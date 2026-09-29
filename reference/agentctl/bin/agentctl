@@ -1,0 +1,1769 @@
+#!/usr/bin/env python3
+"""agentctl - local orchestrator <-> worker communication prototype.
+
+State lives in $AGENTCTL_HOME (SQLite + message bodies). A group uses native
+background sessions (default) or tmux. Delivery, receipt and completion are
+separate: only an explicit `agentctl report` completes a dispatch.
+
+Python 3.9+ stdlib only.
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import shlex
+import shutil
+import sqlite3
+import subprocess
+import sys
+import time
+import uuid
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import native_runtime as native
+import quota
+import projects
+import worktrees
+import scheduling
+import handoffs
+import recovery
+import gateway
+import goals
+import authorization
+import goal_board
+import intake
+
+class ModuleContext:
+    def __getattr__(self, name):
+        return globals()[name]
+
+CTX = ModuleContext()
+
+BIN = os.path.abspath(__file__)
+REPO = os.path.dirname(os.path.dirname(BIN))
+HOME = os.path.abspath(os.environ.get("AGENTCTL_HOME") or os.path.join(REPO, "sandbox", "state"))
+DB_PATH = os.path.join(HOME, "agentctl.db")
+MSG_DIR = os.path.join(HOME, "msgs")
+EVENT_LOG = os.path.join(HOME, "events.jsonl")
+TAG_RE = re.compile(r"\[agentctl msg:([A-Za-z0-9_-]+)\]")
+
+ACK_TIMEOUT_S = 60          # sent but no UserPromptSubmit -> unconfirmed (never auto-resent)
+ENTER_DELAY_S = 1.0         # Codex paste-burst detection needs a gap before Enter
+PUMP_DELAY_S = 1.5          # after Stop, give the TUI time to return to the composer
+
+WAKE_RE = re.compile(r"\[agentctl wake:([A-Za-z0-9_-]+)\]")
+
+# Default permission flags, applied to the orchestrator and managed workers alike.
+SKIP_ARGS = {"claude": ["--dangerously-skip-permissions"],
+             "codex": ["--dangerously-bypass-approvals-and-sandbox"]}
+# If the caller already decided about permissions, do not add ours on top.
+PERMISSION_FLAGS = {"claude": ("--dangerously-skip-permissions", "--permission-mode", "--permission-prompt-tool"),
+                    "codex": ("--dangerously-bypass-approvals-and-sandbox", "--full-auto", "--yolo",
+                              "--sandbox", "-s", "--ask-for-approval", "-a")}
+ADMINISTRATIVE = {"login", "logout", "mcp", "mcp-server", "app-server", "features", "debug",
+                  "sandbox", "completion", "completions", "update", "upgrade", "install", "doctor", "auth",
+                  "queue", "agents", "attach", "logs", "stop", "rm"}
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS workers(
+  id TEXT PRIMARY KEY, kind TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'worker',
+  cwd TEXT NOT NULL, socket TEXT NOT NULL, target TEXT NOT NULL,
+  session_id TEXT, mode TEXT NOT NULL DEFAULT 'auto', state TEXT NOT NULL DEFAULT 'unknown',
+  state_at TEXT, last_message TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS tasks(
+  id TEXT PRIMARY KEY, title TEXT NOT NULL, project TEXT, status TEXT NOT NULL DEFAULT 'open',
+  assignee TEXT, waiting_on TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS messages(
+  id TEXT PRIMARY KEY, task_id TEXT, sender TEXT NOT NULL, recipient TEXT NOT NULL,
+  kind TEXT NOT NULL, summary TEXT NOT NULL, reply_to TEXT, urgent INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL, created_at TEXT NOT NULL, sent_at TEXT, acked_at TEXT, done_at TEXT,
+  read_at TEXT, evidence TEXT, result TEXT);
+CREATE TABLE IF NOT EXISTS events(
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, worker_id TEXT, event TEXT NOT NULL,
+  message_id TEXT, payload TEXT);
+CREATE TABLE IF NOT EXISTS orchestrator_owner(
+  worker_id TEXT PRIMARY KEY, token TEXT NOT NULL, session_id TEXT NOT NULL,
+  pid INTEGER NOT NULL, process_start TEXT NOT NULL, ending INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS retired_orchestrators(
+  session_id TEXT PRIMARY KEY, pid INTEGER, process_start TEXT);
+"""
+
+# ---------------------------------------------------------------- utilities
+
+
+def now():
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+
+
+def local(ts):
+    if not ts:
+        return "-"
+    return dt.datetime.fromisoformat(ts).astimezone().strftime("%m-%d %H:%M:%S")
+
+
+def age(ts):
+    if not ts:
+        return "-"
+    s = int((dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(ts)).total_seconds())
+    return "%ds" % s if s < 90 else "%dm" % (s // 60) if s < 5400 else "%dh" % (s // 3600)
+
+
+def new_id(prefix):
+    return "%s-%s" % (prefix, uuid.uuid4().hex[:8])
+
+
+def db():
+    os.makedirs(MSG_DIR, exist_ok=True)
+    con = sqlite3.connect(DB_PATH, timeout=10)
+    con.row_factory = sqlite3.Row
+    con.executescript(SCHEMA)
+    native.schema(con)
+    quota.schema(con)
+    projects.schema(con)
+    worktrees.schema(con)
+    scheduling.schema(con)
+    handoffs.schema(con)
+    recovery.schema(con)
+    gateway.schema(con)
+    goals.schema(con)
+    intake.schema(con)
+    if "waiting_on" not in [r[1] for r in con.execute("PRAGMA table_info(tasks)")]:
+        con.execute("ALTER TABLE tasks ADD COLUMN waiting_on TEXT")
+    if "pid" not in [r[1] for r in con.execute("PRAGMA table_info(retired_orchestrators)")]:
+        con.execute("ALTER TABLE retired_orchestrators ADD COLUMN pid INTEGER")
+        con.execute("ALTER TABLE retired_orchestrators ADD COLUMN process_start TEXT")
+    return con
+
+
+def log_event(con, event, worker_id=None, message_id=None, payload=None):
+    ts = now()
+    con.execute("INSERT INTO events(ts,worker_id,event,message_id,payload) VALUES(?,?,?,?,?)",
+                (ts, worker_id, event, message_id, json.dumps(payload) if payload is not None else None))
+    with open(EVENT_LOG, "a") as f:
+        f.write(json.dumps({"ts": ts, "worker": worker_id, "event": event,
+                            "msg": message_id, "payload": payload}) + "\n")
+
+
+def die(msg, code=1):
+    print("agentctl: " + msg, file=sys.stderr)
+    sys.exit(code)
+
+
+def get_worker(con, wid):
+    w = con.execute("SELECT * FROM workers WHERE id=?", (wid,)).fetchone()
+    if not w:
+        die("unknown worker %r" % wid)
+    return w
+
+
+def set_state(con, wid, state, last_message=None):
+    con.execute("UPDATE workers SET state_version=state_version+1 WHERE id=?", (wid,))
+    if last_message is not None:
+        con.execute("UPDATE workers SET state=?,state_at=?,last_message=? WHERE id=?",
+                    (state, now(), last_message[:500], wid))
+    else:
+        con.execute("UPDATE workers SET state=?,state_at=? WHERE id=?", (state, now(), wid))
+
+
+def tmux(w, *args, check=True):
+    return subprocess.run(["tmux", "-L", w["socket"]] + list(args), check=check,
+                          capture_output=True, text=True)
+
+
+def tmux_alive(w):
+    return tmux(w, "has-session", "-t", "=" + w["target"], check=False).returncode == 0
+
+
+def hook_command(wid):
+    return 'AGENTCTL_HOME=${AGENTCTL_HOME:-%s} AGENTCTL_WORKER=${AGENTCTL_WORKER:-%s} %s hook' % (
+        shlex.quote(HOME), shlex.quote(wid), shlex.quote(BIN))
+
+
+# ---------------------------------------------------------------- hook config
+
+
+def write_hook_config(w):
+    """Install hook config in the worker's repo so its CLI reports events to us.
+
+    Env is baked into the command string, so a TUI operator launches by hand still reports.
+    """
+    cmd = hook_command(w["id"])
+    if w["role"] == "orchestrator":
+        cmd += " --orchestrator --kind " + w["kind"]
+    if w["kind"] == "claude":
+        path = os.path.join(w["cwd"], ".claude", "settings.local.json")
+        events = ["SessionStart", "UserPromptSubmit", "Stop", "Notification"]
+    else:
+        path = os.path.join(w["cwd"], ".codex", "hooks.json")
+        events = ["SessionStart", "UserPromptSubmit", "Stop", "PermissionRequest"]
+    if w["role"] == "orchestrator":
+        events.append("SessionEnd")
+    cfg = {}
+    if os.path.exists(path):
+        with open(path) as f:
+            cfg = json.load(f)
+    hooks = cfg.setdefault("hooks", {})
+    for ev in events:
+        # Preserve unrelated handlers, even when they share a matcher group.
+        groups = []
+        for group in hooks.get(ev, []):
+            handlers = [h for h in group.get("hooks", []) if BIN not in h.get("command", "")]
+            if handlers:
+                groups.append(dict(group, hooks=handlers))
+        groups.append({"hooks": [{"type": "command", "command": cmd}]})
+        hooks[ev] = groups
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(cfg, f, indent=1)
+        f.write("\n")
+    return path
+
+
+# ---------------------------------------------------------------- orchestrator lifetime
+
+def process_info(pid):
+    """PID plus start time avoids treating a recycled PID as the original CLI."""
+    result = subprocess.run(["ps", "-p", str(pid), "-o", "ppid=,stat=,lstart=,comm="],
+                            capture_output=True, text=True, env=dict(os.environ, LC_ALL="C"))
+    fields = result.stdout.strip().split(None, 7)
+    if result.returncode or len(fields) != 8 or fields[1].startswith("Z"):
+        return None
+    return {"pid": pid, "ppid": int(fields[0]), "start": " ".join(fields[2:7]), "comm": fields[7]}
+
+
+def cli_ancestor(kind):
+    pid = os.getppid()
+    executable = shutil.which(kind)
+    for _ in range(32):
+        info = process_info(pid)
+        if not info or pid <= 1:
+            return None
+        if (os.path.basename(info["comm"]) == kind or
+                (executable and os.path.realpath(info["comm"]) == os.path.realpath(executable))):
+            return info
+        pid = info["ppid"]
+    return None
+
+
+def claim_orchestrator(con, w, sid, kind, process):
+    old = con.execute("SELECT * FROM orchestrator_owner WHERE worker_id=?", (w["id"],)).fetchone()
+    if old and old["session_id"] == sid and old["pid"] == process["pid"] and old["process_start"] == process["start"]:
+        return old["token"], False
+    if w["session_id"] and w["session_id"] != sid:
+        con.execute("INSERT OR REPLACE INTO retired_orchestrators VALUES(?,?,?)",
+                    (w["session_id"], old["pid"] if old else None, old["process_start"] if old else None))
+        log_event(con, "orchestrator.takeover", w["id"], payload={"from": w["session_id"], "to": sid})
+    elif old and (old["pid"] != process["pid"] or old["process_start"] != process["start"]):
+        con.execute("INSERT OR REPLACE INTO retired_orchestrators VALUES(?,?,?)",
+                    ("retired-" + old["token"], old["pid"], old["process_start"]))
+    token = uuid.uuid4().hex
+    con.execute("INSERT OR REPLACE INTO orchestrator_owner VALUES(?,?,?,?,?,0)",
+                (w["id"], token, sid, process["pid"], process["start"]))
+    con.execute("UPDATE workers SET session_id=?,kind=? WHERE id=?", (sid, kind, w["id"]))
+    log_event(con, "orchestrator.claimed", w["id"], payload={"session": sid, "pid": process["pid"], "token": token})
+    return token, True
+
+
+def spawn_watch(wid, token):
+    subprocess.Popen([sys.executable, BIN, "watch-orchestrator", wid, token],
+                     env=dict(os.environ, AGENTCTL_HOME=HOME), stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def shutdown_orchestrator(con, wid, token):
+    """Caller holds the write lock through cleanup; a takeover cannot interleave."""
+    owner = con.execute("SELECT * FROM orchestrator_owner WHERE worker_id=? AND token=?", (wid, token)).fetchone()
+    if not owner:
+        return
+    failed = []
+    for w in con.execute("SELECT * FROM workers WHERE role='worker'").fetchall():
+        tmux(w, "kill-session", "-t", "=" + w["target"], check=False)
+        if tmux_alive(w):
+            failed.append(w["id"])
+            continue
+        reconcile_restart(con, w, "orchestrator exited")
+        # Unsent dispatches also require explicit restart; retain replies and decisions.
+        con.execute("UPDATE messages SET state='interrupted' WHERE recipient=? AND state='queued' "
+                    "AND kind='dispatch'", (w["id"],))
+        con.execute("UPDATE tasks SET status='interrupted',updated_at=? WHERE id IN "
+                    "(SELECT task_id FROM messages WHERE recipient=? AND state='interrupted') "
+                    "AND status NOT IN ('review','done')", (now(), w["id"]))
+        con.execute("UPDATE workers SET session_id=NULL WHERE id=?", (w["id"],))
+        set_state(con, w["id"], "stopped")
+        log_event(con, "worker.stopped", w["id"], payload={"reason": "orchestrator exited"})
+    if failed:
+        con.execute("UPDATE orchestrator_owner SET ending=1 WHERE worker_id=?", (wid,))
+        log_event(con, "orchestrator.cleanup_retry", wid, payload={"workers": failed})
+        return
+    con.execute("INSERT OR REPLACE INTO retired_orchestrators VALUES(?,?,?)",
+                (owner["session_id"], owner["pid"], owner["process_start"]))
+    close_wakes(con, wid, "orchestrator exited")
+    con.execute("DELETE FROM orchestrator_owner WHERE worker_id=? AND token=?", (wid, token))
+    con.execute("UPDATE workers SET session_id=NULL WHERE id=?", (wid,))
+    set_state(con, wid, "stopped")
+    log_event(con, "orchestrator.ended", wid, payload={"session": owner["session_id"], "token": token})
+
+
+def cmd_watch(a):
+    con = db()
+    while True:
+        con.execute("BEGIN IMMEDIATE")
+        owner = con.execute("SELECT * FROM orchestrator_owner WHERE worker_id=? AND token=?", (a.worker, a.token)).fetchone()
+        if not owner:
+            con.commit()
+            return
+        info = process_info(owner["pid"])
+        if owner["ending"] or not info or info["start"] != owner["process_start"]:
+            shutdown_orchestrator(con, a.worker, a.token)
+        con.commit()
+        # A report can arrive before the composer redraws or while a draft is
+        # present. Retry pending wakes without waiting for another model hook.
+        if not owner["ending"] and info and info["start"] == owner["process_start"]:
+            if open_wakes(con, a.worker):
+                try:
+                    pump_orchestrator(con)
+                    con.commit()
+                except Exception as error:
+                    con.rollback()
+                    log_event(con, "wake.error", a.worker, payload={"error": str(error), "via": "monitor"})
+                    con.commit()
+            control = con.execute('SELECT enabled,paused FROM scheduler_control WHERE id=1').fetchone()
+            if control['enabled'] and not control['paused']:
+                try:
+                    for worker in con.execute("SELECT * FROM workers WHERE role='worker' AND backend='tmux'").fetchall():
+                        pump_worker(con, worker)
+                        con.commit()
+                except Exception as error:
+                    con.rollback()
+                    log_event(con, 'scheduler.error', payload={'error': str(error), 'via': 'monitor'})
+                    con.commit()
+        time.sleep(1)
+
+
+def strip_separator(args):
+    return args[1:] if args[:1] == ["--"] else list(args)
+
+
+def is_administrative(args):
+    """help/version/`claude mcp ...` must reach the CLI untouched: no claim, no menu, no tmux."""
+    return (any(arg in ("--help", "-h", "--version", "-V", "-v") for arg in args)
+            or bool(args) and args[0] in ADMINISTRATIVE)
+
+
+def cli_args(kind, args):
+    """Default to the *-skip flags, unless the caller already passed a permission flag."""
+    flags = PERMISSION_FLAGS[kind]
+    if any(arg == f or arg.startswith(f + "=") for arg in args for f in flags):
+        return list(args)
+    return SKIP_ARGS[kind] + list(args)
+
+
+def default_worker_command(kind):
+    return " ".join(shlex.quote(x) for x in [kind] + SKIP_ARGS[kind])
+
+
+def cmd_install(a):
+    repo = os.path.dirname(os.path.dirname(BIN))
+    for kind in ("claude", "codex"):
+        print(write_hook_config({"id": "orch", "kind": kind, "role": "orchestrator", "cwd": repo}))
+    print("Installed local hooks. Codex requires trust of the new hook definitions on first use.")
+    if a.shell:
+        path = os.path.expanduser("~/.zshrc")
+        with open(path) as f:
+            original = f.read()
+        source = os.path.join(repo, "bin", "agentctl-shell.zsh")
+        line = "\n# agentctl: explicit orchestrator shortcut; ordinary CLIs stay unmanaged\n" + "[[ ! -f %s ]] || source %s\n" % (shlex.quote(source), shlex.quote(source))
+        if line not in original:
+            backup = path + ".agentctl-" + dt.datetime.now().strftime("%Y%m%d%H%M%S") + ".bak"
+            shutil.copy2(path, backup)
+            with open(path, "a") as f:
+                f.write(line)
+            print("Added repo-scoped launch functions to %s (backup: %s)." % (path, backup))
+
+
+def cmd_launch(a):
+    """Internal tmux launcher, called only by orch's registered pane."""
+    if not os.environ.get("AGENTCTL_ORCH_SESSION"):
+        die("launch is internal; use agentctl orch to start management")
+    executable = shutil.which(a.kind)
+    if not executable:
+        die("CLI not found: " + a.kind)
+    args = strip_separator(a.args)
+    if is_administrative(args):
+        os.execv(executable, [a.kind] + args)
+    args = cli_args(a.kind, args)
+    if os.path.realpath(os.getcwd()) != os.path.realpath(REPO) or os.environ.get("AGENTCTL_WORKER"):
+        die("launch is only for a user CLI in the agentctl checkout")
+    con = db()
+    selected = con.execute("SELECT backend FROM management WHERE id=1").fetchone()
+    if selected and selected[0] == "native":
+        die("native group selected; use orch to attach/start, or stop the group before --mode tmux")
+    con.execute("BEGIN IMMEDIATE")
+    w = get_worker(con, "orch")
+    if w["role"] != "orchestrator" or os.path.realpath(w["cwd"]) != os.path.realpath(REPO):
+        die("orch is registered to a different role or checkout")
+    if not process_in_tmux(w, os.getpid()):
+        die("launch requires the registered Orch pane; use agentctl orch")
+    token, _ = claim_orchestrator(con, w, "launch-" + uuid.uuid4().hex, a.kind, process_info(os.getpid()))
+    set_state(con, "orch", "starting")
+    con.commit()
+    con.close()
+    spawn_watch("orch", token)
+    env = dict(os.environ, AGENTCTL_HOME=HOME)
+    if a.kind == "claude" and os.environ.get("AGENTCTL_ORCH_SESSION"):
+        # Suggested text looks like a draft in tmux capture-pane and blocks wakes.
+        env["CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"] = "false"
+    os.execvpe(executable, [a.kind] + args, env)
+
+
+# ---------------------------------------------------------------- tmux orchestrator
+
+
+def orch_row(con):
+    return con.execute("SELECT * FROM workers WHERE role='orchestrator' ORDER BY created_at LIMIT 1").fetchone()
+
+
+def live_owner(con, w):
+    """The owner row only counts while its CLI process is still the one we claimed."""
+    owner = con.execute("SELECT * FROM orchestrator_owner WHERE worker_id=?", (w["id"],)).fetchone()
+    if not owner or owner["ending"]:
+        return None
+    info = process_info(owner["pid"])
+    return owner if info and info["start"] == owner["process_start"] else None
+
+
+def tmux_hosted(w, owner):
+    """True when the owning CLI runs inside w's tmux session, so send-keys reaches its composer.
+
+    Derived live from the pane pid instead of stored state: a takeover by a plain terminal CLI
+    stops matching the pane immediately, so we never type into the wrong session.
+    """
+    return bool(owner) and process_in_tmux(w, owner["pid"])
+
+
+def process_in_tmux(w, pid):
+    """Verify a process belongs to the registered pane, even if a CLI sanitizes hook env."""
+    if not tmux_alive(w):
+        return False
+    r = tmux(w, "list-panes", "-t", "=" + w["target"], "-F", "#{pane_pid}", check=False)
+    if r.returncode != 0:
+        return False
+    panes = {int(x) for x in r.stdout.split() if x.isdigit()}
+    for _ in range(32):
+        if pid in panes:
+            return True
+        info = process_info(pid)
+        if not info or pid <= 1:
+            return False
+        pid = info["ppid"]
+    return False
+
+
+def attach_command(w):
+    return "tmux -L %s attach -t %s" % (w["socket"], w["target"])
+
+
+MENU = ("agentctl orchestrator in %s\n"
+        "  [Enter] Claude  (claude %s)\n"
+        "      [2] Codex   (codex %s)\n"
+        "      [q] cancel\n"
+        "choice: ")
+
+
+def choose_kind(stream=None, out=None):
+    """Short launch menu. Enter takes the Claude skip default; only called on a tty."""
+    stream = stream or sys.stdin
+    out = out or sys.stdout
+    out.write(MENU % (REPO, " ".join(SKIP_ARGS["claude"]), " ".join(SKIP_ARGS["codex"])))
+    out.flush()
+    for _ in range(3):
+        line = stream.readline()
+        if not line:
+            return None
+        answer = line.strip().lower()
+        if answer in ("", "1", "claude"):
+            return "claude"
+        if answer in ("2", "codex"):
+            return "codex"
+        if answer in ("q", "n", "quit", "cancel"):
+            return None
+        out.write("choice: ")
+        out.flush()
+    return None
+
+
+def choose_backend(stream=None, out=None):
+    stream, out = stream or sys.stdin, out or sys.stdout
+    out.write("agentctl management mode\n  [Enter] native\n      [2] tmux\n      [q] cancel\nchoice: ")
+    out.flush()
+    for _ in range(3):
+        value = stream.readline()
+        if not value:
+            return None
+        value = value.strip().lower()
+        if value in ("", "1", "native"):
+            return "native"
+        if value in ("2", "tmux"):
+            return "tmux"
+        if value in ("q", "cancel"):
+            return None
+        out.write("choice: ")
+        out.flush()
+    return None
+
+
+def cmd_orch(a):
+    """Interactive entry point: attach to the running orchestrator, or start one in its own tmux."""
+    args = strip_separator(a.args)
+    if is_administrative(args):
+        if not a.kind:
+            die("pass --kind claude|codex for CLI management commands")
+        executable = shutil.which(a.kind) or die("CLI not found: " + a.kind)
+        os.execv(executable, [a.kind] + args)
+    if os.environ.get("AGENTCTL_WORKER"):
+        die("managed workers never launch an orchestrator")
+    if os.environ.get("AGENTCTL_ORCH_SESSION"):
+        die("already inside the orchestrator session; use this CLI, or detach with the tmux prefix then d")
+    if os.path.realpath(os.getcwd()) != os.path.realpath(REPO):
+        die("run this from the agentctl checkout (%s)" % REPO)
+    # Omitted mode attaches to the current group; on a fresh launch the default is native.
+    con = db()
+    requested = getattr(a, "mode", None)
+    current = con.execute("SELECT backend FROM management WHERE id=1").fetchone()
+    backend = requested or (current[0] if current and group_running(con) else "native")
+    if not requested and not a.kind and not getattr(a, "resume", False) and not group_running(con) and sys.stdin.isatty() and sys.stdout.isatty():
+        backend = choose_backend()
+        if not backend:
+            con.close()
+            print("cancelled; no orchestrator started")
+            return
+    select_backend(con, backend)
+    con.close()
+    if backend == "native":
+        return cmd_native_orch(a, args)
+    if getattr(a, "resume", False):
+        die("--resume is for native sessions; for tmux pass the CLI resume arguments after --")
+    con = db()
+    con.execute("BEGIN IMMEDIATE")
+    con.execute("INSERT OR IGNORE INTO workers(id,kind,role,cwd,socket,target,state,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                ("orch", a.kind or "claude", "orchestrator", REPO, "agentctl", "orch", "unknown", now()))
+    w = get_worker(con, "orch")
+    owner = live_owner(con, w)
+    hosted = tmux_hosted(w, owner)
+    con.commit()
+    if owner and not hosted and not a.takeover:
+        die("an orchestrator (%s, pid %s) is already running outside tmux. Keep using it, or start the tmux one with "
+            "--takeover and then exit the old CLI (its workers keep running)." % (w["kind"], owner["pid"]))
+    if hosted:
+        log_event(con, "orchestrator.attach", w["id"], payload={"target": w["target"]})
+        con.commit()
+        con.close()
+        if a.kind and a.kind != w["kind"]:
+            print("note: the running orchestrator is %s; exit it first if you want %s" % (w["kind"], a.kind))
+        return exec_attach(w, a.no_attach, "attaching to the running orchestrator (%s)" % w["kind"])
+    con.close()
+    kind = a.kind
+    if not kind:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            die("no orchestrator running; pass --kind claude|codex (the menu needs a terminal)")
+        kind = choose_kind()
+        if not kind:
+            print("cancelled; no orchestrator started")
+            return
+    if not shutil.which(kind):
+        die("CLI not found: " + kind)
+    if tmux_alive(w):
+        # tmux drops a session when its process exits, so this one still has a live CLI in it: never kill it for operator.
+        die("tmux session %s exists but does not own the orchestrator. Look at it (%s), then end it explicitly: "
+            "tmux -L %s kill-session -t %s" % (w["target"], attach_command(w), w["socket"], w["target"]))
+    command = " ".join(shlex.quote(x) for x in [sys.executable, BIN, "launch", kind, "--"] + cli_args(kind, args))
+    subprocess.run(["tmux", "-L", w["socket"], "new-session", "-d", "-s", w["target"], "-x", "200", "-y", "50",
+                    "-c", REPO, "-e", "AGENTCTL_HOME=" + HOME, "-e", "AGENTCTL_ORCH_SESSION=1", command], check=True)
+    con = db()
+    log_event(con, "orchestrator.tmux_started", w["id"], payload={"kind": kind, "target": w["target"], "command": command})
+    con.commit()
+    con.close()
+    return exec_attach(w, a.no_attach, "started %s orchestrator in tmux" % kind)
+
+
+def exec_attach(w, no_attach, message):
+    print("%s: %s" % (message, attach_command(w)))
+    if no_attach:
+        return
+    if not sys.stdout.isatty():
+        return
+    env = dict(os.environ)
+    env.pop("TMUX", None)          # attaching from inside another tmux client
+    os.execvpe("tmux", ["tmux", "-L", w["socket"], "attach", "-t", "=" + w["target"]], env)
+
+
+def group_running(con):
+    for w in con.execute("SELECT * FROM workers"):
+        if w["backend"] == "native":
+            r = native.row(con, w["id"])
+            if r and (native.alive(CTX, r) or native.alive(CTX, r, "watcher_pid")
+                      or w["state"] == "starting"):
+                return True
+        elif tmux_alive(w) or (w["role"] == "orchestrator" and live_owner(con, w)):
+            return True
+    return False
+
+
+def select_backend(con, backend):
+    con.execute("BEGIN IMMEDIATE")
+    current = con.execute("SELECT backend FROM management WHERE id=1").fetchone()
+    if current and current[0] != backend and group_running(con):
+        die("stop the entire %s group before switching to %s" % (current[0], backend))
+    if not current and group_running(con):
+        kinds = {w["backend"] for w in con.execute("SELECT * FROM workers") if w["state"] != "stopped"}
+        if kinds and kinds != {backend}:
+            die("stop the existing group before switching management mode")
+    con.execute("INSERT OR REPLACE INTO management VALUES(1,?)", (backend,))
+    con.execute("UPDATE workers SET backend=?", (backend,))
+    if backend == "native":
+        # Retire the old PID watcher before any native job can start.
+        con.execute("DELETE FROM orchestrator_owner")
+    con.commit()
+
+
+def cmd_native_orch(a, args):
+    con = db()
+    w = orch_row(con)
+    if w and native.active(CTX, con, w):
+        if a.kind and a.kind != w["kind"]:
+            die("running orchestrator is %s; stop the group before changing kind" % w["kind"])
+        return native_attach(con, w, a.no_attach)
+    kind = a.kind or (w["kind"] if w and getattr(a, "resume", False) else None)
+    if not kind:
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            die("pass --kind claude|codex (the menu needs a terminal)")
+        kind = choose_kind()
+        if not kind:
+            print("cancelled; no orchestrator started")
+            return
+    con.execute("INSERT OR IGNORE INTO workers(id,kind,role,cwd,socket,target,state,created_at,backend) "
+                "VALUES(?,?,?,?,?,?,?,?,?)", ("orch", kind, "orchestrator", REPO, "agentctl", "orch", "stopped", now(), "native"))
+    con.execute("UPDATE workers SET kind=? WHERE id='orch'", (kind,))
+    con.commit()
+    w = get_worker(con, "orch")
+    native.start(CTX, con, w, getattr(a, "resume", False), args)
+    return native_attach(con, get_worker(con, "orch"), a.no_attach)
+
+
+def native_attach(con, w, no_attach=False):
+    argv = native.attach_argv(CTX, con, w)
+    print("native %s: %s" % (w["id"], shlex.join(argv)), flush=True)
+    if not no_attach and sys.stdin.isatty() and sys.stdout.isatty():
+        # Viewing clients must not run the legacy orchestrator ownership hooks.
+        env = native.environment(CTX, w)
+        con.close()
+        os.execvpe(argv[0], argv, env)
+
+
+def cmd_stop(a):
+    con = db()
+    # Block further native dispatch before stopping any member.
+    con.execute("UPDATE native_sessions SET stopping=1")
+    con.commit()
+    failures = []
+    for w in con.execute("SELECT * FROM workers ORDER BY role DESC").fetchall():
+        try:
+            if w["backend"] == "native":
+                native.stop(CTX, con, w)
+            else:
+                tmux(w, "kill-session", "-t", "=" + w["target"], check=False)
+                if tmux_alive(w):
+                    raise RuntimeError("tmux session is still running")
+                reconcile_restart(con, w, "explicit group stop")
+                set_state(con, w["id"], "stopped")
+                con.execute("UPDATE workers SET session_id=NULL WHERE id=?", (w["id"],))
+                con.commit()
+        except Exception as error:
+            failures.append(w["id"] + ": " + str(error))
+    if failures:
+        die("stop incomplete: " + "; ".join(failures))
+    con.execute("DELETE FROM orchestrator_owner")
+    orch = orch_row(con)
+    if orch:
+        close_wakes(con, orch["id"], "explicit group stop")
+    con.commit()
+    print("stopped orchestrator and all managed workers")
+
+
+def ack_native(con, w, text, evidence):
+    for mid in TAG_RE.findall(text):
+        con.execute("UPDATE messages SET state='acked',acked_at=?,evidence=? WHERE id=? AND recipient=? "
+                    "AND state IN ('sending','sent','unconfirmed')",
+                    (now(), json.dumps({"via": evidence, "session_id": w["session_id"]}), mid, w["id"]))
+    if TAG_RE.search(text):
+        set_state(con, w["id"], "busy")
+
+
+def cmd_ack(a):
+    con = db()
+    m = con.execute("SELECT * FROM messages WHERE id=?", (a.message,)).fetchone()
+    if not m or m["kind"] != "dispatch":
+        die("ack requires a dispatch message ID")
+    w = get_worker(con, m["recipient"])
+    ack_native(con, w, "[agentctl msg:%s]" % a.message, "explicit receiver ack")
+    log_event(con, "message.acked", w["id"], a.message, {"via": "explicit receiver ack"})
+    con.commit()
+    print("acknowledged " + a.message)
+
+
+# ---------------------------------------------------------------- delivery
+
+
+def wire_text(m):
+    body_path = os.path.join(MSG_DIR, m["id"] + ".md")
+    report = "AGENTCTL_HOME=%s %s report %s --status done \"<summary>\"" % (shlex.quote(HOME), shlex.quote(BIN), m["id"])
+    return ("[agentctl msg:%s] %s from %s (task %s): read %s and follow it. "
+            "When finished run: %s" % (m["id"], m["kind"], m["sender"], m["task_id"] or "-",
+                                       body_path, report))
+
+
+def send_line(w, text):
+    """Type one line into a TUI composer; the gap before Enter keeps Codex from treating it as a paste."""
+    tmux(w, "send-keys", "-t", w["target"], "-l", text)
+    time.sleep(ENTER_DELAY_S)
+    tmux(w, "send-keys", "-t", w["target"], "Enter")
+
+
+def deliver(con, w, m):
+    """Type one message into the worker's composer. Marks 'sent' only; ack comes from the hook."""
+    if not con.in_transaction:
+        con.execute("BEGIN IMMEDIATE")
+    if m["kind"] == "dispatch" and goals.dispatch_error(con, m["task_id"]):
+        return False
+    goals.record_receiver(CTX, con, w, m)
+    if w["backend"] == "native":
+        text = wire_text(m) + " FIRST acknowledge receipt: AGENTCTL_HOME=%s %s ack %s" % (
+            shlex.quote(HOME), shlex.quote(BIN), m["id"])
+        return native_delivery(con, w, m, text)
+    if not tmux_alive(w):
+        set_state(con, w["id"], "gone")
+        log_event(con, "deliver.failed", w["id"], m["id"], {"reason": "tmux target missing"})
+        return False
+    claimed = con.execute("UPDATE messages SET state='sending',sent_at=? WHERE id=? AND state='queued'", (now(), m["id"]))
+    con.commit()
+    if claimed.rowcount != 1:
+        return False
+    try:
+        send_line(w, wire_text(m))
+        con.execute("UPDATE messages SET state='sent' WHERE id=? AND state='sending'", (m["id"],))
+        log_event(con, "message.sent", w["id"], m["id"], {"via": "tmux send-keys", "target": w["target"]})
+        con.commit()
+        return True
+    except Exception as error:
+        con.execute("UPDATE messages SET state='unconfirmed',result=? WHERE id=? AND state='sending'",
+                    ("tmux delivery failed: " + str(error), m["id"]))
+        log_event(con, "deliver.failed", w["id"], m["id"], {"via": "tmux", "error": str(error)})
+        con.commit()
+        return False
+
+
+def native_delivery(con, w, m, text):
+    # Reserve durably before I/O and release the write lock. queue may trigger a
+    # receiver hook/ack before the sending CLI returns. Never downgrade that ack.
+    claimed = con.execute("UPDATE messages SET state='sending',sent_at=? WHERE id=? AND state='queued'", (now(), m["id"]))
+    con.commit()
+    if claimed.rowcount != 1:
+        return False
+    try:
+        native.send(CTX, con, w, text)
+        con.execute("UPDATE messages SET state='sent' WHERE id=? AND state='sending'", (m["id"],))
+        log_event(con, "message.sent", w["id"], m["id"], {"via": "native", "kind": w["kind"]})
+        con.commit()
+        return True
+    except Exception as error:
+        con.execute("UPDATE messages SET state='unconfirmed',result=? WHERE id=? AND state='sending'",
+                    ("native transport failed: " + str(error), m["id"]))
+        log_event(con, "deliver.failed", w["id"], m["id"], {"error": str(error), "via": "native"})
+        con.commit()
+        print("native delivery failed; inspect before explicit resend: " + str(error), file=sys.stderr)
+        return False
+
+
+COMPOSER_RE = re.compile(r"^(\u276f\s*|\u203a Ask Codex to do anything|\u203a\s*)$")
+
+
+def composer_visible(w):
+    """Launch-time only: has the TUI reached its empty composer? (Hooks take over after the first turn.)"""
+    r = tmux(w, "capture-pane", "-p", "-t", w["target"], check=False)
+    if r.returncode != 0:
+        return False
+    return any(COMPOSER_RE.match(line.rstrip()) for line in r.stdout.splitlines())
+
+
+def pump_worker(con, w, quiet=False):
+    """Deliver the next queued message if this worker is idle, in auto mode, with nothing in flight."""
+    if not con.in_transaction:
+        con.execute("BEGIN IMMEDIATE")
+    w = get_worker(con, w["id"])
+    scheduling.recover_completed(con)
+    goals.deliver_answers(CTX, con, w)
+    if recovery.detect(CTX, con, w):
+        con.commit()
+        recovery.spawn_pending(CTX, con)
+        return 'quota exhausted; recovery queued'
+    if w["role"] != "worker" and w["backend"] != "native":
+        return "not a worker"
+    if w["backend"] == "native":
+        expire_native(con, w)
+        orch = orch_row(con)
+        if not orch or not native.active(CTX, con, orch):
+            return "orchestrator unavailable; dispatch paused"
+        if not native.active(CTX, con, w):
+            return "native receiver unavailable"
+        unresolved = con.execute("SELECT 1 FROM messages WHERE recipient=? AND kind='dispatch' "
+                                 "AND state IN ('sending','sent','acked','unconfirmed','interrupted') LIMIT 1", (w["id"],)).fetchone()
+        if unresolved:
+            return "in-flight or unresolved; explicit report/resend required"
+    if w["backend"] == "tmux" and w["state"] in ("starting", "unknown") and tmux_alive(w) and composer_visible(w):
+        set_state(con, w["id"], "idle")
+        log_event(con, "worker.ready", w["id"], payload={"evidence": "composer visible on screen"})
+        w = get_worker(con, w["id"])
+    inflight = con.execute(
+        "SELECT * FROM messages WHERE recipient=? AND state IN ('sent','acked') ORDER BY created_at",
+        (w["id"],)).fetchall()
+    for m in inflight:
+        if m["state"] == "sent" and m["sent_at"]:
+            sent = dt.datetime.fromisoformat(m["sent_at"])
+            if (dt.datetime.now(dt.timezone.utc) - sent).total_seconds() > ACK_TIMEOUT_S:
+                con.execute("UPDATE messages SET state='unconfirmed' WHERE id=?", (m["id"],))
+                log_event(con, "message.unconfirmed", w["id"], m["id"],
+                          {"reason": "no UserPromptSubmit within %ss; not resent" % ACK_TIMEOUT_S})
+    inflight = con.execute(
+        "SELECT count(*) FROM messages WHERE recipient=? AND state IN ('sent','acked')", (w["id"],)).fetchone()[0]
+    if inflight:
+        return "in-flight"
+    if w["mode"] != "auto":
+        return "manual"
+    if w["state"] != "idle":
+        return "worker %s" % w["state"]
+    if con.execute("SELECT 1 FROM messages WHERE recipient=? AND kind='dispatch' AND state IN ('sending','unconfirmed','interrupted')", (w['id'],)).fetchone():
+        return "unresolved; explicit report/resend required"
+    candidates = con.execute(
+        "SELECT * FROM messages WHERE recipient=? AND kind='dispatch' AND state='queued' ORDER BY urgent DESC, created_at,rowid",
+        (w["id"],)).fetchall()
+    m = next((candidate for candidate in candidates
+              if not goals.dispatch_error(con, candidate['task_id']) and
+              not (candidate['task_id'] and scheduling.exhausted_methods(con, candidate['task_id']))), None)
+    if not m:
+        m = scheduling.claim_for_worker(CTX, con, w)
+    if not m:
+        return "empty"
+    error = scheduling.delivery_error(con, w, m)
+    if error:
+        return error
+    ok = deliver(con, w, m)
+    return "sent %s" % m["id"] if ok else "failed"
+
+
+def spawn_delayed_pump(wid):
+    """From inside a hook: pump later, detached, so the TUI has returned to its composer."""
+    env = dict(os.environ, AGENTCTL_HOME=HOME)
+    subprocess.Popen([sys.executable, BIN, "pump", "--delay", str(PUMP_DELAY_S), wid], env=env,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+
+
+def reconcile_restart(con, w, reason):
+    """Worker process is gone or came back as a new session: outcomes of in-flight messages are unknown.
+    Mark them interrupted (never auto-resend) and tell the orchestrator."""
+    rows = con.execute("SELECT * FROM messages WHERE recipient=? AND state IN ('sending','sent','acked')", (w["id"],)).fetchall()
+    for m in rows:
+        con.execute("UPDATE messages SET state='interrupted' WHERE id=?", (m["id"],))
+        log_event(con, "message.interrupted", w["id"], m["id"], {"was": m["state"], "reason": reason})
+        nid = new_id("msg")
+        con.execute("INSERT INTO messages(id,task_id,sender,recipient,kind,summary,reply_to,state,created_at,result) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (nid, m["task_id"], "agentctl", m["sender"], "note",
+                     "[interrupted] %s to %s (%s) outcome unknown: %s" % (m["id"], w["id"], m["state"], reason), m["id"],
+                     "queued", now(), "Check the worker/worktree before deciding; `agentctl resend %s` re-queues it." % m["id"]))
+    return len(rows)
+
+
+# ---------------------------------------------------------------- orchestrator wake-ups
+
+
+def wake_text(mid, unread):
+    return ("[agentctl wake:%s] %d unread inbox item(s) (worker report/decision) are attached to this prompt's "
+            "context; act on them and continue the affected task. Only run `AGENTCTL_HOME=%s %s inbox` if they are "
+            "not there. This is a notification, not a dispatch: never run `report` for it."
+            % (mid, unread, HOME, BIN))
+
+
+def open_wakes(con, wid, states=("queued", "sent")):
+    return con.execute("SELECT * FROM messages WHERE recipient=? AND kind='wake' AND state IN (%s) "
+                       "ORDER BY created_at" % ",".join("?" * len(states)), (wid,) + tuple(states)).fetchall()
+
+
+def close_wakes(con, wid, reason):
+    """Anything the orchestrator has already seen makes a pending wake stale; never leave one to re-fire."""
+    rows = open_wakes(con, wid, ("queued", "sending", "sent", "unconfirmed"))
+    for m in rows:
+        con.execute("UPDATE messages SET state='done',done_at=?,result=? WHERE id=?", (now(), reason, m["id"]))
+        log_event(con, "wake.closed", wid, m["id"], {"was": m["state"], "reason": reason})
+    return len(rows)
+
+
+def enqueue_wake(con, reason):
+    """Queue a single nudge for the orchestrator; pump decides whether it can be typed now."""
+    w = orch_row(con)
+    if not w:
+        return "no orchestrator"
+    if open_wakes(con, w["id"], ("queued", "sending", "sent", "unconfirmed") if w["backend"] == "native" else ("queued", "sent")):
+        log_event(con, "wake.merged", w["id"], payload={"reason": reason})
+        return pump_orchestrator(con)
+    mid = new_id("wake")
+    con.execute("INSERT INTO messages(id,sender,recipient,kind,summary,state,created_at) VALUES(?,?,?,?,?,?,?)",
+                (mid, "agentctl", w["id"], "wake", "[wake] " + reason[:110], "queued", now()))
+    log_event(con, "wake.queued", w["id"], mid, {"reason": reason})
+    return pump_orchestrator(con)
+
+
+def pump_orchestrator(con):
+    """Deliver a queued wake only to a tmux-hosted orchestrator that is idle with an empty composer."""
+    if not con.in_transaction:
+        con.execute("BEGIN IMMEDIATE")
+    w = orch_row(con)
+    if not w:
+        return "no orchestrator"
+    if w["backend"] == "native":
+        return pump_native_orchestrator(con, w)
+    pending = open_wakes(con, w["id"])
+    if not pending:
+        return "empty"
+    owner = live_owner(con, w)
+    if not owner or not tmux_hosted(w, owner):
+        # Pre-tmux orchestrators keep the manual path: the inbox is injected on operator's next prompt.
+        n = close_wakes(con, w["id"], "no tmux orchestrator; inbox fallback on next prompt")
+        log_event(con, "wake.fallback", w["id"], payload={"closed": n})
+        return "no tmux orchestrator"
+    unread = len(inbox_rows(con, "orchestrator"))
+    if not unread:
+        close_wakes(con, w["id"], "inbox already empty")
+        return "inbox empty"
+    for m in pending:
+        if m["state"] == "sent" and m["sent_at"]:
+            sent = dt.datetime.fromisoformat(m["sent_at"])
+            if (dt.datetime.now(dt.timezone.utc) - sent).total_seconds() > ACK_TIMEOUT_S:
+                con.execute("UPDATE messages SET state='unconfirmed' WHERE id=?", (m["id"],))
+                log_event(con, "wake.unconfirmed", w["id"], m["id"],
+                          {"reason": "no UserPromptSubmit within %ss; not resent" % ACK_TIMEOUT_S})
+    pending = open_wakes(con, w["id"])
+    if any(m["state"] == "sent" for m in pending):
+        return "in-flight"
+    if not pending:
+        return "empty"
+    if w["state"] in ("busy", "waiting_permission"):
+        return "orchestrator %s" % w["state"]
+    if not composer_visible(w):
+        return "composer not ready"
+    m = pending[0]
+    send_line(w, wake_text(m["id"], unread))
+    con.execute("UPDATE messages SET state='sent',sent_at=? WHERE id=?", (now(), m["id"]))
+    log_event(con, "wake.sent", w["id"], m["id"], {"unread": unread, "target": w["target"]})
+    con.commit()
+    return "sent %s" % m["id"]
+
+
+def pump_native_orchestrator(con, w):
+    expire_native(con, w)
+    if not native.active(CTX, con, w):
+        return "native orchestrator unavailable; inbox retained"
+    if w["state"] != "idle":
+        return "orchestrator " + w["state"]
+    if con.execute("SELECT 1 FROM messages WHERE recipient=? AND kind='dispatch' AND state IN ('sending','sent') LIMIT 1",
+                   (w["id"],)).fetchone():
+        return "orchestrator dispatch awaiting receipt"
+    pending = open_wakes(con, w["id"], ("queued", "sending", "sent", "unconfirmed"))
+    if not inbox_rows(con, "orchestrator"):
+        close_wakes(con, w["id"], "inbox empty")
+        return pump_worker(con, w)
+    if any(m["state"] != "queued" for m in pending):
+        return "wake in-flight or unconfirmed"
+    if not pending:
+        return "no wake queued"
+    m = pending[0]
+    text = "[agentctl wake:%s] Inbox items are ready. Run AGENTCTL_HOME=%s %s inbox --mark-read and act on the results. This is a notification; never report it." % (
+        m["id"], shlex.quote(HOME), shlex.quote(BIN))
+    return "sent " + m["id"] if native_delivery(con, w, m, text) else "failed"
+
+
+def expire_native(con, w):
+    for m in con.execute("SELECT * FROM messages WHERE recipient=? AND state IN ('sending','sent')", (w["id"],)).fetchall():
+        if m["sent_at"] and (dt.datetime.now(dt.timezone.utc) - dt.datetime.fromisoformat(m["sent_at"])).total_seconds() > ACK_TIMEOUT_S:
+            con.execute("UPDATE messages SET state='unconfirmed' WHERE id=?", (m["id"],))
+            log_event(con, "message.unconfirmed", w["id"], m["id"], {"reason": "native receiver has not acknowledged; not resent"})
+
+
+def spawn_delayed_orch_pump():
+    env = dict(os.environ, AGENTCTL_HOME=HOME)
+    subprocess.Popen([sys.executable, BIN, "pump", "--delay", str(PUMP_DELAY_S), "--orchestrator"], env=env,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+
+
+# ---------------------------------------------------------------- inbox rendering
+
+
+def inbox_recipients(con, recipient):
+    """The historical role address and registered Orch ID share one inbox."""
+    if recipient in ("operator", "nat"):
+        return ("operator", "nat")  # Include the legacy operator address.
+    w = orch_row(con)
+    if w and recipient in ("orchestrator", w["id"]):
+        return tuple(dict.fromkeys(("orchestrator", w["id"])))
+    return (recipient,)
+
+
+def inbox_rows(con, recipient):
+    recipients = inbox_recipients(con, recipient)
+    return con.execute(
+        "SELECT * FROM messages WHERE recipient IN (%s) AND kind IN ('reply','question','note') AND read_at IS NULL "
+        "ORDER BY created_at" % ",".join("?" for _ in recipients), recipients).fetchall()
+
+
+def render_inbox(con, recipient, mark_read=False):
+    rows = inbox_rows(con, recipient)
+    if not rows:
+        return ""
+    lines = ["[agentctl inbox for %s: %d unread]" % (recipient, len(rows))]
+    for m in rows:
+        lines.append("- %s %s from %s task=%s: %s" % (m["id"], m["kind"], m["sender"], m["task_id"] or "-",
+                                                     m["summary"]))
+        if m["result"]:
+            lines.append("  result: %s" % m["result"][:400])
+    if mark_read:
+        # Mark exactly the rendered rows, across both Orch addresses.
+        stamp = now()
+        con.executemany("UPDATE messages SET read_at=?,state='done',done_at=COALESCE(done_at,?) WHERE id=?",
+                        [(stamp, stamp, m["id"]) for m in rows])
+        con.commit()
+    return "\n".join(lines)
+
+
+def orchestrator_brief(con, w):
+    """Injected only into the explicitly launched, registered Orch process."""
+    repo = os.path.dirname(os.path.dirname(BIN))
+    lines = ["[agentctl] This session is the Orchestrator (worker id %s). Management was explicitly started with agentctl orch in %s. "
+             "Ordinary Claude or Codex sessions do not become orchestrators." % (w["id"], w["cwd"]),
+             "Worker reports wake this session automatically while it is tmux-hosted; a wake line is a notification, "
+             "never report it. Detaching the tmux client leaves this orchestrator running.",
+              "Rules: %s/docs/protocol.md. Dispatch only via agentctl (never tmux send-keys). "
+             "Replies arrive as inbox context on your next prompt; run `inbox` to check on demand." % repo,
+             "Every command needs: AGENTCTL_HOME=%s %s <cmd>" % (HOME, BIN),
+             "Dispatch project work to the worker whose cwd matches the project; do not do the worker's project work yourself. "
+             "Exiting the current Orchestrator stops all managed workers. Older sessions cannot stop the new owner's workers.",
+             "Common: status | inbox --mark-read | task new \"<title>\" --project <p> | send <worker> --task <id> \"<text>\" "
+             "| ask \"<question>\" --task <id> | worker screen <id> | log -n 40",
+             "Goal workflow: read docs/goal-coordination.md before coordinating a goal. Check goal list/show and question list; "
+             "ask worker questions via question new/answer, preserve ticket links, and record every overall verification. "
+             "Never create replacement goals to bypass failure limits.",
+             authorization.PROMPT,
+             "Workers (pick by cwd; one project per worker):"]
+    rows = con.execute("SELECT * FROM workers WHERE role='worker' ORDER BY created_at").fetchall()
+    for r in rows:
+        lines.append("  - %s (%s) cwd=%s state=%s mode=%s" % (r["id"], r["kind"], r["cwd"], r["state"], r["mode"]))
+    if not rows:
+        lines.append("  (none registered; `worker add <id> --kind claude|codex --cwd <repo>` then `worker start <id>`)")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------- commands
+
+
+def cmd_worker(a):
+    con = db()
+    if a.sub != "add":
+        w = get_worker(con, a.id)
+        if w["backend"] == "native":
+            return cmd_native_worker(con, w, a)
+    if a.sub == "add":
+        if con.execute("SELECT 1 FROM workers WHERE id=?", (a.id,)).fetchone():
+            die("worker %s already exists" % a.id)
+        cwd = os.path.abspath(a.cwd)
+        dup = con.execute("SELECT id FROM workers WHERE kind=? AND cwd=?", (a.kind, cwd)).fetchone()
+        if dup:
+            print("warning: %s (%s) shares cwd %s; project hooks can only tell them apart when agentctl starts the tmux "
+                  "session" % (dup["id"], a.kind, cwd), file=sys.stderr)
+        con.execute("INSERT INTO workers(id,kind,role,cwd,socket,target,mode,state,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (a.id, a.kind, a.role, cwd, a.socket, a.id, "auto", "unknown", now()))
+        group = con.execute("SELECT backend FROM management WHERE id=1").fetchone()
+        con.execute("UPDATE workers SET backend=? WHERE id=?", (group[0] if group else "native", a.id))
+        w = get_worker(con, a.id)
+        path = write_hook_config(w) if w["backend"] == "tmux" else "native observer (no project hooks installed)"
+        log_event(con, "worker.added", a.id, payload={"kind": a.kind, "role": a.role, "cwd": cwd, "hooks": path})
+        con.commit()
+        print("added %s (%s, %s) cwd=%s hooks=%s" % (a.id, a.kind, a.role, cwd, path))
+        if a.kind == "codex" and w["backend"] == "tmux":
+            print("note: Codex will ask to trust the project hooks on first launch (trust is per hook hash).")
+    elif a.sub == "start":
+        if getattr(a, "resume", False):
+            die("worker --resume is for native sessions; for tmux use --command with the CLI resume command")
+        con.execute("BEGIN IMMEDIATE")
+        w = get_worker(con, a.id)
+        recovery.worker_mutation_gate(CTX, con, w)
+        if tmux_alive(w):
+            print("%s already running on socket %s (state=%s)" % (w["id"], w["socket"], w["state"]))
+            return
+        n = reconcile_restart(con, w, "tmux session missing at worker start")
+        if n:
+            print("warning: %d in-flight message(s) marked interrupted; see agentctl inbox" % n)
+        con.execute('UPDATE workers SET execution_generation=?,session_id=NULL WHERE id=?', (uuid.uuid4().hex, w['id']))
+        prog = a.command or default_worker_command(w["kind"])
+        subprocess.run(["tmux", "-L", w["socket"], "new-session", "-d", "-s", w["target"], "-x", "180", "-y", "50",
+                        "-c", w["cwd"], "-e", "AGENTCTL_HOME=" + HOME, "-e", "AGENTCTL_WORKER=" + w["id"], prog],
+                       check=True)
+        set_state(con, w["id"], "starting")
+        log_event(con, "worker.started", w["id"], payload={"command": prog})
+        con.commit()
+        print("started %s: tmux -L %s attach -t %s" % (w["id"], w["socket"], w["target"]))
+    elif a.sub == "stop":
+        con.execute("BEGIN IMMEDIATE")
+        w = get_worker(con, a.id)
+        tmux(w, "kill-session", "-t", w["target"], check=False)
+        set_state(con, w["id"], "stopped")
+        log_event(con, "worker.stopped", w["id"])
+        con.commit()
+        print("stopped %s" % w["id"])
+    elif a.sub == "manual":
+        w = get_worker(con, a.id)
+        mode = "manual" if a.on_off == "on" else "auto"
+        con.execute("UPDATE workers SET mode=? WHERE id=?", (mode, w["id"]))
+        log_event(con, "worker.mode", w["id"], payload={"mode": mode})
+        con.commit()
+        print("%s mode=%s" % (w["id"], mode))
+        if mode == "auto":
+            print("pump:", pump_worker(con, get_worker(con, w["id"])))
+            con.commit()
+    elif a.sub == "attach":
+        w = get_worker(con, a.id)
+        print("tmux -L %s attach -t %s" % (w["socket"], w["target"]))
+    elif a.sub == "screen":
+        w = get_worker(con, a.id)
+        r = tmux(w, "capture-pane", "-p", "-t", w["target"], check=False)
+        print(r.stdout if r.returncode == 0 else "(no tmux session)")
+    elif a.sub == "rm":
+        scheduling.transaction(con)
+        w = get_worker(con, a.id)
+        recovery.worker_mutation_gate(CTX, con, w)
+        con.execute("DELETE FROM workers WHERE id=?", (w["id"],))
+        log_event(con, "worker.removed", w["id"])
+        con.commit()
+        print("removed %s (hook config left in place)" % w["id"])
+
+
+def cmd_native_worker(con, w, a):
+    if a.sub == "start":
+        if w["role"] == "orchestrator":
+            die("use orch to start the orchestrator")
+        orch = orch_row(con)
+        if not orch or not native.active(CTX, con, orch):
+            die("start the native orchestrator first")
+        if getattr(a, "command", None):
+            die("native uses provider lifecycle APIs; --command is only supported with tmux")
+        if not native.active(CTX, con, w):
+            native.start(CTX, con, w, getattr(a, "resume", False))
+        native_attach(con, get_worker(con, w["id"]), True)
+    elif a.sub == "stop":
+        if w["role"] == "orchestrator":
+            return cmd_stop(a)
+        native.stop(CTX, con, w)
+        print("stopped " + w["id"])
+    elif a.sub == "attach":
+        native_attach(con, w)
+    elif a.sub == "screen":
+        r = native.row(con, w["id"])
+        if r and r["kind"] == "claude" and r["job_id"]:
+            subprocess.run(["claude", "logs", r["job_id"]], stdin=subprocess.DEVNULL, check=True)
+        else:
+            print(w["last_message"] or "(no response yet; attach to see the native conversation)")
+    elif a.sub == "manual":
+        con.execute("UPDATE workers SET mode=? WHERE id=?", ("manual" if a.on_off == "on" else "auto", w["id"]))
+        con.commit()
+        print("updated " + w["id"])
+    elif a.sub == "rm":
+        scheduling.transaction(con)
+        recovery.worker_mutation_gate(CTX, con, w)
+        r = native.row(con, w["id"])
+        if r and (native.alive(CTX, r) or native.alive(CTX, r, "watcher_pid")):
+            die("stop the worker before removing it")
+        con.execute("DELETE FROM native_sessions WHERE worker_id=?", (w["id"],))
+        con.execute("DELETE FROM workers WHERE id=?", (w["id"],))
+        con.commit()
+        print("removed " + w["id"])
+
+
+def cmd_task(a):
+    con = db()
+    if a.sub == "new":
+        tid = a.id or new_id("task")
+        con.execute("INSERT INTO tasks(id,title,project,status,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                    (tid, a.title, a.project, "open", now(), now()))
+        if a.goal:
+            goals.attach(CTX, con, tid, a.goal, a.ticket)
+        elif a.ticket:
+            con.execute('UPDATE tasks SET ticket=? WHERE id=?', (a.ticket, tid))
+        log_event(con, "task.created", message_id=None, payload={"task": tid, "title": a.title})
+        con.commit()
+        print(tid)
+    elif a.sub == "set":
+        con.execute("BEGIN IMMEDIATE")
+        scheduling.task(con, a.id)
+        if goals.task_goal(con, a.id):
+            goals.require_dispatch(con, a.id)
+            if a.status == "superseded":
+                die("use goal retire-task with replacement and evidence")
+        scheduling.recover_completed(con)
+        if a.status == "done":
+            goals.require_dispatch(con, a.id)
+            error = scheduling.completion_error(con, a.id)
+            if error:
+                die(error)
+        con.execute("UPDATE tasks SET status=?,updated_at=? WHERE id=?", (a.status, now(), a.id))
+        log_event(con, "task.status", payload={"task": a.id, "status": a.status})
+        con.commit()
+        print("%s -> %s" % (a.id, a.status))
+    elif a.sub == "list":
+        for t in con.execute("SELECT * FROM tasks ORDER BY created_at"):
+            print("%-16s %-18s %-10s %s" % (t["id"], t["status"], t["assignee"] or "-", t["title"]))
+
+
+def cmd_send(a):
+    con = db()
+    w = get_worker(con, a.worker)
+    con.execute('BEGIN IMMEDIATE')
+    if a.kind == 'dispatch':
+        goals.require_dispatch(con, a.task)
+    if a.task and not con.execute("SELECT 1 FROM tasks WHERE id=?", (a.task,)).fetchone():
+        die("unknown task %s" % a.task)
+    if a.task and a.kind == "dispatch" and con.execute("SELECT 1 FROM task_queue WHERE task_id=?", (a.task,)).fetchone():
+        die("scheduled task: use scheduler enqueue/retry instead of direct send")
+    mid = new_id("msg")
+    body = a.body if a.body != "-" else sys.stdin.read()
+    summary = body.strip().splitlines()[0][:120] if body.strip() else "(empty)"
+    with open(os.path.join(MSG_DIR, mid + ".md"), "w") as f:
+        f.write("# %s %s -> %s\n\n" % (a.kind, a.sender, w["id"]))
+        f.write("- message: %s\n- task: %s\n- reply_to: %s\n- agentctl: %s\n- AGENTCTL_HOME: %s\n\n" % (
+            mid, a.task or "-", a.reply_to or "-", BIN, HOME))
+        f.write(body.rstrip() + "\n\n")
+        f.write("## When done\n\nRun (replace the summary; use --status blocked or question if you cannot finish):\n\n")
+        f.write("    AGENTCTL_HOME=%s %s report %s --status done \"one-line summary\"\n" % (HOME, BIN, mid))
+    con.execute("INSERT INTO messages(id,task_id,sender,recipient,kind,summary,reply_to,urgent,state,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (mid, a.task, a.sender, w["id"], a.kind, summary, a.reply_to, 1 if a.urgent else 0, "queued", now()))
+    if a.task:
+        con.execute("UPDATE tasks SET assignee=?,status=CASE WHEN status='open' THEN 'in_progress' ELSE status END,"
+                    "updated_at=? WHERE id=?", (w["id"], now(), a.task))
+    log_event(con, "message.queued", w["id"], mid, {"kind": a.kind, "urgent": bool(a.urgent), "task": a.task})
+    con.commit()
+    res = pump_worker(con, w)
+    con.commit()
+    print("%s queued for %s; pump: %s" % (mid, w["id"], res))
+
+
+def cmd_pump(a):
+    if a.delay:
+        time.sleep(a.delay)
+    con = db()
+    if a.orchestrator or (a.worker and get_worker(con, a.worker)["role"] == "orchestrator"):
+        print("orchestrator: %s" % pump_orchestrator(con))
+        con.commit()
+        if a.orchestrator:
+            return
+    ws = [get_worker(con, a.worker)] if a.worker else con.execute("SELECT * FROM workers WHERE role='worker'").fetchall()
+    for w in ws:
+        if w["role"] != "worker":
+            continue
+        print("%s: %s" % (w["id"], pump_worker(con, w)))
+    con.commit()
+
+
+def cmd_report(a):
+    con = db()
+    con.execute("BEGIN IMMEDIATE")
+    m = con.execute("SELECT * FROM messages WHERE id=?", (a.message,)).fetchone()
+    if not m:
+        die("unknown message %s" % a.message)
+    if m["kind"] == "wake":
+        die("%s is an inbox notification, not a dispatch; read the inbox instead of reporting it" % m["id"])
+    if m["state"] in ("done", "closed-blocked", "closed-question"):
+        print("warning: %s already reported (%s); ignoring duplicate" % (m["id"], m["done_at"]),
+              file=sys.stderr)
+        log_event(con, "report.duplicate", m["recipient"], m["id"], {"status": a.status, "summary": a.summary})
+        con.commit()
+        return
+    if m["state"] not in ("acked", "sent", "unconfirmed"):
+        print("warning: %s is in state %s, not acked; recording anyway" % (m["id"], m["state"]), file=sys.stderr)
+    state = "done" if a.status == "done" else "closed-" + a.status
+    con.execute("UPDATE messages SET state=?,done_at=?,result=? WHERE id=?", (state, now(), a.summary, m["id"]))
+    # reply goes to the sender's inbox
+    rid = new_id("msg")
+    kind = "question" if a.status == "question" else "reply"
+    con.execute("INSERT INTO messages(id,task_id,sender,recipient,kind,summary,reply_to,state,created_at,result) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (rid, m["task_id"], m["recipient"], m["sender"], kind, "[%s] %s" % (a.status, a.summary[:110]),
+                 m["id"], "queued", now(), a.summary))
+    current_report = scheduling.report(con, m, a.status, a.summary, now())
+    if m["task_id"] and current_report:
+        st = {"done": "review", "blocked": "blocked", "question": "needs_answer"}[a.status]
+        con.execute("UPDATE tasks SET status=?,updated_at=? WHERE id=?", (st, now(), m["task_id"]))
+    log_event(con, "message.reported", m["recipient"], m["id"], {"status": a.status, "summary": a.summary, "reply": rid})
+    con.commit()
+    print("recorded %s as %s; reply %s queued to %s" % (m["id"], state, rid, m["sender"]))
+    print("orchestrator: %s" % notify_inbox(con, "%s reported %s" % (m["recipient"], m["id"])))
+
+
+def notify_inbox(con, reason):
+    """Wake the orchestrator for a new inbox item; only meaningful when it is tmux-hosted.
+
+    Never raises: `report` is the only completion evidence, so a failed nudge must not make a
+    worker think its report failed and send it twice. The inbox item is already recorded.
+    """
+    try:
+        w = orch_row(con)
+        if not w:
+            return "no orchestrator registered"
+        if not inbox_rows(con, "orchestrator"):
+            return "inbox empty"
+        res = enqueue_wake(con, reason)
+        con.commit()
+        return res
+    except Exception as e:
+        try:
+            con.rollback()
+            log_event(con, "wake.error", None, payload={"reason": reason, "error": repr(e)})
+            con.commit()
+        except Exception:
+            pass
+        return "notify failed (%r); the inbox still has it" % e
+
+
+def cmd_resend(a):
+    con = db()
+    m = con.execute("SELECT * FROM messages WHERE id=?", (a.message,)).fetchone()
+    if not m:
+        die("unknown message %s" % a.message)
+    if m["state"] not in ("interrupted", "unconfirmed", "queued"):
+        die("%s is %s; only interrupted/unconfirmed messages can be re-queued" % (m["id"], m["state"]))
+    con.execute("UPDATE messages SET state='queued',sent_at=NULL,acked_at=NULL WHERE id=?", (m["id"],))
+    log_event(con, "message.resend", m["recipient"], m["id"], {"was": m["state"]})
+    con.commit()
+    receiver = get_worker(con, m["recipient"])
+    result = pump_orchestrator(con) if m["kind"] == "wake" else pump_worker(con, receiver)
+    print("%s re-queued; pump: %s" % (m["id"], result))
+    con.commit()
+
+
+def cmd_ask(a):
+    """Orchestrator asks operator for a decision; the task waits until `answer`."""
+    con = db()
+    qid = new_id("q")
+    con.execute("INSERT INTO messages(id,task_id,sender,recipient,kind,summary,state,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (qid, a.task, a.sender, "operator", "question", a.question[:120], "waiting", now()))
+    with open(os.path.join(MSG_DIR, qid + ".md"), "w") as f:
+        f.write(a.question + "\n")
+    if a.task:
+        con.execute("UPDATE tasks SET waiting_on=?,updated_at=? WHERE id=?", (qid, now(), a.task))
+    log_event(con, "decision.asked", None, qid, {"task": a.task, "question": a.question})
+    con.commit()
+    print("%s waiting for operator (task %s)" % (qid, a.task or "-"))
+
+
+def cmd_answer(a):
+    con = db()
+    q = con.execute("SELECT * FROM messages WHERE id=? AND kind='question' AND recipient IN ('operator','nat')", (a.question,)).fetchone()
+    if not q:
+        die("unknown decision %s" % a.question)
+    if q["state"] != "waiting":
+        die("%s already answered (%s)" % (q["id"], q["result"]))
+    con.execute("UPDATE messages SET state='done',done_at=?,result=? WHERE id=?", (now(), a.answer, q["id"]))
+    # the answer lands in the asker's inbox; the asker resumes only that task
+    rid = new_id("msg")
+    con.execute("INSERT INTO messages(id,task_id,sender,recipient,kind,summary,reply_to,state,created_at,result) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (rid, q["task_id"], "operator", q["sender"], "note", "[decision] " + a.answer[:110], q["id"], "queued", now(), a.answer))
+    if q["task_id"]:
+        con.execute("UPDATE tasks SET waiting_on=NULL,updated_at=? WHERE id=? AND waiting_on=?", (now(), q["task_id"], q["id"]))
+    log_event(con, "decision.answered", None, q["id"], {"answer": a.answer, "reply": rid})
+    con.commit()
+    print("%s answered; %s queued to %s (task %s resumed)" % (q["id"], rid, q["sender"], q["task_id"] or "-"))
+    print("orchestrator: %s" % notify_inbox(con, "operator answered %s" % q["id"]))
+
+
+def cmd_inbox(a):
+    con = db()
+    out = render_inbox(con, a.recipient, mark_read=a.mark_read)
+    if a.mark_read and "orchestrator" in inbox_recipients(con, a.recipient):
+        w = orch_row(con)
+        if w and w["backend"] == "native":
+            close_wakes(con, w["id"], "receiver read inbox")
+            con.commit()
+    print(out or "(inbox empty for %s)" % a.recipient)
+    pend = con.execute("SELECT * FROM messages WHERE recipient IN ('operator','nat') AND state='waiting'").fetchall()
+    if pend:
+        print("\nwaiting for operator:")
+        for q in pend:
+            print("- %s task=%s: %s  -> agentctl answer %s \"...\"" % (q["id"], q["task_id"] or "-", q["summary"], q["id"]))
+
+
+def cmd_status(a):
+    con = db()
+    print("workers  (AGENTCTL_HOME=%s)" % HOME)
+    for w in con.execute("SELECT * FROM workers ORDER BY created_at"):
+        if w["backend"] == "native":
+            r = native.row(con, w["id"])
+            live = w["state"] if native.active(CTX, con, w) else "stopped" if w["state"] == "stopped" else "gone(native)"
+            hosted = False
+        elif w["role"] == "orchestrator":
+            owner = con.execute("SELECT * FROM orchestrator_owner WHERE worker_id=?", (w["id"],)).fetchone()
+            info = process_info(owner["pid"]) if owner else None
+            live = (w["state"] if info and info["start"] == owner["process_start"] else
+                    "gone(process)" if owner else "stopped" if not w["session_id"] else "unmonitored")
+            hosted = tmux_hosted(w, live_owner(con, w))
+        else:
+            live = w["state"] if w["state"] == "stopped" or tmux_alive(w) else "gone(tmux)"
+        print("  %-12s %-6s %-12s %-14s mode=%-6s since=%-6s session=%s" % (
+            w["id"], w["kind"], w["role"], live, w["mode"], age(w["state_at"]), (w["session_id"] or "-")[:8]))
+        print("               cwd=%s" % w["cwd"])
+        if w["backend"] == "native":
+            print("               backend=native; attach: %s worker attach %s" % (BIN, w["id"]))
+            if r and r["error"]:
+                print("               error: %s (log: %s)" % (r["error"], r["log_path"]))
+        elif w["role"] == "orchestrator":
+            print("               %s" % ("tmux: " + attach_command(w) if hosted
+                                         else "not tmux-hosted (inbox notifications fall back to the next prompt)"))
+        if w["last_message"]:
+            print("               last: %s" % w["last_message"].replace("\n", " ")[:100])
+    print("tasks")
+    for t in con.execute("SELECT * FROM tasks ORDER BY created_at"):
+        st = t["status"] + (" (waiting %s)" % t["waiting_on"] if t["waiting_on"] else "")
+        print("  %-16s %-30s %-10s %s" % (t["id"], st, t["assignee"] or "-", t["title"]))
+    print("messages (non-final)")
+    rows = con.execute("SELECT * FROM messages WHERE state NOT IN ('done') ORDER BY created_at").fetchall()
+    for m in rows:
+        print("  %-14s %-9s %-11s %s->%s task=%s sent=%s acked=%s %s" % (
+            m["id"], m["kind"], m["state"], m["sender"], m["recipient"], m["task_id"] or "-",
+            local(m["sent_at"]), local(m["acked_at"]), m["summary"][:50]))
+    if not rows:
+        print("  (none)")
+    quota.display(quota.snapshots(con))
+    print("scheduler: " + json.dumps(scheduling.summary(con)))
+    if a.all:
+        print("recent events")
+        for e in con.execute("SELECT * FROM events ORDER BY seq DESC LIMIT %d" % a.all):
+            print("  %s %-10s %-22s %s %s" % (local(e["ts"]), e["worker_id"] or "-", e["event"], e["message_id"] or "",
+                                             (e["payload"] or "")[:80]))
+
+
+def cmd_log(a):
+    con = db()
+    for e in con.execute("SELECT * FROM events ORDER BY seq DESC LIMIT ?", (a.n,)).fetchall()[::-1]:
+        print("%s %-10s %-22s %-14s %s" % (local(e["ts"]), e["worker_id"] or "-", e["event"], e["message_id"] or "",
+                                          e["payload"] or ""))
+
+
+def cmd_hook(a):
+    """Called by the worker's CLI (Claude Code / Codex) on lifecycle events. Must be fast and never fail the CLI."""
+    wid = os.environ.get("AGENTCTL_WORKER")
+    try:
+        payload = json.load(sys.stdin)
+    except Exception:
+        payload = {}
+    ev = payload.get("hook_event_name") or "?"
+    out = {}
+    watch = None
+    con = None
+    try:
+        con = db()
+        con.execute("BEGIN IMMEDIATE")
+        w = con.execute("SELECT * FROM workers WHERE id=?", (wid,)).fetchone() if wid else None
+        if w and w["backend"] == "native":
+            # Native observers own identity/readiness; a viewing TUI or stale project
+            # hook must never claim ownership, drain an inbox, or stop the group.
+            con.commit()
+            print("{}")
+            return
+        tmux_env = os.environ.get("TMUX", "")
+        tmux_socket = os.path.basename(tmux_env.split(",")[0]) if tmux_env else ""
+        sid = payload.get("session_id")
+        if w and w["role"] == "orchestrator":
+            kind = a.kind or w["kind"]
+            if not sid or os.path.realpath(payload.get("cwd", "")) != os.path.realpath(w["cwd"]):
+                log_event(con, "hook.ignored_orchestrator", wid, payload={"event": ev, "reason": "missing session or wrong cwd"})
+                con.commit()
+                print("{}")
+                return
+            process = cli_ancestor(kind)
+            owner = con.execute("SELECT * FROM orchestrator_owner WHERE worker_id=?", (wid,)).fetchone()
+            # Hooks observe the process already claimed by `orch`'s launcher.
+            # Repo-local defaults and SessionStart are not permission to take over.
+            if not owner or not process or owner["pid"] != process["pid"] or owner["process_start"] != process["start"]:
+                con.commit()
+                print("{}")
+                return
+            retired_process = con.execute("SELECT 1 FROM retired_orchestrators WHERE pid=? AND process_start=?",
+                                          (process["pid"], process["start"])).fetchone() if process else None
+            if retired_process and (not owner or owner["pid"] != process["pid"] or owner["process_start"] != process["start"]):
+                log_event(con, "hook.stale_orchestrator", wid, payload={"event": ev, "session": sid})
+                con.commit()
+                print("{}")
+                return
+            retired = con.execute("SELECT * FROM retired_orchestrators WHERE session_id=?", (sid,)).fetchone()
+            if retired and ev == "SessionStart" and payload.get("source") == "resume" and process and (
+                    process["pid"] != retired["pid"] or process["start"] != retired["process_start"]):
+                con.execute("DELETE FROM retired_orchestrators WHERE session_id=?", (sid,))
+                retired = None
+            if retired:
+                log_event(con, "hook.stale_orchestrator", wid, payload={"event": ev, "session": sid})
+                con.commit()
+                print("{}")
+                return
+            if ev == "SessionStart":
+                if not process:
+                    log_event(con, "hook.ignored_orchestrator", wid, payload={"event": ev, "reason": "CLI ancestor not found"})
+                    con.commit()
+                    print("{}")
+                    return
+                owner = con.execute("SELECT * FROM orchestrator_owner WHERE worker_id=?", (wid,)).fetchone()
+                if payload.get("source") == "compact" and owner and (
+                        owner["session_id"] != sid or owner["pid"] != process["pid"] or owner["process_start"] != process["start"]):
+                    log_event(con, "hook.stale_orchestrator", wid, payload={"event": ev, "session": sid})
+                    con.commit()
+                    print("{}")
+                    return
+                token, changed = claim_orchestrator(con, w, sid, kind, process)
+                if changed:
+                    watch = (wid, token)
+                w = get_worker(con, wid)
+            else:
+                owner = con.execute("SELECT * FROM orchestrator_owner WHERE worker_id=?", (wid,)).fetchone()
+                if not owner or not process or owner["session_id"] != sid or owner["pid"] != process["pid"] or owner["process_start"] != process["start"]:
+                    log_event(con, "hook.stale_orchestrator", wid, payload={"event": ev, "session": sid})
+                    con.commit()
+                    print("{}")
+                    return
+        if not w:
+            log_event(con, "hook.unknown_worker", wid, payload={"event": ev})
+            con.commit()
+        elif w["role"] == "worker" and not process_in_tmux(w, os.getppid()):
+            # Codex may omit TMUX from hook children. Verify actual pane ancestry instead;
+            # neither the hook's baked-in worker id nor a matching socket proves membership.
+            log_event(con, "hook.ignored_foreign_session", w["id"],
+                      payload={"event": ev, "tmux_socket": tmux_socket or None, "session": sid})
+            con.commit()
+        elif w["role"] == "orchestrator" and sid and w["session_id"] and sid != w["session_id"] and ev != "SessionStart":
+            # Only the registered owner may update its session identity.
+            # Older sessions keep running but must not consume the inbox.
+            log_event(con, "hook.stale_orchestrator", w["id"],
+                      payload={"event": ev, "session": sid, "current": w["session_id"]})
+            con.commit()
+        else:
+            if w['role'] == 'worker' and not scheduling.bind_tmux_session(con, w, sid, ev):
+                log_event(con, 'hook.ignored_stale_session', w['id'], payload={'event': ev})
+                con.commit()
+                print('{}')
+                return
+            if sid and sid != w["session_id"]:
+                if w["role"] == "worker" and w["session_id"] and ev == "SessionStart":
+                    reconcile_restart(con, w, "new CLI session %s (was %s)" % (sid[:8], w["session_id"][:8]))
+                if w["role"] == "orchestrator" and w["session_id"]:
+                    log_event(con, "orchestrator.takeover", w["id"], payload={"from": w["session_id"], "to": sid})
+                con.execute("UPDATE workers SET session_id=? WHERE id=?", (sid, w["id"]))
+            if ev == "SessionStart":
+                set_state(con, w["id"], "idle")
+                log_event(con, "hook.SessionStart", w["id"], payload={"source": payload.get("source"), "session": sid})
+                if w["role"] == "worker":
+                    spawn_delayed_pump(w["id"])
+                else:
+                    ctx = orchestrator_brief(con, w)
+                    inbox = render_inbox(con, "orchestrator")
+                    if inbox:
+                        ctx += "\n\n" + inbox
+                    out = {"hookSpecificOutput": {"hookEventName": ev, "additionalContext": ctx}}
+                    spawn_delayed_orch_pump()   # a wake queued while the TUI was starting still lands
+            elif ev == "UserPromptSubmit":
+                prompt = payload.get("prompt") or ""
+                tags = TAG_RE.findall(prompt)
+                set_state(con, w["id"], "busy")
+                ev_payload = {"tags": tags, "session": sid, "turn": payload.get("turn_id") or payload.get("prompt_id")}
+                for mid in tags:
+                    m = con.execute("SELECT * FROM messages WHERE id=? AND recipient=?", (mid, w["id"])).fetchone()
+                    if m and m["state"] in ("sending", "sent", "unconfirmed", "interrupted", "queued"):
+                        con.execute("UPDATE messages SET state='acked',acked_at=?,evidence=? WHERE id=?",
+                                    (now(), json.dumps({"hook": ev, "session_id": sid,
+                                                        "turn_id": payload.get("turn_id") or payload.get("prompt_id"),
+                                                        "cwd": payload.get("cwd")}), mid))
+                        log_event(con, "message.acked", w["id"], mid, ev_payload)
+                    elif m:
+                        log_event(con, "message.ack_duplicate", w["id"], mid, {"state": m["state"]})
+                    else:
+                        log_event(con, "message.ack_unknown", w["id"], mid, ev_payload)
+                if len(tags) > 1:
+                    log_event(con, "hook.merged_prompt", w["id"], payload=ev_payload)
+                if not tags:
+                    log_event(con, "hook.prompt", w["id"], payload={"prompt": prompt[:80]})
+                if w["role"] == "orchestrator":
+                    wakes = WAKE_RE.findall(prompt)
+                    inbox = render_inbox(con, "orchestrator", mark_read=True)
+                    if inbox:
+                        log_event(con, "inbox.injected", w["id"], payload={"lines": inbox.count("\n")})
+                        out = {"hookSpecificOutput": {"hookEventName": ev, "additionalContext": inbox}}
+                    # Every prompt drains the inbox, so any pending nudge (acked or overtaken) is spent.
+                    close_wakes(con, w["id"], "acked by prompt" if wakes else "inbox drained by prompt")
+                    if wakes:
+                        log_event(con, "wake.acked", w["id"], wakes[0],
+                                  {"session": sid, "turn": payload.get("turn_id") or payload.get("prompt_id")})
+            elif ev == "Stop":
+                last = payload.get("last_assistant_message") or ""
+                set_state(con, w["id"], "idle", last)
+                open_acked = con.execute("SELECT id FROM messages WHERE recipient=? AND state='acked'", (w["id"],)).fetchall()
+                log_event(con, "hook.Stop", w["id"], payload={"last": last[:200], "unreported": [r["id"] for r in open_acked]})
+                if w["role"] == "worker":
+                    spawn_delayed_pump(w["id"])
+                else:
+                    spawn_delayed_orch_pump()
+            elif ev == "SessionEnd" and w["role"] == "orchestrator":
+                # The monitor does cleanup outside the CLI's short SessionEnd timeout.
+                con.execute("UPDATE orchestrator_owner SET ending=1 WHERE worker_id=? AND session_id=?", (wid, sid))
+                log_event(con, "orchestrator.end_requested", wid, payload={"session": sid})
+            elif ev in ("PermissionRequest", "Notification"):
+                kind = payload.get("notification_type") or payload.get("tool_name") or ev
+                if ev == "PermissionRequest" or kind == "permission_prompt":
+                    set_state(con, w["id"], "waiting_permission")
+                log_event(con, "hook." + ev, w["id"], payload={"type": kind})
+            else:
+                log_event(con, "hook." + ev, w["id"])
+            con.commit()
+        if watch:
+            spawn_watch(*watch)
+    except Exception as e:  # never break the host CLI
+        try:
+            with open(os.path.join(HOME, "hook-errors.log"), "a") as f:
+                f.write("%s %s %s: %r\n" % (now(), wid, ev, e))
+        except Exception:
+            pass
+    finally:
+        if con is not None:
+            con.close()
+    print(json.dumps(out) if out else "{}")
+
+
+# ---------------------------------------------------------------- main
+
+
+def main():
+    p = argparse.ArgumentParser(prog="agentctl", description=__doc__.splitlines()[0])
+    sp = p.add_subparsers(dest="cmd", required=True)
+    projects.register_parser(sp, CTX)
+    worktrees.register_parser(sp, CTX)
+    scheduling.register_parser(sp, CTX)
+    handoffs.register_parser(sp, CTX)
+    recovery.register_parser(sp, CTX)
+    gateway.register_parser(sp, CTX)
+    goals.register_parser(sp, CTX)
+    goal_board.register_parser(sp, CTX)
+    intake.register_parser(sp, CTX)
+
+    def positive(value):
+        result = float(value)
+        if not 0 < result <= 86400:
+            raise argparse.ArgumentTypeError('must be between 0 and 86400 seconds')
+        return result
+
+    x = sp.add_parser('quota', help='subscription observations; --refresh reads native Codex without model turns')
+    x.add_argument('--refresh', action='store_true'); x.add_argument('--json', action='store_true')
+    x.add_argument('--max-age', type=positive, default=quota.DEFAULT_MAX_AGE)
+    x.add_argument('--worker', help=argparse.SUPPRESS); x.add_argument('--generation', help=argparse.SUPPRESS)
+    x = sp.add_parser('watch', help='watch quota in this terminal; Ctrl-C only closes the viewer')
+    x.add_argument('--refresh', action='store_true', help='also refresh native Codex observations periodically')
+    x.add_argument('--interval', type=positive, default=2)
+    x.add_argument('--refresh-interval', type=positive, default=60)
+    x.add_argument('--max-age', type=positive, default=quota.DEFAULT_MAX_AGE)
+    x.add_argument('--once', action='store_true')
+    x = sp.add_parser('quota-claude', help='(internal) collect statusLine quota and preserve original display')
+    x.add_argument('worker'); x.add_argument('generation'); x.add_argument('--home', required=True)
+    x.add_argument('--forward')
+
+    w = sp.add_parser("worker", help="register/start/stop workers").add_subparsers(dest="sub", required=True)
+    x = w.add_parser("add"); x.add_argument("id"); x.add_argument("--kind", choices=["claude", "codex"], required=True)
+    x.add_argument("--cwd", required=True); x.add_argument("--socket", default="agentctl")
+    x.add_argument("--role", choices=["worker", "orchestrator"], default="worker")
+    x = w.add_parser("start"); x.add_argument("id"); x.add_argument("--command")
+    x.add_argument("--resume", action="store_true", help="resume the saved native conversation")
+    for s in ("stop", "attach", "screen", "rm"):
+        w.add_parser(s).add_argument("id")
+    x = w.add_parser("manual"); x.add_argument("id"); x.add_argument("on_off", choices=["on", "off"])
+
+    t = sp.add_parser("task", help="tasks").add_subparsers(dest="sub", required=True)
+    x = t.add_parser("new"); x.add_argument("title"); x.add_argument("--project"); x.add_argument("--id")
+    x.add_argument('--goal'); x.add_argument('--ticket')
+    x = t.add_parser("set"); x.add_argument("id"); x.add_argument("status")
+    t.add_parser("list")
+
+    x = sp.add_parser("send", help="queue a message for a worker (delivered when idle)")
+    x.add_argument("worker"); x.add_argument("body", help="text, or - for stdin")
+    x.add_argument("--task"); x.add_argument("--kind", default="dispatch"); x.add_argument("--from", dest="sender", default="orchestrator")
+    x.add_argument("--reply-to"); x.add_argument("--urgent", action="store_true")
+
+    x = sp.add_parser("pump", help="deliver queued messages to idle workers"); x.add_argument("worker", nargs="?")
+    x.add_argument("--delay", type=float, default=0)
+    x.add_argument("--orchestrator", action="store_true", help="only pump the orchestrator's wake queue")
+
+    x = sp.add_parser("report", help="worker reports a message's outcome"); x.add_argument("message")
+    x.add_argument("--status", choices=["done", "blocked", "question"], default="done"); x.add_argument("summary")
+
+    x = sp.add_parser("resend", help="re-queue an interrupted/unconfirmed message (explicit human decision)"); x.add_argument("message")
+    x = sp.add_parser("ask", help="ask operator for a decision; task waits"); x.add_argument("question")
+    x.add_argument("--task"); x.add_argument("--from", dest="sender", default="orchestrator")
+    x = sp.add_parser("answer", help="operator answers a decision; only that task resumes"); x.add_argument("question"); x.add_argument("answer")
+
+    x = sp.add_parser("inbox", help="unread replies/questions"); x.add_argument("--for", dest="recipient", default="orchestrator")
+    x.add_argument("--mark-read", action="store_true")
+
+    x = sp.add_parser("status"); x.add_argument("--all", type=int, nargs="?", const=20, default=0, metavar="N")
+    sp.add_parser("stop", help="explicitly stop the orchestrator and all managed workers")
+    x = sp.add_parser("ack", help="receiver acknowledges a dispatch before executing it"); x.add_argument("message")
+    x = sp.add_parser("native-watch", help="(internal) native lifecycle and message observer")
+    x.add_argument("worker"); x.add_argument("generation")
+    x = sp.add_parser("log"); x.add_argument("-n", type=int, default=40)
+    x = sp.add_parser("hook", help="(internal) called by Claude Code / Codex hooks")
+    x.add_argument("--orchestrator", action="store_true")
+    x.add_argument("--kind", choices=["claude", "codex"])
+    x = sp.add_parser("install", help="install local Claude and Codex orchestrator hooks in this checkout")
+    x.add_argument("--shell", action="store_true", help="also install repo-scoped launch functions in ~/.zshrc")
+    x = sp.add_parser("orch", help="attach/start the orchestrator (default management mode: native)")
+    x.add_argument("--kind", choices=["claude", "codex"], help="skip the menu and use this CLI")
+    x.add_argument("--mode", choices=["tmux", "native"], help="management mode (new group default: native)")
+    x.add_argument("--resume", action="store_true", help="resume the saved native orchestrator conversation")
+    x.add_argument("--no-attach", action="store_true", help="start/keep the session without attaching")
+    x.add_argument("--takeover", action="store_true",
+                   help="take over from an orchestrator running outside tmux (its workers keep running)")
+    x.add_argument("args", nargs=argparse.REMAINDER, help="-- <extra CLI args>")
+    x = sp.add_parser("launch", help="(internal) start the CLI in the registered Orch pane")
+    x.add_argument("kind", choices=["claude", "codex"])
+    x.add_argument("args", nargs=argparse.REMAINDER)
+    x = sp.add_parser("watch-orchestrator", help="(internal) monitor the owning CLI and stop workers on exit")
+    x.add_argument("worker"); x.add_argument("token")
+
+    a = p.parse_args()
+    if hasattr(a, 'func'):
+        return a.func(a)
+    {"worker": cmd_worker, "task": cmd_task, "send": cmd_send, "pump": cmd_pump, "report": cmd_report,
+     "ask": cmd_ask, "answer": cmd_answer, "resend": cmd_resend, "inbox": cmd_inbox, "status": cmd_status, "log": cmd_log,
+     "hook": cmd_hook, "install": cmd_install, "launch": cmd_launch, "orch": cmd_orch,
+     "watch-orchestrator": cmd_watch, "stop": cmd_stop, "ack": cmd_ack,
+     "native-watch": lambda args: native.run(CTX, args),
+     "quota": lambda args: quota.cmd(CTX, args), "watch": lambda args: quota.watch(CTX, args),
+     "quota-claude": lambda args: quota.collect_claude(CTX, args)}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (RuntimeError, subprocess.SubprocessError, OSError, sqlite3.Error) as error:
+        die(str(error))

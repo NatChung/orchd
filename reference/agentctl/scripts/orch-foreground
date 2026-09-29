@@ -1,0 +1,4 @@
+#!/bin/sh
+# Resolve relative to this script, so invocation works from any directory.
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 1
+exec python3 "$SCRIPT_DIR/ghostty-view.py" foreground orch "$@"

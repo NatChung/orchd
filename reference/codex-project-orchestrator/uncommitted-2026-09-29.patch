@@ -1,0 +1,286 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index e0297f4..3fbd99f 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -2,6 +2,9 @@
+ 
+ If `docs/local-workspace.md` exists, read it first for this operator's local
+ workspace role and project routing. It is private and excluded from Git.
++At session start or after compaction, read `docs/handoffs/INDEX.md` if present;
++open only the handoffs relevant to the current request. This private index records
++assignment progress, evidence, and next actions, not additional authority.
+ 
+ The tracked files are the reusable tool; local workspace configuration stays
+ outside the tracked source.
+diff --git a/docs/security.md b/docs/security.md
+index 3f299b8..ea72640 100644
+--- a/docs/security.md
++++ b/docs/security.md
+@@ -52,6 +52,10 @@ permission 或 mode 變更不是 hot reload。Operator 必須停止相關 app-se
+ 
+ 角色的 `model` 設定只選擇模型，不授予或撤銷任何權限。Worker 在建立／續接 thread 及啟動新回合時傳入設定的模型；活躍回合不會被中斷以套用新設定。直接在其他 Codex home 或桌面版啟動的對話不受本工具產生的 TOML 管理。
+ 
++既有 Agent Mail 相容 adapter 使用同一個外部 mailbox 與 private runtime；更新程式與 mode snapshot 不應刪除 mailbox、identity、delivery journal 或進行未核對的任務重送。`install_management.py` 依 snapshot 的 `applied` mode 寫入對應的 live config，保留另一模式設定供 `project_mode.py` 切換。其 worker model policy 分別鎖定 development `gpt-6-sol` 與指定 communications worker `gpt-6-luna`；這只是模型路由，仍須以新受限 session 的實際工具與 sandbox probe 驗證隔離。
++已 hold 的舊請求保留原 mailbox 與 delivery 收據，不會因新任務的 context rotation 自動重播；worker 回報仍須核對並 acknowledge 後才能 rotate。
++Worker 使用固定 `project_agents` MCP 作跨角色信箱；授權的本地 connector 可由其受限 shell 執行。Mailbox 回覆與模型文字並不能證明 connector 曾被執行，必須核對實際 command/tool event 與結果；沒有執行事件的成功宣稱列為未驗證。
++
+ ## 崩潰、重送與副作用
+ 
+ SQLite mailbox 讓完全相同的 send 冪等，並持久保存 acknowledgement，但不提供 exactly-once execution。Worker 可能已經完成外部副作用，卻在回覆或 acknowledge 前崩潰。此時狀態具有歧義，系統不應自動重試可能產生副作用的工作；operator 或 orchestrator 應先查核目標系統的實際狀態，再選擇最小的續作。
+diff --git a/tools/projects-agent-mcp/README.md b/tools/projects-agent-mcp/README.md
+index 643c0a1..a2ba435 100644
+--- a/tools/projects-agent-mcp/README.md
++++ b/tools/projects-agent-mcp/README.md
+@@ -33,14 +33,19 @@ Only Orch exposes `manage_worker(project, operation, request_id)`. The project
+ must exist in the operator registry; callers cannot choose paths, profiles,
+ models, shell commands or thread IDs. Operations are create, restore, stop,
+ archive, retire, replace, rotate and reconcile. Workers only expose list/send/
+-fetch/acknowledge. Fixed worker model is `gpt-5.6-sol`, with no fallback; the
+-main session model remains the user's choice.
++fetch/acknowledge. The fixed development worker model is `gpt-6-sol` and the
++configured communications worker uses `gpt-6-luna`, with no fallback; the main
++session model remains the user's choice.
+ 
+ Stop interrupts the active turn and holds dispatch; it does not prove derived
+ processes stopped. Archive retains transcripts, task mappings and worktrees.
+ Retire also retires the mailbox agent; restore recovers the same identity and
+ session without replay. Replace preserves the old session mapping and holds
+ pending tasks for reconciliation. No operation deletes project files or results.
++After `stop` holds old unread deliveries, `rotate` may preserve those held
++deliveries while starting the next task in a fresh context. Worker replies still
++require review and acknowledgement before rotation; held mail is never replayed
++automatically.
+ 
+ A task owns one worker context. After Orch verifies and acknowledges the task
+ and its reports, rotate archives that context. The next task starts a fresh
+@@ -57,6 +62,10 @@ its project. Control files, other projects, inherited MCP gateways, plugins,
+ memories and alternate tool surfaces are denied. Explicit connector exceptions
+ remain operator-owned configuration. Communication instructions are still prompts;
+ there is no automatic worker-to-Orch-to-communication-worker workflow here.
++The fixed `project_agents` MCP is the only cross-role mailbox; a communication
++worker may use local shell within its project profile to run authorized native
++connector scripts. A claimed connector result without an actual command/tool
++execution record is unverified and must not be acknowledged as proof.
+ 
+ Offline checks, from the repository root:
+ 
+diff --git a/tools/projects-agent-mcp/install_management.py b/tools/projects-agent-mcp/install_management.py
+index a4b84cb..25422e0 100644
+--- a/tools/projects-agent-mcp/install_management.py
++++ b/tools/projects-agent-mcp/install_management.py
+@@ -65,7 +65,9 @@ def main():
+         local=copy.deepcopy(cfg)
+         for c in record['changes']:put(local,c['keys'],c['local'])
+         record['local_raw']=dump(local)
+-        writes[path]=dump(cfg)
++        # Keep the live config aligned with the mode recorded in the snapshot.
++        # The isolated version remains in record['raw'] for the next mode switch.
++        writes[path]=record['raw'] if state['applied']=='isolated' else record['local_raw']
+     writes[ROOT/'.projects-mode-state.json']=json.dumps(state,ensure_ascii=False,indent=2)+'\n'
+     for name in ['project_agents.py','rpc.py','lifecycle.py','worker-model.toml','start-mail.py','tracking_io.py','operator_settings.py']:
+         writes[BASE/name]=(SOURCE/name).read_text()
+diff --git a/tools/projects-agent-mcp/lifecycle.py b/tools/projects-agent-mcp/lifecycle.py
+index b00467b..f6e27da 100644
+--- a/tools/projects-agent-mcp/lifecycle.py
++++ b/tools/projects-agent-mcp/lifecycle.py
+@@ -28,7 +28,7 @@ def inspect(a, project, rpc=None):
+     d = json.loads(f.read_text()) if f.exists() else {}
+     result = {'project': project, 'cwd': spec['cwd'], 'profile': spec['profile'],
+               'thread_id': d.get('thread_id'), 'session': 'not_created',
+-              'configured_model': a.worker_model(), 'mailbox': 'unknown',
++              'configured_model': a.worker_model(project), 'mailbox': 'unknown',
+               'dispatch': 'held' if d.get('dispatch_held') else 'enabled'}
+     try:
+         agent = agent_call(a, project, 'whois')
+@@ -61,12 +61,16 @@ def ensure_session(a, project, c, *, new=False, handshake=True):
+     old = json.loads(f.read_text()) if f.exists() else {}
+     if old.get('creation_pending'):
+         raise RuntimeError('Uncertain session creation; maintenance reconciliation required')
+-    policy = a.worker_model()
++    policy = a.worker_model(project)
+     config = a.worker_config(project, policy)
+     params = {'cwd': spec['cwd'], 'permissions': spec['profile'], 'approvalPolicy': 'never',
+               'model': policy['model'], 'config': config,
+               'developerInstructions': 'Independent isolated worker for ' + project + '. '
+-              'Use only your fixed project_agents mailbox. No native subagents. '
++              'Use only your fixed project_agents MCP for cross-role mailbox operations. '
++              'For authorized work, local shell tools are allowed within your permission profile, '
++              'including this repository\'s native communication connectors. '
++              'Do not claim a shell command or connector ran unless its tool call completed; '
++              'if unavailable, report UNVERIFIED. No native subagents. '
+               'Shell uses login=false. Management recovery is not authorization to execute old tasks.'}
+     if old.get('thread_id') and not new:
+         t = c.call('thread/read', {'threadId': old['thread_id'], 'includeTurns': False})['thread']
+@@ -152,7 +156,7 @@ def manage(a, project, operation, request_id):
+         if operation == 'rotate':
+             current=json.loads(a.statefile(project).read_text()) if a.statefile(project).exists() else {}
+             task_id=current.get('active_task_id')
+-            unresolved=[v for p in a.delivery_dir().glob('*.json') if ((v:=json.loads(p.read_text())).get('to')==project or v.get('from')==project) and not v.get('acknowledged') and (not task_id or v.get('task_id')==task_id)]
++            unresolved=[v for p in a.delivery_dir().glob('*.json') if ((v:=json.loads(p.read_text())).get('to')==project or v.get('from')==project) and not v.get('acknowledged') and not (v.get('to')==project and v.get('held')) and (not task_id or v.get('task_id')==task_id)]
+             if unresolved:raise RuntimeError('Unacknowledged tasks or reports remain; verify/reconcile before context rotation')
+             if inspect(a,project)['session']=='active':raise RuntimeError('Active worker cannot rotate before task verification')
+         f = a.statefile(project)
+diff --git a/tools/projects-agent-mcp/project_agents.py b/tools/projects-agent-mcp/project_agents.py
+index 3bde534..f1902be 100644
+--- a/tools/projects-agent-mcp/project_agents.py
++++ b/tools/projects-agent-mcp/project_agents.py
+@@ -42,10 +42,13 @@ def statefile(project):
+  return BASE/('worker-'+project+'.json')
+ def save(path,data):
+  t=path.with_suffix('.tmp');t.write_text(json.dumps(data,indent=2));t.replace(path)
+-def worker_model():
+- policy=tomllib.loads((BASE/'worker-model.toml').read_text())
+- if policy.get('model') != 'gpt-5.6-sol':
+-  raise ValueError('Worker model must be gpt-5.6-sol; no automatic fallback')
++def worker_model(project):
++ policies=tomllib.loads((BASE/'worker-model.toml').read_text())
++ role='communications' if project==operator_settings().get('communications_worker') else 'development'
++ policy=policies.get(role,{})
++ expected='gpt-6-luna' if role=='communications' else 'gpt-6-sol'
++ if policy.get('model') != expected:
++  raise ValueError(f'{role} worker model must be {expected}; no automatic fallback')
+  if policy.get('reasoning_effort') not in ['none','minimal','low','medium','high','xhigh','max','ultra']:
+   raise ValueError('worker-model.toml requires a valid reasoning_effort')
+  return policy
+@@ -141,8 +144,8 @@ def wake(project):
+      raise RuntimeError('An admitted task has an unresolved execution attempt; inspect its reply/effects and explicitly resume_task. No automatic re-execution.')
+     for p,v in selected:
+      v['attempted']=True;save(p,v)
+-   policy=worker_model()
+-   t=c.call('turn/start',{'threadId':d['thread_id'],'model':policy['model'],'effort':policy['reasoning_effort'],'input':[{'type':'text','text':communication_route(project)+'Use project_agents.fetch_inbox to check admitted tasks from orchestrator. Read local AGENTS.md and COMMUNICATION.md. Process only authorized tasks returned by that tool. For each task, reply with project_agents.send_message to orchestrator using the same task_id (mail thread_id), include evidence and exact errors, then acknowledge the task. Do not re-execute a task already completed in your conversation. If no task exists, respond NO_NEW_TASK without sending mail. No business action is authorized just by this wake request.'}]})
++   policy=worker_model(project)
++   t=c.call('turn/start',{'threadId':d['thread_id'],'model':policy['model'],'effort':policy['reasoning_effort'],'input':[{'type':'text','text':communication_route(project)+'Use project_agents.fetch_inbox to check admitted tasks from orchestrator. Read local AGENTS.md and COMMUNICATION.md with an actual local file or shell tool. Process only authorized tasks returned by that tool. For connector work, execute the native tool and include its verifiable result; if no local execution tool is available, report UNVERIFIED. Never invent a command, exit status, or provider result. For each task, reply with project_agents.send_message to orchestrator using the same task_id (mail thread_id), include evidence and exact errors, then acknowledge the task. Do not re-execute a task already completed in your conversation. If no task exists, respond NO_NEW_TASK without sending mail. No business action is authorized just by this wake request.'}]})
+    d['inbox_turn_started']=True
+    d['context_fresh']=False
+    save(f,d)
+diff --git a/tools/projects-agent-mcp/test_lifecycle.py b/tools/projects-agent-mcp/test_lifecycle.py
+index 3cc63f0..60c5744 100644
+--- a/tools/projects-agent-mcp/test_lifecycle.py
++++ b/tools/projects-agent-mcp/test_lifecycle.py
+@@ -151,6 +151,16 @@ class LifecycleTests(WorkerModelTests):
+             manage(adapter,'demo','rotate','rotate-blocked')
+         self.assertNotIn('thread/archive',dict(self.calls))
+ 
++    def test_rotation_preserves_held_old_task_without_replaying_it(self):
++        self.existing()
++        path=adapter.delivery_dir()/'old-task.json'
++        path.write_text(json.dumps({'from':'orchestrator','to':'demo','task_id':'old','message_id':9,'status':'sent'}))
++        manage(adapter,'demo','stop','hold-old-task')
++        self.assertTrue(json.loads(path.read_text())['held'])
++        manage(adapter,'demo','rotate','rotate-after-hold')
++        self.assertTrue(json.loads(path.read_text())['held'])
++        self.assertIsNone(json.loads((self.base/'worker-demo.json').read_text())['active_task_id'])
++
+     def test_new_task_cannot_reuse_previous_context(self):
+         (self.base/'worker-demo.json').write_text(json.dumps({'thread_id':'test-worker','active_task_id':'previous'}))
+         path=adapter.delivery_dir()/'queued.json'
+diff --git a/tools/projects-agent-mcp/test_operator_settings.py b/tools/projects-agent-mcp/test_operator_settings.py
+index 2acc2b5..a1b1361 100644
+--- a/tools/projects-agent-mcp/test_operator_settings.py
++++ b/tools/projects-agent-mcp/test_operator_settings.py
+@@ -42,7 +42,7 @@ class OperatorSettingsTests(unittest.TestCase):
+             config.write_text('[permissions.orch.filesystem]\n[features]\n[mcp_servers.project_agents]\nenabled_tools=[]\n')
+             (runtime / 'registry.json').write_text('{}')
+             (runtime / 'runtime.toml').write_text('[permissions.orch.filesystem]\n[features]\n')
+-            (workspace / '.projects-mode-state.json').write_text(json.dumps({'files': {str(config): {'changes': []}}}))
++            (workspace / '.projects-mode-state.json').write_text(json.dumps({'applied': 'local', 'files': {str(config): {'changes': []}}}))
+             settings = base / 'private.toml'
+             settings.write_text(f'workspace={json.dumps(str(workspace))}\nruntime={json.dumps(str(runtime))}\n')
+             env = dict(os.environ, HOME=str(home), PROJECTS_AGENT_SETTINGS=str(settings))
+@@ -50,6 +50,9 @@ class OperatorSettingsTests(unittest.TestCase):
+             subprocess.run(command, env=env, check=True, capture_output=True)
+             self.assertFalse((runtime / 'operator.toml').exists())
+             subprocess.run(command + ['--apply'], env=env, check=True, capture_output=True)
++            state = json.loads((workspace / '.projects-mode-state.json').read_text())
++            self.assertEqual(config.read_text(), state['files'][str(config)]['local_raw'])
++            self.assertNotEqual(config.read_text(), state['files'][str(config)]['raw'])
+             self.assertEqual(tomllib.loads((runtime / 'operator.toml').read_text())['runtime'], str(runtime))
+             self.assertTrue((runtime / 'operator_settings.py').exists())
+             self.assertTrue((runtime / 'backups').is_dir())
+diff --git a/tools/projects-agent-mcp/test_worker_model.py b/tools/projects-agent-mcp/test_worker_model.py
+index a89ad58..58bcadd 100644
+--- a/tools/projects-agent-mcp/test_worker_model.py
++++ b/tools/projects-agent-mcp/test_worker_model.py
+@@ -44,7 +44,7 @@ class WorkerModelTests(unittest.TestCase):
+         (self.base / 'identities.json').write_text(json.dumps({'demo': {'name':'Demo','registration_token':'test'}}))
+         self.calls = []
+         self.active = False
+-        self.actual_model = 'gpt-5.6-sol'
++        self.actual_model = 'gpt-6-sol'
+         self.actual_effort = 'medium'
+         self.rpc = Mock()
+         self.rpc.call.side_effect = self.call
+@@ -81,14 +81,15 @@ class WorkerModelTests(unittest.TestCase):
+ 
+     def assert_routing(self, method):
+         calls = dict(self.calls)
+-        self.assertEqual(calls[method]['model'], 'gpt-5.6-sol')
++        self.assertEqual(calls[method]['model'], 'gpt-6-sol')
+         self.assertEqual(calls[method]['config']['model_reasoning_effort'], 'medium')
+         self.assertEqual(calls[method]['permissions'], 'worker-demo')
++        self.assertIn('local shell tools are allowed', calls[method]['developerInstructions'])
+         self.assertEqual(calls[method]['config']['permissions.worker-demo']['filesystem']['/demo'], 'write')
+-        self.assertEqual(calls['turn/start']['model'], 'gpt-5.6-sol')
++        self.assertEqual(calls['turn/start']['model'], 'gpt-6-sol')
+         self.assertEqual(calls['turn/start']['effort'], 'medium')
+         state = json.loads((self.base / 'worker-demo.json').read_text())
+-        self.assertEqual((state['model'], state['reasoning_effort']), ('gpt-5.6-sol', 'medium'))
++        self.assertEqual((state['model'], state['reasoning_effort']), ('gpt-6-sol', 'medium'))
+ 
+     def test_new_worker(self):
+         adapter.wake('demo')
+@@ -110,6 +111,7 @@ class WorkerModelTests(unittest.TestCase):
+                 text = dict(self.calls)['turn/start']['input'][0]['text']
+                 self.assertIn('handled by communications through orchestrator', text)
+                 self.assertIn('Do not execute communication skills', text)
++                self.assertIn('Never invent a command', text)
+ 
+     def test_communication_executor_has_distinct_route(self):
+         text = adapter.communication_route('communications')
+@@ -117,6 +119,7 @@ class WorkerModelTests(unittest.TestCase):
+         self.assertIn('not Apps connectors', text)
+         self.assertIn('unknown send result', text)
+         self.assertNotIn('Do not execute communication skills', text)
++        self.assertEqual(adapter.worker_model('communications')['model'], 'gpt-6-luna')
+ 
+     def test_runtime_permission_update_is_passed_on_resume(self):
+         adapter.wake('demo')
+@@ -136,7 +139,7 @@ class WorkerModelTests(unittest.TestCase):
+         self.assertEqual((self.base / 'worker-demo.json').read_text(), before)
+ 
+     def test_mismatches_prevent_turn(self):
+-        for model, effort in [('gpt-6-astra', 'medium'), ('gpt-5.6-sol', 'high')]:
++        for model, effort in [('gpt-6-astra', 'medium'), ('gpt-6-sol', 'high')]:
+             with self.subTest(model=model, effort=effort):
+                 self.calls.clear()
+                 self.actual_model, self.actual_effort = model, effort
+@@ -154,13 +157,13 @@ class WorkerModelTests(unittest.TestCase):
+     def test_policy_reload(self):
+         adapter.wake('demo')
+         self.calls.clear()
+-        self.policy.write_text('model = "gpt-5.6-sol"\nreasoning_effort = "high"\n')
++        self.policy.write_text('[development]\nmodel = "gpt-6-sol"\nreasoning_effort = "high"\n[communications]\nmodel = "gpt-6-luna"\nreasoning_effort = "medium"\n')
+         self.actual_effort = 'high'
+         adapter.wake('demo')
+         self.assertEqual(dict(self.calls)['turn/start']['effort'], 'high')
+ 
+     def test_invalid_policy_prevents_start(self):
+-        self.policy.write_text('model = ""\nreasoning_effort = "medium"\n')
++        self.policy.write_text('[development]\nmodel = ""\nreasoning_effort = "medium"\n')
+         with self.assertRaises(ValueError):
+             adapter.wake('demo')
+         self.assertEqual(self.calls, [])
+diff --git a/tools/projects-agent-mcp/worker-model.toml b/tools/projects-agent-mcp/worker-model.toml
+index f3effe5..9bee2a9 100644
+--- a/tools/projects-agent-mcp/worker-model.toml
++++ b/tools/projects-agent-mcp/worker-model.toml
+@@ -1,3 +1,8 @@
+ # Model routing for independent isolated workers only.
+-model = "gpt-5.6-sol"
++[development]
++model = "gpt-6-sol"
++reasoning_effort = "medium"
++
++[communications]
++model = "gpt-6-luna"
+ reasoning_effort = "medium"
