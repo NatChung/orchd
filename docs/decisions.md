@@ -40,3 +40,24 @@
 ## 延後
 - 回報格式（省 token）
 - 模型分流規則
+
+## v1 實作（2026-09-29）
+- **沒有常駐 daemon**（偏離決策 5）：`dispatch` 由 MCP server 直接開 worker；worker 跑 `orchd report/ask` 時寫 DB 並用 `codex queue --thread <派工的 Orch>` 叫醒 Orch。之後需要背景監看（例如偵測 worker 死掉）再加 daemon。
+- Orch 身分：`dispatch` 記下 tools/call `_meta.threadId`（Desktop 0.158.0-alpha 與 codex exec 0.159 均實測有帶）。
+- worktree：`~/projects/.orchd-worktrees/<repo>-<task>`，branch `orchd/<task>`，從 `origin/HEAD` 開。
+- Claude trust 以 repo 主目錄為準（worktree 繼承；`~/projects` 底下的新 repo 不繼承）。dispatch 前檢查 `~/.claude.json`，未 trust 就拒絕並請 Nat 手動 trust；orchd 不自己改 `~/.claude.json`（多個 Claude 程序同時寫會互蓋）。目前未 trust 的 repo 例如 yite-hub、karaoke-hub、skills、sharon。
+- state：`~/.local/share/orchd/orchd.db`（`ORCHD_HOME` 可覆寫），在 Orch sandbox 之外。
+
+## v1.1 候選（v1 不做）
+- Orch 的 GitHub issue 工具
+- 各 repo merge 政策設定檔
+- 模型分流規則
+- 回報格式（JSON 省 token）
+- adopt
+- 背景監看 daemon
+
+## v1 實測（2026-09-29～30）
+- Shell pilot（orchd-pilot，本機 bare remote）：worker 20 秒內 ack、commit、push 任務 branch、回報含 commit 與 ls-remote 證據；main 未動；`close` 停 worker、刪 worktree。啟動 worker 的程序結束後 worker 仍存活並回報。
+- Desktop pilot：Orch 在 Desktop 以 MCP dispatch → worker 回報 → `codex queue` 成功送出 → Orch 讀 inbox、核對、close。
+- 發現：`codex queue` 的訊息要等 Orch 目前回合結束才進來；Orch 若在同一回合等待，通知會延遲。已在 orch/AGENTS.md 規定派工後即結束回合。
+- 未測：Desktop app 重啟後 worker 是否存活（本次 app 未重啟）。

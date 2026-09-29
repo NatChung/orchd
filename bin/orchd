@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""orchd: Orch MCP server and the worker/operator command line.
+
+  orchd mcp                                   run the MCP server for an Orch session (stdio)
+  orchd ack ID                                worker: acknowledge a task
+  orchd report ID --status done|blocked --summary S [--evidence E]
+  orchd ask ID "question with full preview"   worker: ask Orch/Nat and wait for an answer
+  orchd list                                  show open tasks across all Orch sessions
+  orchd close ID                              stop a task's worker and clean its worktree if safe
+"""
+import argparse
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from orchd import core, store  # noqa: E402
+from orchd.runtime import Runtime  # noqa: E402
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="orchd", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("mcp")
+    sub.add_parser("ack").add_argument("task_id")
+    rep = sub.add_parser("report")
+    rep.add_argument("task_id")
+    rep.add_argument("--status", required=True, choices=["done", "blocked"])
+    rep.add_argument("--summary", required=True)
+    rep.add_argument("--evidence", default="")
+    ask = sub.add_parser("ask")
+    ask.add_argument("task_id")
+    ask.add_argument("question")
+    sub.add_parser("list")
+    sub.add_parser("close").add_argument("task_id")
+    args = parser.parse_args(argv)
+
+    if args.cmd == "mcp":
+        from orchd import mcp_server
+        mcp_server.serve()
+        return 0
+    con, rt = store.connect(), Runtime()
+    if args.cmd == "ack":
+        core.ack(con, args.task_id)
+        print(f"acked {args.task_id}")
+    elif args.cmd == "report":
+        woke = core.report(con, rt, args.task_id, args.status, args.summary, args.evidence)
+        print(f"reported {args.task_id}" + ("" if woke else " (stored; waking Orch failed, it will see it in list_open)"))
+    elif args.cmd == "ask":
+        woke = core.ask(con, rt, args.task_id, args.question)
+        print(f"asked on {args.task_id}; wait for an [orchd answer {args.task_id}] message"
+              + ("" if woke else " (stored; waking Orch failed)"))
+    elif args.cmd == "list":
+        print(json.dumps(core.list_open(con, rt), ensure_ascii=False, indent=1))
+    elif args.cmd == "close":
+        print(json.dumps(core.close(con, rt, args.task_id), ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
