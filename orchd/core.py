@@ -1,4 +1,5 @@
 """Task operations shared by the Orch MCP tools and the worker CLI."""
+import json
 import os
 import shlex
 import uuid
@@ -53,9 +54,33 @@ Done when:
 Start with: {ORCHD} ack {task['id']}"""
 
 
-def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when):
+TASK_TYPES = ("code", "docs", "investigation", "outward", "review", "ops", "other")
+FOUND_BY = ("verify", "review", "orch", "nat")
+OUTCOMES = ("merged", "abandoned", "parked", "done")
+
+
+def _choice(name, value, valid):
+    if value not in valid:
+        raise ValueError(f"unknown {name} {value!r}; use one of {', '.join(valid)}")
+
+
+def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, model=DEFAULT_WORKER_MODEL,
+             model_reason=None, task_type=None, rework_of=None, found_by=None):
     if not orch_thread:
         raise ValueError("dispatch needs the caller's thread id")
+    _choice("model", model, tuple(MODELS))
+    if not isinstance(model_reason, str) or not model_reason.strip():
+        raise ValueError("dispatch needs a non-empty model_reason")
+    _choice("task_type", task_type, TASK_TYPES)
+    if found_by is not None:
+        if not rework_of:
+            raise ValueError("found_by is only allowed with rework_of")
+        _choice("found_by", found_by, FOUND_BY)
+    if rework_of:
+        try:
+            store.get_task(con, rework_of)
+        except KeyError:
+            raise ValueError(f"rework_of: unknown task {rework_of}") from None
     repo_path = rt.repo_path(repo)
     if not rt.claude_trusted(repo_path):
         raise ValueError(f"Claude has not trusted {repo_path}. Ask Nat to run `claude` there once and accept "
@@ -63,12 +88,16 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when):
     task_id = store.new_task_id()
     task = store.create_task(con, id=task_id, repo=repo, repo_path=str(repo_path), title=title,
                              instructions=instructions, done_when=done_when,
-                             orch_thread=orch_thread, codex_bin=rt.codex)
+                             orch_thread=orch_thread, codex_bin=rt.codex, model=MODELS[model],
+                             model_reason=model_reason, task_type=task_type, rework_of=rework_of, found_by=found_by)
+    store.add_message(con, task_id, "dispatch", json.dumps(
+        dict(model=MODELS[model], model_reason=model_reason, task_type=task_type,
+             rework_of=rework_of, found_by=found_by), ensure_ascii=False))
     try:
         base, branch, worktree = rt.create_worktree(repo_path, repo, task_id)
         store.update_task(con, task_id, base=base, branch=branch, worktree=worktree)
         sock = rt.socket_path(task_id)
-        job, session = rt.start_worker(worktree, sock, worker_brief(ORCHD), MODELS[DEFAULT_WORKER_MODEL])
+        job, session = rt.start_worker(worktree, sock, worker_brief(ORCHD), MODELS[model])
         store.update_task(con, task_id, socket=sock, job_id=job, session_id=session, status="running")
         task = store.get_task(con, task_id)
         rt.send_uds(sock, session, task_message(task))
@@ -82,6 +111,12 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when):
                 pass
         raise
     return store.get_task(con, task_id)
+
+
+def other_open_on_repo(con, repo, orch_thread, exclude_id=None):
+    return [dict(task_id=t["id"], title=t["title"], orch_thread=t["orch_thread"], status=t["status"])
+            for t in store.open_tasks(con)
+            if t["repo"] == repo and t["orch_thread"] != orch_thread and t["id"] != exclude_id]
 
 
 def _short(text, limit=160):
@@ -163,11 +198,28 @@ def list_open(con, rt):
     return out
 
 
-def close(con, rt, task_id):
+def _record_usage(con, rt, task):
+    if not task["session_id"]:
+        return
+    try:
+        usage = rt.claude_usage(task["session_id"])
+    except Exception:  # usage is bookkeeping; never block a close
+        return
+    if usage:
+        store.add_message(con, task["id"], "usage", json.dumps(dict(model=task["model"], **usage)))
+
+
+def close(con, rt, task_id, outcome=None, rating=None):
     """Stop the worker; remove the worktree only when nothing local would be lost."""
     task = store.get_task(con, task_id)
     if task["status"] == "closed":
         return dict(task_id=task_id, closed=True, worktree="already closed")
+    if outcome is not None:
+        _choice("outcome", outcome, OUTCOMES)
+    if rating is not None and (isinstance(rating, bool) or not isinstance(rating, int) or not 1 <= rating <= 3):
+        raise ValueError("rating must be an integer 1-3")
+    store.add_message(con, task_id, "close", json.dumps(dict(outcome=outcome, rating=rating)))
+    store.update_task(con, task_id, outcome=outcome, rating=rating)
     if task["job_id"]:
         rt.stop_worker(task["job_id"])
     kept = None
@@ -177,6 +229,7 @@ def close(con, rt, task_id):
             rt.remove_worktree(task["repo_path"], task["worktree"])
         else:
             kept = reason
+    _record_usage(con, rt, task)
     store.update_task(con, task_id, status="closed",
                       note=(f"worktree kept: {kept}" if kept else task["note"]))
     return dict(task_id=task_id, closed=True,

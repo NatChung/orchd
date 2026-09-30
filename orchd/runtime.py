@@ -20,6 +20,7 @@ ORCHD_BIN = str(Path(__file__).resolve().parents[1] / "bin" / "orchd")
 MODELS = {"sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}
 DEFAULT_WORKER_MODEL = "sonnet"
 DEFAULT_ORCH_MODEL = "opus"
+USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 
 
 def _bin(name, env_var):
@@ -166,6 +167,24 @@ class Runtime:
 
     def attach(self, job):
         os.execvp(self.claude, [self.claude, "attach", job])
+
+    def claude_usage(self, session_id):
+        """Token totals of a session's transcript; a message id can span several lines, so count each once."""
+        root = Path(os.environ.get("ORCHD_CLAUDE_PROJECTS", Path.home() / ".claude" / "projects"))
+        files = sorted(root.glob(f"*/{session_id}.jsonl"))
+        if not files:
+            return None
+        seen = {}
+        for line in files[0].read_text(errors="replace").splitlines():
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            msg = entry.get("message") if entry.get("type") == "assistant" else None
+            if isinstance(msg, dict) and isinstance(msg.get("usage"), dict):
+                seen[msg.get("id") or entry.get("uuid") or len(seen)] = msg["usage"]
+        total = {k: sum(u.get(k) or 0 for u in seen.values()) for k in USAGE_FIELDS}
+        return {**total, "messages": len(seen)}
 
     def stop_worker(self, job):
         self.run([self.claude, "stop", job], timeout=30, check=False)
