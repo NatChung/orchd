@@ -113,7 +113,12 @@ class Runtime:
         if head == base:
             return True, "no new commits"
         upstream = self.run(["git", "-C", worktree, "rev-parse", "@{u}"], check=False)
-        if upstream.returncode != 0:
+        if upstream.returncode != 0:  # pushed without -u still counts if origin has this exact commit
+            branch = self.run(["git", "-C", worktree, "rev-parse", "--abbrev-ref", "HEAD"]).stdout.strip()
+            remote = self.run(["git", "-C", worktree, "ls-remote", "origin", f"refs/heads/{branch}"],
+                              timeout=60, check=False).stdout.split()
+            if remote and remote[0] == head:
+                return True, "pushed"
             return False, "commits not pushed (no upstream)"
         if upstream.stdout.strip() != head:
             return False, "local branch differs from its upstream"

@@ -105,6 +105,12 @@ def summary(con, since=0):
             spans.append(end - start)
             first = start if first is None else min(first, start)
             last = end if last is None else max(last, end)
+        edges = sorted([(t["created_at"], 1) for t in mine] + [(t["created_at"] + d, -1) for t, d in zip(mine, spans)],
+                       key=lambda e: (e[0], e[1]))
+        running = peak = 0
+        for _, step in edges:
+            running += step
+            peak = max(peak, running)
         tokens = 0
         for m in msgs:
             if m["kind"] == "usage":
@@ -121,5 +127,5 @@ def summary(con, since=0):
             questions=kinds["question"], answers=kinds["answer"], progress=kinds["progress"],
             rework=sum(1 for t in mine if t["rework_of"]),
             wall_min=round(wall / 60, 1), worker_min=round(busy / 60, 1),
-            parallel=round(busy / wall, 1) if wall else None, output_tokens=tokens))
+            parallel=round(busy / wall, 1) if wall else None, peak_workers=peak, output_tokens=tokens))
     return out

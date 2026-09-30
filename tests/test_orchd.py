@@ -328,7 +328,8 @@ class WatchTest(unittest.TestCase):
                 mid = store.add_message(con, tid, "report", "done: ok")
                 con.execute("UPDATE messages SET created_at=160 WHERE id=?", (mid,))
             (row,) = watch.summary(con)
-            self.assertEqual((row["workers"], row["worker_min"], row["wall_min"], row["parallel"]), (2, 2.0, 1.0, 2.0))
+            self.assertEqual((row["workers"], row["worker_min"], row["wall_min"], row["parallel"], row["peak_workers"]),
+                             (2, 2.0, 1.0, 2.0, 2))
 
 
 class LaunchEnvTest(unittest.TestCase):
@@ -478,6 +479,11 @@ class WorktreeStateTest(unittest.TestCase):
         self.git("add", "f.txt", cwd=self.wt)
         self.git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "c", cwd=self.wt)
         self.assertEqual(self.rt.worktree_state(self.wt, self.base), (False, "commits not pushed (no upstream)"))
+
+    def test_pushed_without_upstream_is_removable(self):
+        self.commit()
+        self.git("push", "-q", "origin", self.branch, cwd=self.wt)
+        self.assertEqual(self.rt.worktree_state(self.wt, self.base), (True, "pushed"))
 
     def test_pushed_branch_is_removable(self):
         self.commit()

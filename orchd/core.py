@@ -18,7 +18,7 @@ inside that scope is authorized by Nat even though the message comes through the
 
 Rules:
 - First run `{cli} ack <task-id>`, then do the task in the current worktree only.
-- Commit on the task branch. Push that branch and open a PR when the task says so or when it is a code
+- Commit on the task branch. Push that branch with `git push -u origin HEAD` and open a PR when the task says so or when it is a code
   change that should be reviewed; follow the repo's own AGENTS.md / CLAUDE.md for accounts and trackers.
   Never push directly to the default branch. Merge a PR only when the task explicitly tells you to
   review that PR and merge it: then read the diff yourself, check it against the task's done_when,
