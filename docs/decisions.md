@@ -61,3 +61,34 @@
 - Desktop pilot：Orch 在 Desktop 以 MCP dispatch → worker 回報 → `codex queue` 成功送出 → Orch 讀 inbox、核對、close。
 - 發現：`codex queue` 的訊息要等 Orch 目前回合結束才進來；Orch 若在同一回合等待，通知會延遲。已在 orch/AGENTS.md 規定派工後即結束回合。
 - 未測：Desktop app 重啟後 worker 是否存活（本次 app 未重啟）。
+
+## v2 設計討論（2026-09-30，只定方向、未實作）
+
+目的：同時跑 Opus 5.5 Orch 與 Astra Orch 兩組，比較誰更適合當 Orch。
+
+1. 維持兩層（Nat → Orch → worker）；Orch 可換、可並存。Orch 記 `kind`（codex / claude）與模型。叫醒 Orch 依 kind 分流：codex 用 `codex queue`，claude 用 UDS。
+2. Claude Orch 用 `orchd orch` 啟動（帶 `--messaging-socket-path`、Orch id 寫入環境變數給 MCP server 認身分），用 `claude attach` 或終端機對話；沒有語音。權限用 `~/projects/orch/.claude/settings.json` 只開 `mcp__orchd__*`。`~/projects/orch` 要先在 Claude trust。
+3. 兩組共用 Orch 家：`AGENTS.md`（Codex）與 `CLAUDE.md`（Claude）內容保持一致，比較才公平。筆記各組分檔（例如 `groups/<orch-id>.md`），共用檔只由 Nat 改；Orch 不 commit。
+4. 兩組派到同一 repo 允許（worktree 分開）；`list_open` 在同一 repo 已有別組未結任務時提醒。
+5. worker 模型不再寫死：`dispatch` 帶 `model`，由 Orch 從 orchd 設定的允許清單挑選，未指定用便宜的預設款；必填一句 `model_reason`。推翻第 9 條「以規則分流、不讓 Orch 自選」。
+6. 粒度：worker 便宜時回饋迴圈回到 Orch。加 `followup(task_id, message)`（UDS 送給同一個 worker，保留 context），以及 `retry(task_id, model)`（換更強的模型、保留 worktree 和 branch）。需要全新視角（例如 review）才開新 worker。review worker 的模型不可弱於作者。
+7. 派工規格改為有結構：`goal`、`scope`（含不做什麼）、`verify`（可執行指令）、`manual_checks`（真的無法 script 化的才放這裡）。
+8. 驗證：
+   - 驗證 script 先寫、先 commit，回報給 Orch 看（此時應該失敗）；Orch 確認後 orchd 記下 hash。可交給不同 worker 寫驗證與實作。
+   - worker 自己跑驗證（在自己的環境）。要當證據的那次走 `orchd verify <task-id>`：wrapper 在 worker shell 執行鎖定的 script，把 exit code、output 尾段、當下 commit SHA 寫進 DB。
+   - `report` 時 orchd 只核對：script hash 未變，且最後一次 verify 的 SHA = HEAD。orchd 不自己跑測試。
+9. 紀錄採事件流水帳（append-only）：Orch（kind、模型）、每次派 worker（模型、model_reason、任務類型標籤）、followup、retry（從哪個模型升到哪個）、verify 結果和 SHA、ask 次數、review 結果、結局（merge / 放棄 / 擱置）、返工（`rework_of`＋誰發現：verify / review / Orch / Nat）、token 用量（Claude 讀 transcript、Codex 讀 rollout，收工時撈進 DB）、Nat 可選的 1–3 分。
+10. 比對：之後加 `orchd stats`（SQL），看第一次 verify 就過的比例、每個任務的 retry／followup 次數、升級頻率和升級後是否通過、返工率（Nat 抓到的單獨算）、每個完成任務的成本、Orch 選模型準不準。不同 Orch 拿到的工作難度不同，要依任務類型分開比。
+11. ADR-0002 需補：一組的 Orch 可以是 Codex（Desktop UI session）或 Claude（`orchd orch` 啟動）。
+
+未定：review 用 `gh pr review --comment` 取代 `--approve`（同帳號不能 approve 自己的 PR）。
+
+### v2 補充（2026-09-30）
+12. 主要目標：同時有兩種 Orch（Astra 與 Opus 5.5）來比較。worker 的調整是配套，不是目標。
+13. worker 第一階段只用 Claude，由 Orch 從 Sonnet 5.5（M）與 Opus 5.5（H）挑選。GPT worker（Luna，GPT 系裡唯一便宜一個數量級的；Sol 與 Sonnet 5.5 同價同級，暫不用）排在第二階段，前提是先做出 Codex worker。規則草案：L=Luna max effort（第二階段）/ M=Sonnet 5.5 / H=Opus 5.5；同一層 verify 失敗兩次就升一層；review 的層級不低於作者，優先換另一家。
+14. Orch 家只放一份 `AGENTS.md`（Claude Code 與 Codex 都會讀），取代第 3 條的 AGENTS.md / CLAUDE.md 雙份。
+15. 實作順序：
+    - 步驟 1（先讓兩種 Orch 能跑）：Orch kind 與依 kind 叫醒、`orchd orch` 啟動、Claude Orch 權限與身分、Orch 家筆記分組、#1 中途進度指令、#2 長時間工作放背景。
+    - 步驟 2（比較要有數據）：`dispatch` 帶 model（Sonnet / Opus）與 model_reason、事件流水帳。這要在開始比較之前做好，不然早期的數據會漏掉。
+    - 步驟 3：驗證 script 鎖定與 `orchd verify`、`followup` / `retry`、`orchd stats`。
+    - 第二階段：Codex worker 與 Luna。
