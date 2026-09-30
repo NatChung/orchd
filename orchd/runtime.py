@@ -24,9 +24,18 @@ USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", 
 
 
 def launch_env():
-    """A Claude Orch's MCP server runs inside a Claude session; its session variables and Orch id must not
-    leak into the sessions it starts."""
+    """Keep a parent Claude session's variables and Orch id out of the sessions we start (belt and braces:
+    the Claude daemon may spawn --bg sessions from its own environment anyway)."""
     return {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE") and k != "ORCHD_ORCH_ID"}
+
+
+def mcp_env(orch_id):
+    """--bg sessions are spawned by the Claude daemon, not by us, so only env written into the MCP config
+    reaches the Orch's MCP server."""
+    env = {"ORCHD_ORCH_ID": orch_id}
+    if os.environ.get("ORCHD_HOME"):
+        env["ORCHD_HOME"] = os.environ["ORCHD_HOME"]
+    return env
 
 
 def _bin(name, env_var):
@@ -158,7 +167,7 @@ class Runtime:
         sock = self.orch_socket_path(orch_id)
         mcp = Path(sock).parent / "mcp.json"
         mcp.write_text(json.dumps({"mcpServers": {"orchd": {
-            "command": "/usr/bin/python3", "args": [ORCHD_BIN, "mcp"], "env": {"ORCHD_ORCH_ID": orch_id}}}}))
+            "command": "/usr/bin/python3", "args": [ORCHD_BIN, "mcp"], "env": mcp_env(orch_id)}}}))
         try:
             agents = (orch_home / "AGENTS.md").read_text()
         except OSError:
