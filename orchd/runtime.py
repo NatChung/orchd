@@ -23,6 +23,12 @@ DEFAULT_ORCH_MODEL = "opus"
 USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 
 
+def launch_env():
+    """A Claude Orch's MCP server runs inside a Claude session; its session variables and Orch id must not
+    leak into the sessions it starts."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE") and k != "ORCHD_ORCH_ID"}
+
+
 def _bin(name, env_var):
     found = os.environ.get(env_var) or shutil.which(name)
     if found:
@@ -38,9 +44,9 @@ class Runtime:
         self.projects = Path(os.environ.get("ORCHD_PROJECTS", Path.home() / "projects"))
 
     # -- process plumbing (tests override these) --------------------------------
-    def run(self, cmd, cwd=None, timeout=60, check=True):
+    def run(self, cmd, cwd=None, timeout=60, check=True, env=None):
         return subprocess.run(cmd, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
-                              text=True, timeout=timeout, check=check)
+                              text=True, timeout=timeout, check=check, env=env)
 
     def send_uds(self, path, session_id, text):
         frame = {"type": "user", "session_id": session_id, "uuid": str(uuid.uuid4()),
@@ -124,7 +130,7 @@ class Runtime:
 
     def start_claude(self, cwd, sock, model, extra_args):
         cmd = [self.claude, "--bg", "--model", model, *extra_args, "--messaging-socket-path", sock]
-        out = self.run(cmd, cwd=cwd, timeout=60, check=False)
+        out = self.run(cmd, cwd=cwd, timeout=60, check=False, env=launch_env())
         match = re.search(r"claude attach ([a-zA-Z0-9-]+)", out.stdout)
         if not match:
             raise RuntimeError("claude --bg returned no job id: " + (out.stdout + out.stderr)[-500:])

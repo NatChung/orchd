@@ -293,6 +293,28 @@ class OrchTest(unittest.TestCase):
         self.assertFalse(hasattr(self.rt, "orch_started"))
 
 
+class LaunchEnvTest(unittest.TestCase):
+    def test_claude_launch_drops_parent_session_and_orch_identity(self):
+        from orchd import runtime
+        seen = {}
+        rt = Runtime()
+        rt.run = lambda cmd, **kw: seen.update(kw) or subprocess.CompletedProcess(cmd, 0, "claude attach j1", "")
+        rt.agents = lambda: [{"id": "j1", "sessionId": "s1"}]
+        rt.exists = lambda path: True
+        keep = dict(os.environ)
+        os.environ.update(CLAUDECODE="1", CLAUDE_CODE_SESSION_ID="parent", ORCHD_ORCH_ID="o1", ORCHD_HOME="/x")
+        try:
+            rt.start_worker("/wt", "/tmp/s", "brief", "claude-sonnet-5-5")
+        finally:
+            os.environ.clear()
+            os.environ.update(keep)
+        env = seen["env"]
+        self.assertNotIn("CLAUDECODE", env)
+        self.assertNotIn("CLAUDE_CODE_SESSION_ID", env)
+        self.assertNotIn("ORCHD_ORCH_ID", env)
+        self.assertEqual(env["ORCHD_HOME"], "/x")
+
+
 class MigrationTest(unittest.TestCase):
     V1_TASKS = """CREATE TABLE tasks(id TEXT PRIMARY KEY, repo TEXT NOT NULL, repo_path TEXT NOT NULL,
         title TEXT NOT NULL, instructions TEXT NOT NULL, done_when TEXT NOT NULL, orch_thread TEXT NOT NULL,
