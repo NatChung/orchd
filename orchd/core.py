@@ -72,6 +72,14 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when):
     return store.get_task(con, task_id)
 
 
+def _short(text, limit=160):
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0] if " " in text[:limit] else text[:limit]
+    return cut + "…"
+
+
 def _wake(con, rt, task, message_id, line):
     text = f"[orchd] {task['repo']}/{task['id']} {line} — 請呼叫 orchd 的 inbox 工具讀取。"
     try:
@@ -95,14 +103,14 @@ def report(con, rt, task_id, status, summary, evidence):
     task = store.get_task(con, task_id)
     mid = store.add_message(con, task_id, "report", f"{status}: {summary}", evidence)
     store.update_task(con, task_id, status=status)
-    return _wake(con, rt, task, mid, f"{status}: {summary[:120]}")
+    return _wake(con, rt, task, mid, f"{status}: {_short(summary)}")
 
 
 def ask(con, rt, task_id, question):
     task = store.get_task(con, task_id)
     mid = store.add_message(con, task_id, "question", question)
     store.update_task(con, task_id, status="question")
-    return _wake(con, rt, task, mid, f"question: {question.splitlines()[0][:120]}")
+    return _wake(con, rt, task, mid, f"question: {_short(question.splitlines()[0])}")
 
 
 def inbox(con, orch_thread):
