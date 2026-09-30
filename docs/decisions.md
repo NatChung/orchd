@@ -92,3 +92,15 @@
     - 步驟 2（比較要有數據）：`dispatch` 帶 model（Sonnet / Opus）與 model_reason、事件流水帳。這要在開始比較之前做好，不然早期的數據會漏掉。
     - 步驟 3：驗證 script 鎖定與 `orchd verify`、`followup` / `retry`、`orchd stats`。
     - 第二階段：Codex worker 與 Luna。
+
+## v2 步驟 1–2 實作與驗證（2026-09-30，branch `v2-two-orchs`）
+- 已做：`orchd progress`（#1）、worker 規則禁止 peer messaging 並要求長時間工作放背景（#2）、`orchs` 表與依 kind 叫醒、`orchd orch` / `orch-stop`（Claude Orch）、Orch 身分（Claude 用 MCP config 的 env；Codex 用 `_meta.threadId`，第一次呼叫時登記）、dispatch 的 `model`（sonnet 預設 / opus）、`model_reason`、`task_type`、`rework_of`、`found_by`、`other_open_on_repo`、close 的 `outcome`、`rating`、事件流水帳（messages 表的 dispatch / answer / close / usage）、收工時從 transcript 撈 worker token。
+- Claude Orch 的鎖（實測）：`--restricted --permission-mode dontAsk --strict-mcp-config --mcp-config <env 帶 ORCHD_ORCH_ID> --settings {allow: Read, Edit, Write, mcp__orchd}`。沒有 Bash，WebSearch 被拒，檔案工具只能用在 Orch 家。
+- 實測發現：
+  - socket 目錄必須是 0700，否則 session 在 init 前就退出。
+  - Claude Code 呼叫 MCP 時不帶 threadId，只能靠 env 認身分。
+  - `--bg` session 由 Claude daemon 產生，啟動它的 shell 的環境變數傳不進去；只有 MCP config 裡的 env 會到 MCP server。
+  - Orch 家的 `AGENTS.md` 不會自動載入，改用 `--append-system-prompt` 傳入。
+- 端到端（2026-09-30，pilot repo + 本機 bare remote，Orch 與 worker 都用 Sonnet）：Claude Orch 派工 → worker ack → progress → commit、push → report → 用 UDS 叫醒 Orch → inbox → close（outcome=done）→ usage 已記錄。測試資料已從 DB 刪除。
+- 行為改變：Codex Orch 的 MCP server 重啟後，`dispatch` 必須帶 `model_reason`、`task_type`；沒指定 model 時 worker 預設 Sonnet（原本寫死 Opus）。
+- 未做（步驟 3）：驗證 script 鎖定與 `orchd verify`、`followup` / `retry`、`orchd stats`、Orch 本身的 token 統計（Claude Orch transcript / Codex rollout）。
