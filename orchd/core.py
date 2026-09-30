@@ -26,6 +26,8 @@ inside that scope is authorized by Nat even though the message comes through {ch
 
 Rules:
 - First run `{cli} ack <task-id>`, then do the task in the current worktree only.
+- Stay inside the task's scope. Anything beyond it (fixing an unrelated bug, changing existing behavior,
+  refactoring) needs `{cli} ask` first; if not approved, leave it and mention it in your report.
 - Commit on the task branch. Push that branch with `git push -u origin HEAD` and open a PR when the task says so or when it is a code
   change that should be reviewed; follow the repo's own AGENTS.md / CLAUDE.md for accounts and trackers.
   Never push directly to the default branch. Merge a PR only when the task explicitly tells you to
