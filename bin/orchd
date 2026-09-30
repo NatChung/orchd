@@ -9,11 +9,14 @@
   orchd progress ID "text"                    worker: interim update to the Orch; the task keeps running
   orchd ask ID "question with full preview"   worker: ask Orch/Nat and wait for an answer
   orchd list                                  show open tasks across all Orch sessions
+  orchd watch [--since HH:MM]                 live timeline of Orch <-> worker messages
+  orchd summary [--since HH:MM]               per Orch: workers, models, questions, parallelism, tokens
   orchd close ID                              stop a task's worker and clean its worktree if safe
 """
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -44,6 +47,8 @@ def main(argv=None):
     ask.add_argument("task_id")
     ask.add_argument("question")
     sub.add_parser("list")
+    for name in ("watch", "summary"):
+        sub.add_parser(name).add_argument("--since", help="HH:MM today (default: last 30 minutes for watch, all for summary)")
     sub.add_parser("close").add_argument("task_id")
     args = parser.parse_args(argv)
 
@@ -52,6 +57,19 @@ def main(argv=None):
         mcp_server.serve()
         return 0
     con, rt = store.connect(), Runtime()
+    if args.cmd in ("watch", "summary"):
+        from orchd import watch
+        since = None
+        if args.since:
+            since = time.mktime(time.strptime(time.strftime("%Y-%m-%d ") + args.since, "%Y-%m-%d %H:%M"))
+        if args.cmd == "watch":
+            try:
+                watch.watch(con, since if since is not None else time.time() - 1800)
+            except KeyboardInterrupt:
+                pass
+        else:
+            print(json.dumps(watch.summary(con, since or 0), ensure_ascii=False, indent=1))
+        return 0
     if args.cmd == "orch":
         row = core.start_orch(con, rt, args.model)
         print(f"orch {row['id']} ({row['model']}) job {row['job_id']}", flush=True)

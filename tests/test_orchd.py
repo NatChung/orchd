@@ -302,6 +302,35 @@ class OrchTest(unittest.TestCase):
         self.assertFalse(hasattr(self.rt, "orch_started"))
 
 
+class WatchTest(unittest.TestCase):
+    def test_timeline_names_who_talks_to_whom(self):
+        from orchd import watch
+        base = dict(task_id="t1", evidence=None, created_at=0, repo="demo-shop-api", title="Fix tax",
+                    model="claude-sonnet-5-5", model_reason="clear scope", orch_thread="o1234567")
+        claude = dict(base, orch_kind="claude", orch_model="claude-opus-5-5")
+        astra = dict(base, orch_kind=None, orch_model=None)
+        line = lambda row, kind, body: watch.format_row(dict(row, kind=kind, body=body), color=False)
+        self.assertIn("Claude Orch o1234567 → worker t1 (sonnet) [demo-shop-api] Fix tax · clear scope",
+                      line(claude, "dispatch", '{"model_reason": "clear scope"}'))
+        self.assertIn("worker t1 (sonnet) → Astra o1234567: asks: stack coupons?", line(astra, "question", "stack coupons?"))
+        self.assertIn("Astra o1234567 → worker t1 (sonnet): no stacking", line(astra, "answer", "no stacking"))
+        self.assertIn("closes worker t1 (sonnet): merged", line(claude, "close", '{"outcome": "merged"}'))
+
+    def test_summary_measures_overlap(self):
+        from orchd import watch
+        with tempfile.TemporaryDirectory() as tmp:
+            con = store.connect(Path(tmp) / "t.db")
+            store.register_orch(con, "o1", "claude")
+            for tid in ("a", "b"):
+                store.create_task(con, id=tid, repo="r", repo_path="/r", title="T", instructions="i", done_when="d",
+                                  orch_thread="o1", codex_bin="c", model="claude-sonnet-5-5")
+                con.execute("UPDATE tasks SET created_at=100 WHERE id=?", (tid,))
+                mid = store.add_message(con, tid, "report", "done: ok")
+                con.execute("UPDATE messages SET created_at=160 WHERE id=?", (mid,))
+            (row,) = watch.summary(con)
+            self.assertEqual((row["workers"], row["worker_min"], row["wall_min"], row["parallel"]), (2, 2.0, 1.0, 2.0))
+
+
 class LaunchEnvTest(unittest.TestCase):
     def test_claude_launch_drops_parent_session_and_orch_identity(self):
         from orchd import runtime
