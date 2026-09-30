@@ -81,7 +81,8 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(session, "session1")
         self.assertIn(f"[orchd task {t['id']}]", text)
         self.assertIn("tests pass", text)
-        self.assertIn("Never push to or merge into the default branch", self.rt.brief)
+        self.assertIn("Never push directly to the default branch", self.rt.brief)
+        self.assertIn("Never review-and-merge a PR you authored", self.rt.brief)
 
     def test_dispatch_without_thread_is_refused(self):
         with self.assertRaises(ValueError):

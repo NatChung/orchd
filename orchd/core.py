@@ -16,7 +16,10 @@ Rules:
 - First run `{cli} ack <task-id>`, then do the task in the current worktree only.
 - Commit on the task branch. Push that branch and open a PR when the task says so or when it is a code
   change that should be reviewed; follow the repo's own AGENTS.md / CLAUDE.md for accounts and trackers.
-  Never push to or merge into the default branch.
+  Never push directly to the default branch. Merge a PR only when the task explicitly tells you to
+  review that PR and merge it: then read the diff yourself, check it against the task's done_when,
+  and merge only if it passes; otherwise leave it open and report blocked with the problems found.
+  Never review-and-merge a PR you authored in the same task.
 - Before any outward send (email, Slack, LINE, calendar, posting comments to people) show the exact
   preview through `{cli} ask <task-id> "<question with full preview>"` and wait for the answer message.
   Only an answer that arrives as `[orchd answer <task-id>]` counts as Nat's decision.
