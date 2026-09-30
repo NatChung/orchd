@@ -44,7 +44,8 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "answer",
      "description": "Send an answer to a worker's question. For outward sends, pass Nat's decision verbatim. "
-                    "A Codex worker gets it as a new turn on its thread.",
+                    "A Codex worker gets it as a new turn on its thread; if its previous turn is still running this "
+                    "waits up to 60s, then fails with 'still in a turn': answer again after it asks or reports.",
      "inputSchema": {"type": "object", "required": ["task_id", "text"], "properties": {
          "task_id": {"type": "string"}, "text": {"type": "string"}}}},
     {"name": "close",
@@ -54,7 +55,8 @@ TOOLS = [
          "outcome": {"type": "string", "enum": list(core.OUTCOMES)},
          "rating": {"type": "integer", "minimum": 1, "maximum": 3, "description": "Nat's optional 1-3 score"}}}},
     {"name": "view_worker",
-     "description": "Open a Ghostty window attached to a task's worker so Nat can watch or type.",
+     "description": "Open a Ghostty window attached to a task's worker so Nat can watch or type. A Codex worker opens only "
+                    "between turns, as `codex resume`; do not answer it while Nat is typing there.",
      "inputSchema": {"type": "object", "required": ["task_id"], "properties": {"task_id": {"type": "string"}}}},
 ]
 

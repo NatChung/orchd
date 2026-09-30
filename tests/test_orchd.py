@@ -78,8 +78,8 @@ class FakeRuntime:
         self.codex_prompt, self.model = prompt, model
         return "4242", "thread-W"
 
-    def resume_codex_worker(self, worktree, log, thread, text):
-        self.resumed.append((thread, text))
+    def resume_codex_worker(self, worktree, log, thread, text, model):
+        self.resumed.append((thread, text, model))
         return "4343"
 
     def pid_alive(self, pid):
@@ -325,7 +325,10 @@ class CodexWorkerTest(unittest.TestCase):
         self.rt.sleep = lambda s: polls.append(s) or (len(polls) == 3 and self.rt.alive_pids.clear())
         core.answer(self.con, self.rt, t["id"], "yes")  # the asking turn exits a moment after the Orch is woken
         self.assertEqual(len(polls), 3)
-        self.assertEqual(self.rt.resumed, [("thread-W", f"[orchd answer {t['id']}]\nyes")])
+        self.assertEqual(self.rt.resumed, [("thread-W", f"[orchd answer {t['id']}]\nyes", "gpt-6.1-sol")])
+        core.close(self.con, self.rt, t["id"])
+        with self.assertRaisesRegex(ValueError, "closed"):
+            core.answer(self.con, self.rt, t["id"], "late")
         self.assertEqual(store.get_task(self.con, t["id"])["job_id"], "4343")
 
     def test_liveness_counts_a_waiting_thread_as_unknown_and_a_silent_exit_as_dead(self):
@@ -363,6 +366,34 @@ class CodexWorkerTest(unittest.TestCase):
         self.rt.alive_pids = set()
         core.view(self.con, self.rt, t["id"])
         self.assertEqual(self.rt.viewed, [("codex", "thread-W")])
+
+    def test_failed_codex_launch_marks_task_failed_and_drops_worktree(self):
+        def boom(*a):
+            raise RuntimeError("codex exec started no thread")
+        self.rt.start_codex_worker = boom
+        with self.assertRaises(RuntimeError):
+            self.dispatch()
+        (row,) = self.con.execute("SELECT status, note, worktree FROM tasks").fetchall()
+        self.assertEqual(row["status"], "failed")
+        self.assertIn("no thread", row["note"])
+        self.assertEqual(self.rt.removed, [row["worktree"]])
+
+    def test_finished_child_is_not_alive_without_another_subprocess(self):
+        rt = Runtime()
+        pid = subprocess.Popen(["/bin/sleep", "0.1"]).pid  # dropped Popen, as spawn does
+        import time
+        time.sleep(0.5)
+        self.assertFalse(rt.pid_alive(pid))
+
+    def test_resume_passes_the_task_model(self):
+        rt = Runtime()
+        rt.codex = "/fake/codex"
+        seen = {}
+        rt.spawn = lambda cmd, cwd, log: seen.update(cmd=cmd, cwd=cwd) or 7
+        self.assertEqual(rt.resume_codex_worker("/wt", "/l", "th-1", "answer", "gpt-6.1-sol"), "7")
+        self.assertEqual(seen["cmd"][seen["cmd"].index("-m") + 1], "gpt-6.1-sol")
+        self.assertEqual(seen["cmd"][-2:], ["th-1", "answer"])
+        self.assertEqual(seen["cwd"], "/wt")
 
     def test_stop_kills_only_a_live_codex_process(self):
         rt = Runtime()

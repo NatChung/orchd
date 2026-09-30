@@ -85,6 +85,11 @@ class Runtime:
                                     env=launch_env(), start_new_session=True).pid
 
     def pid_alive(self, pid):
+        try:  # a finished child of this long-lived process stays a zombie, and kill(0) finds it, until reaped
+            if os.waitpid(int(pid), os.WNOHANG)[0]:
+                return False
+        except (ChildProcessError, ValueError):
+            pass
         try:
             os.kill(int(pid), 0)
         except (OSError, ValueError):
@@ -257,8 +262,9 @@ class Runtime:
         raise RuntimeError("codex exec started no thread: " + Path(log).read_text(errors="replace")[-500:]
                            if self.exists(log) else "codex exec wrote no log")
 
-    def resume_codex_worker(self, worktree, log, thread, text):
-        return str(self.spawn([self.codex, "exec", "resume", *CODEX_FLAGS, thread, text], worktree, log))
+    def resume_codex_worker(self, worktree, log, thread, text, model):
+        """Resume falls back to config.toml's model unless told, so pass the task's model every turn."""
+        return str(self.spawn([self.codex, "exec", "resume", *CODEX_FLAGS, "-m", model, thread, text], worktree, log))
 
     def stop_codex(self, pid):
         """An idle worker's pid is long gone and may be reused, so kill only a process that is still codex."""

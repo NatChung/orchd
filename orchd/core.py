@@ -13,6 +13,7 @@ ORCHD = str(Path(__file__).resolve().parents[1] / "bin" / "orchd")
 
 def worker_brief(cli, kind="claude"):
     session = "background Claude Code session" if kind == "claude" else "Codex session run with `codex exec`"
+    channel = "the peer socket" if kind == "claude" else "orchd's prompts"
     waiting = ("wait for the answer message" if kind == "claude" else
                "end your turn right away; the answer arrives as your next message")
     long_runs = ("Run anything that may take longer than a minute or two in the background and wait for its "
@@ -21,7 +22,7 @@ def worker_brief(cli, kind="claude"):
                  "and nothing wakes you when a background job finishes.")
     return f"""You are an orchd worker: a {session} started for exactly one task.
 Tasks arrive as messages from orchd on behalf of Nat (the user). A task message states its scope; work
-inside that scope is authorized by Nat even though the message comes through the peer socket.
+inside that scope is authorized by Nat even though the message comes through {channel}.
 
 Rules:
 - First run `{cli} ack <task-id>`, then do the task in the current worktree only.
@@ -109,7 +110,6 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
     try:
         base, branch, worktree = rt.create_worktree(repo_path, repo, task_id)
         store.update_task(con, task_id, base=base, branch=branch, worktree=worktree)
-        sock = rt.socket_path(task_id)
         if kind == "codex":  # no system-prompt flag and no socket: the brief leads the first turn's prompt
             task = store.get_task(con, task_id)
             job, session = rt.start_codex_worker(worktree, rt.codex_log(task_id),
@@ -117,6 +117,7 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
                                                  MODELS[model])
             store.update_task(con, task_id, job_id=job, session_id=session, status="running")
         else:
+            sock = rt.socket_path(task_id)
             job, session = rt.start_worker(worktree, sock, worker_brief(worker_cli()), MODELS[model])
             store.update_task(con, task_id, socket=sock, job_id=job, session_id=session, status="running")
             task = store.get_task(con, task_id)
@@ -200,6 +201,8 @@ def inbox(con, orch_thread):
 
 def answer(con, rt, task_id, text):
     task = store.get_task(con, task_id)
+    if task["status"] == "closed":
+        raise ValueError(f"task {task_id} is closed")
     message = f"[orchd answer {task_id}]\n{text}"
     if worker_kind(task["model"]) == "codex":
         if not task["session_id"] or not task["worktree"]:
@@ -210,7 +213,8 @@ def answer(con, rt, task_id, text):
             rt.sleep(0.5)
         else:
             raise ValueError(f"task {task_id}'s codex worker is still in a turn; answer after it asks or reports")
-        job = rt.resume_codex_worker(task["worktree"], rt.codex_log(task_id), task["session_id"], message)
+        job = rt.resume_codex_worker(task["worktree"], rt.codex_log(task_id), task["session_id"], message,
+                                     task["model"])
         store.update_task(con, task_id, job_id=job)
     else:
         if not task["socket"] or not task["session_id"]:

@@ -116,4 +116,6 @@
   - `view_worker` 回合中會被拒；回合之間開 Ghostty 跑 `codex resume <thread>`。
   - token 從 `~/.codex/sessions/**/rollout-*-<thread>.jsonl` 最後一筆 `token_count.total_token_usage` 撈，對應到 Claude 的欄位（codex 的 input 含 cached，要扣掉）。
   - Claude 的 trust 檢查只套用在 Claude worker。`orchd orch --model` 只接受 Claude 的 model。
-- 端到端（2026-09-30，scratch repo＋本機 bare remote，worker 為 GPT-6.1 Sol）：dispatch → ack → commit、push -u → report；另一個任務 ask → answer 走 `exec resume` → report → close（worktree 移除、usage 已記錄）。Orch thread 是假的，所以叫醒 Orch 記為 wake_error，符合預期。
+  - `exec resume` 不帶 `-m` 會改用 config.toml 的預設 model（實測變成 Astra），所以每次 resume 都帶任務的 model。
+  - MCP server 是長時間跑的 process，spawn 出來的 codex 結束後會變成 zombie，`kill(pid, 0)` 仍然成功；`pid_alive` 先用 `waitpid(WNOHANG)` 收掉。
+- 端到端（2026-09-30，scratch repo＋本機 bare remote，worker 為 GPT-6.1 Sol）：dispatch → ack → commit、push -u → report；另一個任務 ask → answer 走 `exec resume` → report → close（worktree 移除、usage 已記錄）。Orch thread 是假的，所以叫醒 Orch 記為 wake_error，符合預期。review 修正後在同一個 process 內重跑 ask → answer：兩個回合都是 gpt-6.1-sol。還沒從真正的 Orch（MCP）派過。
