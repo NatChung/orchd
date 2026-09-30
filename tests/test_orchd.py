@@ -97,6 +97,15 @@ class CoreTest(unittest.TestCase):
         self.assertIn("Never push directly to the default branch", self.rt.brief)
         self.assertIn("Never review-and-merge a PR you authored", self.rt.brief)
 
+    def test_non_default_home_is_carried_to_the_worker(self):
+        os.environ["ORCHD_HOME"] = "/tmp/iso home"
+        try:
+            t = self.dispatch()
+        finally:
+            os.environ.pop("ORCHD_HOME")
+        self.assertIn("ORCHD_HOME='/tmp/iso home' ", self.rt.brief)
+        self.assertIn(f"ORCHD_HOME='/tmp/iso home' {core.ORCHD} ack {t['id']}", self.rt.sent[0][2])
+
     def test_dispatch_without_thread_is_refused(self):
         with self.assertRaises(ValueError):
             self.dispatch(thread=None)

@@ -38,6 +38,12 @@ Rules:
 - Report facts only; say what you did not verify."""
 
 
+def worker_cli():
+    """Workers are spawned by the Claude daemon and do not inherit our env, so carry a non-default home."""
+    home = os.environ.get("ORCHD_HOME")
+    return f"ORCHD_HOME={shlex.quote(home)} {ORCHD}" if home else ORCHD
+
+
 def task_message(task):
     return f"""[orchd task {task['id']}]
 Repo: {task['repo']}
@@ -51,7 +57,7 @@ Instructions:
 Done when:
 {task['done_when']}
 
-Start with: {ORCHD} ack {task['id']}"""
+Start with: {worker_cli()} ack {task['id']}"""
 
 
 TASK_TYPES = ("code", "docs", "investigation", "outward", "review", "ops", "other")
@@ -97,7 +103,7 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
         base, branch, worktree = rt.create_worktree(repo_path, repo, task_id)
         store.update_task(con, task_id, base=base, branch=branch, worktree=worktree)
         sock = rt.socket_path(task_id)
-        job, session = rt.start_worker(worktree, sock, worker_brief(ORCHD), MODELS[model])
+        job, session = rt.start_worker(worktree, sock, worker_brief(worker_cli()), MODELS[model])
         store.update_task(con, task_id, socket=sock, job_id=job, session_id=session, status="running")
         task = store.get_task(con, task_id)
         rt.send_uds(sock, session, task_message(task))
