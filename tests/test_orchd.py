@@ -18,6 +18,7 @@ class FakeRuntime:
         self.wake_fails = False
         self.removable = (True, "pushed")
         self.jobs = {"job1": {}}
+        self.resumed, self.alive_pids = [], set()
 
     def repo_path(self, repo):
         if repo == "missing":
@@ -70,7 +71,28 @@ class FakeRuntime:
     def open_viewer(self, job):
         self.viewed.append(job)
 
+    def codex_log(self, task_id):
+        return f"/tmp/orchd-{task_id}/codex.jsonl"
+
+    def start_codex_worker(self, worktree, log, prompt, model):
+        self.codex_prompt, self.model = prompt, model
+        return "4242", "thread-W"
+
+    def resume_codex_worker(self, worktree, log, thread, text):
+        self.resumed.append((thread, text))
+        return "4343"
+
+    def pid_alive(self, pid):
+        return pid in self.alive_pids
+
+    def stop_codex(self, pid):
+        self.stopped.append(("codex", pid))
+
+    def open_codex_viewer(self, worktree, thread):
+        self.viewed.append(("codex", thread))
+
     claude_usage = Runtime.claude_usage
+    codex_usage = Runtime.codex_usage
 
 
 class CoreTest(unittest.TestCase):
@@ -271,6 +293,107 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(self.rt.removed, [t["worktree"]])
 
 
+class CodexWorkerTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.con = store.connect(Path(self.tmp.name) / "t.db")
+        self.rt = FakeRuntime()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def dispatch(self, repo="demo"):
+        return core.dispatch(self.con, self.rt, orch_thread="thread-A", repo=repo, title="T", instructions="do it",
+                             done_when="tests pass", model="sol", model_reason="second vendor", task_type="code")
+
+    def test_sol_runs_on_codex_with_brief_and_task_in_one_prompt(self):
+        t = self.dispatch(repo="untrusted")  # Claude's trust list does not gate a Codex worker
+        self.assertEqual((t["model"], t["job_id"], t["session_id"], t["socket"]), ("gpt-6.1-sol", "4242", "thread-W", None))
+        self.assertEqual(self.rt.sent, [])
+        self.assertIn("Codex session", self.rt.codex_prompt)
+        self.assertIn("end your turn right away", self.rt.codex_prompt)
+        self.assertIn(f"[orchd task {t['id']}]", self.rt.codex_prompt)
+
+    def test_answer_resumes_the_thread_only_between_turns(self):
+        t = self.dispatch()
+        core.ask(self.con, self.rt, t["id"], "Send it?")
+        self.rt.alive_pids = {"4242"}
+        self.rt.sleep = lambda s: None
+        with self.assertRaisesRegex(ValueError, "still in a turn"):
+            core.answer(self.con, self.rt, t["id"], "yes")
+        polls = []
+        self.rt.sleep = lambda s: polls.append(s) or (len(polls) == 3 and self.rt.alive_pids.clear())
+        core.answer(self.con, self.rt, t["id"], "yes")  # the asking turn exits a moment after the Orch is woken
+        self.assertEqual(len(polls), 3)
+        self.assertEqual(self.rt.resumed, [("thread-W", f"[orchd answer {t['id']}]\nyes")])
+        self.assertEqual(store.get_task(self.con, t["id"])["job_id"], "4343")
+
+    def test_liveness_counts_a_waiting_thread_as_unknown_and_a_silent_exit_as_dead(self):
+        t = self.dispatch()
+        alive = lambda: core.list_open(self.con, self.rt)[0]["worker_alive"]
+        self.rt.alive_pids = {"4242"}
+        self.assertTrue(alive())
+        self.rt.alive_pids = set()
+        self.assertFalse(alive())
+        core.ask(self.con, self.rt, t["id"], "?")
+        self.assertIsNone(alive())
+
+    def test_close_kills_the_turn_and_reads_rollout_usage(self):
+        t = self.dispatch()
+        day = Path(self.tmp.name) / "sessions" / "2026" / "09" / "30"
+        day.mkdir(parents=True)
+        tok = lambda i, c, o: json.dumps({"type": "event_msg", "payload": {"type": "token_count", "info": {
+            "total_token_usage": {"input_tokens": i, "cached_input_tokens": c, "cache_write_input_tokens": 0,
+                                  "output_tokens": o}}}})
+        (day / "rollout-2026-09-30T19-47-32-thread-W.jsonl").write_text(
+            "\n".join([tok(100, 40, 5), "not json", tok(300, 200, 9)]))
+        os.environ["ORCHD_CODEX_SESSIONS"] = str(day.parents[2])
+        self.addCleanup(os.environ.pop, "ORCHD_CODEX_SESSIONS", None)
+        core.close(self.con, self.rt, t["id"])
+        self.assertEqual(self.rt.stopped, [("codex", "4242")])
+        usage = json.loads(self.con.execute("SELECT body FROM messages WHERE kind='usage'").fetchone()[0])
+        self.assertEqual(usage, dict(model="gpt-6.1-sol", input_tokens=100, output_tokens=9,
+                                     cache_creation_input_tokens=0, cache_read_input_tokens=200, messages=2))
+
+    def test_view_refuses_mid_turn_then_opens_codex_resume(self):
+        t = self.dispatch()
+        self.rt.alive_pids = {"4242"}
+        with self.assertRaisesRegex(ValueError, "in a turn"):
+            core.view(self.con, self.rt, t["id"])
+        self.rt.alive_pids = set()
+        core.view(self.con, self.rt, t["id"])
+        self.assertEqual(self.rt.viewed, [("codex", "thread-W")])
+
+    def test_stop_kills_only_a_live_codex_process(self):
+        rt = Runtime()
+        rt.run = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "/usr/bin/python3\n", "")
+        killed = []
+        orig, os.killpg = os.killpg, lambda pid, sig: killed.append(pid)
+        try:
+            rt.stop_codex("4242")  # a reused pid now running something else
+            rt.run = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "/Users/x/.local/bin/codex\n", "")
+            rt.stop_codex("4242")
+        finally:
+            os.killpg = orig
+        self.assertEqual(killed, [4242])
+
+    def test_start_parses_thread_id_from_exec_json(self):
+        log = Path(self.tmp.name) / "codex.jsonl"
+        rt = Runtime()
+        rt.codex = "/fake/codex"
+        seen = {}
+
+        def spawn(cmd, cwd, path):
+            seen["cmd"] = cmd
+            Path(path).write_text('Reading additional input\n{"type":"thread.started","thread_id":"th-1"}\n')
+            return 99
+        rt.spawn, rt.pid_alive, rt.sleep = spawn, lambda pid: True, lambda s: None
+        self.assertEqual(rt.start_codex_worker("/wt", str(log), "prompt", "gpt-6.1-sol"), ("99", "th-1"))
+        self.assertEqual(seen["cmd"][:2], ["/fake/codex", "exec"])
+        self.assertIn("--dangerously-bypass-approvals-and-sandbox", seen["cmd"])
+        self.assertEqual(seen["cmd"][-1], "prompt")
+
+
 class OrchTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -294,6 +417,8 @@ class OrchTest(unittest.TestCase):
     def test_unknown_model_key_is_refused(self):
         with self.assertRaisesRegex(ValueError, "unknown model"):
             core.start_orch(self.con, self.rt, "gpt")
+        with self.assertRaisesRegex(ValueError, "unknown model"):  # a Claude Orch cannot run a GPT model
+            core.start_orch(self.con, self.rt, "sol")
 
     def test_untrusted_orch_home_is_refused(self):
         os.environ["ORCHD_ORCH_HOME"] = str(Path(self.tmp.name) / "untrusted")

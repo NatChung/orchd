@@ -11,11 +11,11 @@ import sys
 import traceback
 
 from . import core, store
-from .runtime import DEFAULT_WORKER_MODEL, Runtime
+from .runtime import DEFAULT_WORKER_MODEL, MODELS, Runtime
 
 TOOLS = [
     {"name": "dispatch",
-     "description": "Start one Claude worker for one task in a fresh worktree of a repo under ~/projects. "
+     "description": "Start one worker (Claude or Codex, by model) for one task in a fresh worktree of a repo under ~/projects. "
                     "Returns immediately; the worker reports later and you are woken with an [orchd] message. "
                     "The result lists other_open_on_repo: open tasks on the same repo from other Orchs.",
      "inputSchema": {"type": "object", "required": ["repo", "title", "instructions", "done_when", "model_reason",
@@ -24,9 +24,11 @@ TOOLS = [
          "title": {"type": "string"},
          "instructions": {"type": "string", "description": "Goal, scope, allowed actions, what to report"},
          "done_when": {"type": "string", "description": "Checkable completion conditions"},
-         "model": {"type": "string", "enum": ["sonnet", "opus"], "description":
-                   "sonnet = default for clear-scope implementation and writing verify scripts; opus = ambiguous "
-                   "requirements, cross-repo, outward communication, review, or after sonnet failed twice"},
+         "model": {"type": "string", "enum": list(MODELS), "description":
+                   "sonnet = default for clear-scope implementation and writing verify scripts; sol = GPT-6.1 Sol "
+                   "on Codex, same tier as sonnet, use it for a second vendor (e.g. reviewing sonnet's work); "
+                   "opus = ambiguous requirements, cross-repo, outward communication, review, or after the "
+                   "M tier failed twice"},
          "model_reason": {"type": "string", "description": "One sentence: why this model for this task"},
          "task_type": {"type": "string", "enum": list(core.TASK_TYPES)},
          "rework_of": {"type": "string", "description": "Task id this task redoes or fixes"},
@@ -36,10 +38,13 @@ TOOLS = [
      "description": "Read unread acks, reports and questions for tasks you dispatched. Call it when an [orchd] message arrives.",
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "list_open",
-     "description": "List every task that is not closed, across all Orch sessions, with worker liveness.",
+     "description": "List every task that is not closed, across all Orch sessions, with worker liveness. "
+                    "worker_alive null: unknown, or a Codex worker between turns (it asked or reported and can "
+                    "still be answered); false: its process ended without a report.",
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "answer",
-     "description": "Send an answer to a worker's question. For outward sends, pass Nat's decision verbatim.",
+     "description": "Send an answer to a worker's question. For outward sends, pass Nat's decision verbatim. "
+                    "A Codex worker gets it as a new turn on its thread.",
      "inputSchema": {"type": "object", "required": ["task_id", "text"], "properties": {
          "task_id": {"type": "string"}, "text": {"type": "string"}}}},
     {"name": "close",

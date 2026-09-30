@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from orchd import core, store  # noqa: E402
-from orchd.runtime import DEFAULT_ORCH_MODEL, MODELS, Runtime  # noqa: E402
+from orchd.runtime import DEFAULT_ORCH_MODEL, MODELS, Runtime, worker_kind  # noqa: E402
 
 
 def main(argv=None):
@@ -31,7 +31,8 @@ def main(argv=None):
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("mcp")
     orch = sub.add_parser("orch")
-    orch.add_argument("--model", default=DEFAULT_ORCH_MODEL, choices=list(MODELS))
+    orch.add_argument("--model", default=DEFAULT_ORCH_MODEL,
+                      choices=[k for k, v in MODELS.items() if worker_kind(v) == "claude"])
     orch.add_argument("--no-attach", action="store_true")
     sub.add_parser("orch-stop").add_argument("orch_id")
     sub.add_parser("ack").add_argument("task_id")

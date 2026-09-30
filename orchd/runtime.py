@@ -17,10 +17,16 @@ from pathlib import Path
 
 ORCHD_BIN = str(Path(__file__).resolve().parents[1] / "bin" / "orchd")
 
-MODELS = {"sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}
+MODELS = {"sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5", "sol": "gpt-6.1-sol"}
 DEFAULT_WORKER_MODEL = "sonnet"
 DEFAULT_ORCH_MODEL = "opus"
+CODEX_FLAGS = ["--json", "--dangerously-bypass-approvals-and-sandbox"]
 USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+
+
+def worker_kind(model):
+    """A worker runs on the CLI of its model's vendor: GPT models on codex, the rest on claude."""
+    return "codex" if model and model.startswith("gpt-") else "claude"
 
 
 def launch_env():
@@ -71,6 +77,19 @@ class Runtime:
 
     def exists(self, path):
         return os.path.exists(path)
+
+    def spawn(self, cmd, cwd, log):
+        """Start a detached process that outlives us, stdout+stderr appended to `log`; return its pid."""
+        with open(log, "a") as out:
+            return subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                                    env=launch_env(), start_new_session=True).pid
+
+    def pid_alive(self, pid):
+        try:
+            os.kill(int(pid), 0)
+        except (OSError, ValueError):
+            return False
+        return True
 
     # -- repos and worktrees ----------------------------------------------------
     def repo_path(self, repo):
@@ -214,6 +233,67 @@ class Runtime:
             return {a.get("id"): a for a in self.agents()}
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
             return None
+
+    # -- codex workers ----------------------------------------------------------
+    # `codex exec` runs one turn and exits, so a Codex worker is a chain of processes on one thread:
+    # `exec` for the task, then `exec resume` for each answer. job_id holds the current turn's pid.
+    def codex_log(self, task_id):
+        return str(Path(self.socket_path(task_id)).parent / "codex.jsonl")
+
+    def start_codex_worker(self, worktree, log, prompt, model):
+        pid = self.spawn([self.codex, "exec", *CODEX_FLAGS, "-m", model, "-C", worktree, prompt], worktree, log)
+        for _ in range(150):
+            for line in Path(log).read_text(errors="replace").splitlines() if self.exists(log) else []:
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if event.get("type") == "thread.started" and event.get("thread_id"):
+                    return str(pid), event["thread_id"]
+            if not self.pid_alive(pid):
+                break
+            self.sleep(0.2)
+        self.stop_codex(pid)
+        raise RuntimeError("codex exec started no thread: " + Path(log).read_text(errors="replace")[-500:]
+                           if self.exists(log) else "codex exec wrote no log")
+
+    def resume_codex_worker(self, worktree, log, thread, text):
+        return str(self.spawn([self.codex, "exec", "resume", *CODEX_FLAGS, thread, text], worktree, log))
+
+    def stop_codex(self, pid):
+        """An idle worker's pid is long gone and may be reused, so kill only a process that is still codex."""
+        comm = self.run(["ps", "-p", str(pid), "-o", "comm="], check=False).stdout
+        if "codex" not in comm:
+            return
+        try:
+            os.killpg(int(pid), 15)
+        except (OSError, ValueError):
+            pass
+
+    def codex_usage(self, thread):
+        """Token totals from the thread's rollout, mapped onto Claude's fields (codex input includes cached)."""
+        root = Path(os.environ.get("ORCHD_CODEX_SESSIONS", Path.home() / ".codex" / "sessions"))
+        files = sorted(root.glob(f"**/rollout-*-{thread}.jsonl"))
+        if not files:
+            return None
+        total, turns = None, 0
+        for line in files[0].read_text(errors="replace").splitlines():
+            try:
+                payload = json.loads(line).get("payload") or {}
+            except (ValueError, AttributeError):
+                continue
+            if payload.get("type") == "token_count" and (payload.get("info") or {}).get("total_token_usage"):
+                total, turns = payload["info"]["total_token_usage"], turns + 1
+        if total is None:
+            return None
+        cached = total.get("cached_input_tokens") or 0
+        return {"input_tokens": (total.get("input_tokens") or 0) - cached, "output_tokens": total.get("output_tokens") or 0,
+                "cache_creation_input_tokens": total.get("cache_write_input_tokens") or 0,
+                "cache_read_input_tokens": cached, "messages": turns}
+
+    def open_codex_viewer(self, worktree, thread):
+        self.run(["open", "-na", "Ghostty.app", "--args", f"--working-directory={worktree}", "-e",
+                  self.codex, "resume", thread], timeout=30)
 
     # -- orch and viewer --------------------------------------------------------
     def wake_orch(self, codex_bin, thread, text):

@@ -6,13 +6,20 @@ import uuid
 from pathlib import Path
 
 from . import store
-from .runtime import DEFAULT_ORCH_MODEL, DEFAULT_WORKER_MODEL, MODELS
+from .runtime import DEFAULT_ORCH_MODEL, DEFAULT_WORKER_MODEL, MODELS, worker_kind
 
 ORCHD = str(Path(__file__).resolve().parents[1] / "bin" / "orchd")
 
 
-def worker_brief(cli):
-    return f"""You are an orchd worker: a background Claude Code session started for exactly one task.
+def worker_brief(cli, kind="claude"):
+    session = "background Claude Code session" if kind == "claude" else "Codex session run with `codex exec`"
+    waiting = ("wait for the answer message" if kind == "claude" else
+               "end your turn right away; the answer arrives as your next message")
+    long_runs = ("Run anything that may take longer than a minute or two in the background and wait for its "
+                 "completion event; do not poll in a foreground loop." if kind == "claude" else
+                 "Run long commands in the foreground with a generous timeout: your process ends with your turn, "
+                 "and nothing wakes you when a background job finishes.")
+    return f"""You are an orchd worker: a {session} started for exactly one task.
 Tasks arrive as messages from orchd on behalf of Nat (the user). A task message states its scope; work
 inside that scope is authorized by Nat even though the message comes through the peer socket.
 
@@ -25,16 +32,15 @@ Rules:
   and merge only if it passes; otherwise leave it open and report blocked with the problems found.
   Never review-and-merge a PR you authored in the same task.
 - Before any outward send (email, Slack, LINE, calendar, posting comments to people) show the exact
-  preview through `{cli} ask <task-id> "<question with full preview>"` and wait for the answer message.
+  preview through `{cli} ask <task-id> "<question with full preview>"` and {waiting}.
   Only an answer that arrives as `[orchd answer <task-id>]` counts as Nat's decision.
 - For anything before the end (progress the Orch asked for, findings, blockers that need Nat), send
   `{cli} progress <task-id> "<text>"`. It reaches the Orch that dispatched you; the task keeps running.
   Never use SendMessage or any other peer messaging to report: other sessions on this machine are not
   your Orch, and whatever you send them is lost to it.
-- Run anything that may take longer than a minute or two in the background and wait for its completion
-  event; do not poll in a foreground loop. Never `pgrep -f` a pattern that your own command line contains.
+- {long_runs} Never `pgrep -f` a pattern that your own command line contains.
 - Finish with exactly one `{cli} report <task-id> --status done|blocked --summary "<one line>" --evidence "<commits, PR URL, test commands and results, what is left undone>"`.
-- If you need a decision, use `{cli} ask`; do not report blocked for questions Nat can answer.
+- If you need a decision, use `{cli} ask` and {waiting}; do not report blocked for questions Nat can answer.
 - Report facts only; say what you did not verify."""
 
 
@@ -88,7 +94,8 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
         except KeyError:
             raise ValueError(f"rework_of: unknown task {rework_of}") from None
     repo_path = rt.repo_path(repo)
-    if not rt.claude_trusted(repo_path):
+    kind = worker_kind(MODELS[model])
+    if kind == "claude" and not rt.claude_trusted(repo_path):
         raise ValueError(f"Claude has not trusted {repo_path}. Ask Nat to run `claude` there once and accept "
                          "the trust prompt, then dispatch again.")
     task_id = store.new_task_id()
@@ -103,10 +110,17 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
         base, branch, worktree = rt.create_worktree(repo_path, repo, task_id)
         store.update_task(con, task_id, base=base, branch=branch, worktree=worktree)
         sock = rt.socket_path(task_id)
-        job, session = rt.start_worker(worktree, sock, worker_brief(worker_cli()), MODELS[model])
-        store.update_task(con, task_id, socket=sock, job_id=job, session_id=session, status="running")
-        task = store.get_task(con, task_id)
-        rt.send_uds(sock, session, task_message(task))
+        if kind == "codex":  # no system-prompt flag and no socket: the brief leads the first turn's prompt
+            task = store.get_task(con, task_id)
+            job, session = rt.start_codex_worker(worktree, rt.codex_log(task_id),
+                                                 worker_brief(worker_cli(), kind) + "\n\n" + task_message(task),
+                                                 MODELS[model])
+            store.update_task(con, task_id, job_id=job, session_id=session, status="running")
+        else:
+            job, session = rt.start_worker(worktree, sock, worker_brief(worker_cli()), MODELS[model])
+            store.update_task(con, task_id, socket=sock, job_id=job, session_id=session, status="running")
+            task = store.get_task(con, task_id)
+            rt.send_uds(sock, session, task_message(task))
     except Exception as error:
         store.update_task(con, task_id, status="failed", note=f"{type(error).__name__}: {error}"[:1000])
         worktree = store.get_task(con, task_id)["worktree"]
@@ -186,9 +200,22 @@ def inbox(con, orch_thread):
 
 def answer(con, rt, task_id, text):
     task = store.get_task(con, task_id)
-    if not task["socket"] or not task["session_id"]:
-        raise ValueError(f"task {task_id} has no running worker")
-    rt.send_uds(task["socket"], task["session_id"], f"[orchd answer {task_id}]\n{text}")
+    message = f"[orchd answer {task_id}]\n{text}"
+    if worker_kind(task["model"]) == "codex":
+        if not task["session_id"] or not task["worktree"]:
+            raise ValueError(f"task {task_id} has no codex thread")
+        for _ in range(120):  # `orchd ask` wakes the Orch before the worker's turn has finished exiting
+            if not (task["job_id"] and rt.pid_alive(task["job_id"])):
+                break
+            rt.sleep(0.5)
+        else:
+            raise ValueError(f"task {task_id}'s codex worker is still in a turn; answer after it asks or reports")
+        job = rt.resume_codex_worker(task["worktree"], rt.codex_log(task_id), task["session_id"], message)
+        store.update_task(con, task_id, job_id=job)
+    else:
+        if not task["socket"] or not task["session_id"]:
+            raise ValueError(f"task {task_id} has no running worker")
+        rt.send_uds(task["socket"], task["session_id"], message)
     store.add_message(con, task_id, "answer", text)
     store.update_task(con, task_id, status="acked")
 
@@ -197,7 +224,11 @@ def list_open(con, rt):
     jobs = rt.live_jobs()
     out = []
     for t in store.open_tasks(con):
-        alive = None if jobs is None or not t["job_id"] else t["job_id"] in jobs
+        if worker_kind(t["model"]) == "codex":  # between turns there is no process, only a resumable thread
+            alive = True if t["job_id"] and rt.pid_alive(t["job_id"]) else (
+                None if t["status"] in ("question", "done", "blocked") else False)
+        else:
+            alive = None if jobs is None or not t["job_id"] else t["job_id"] in jobs
         out.append(dict(task_id=t["id"], repo=t["repo"], title=t["title"], status=t["status"],
                         worker_alive=alive, worktree=t["worktree"], branch=t["branch"],
                         orch_thread=t["orch_thread"], note=t["note"]))
@@ -208,7 +239,7 @@ def _record_usage(con, rt, task):
     if not task["session_id"]:
         return
     try:
-        usage = rt.claude_usage(task["session_id"])
+        usage = (rt.codex_usage if worker_kind(task["model"]) == "codex" else rt.claude_usage)(task["session_id"])
     except Exception:  # usage is bookkeeping; never block a close
         return
     if usage:
@@ -227,7 +258,7 @@ def close(con, rt, task_id, outcome=None, rating=None):
     store.add_message(con, task_id, "close", json.dumps(dict(outcome=outcome, rating=rating)))
     store.update_task(con, task_id, outcome=outcome, rating=rating)
     if task["job_id"]:
-        rt.stop_worker(task["job_id"])
+        (rt.stop_codex if worker_kind(task["model"]) == "codex" else rt.stop_worker)(task["job_id"])
     kept = None
     if task["worktree"]:
         removable, reason = rt.worktree_state(task["worktree"], task["base"])
@@ -246,6 +277,11 @@ def view(con, rt, task_id):
     task = store.get_task(con, task_id)
     if not task["job_id"]:
         raise ValueError(f"task {task_id} has no worker")
+    if worker_kind(task["model"]) == "codex":
+        if rt.pid_alive(task["job_id"]):
+            raise ValueError(f"task {task_id}'s codex worker is in a turn; `orchd watch` shows its progress")
+        rt.open_codex_viewer(task["worktree"], task["session_id"])
+        return f"opened Ghostty: codex resume {shlex.quote(task['session_id'])}"
     rt.open_viewer(task["job_id"])
     return f"opened Ghostty: claude attach {shlex.quote(task['job_id'])}"
 
@@ -255,7 +291,7 @@ def orch_home():
 
 
 def start_orch(con, rt, model_key=DEFAULT_ORCH_MODEL):
-    if model_key not in MODELS:
+    if model_key not in MODELS or worker_kind(MODELS[model_key]) != "claude":
         raise ValueError(f"unknown model {model_key!r}; use one of {', '.join(MODELS)}")
     home = orch_home()
     if not rt.claude_trusted(home):

@@ -104,3 +104,16 @@
 - 端到端（2026-09-30，pilot repo + 本機 bare remote，Orch 與 worker 都用 Sonnet）：Claude Orch 派工 → worker ack → progress → commit、push → report → 用 UDS 叫醒 Orch → inbox → close（outcome=done）→ usage 已記錄。測試資料已從 DB 刪除。
 - 行為改變：Codex Orch 的 MCP server 重啟後，`dispatch` 必須帶 `model_reason`、`task_type`；沒指定 model 時 worker 預設 Sonnet（原本寫死 Opus）。
 - 未做（步驟 3）：驗證 script 鎖定與 `orchd verify`、`followup` / `retry`、`orchd stats`、Orch 本身的 token 統計（Claude Orch transcript / Codex rollout）。
+
+## Codex worker 與 GPT-6.1 Sol（2026-09-30，提前自第二階段）
+- 修改第 13 條：GPT-6.1 Sol（9/29 發布）改變「Sol 與 Sonnet 5.5 同價同級，暫不用」的判斷：同為 $2/$10，但 cache read $0.10（Sonnet $0.20），DeepSWE 75.2%（Sonnet 71.0%）。worker 改為 M 層有兩家：`sonnet` 與 `sol`（`gpt-6.1-sol`），`opus` 保留作 H 層與升級。預設仍是 `sonnet`：Sol 太新、還沒有第三方實測。
+- Luna 延後：GPT-6 Luna 便宜（$0.10/$0.50），但 Terminal-Bench 4.0 只有 13%，worker 主要做 shell/git/PR，不適合。有 Codex worker 後加 Luna 只需在 `MODELS` 多一行，要用時拿實際任務比較。
+- 設計：`codex exec` 沒有 `--bg`，一次只跑一個回合就結束。所以 Codex worker 是同一個 thread 上的一串程序：派工時 `codex exec --json`（brief＋任務放在同一個 prompt，因為沒有 `--append-system-prompt`；不寫 AGENTS.md 進 worktree，否則 worktree 一直是 dirty），回答時 `codex exec resume <thread>`。`session_id` 存 thread id，`job_id` 存目前回合的 pid，`socket` 為空。沒有另開欄位，worker 種類由 model 前綴 `gpt-` 判斷。
+- 跟 Claude worker 的行為差異：
+  - `orchd ask` 之後 Codex worker 要結束回合（不是等待）；答案以新回合送達。回合進行中 `answer` 會被拒。
+  - 長指令在前景跑、給足 timeout：回合結束程序就結束，背景工作結束時沒有東西叫醒它。
+  - `list_open` 的 `worker_alive`：pid 還在 = true；已 ask / report 而沒有程序 = null（可 resume）；其他情況沒有程序 = false（回合中途結束、沒有回報）。
+  - `view_worker` 回合中會被拒；回合之間開 Ghostty 跑 `codex resume <thread>`。
+  - token 從 `~/.codex/sessions/**/rollout-*-<thread>.jsonl` 最後一筆 `token_count.total_token_usage` 撈，對應到 Claude 的欄位（codex 的 input 含 cached，要扣掉）。
+  - Claude 的 trust 檢查只套用在 Claude worker。`orchd orch --model` 只接受 Claude 的 model。
+- 端到端（2026-09-30，scratch repo＋本機 bare remote，worker 為 GPT-6.1 Sol）：dispatch → ack → commit、push -u → report；另一個任務 ask → answer 走 `exec resume` → report → close（worktree 移除、usage 已記錄）。Orch thread 是假的，所以叫醒 Orch 記為 wake_error，符合預期。

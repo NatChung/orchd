@@ -19,7 +19,7 @@ QUERY = """SELECT m.id, m.task_id, m.kind, m.body, m.evidence, m.created_at,
 def _short_model(model):
     if not model:  # dispatched before v2, when every worker ran Opus
         return "opus"
-    return model.replace("claude-", "").replace("-5-5", "")
+    return model.replace("claude-", "").replace("-5-5", "").replace("gpt-6.1-", "")
 
 
 def orch_label(row, color=True):
