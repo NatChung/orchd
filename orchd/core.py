@@ -1,8 +1,11 @@
 """Task operations shared by the Orch MCP tools and the worker CLI."""
+import os
 import shlex
+import uuid
 from pathlib import Path
 
 from . import store
+from .runtime import DEFAULT_ORCH_MODEL, DEFAULT_WORKER_MODEL, MODELS
 
 ORCHD = str(Path(__file__).resolve().parents[1] / "bin" / "orchd")
 
@@ -65,7 +68,7 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when):
         base, branch, worktree = rt.create_worktree(repo_path, repo, task_id)
         store.update_task(con, task_id, base=base, branch=branch, worktree=worktree)
         sock = rt.socket_path(task_id)
-        job, session = rt.start_worker(worktree, sock, worker_brief(ORCHD))
+        job, session = rt.start_worker(worktree, sock, worker_brief(ORCHD), MODELS[DEFAULT_WORKER_MODEL])
         store.update_task(con, task_id, socket=sock, job_id=job, session_id=session, status="running")
         task = store.get_task(con, task_id)
         rt.send_uds(sock, session, task_message(task))
@@ -186,3 +189,29 @@ def view(con, rt, task_id):
         raise ValueError(f"task {task_id} has no worker")
     rt.open_viewer(task["job_id"])
     return f"opened Ghostty: claude attach {shlex.quote(task['job_id'])}"
+
+
+def orch_home():
+    return Path(os.environ.get("ORCHD_ORCH_HOME", Path.home() / "projects" / "orch"))
+
+
+def start_orch(con, rt, model_key=DEFAULT_ORCH_MODEL):
+    if model_key not in MODELS:
+        raise ValueError(f"unknown model {model_key!r}; use one of {', '.join(MODELS)}")
+    home = orch_home()
+    if not rt.claude_trusted(home):
+        raise ValueError(f"Claude has not trusted {home}. Run `claude` in that directory once and accept "
+                         "the trust prompt, then run `orchd orch` again.")
+    orch_id = "o" + uuid.uuid4().hex[:7]
+    sock, job, session = rt.start_orch(orch_id, MODELS[model_key], home)
+    return store.register_orch(con, orch_id, "claude", model=MODELS[model_key], socket=sock,
+                               session_id=session, job_id=job)
+
+
+def stop_orch(con, rt, orch_id):
+    orch = store.get_orch(con, orch_id)
+    if orch is None:
+        raise ValueError(f"unknown orch {orch_id}")
+    if orch["job_id"]:
+        rt.stop_worker(orch["job_id"])
+    store.stop_orch(con, orch_id)

@@ -2,6 +2,8 @@
 """orchd: Orch MCP server and the worker/operator command line.
 
   orchd mcp                                   run the MCP server for an Orch session (stdio)
+  orchd orch [--model opus|sonnet] [--no-attach]   start a Claude Orch, then attach to it
+  orchd orch-stop ID                          stop a Claude Orch
   orchd ack ID                                worker: acknowledge a task
   orchd report ID --status done|blocked --summary S [--evidence E]
   orchd progress ID "text"                    worker: interim update to the Orch; the task keeps running
@@ -17,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from orchd import core, store  # noqa: E402
-from orchd.runtime import Runtime  # noqa: E402
+from orchd.runtime import DEFAULT_ORCH_MODEL, MODELS, Runtime  # noqa: E402
 
 
 def main(argv=None):
@@ -25,6 +27,10 @@ def main(argv=None):
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("mcp")
+    orch = sub.add_parser("orch")
+    orch.add_argument("--model", default=DEFAULT_ORCH_MODEL, choices=list(MODELS))
+    orch.add_argument("--no-attach", action="store_true")
+    sub.add_parser("orch-stop").add_argument("orch_id")
     sub.add_parser("ack").add_argument("task_id")
     rep = sub.add_parser("report")
     rep.add_argument("task_id")
@@ -46,7 +52,15 @@ def main(argv=None):
         mcp_server.serve()
         return 0
     con, rt = store.connect(), Runtime()
-    if args.cmd == "ack":
+    if args.cmd == "orch":
+        row = core.start_orch(con, rt, args.model)
+        print(f"orch {row['id']} ({row['model']}) job {row['job_id']}", flush=True)
+        if not args.no_attach:
+            rt.attach(row["job_id"])
+    elif args.cmd == "orch-stop":
+        core.stop_orch(con, rt, args.orch_id)
+        print(f"stopped {args.orch_id}")
+    elif args.cmd == "ack":
         core.ack(con, args.task_id)
         print(f"acked {args.task_id}")
     elif args.cmd == "report":

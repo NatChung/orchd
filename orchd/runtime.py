@@ -15,7 +15,11 @@ import time
 import uuid
 from pathlib import Path
 
-WORKER_MODEL = "claude-opus-5-5"
+ORCHD_BIN = str(Path(__file__).resolve().parents[1] / "bin" / "orchd")
+
+MODELS = {"sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}
+DEFAULT_WORKER_MODEL = "sonnet"
+DEFAULT_ORCH_MODEL = "opus"
 
 
 def _bin(name, env_var):
@@ -117,11 +121,9 @@ class Runtime:
             raise RuntimeError("unsupported claude agents JSON format")
         return data
 
-    def start_worker(self, worktree, sock, brief):
-        cmd = [self.claude, "--bg", "--model", WORKER_MODEL, "--dangerously-skip-permissions",
-               "--messaging-socket-path", sock, "--settings", '{"crossSessionInbound":"accept"}',
-               "--append-system-prompt", brief]
-        out = self.run(cmd, cwd=worktree, timeout=60, check=False)
+    def start_claude(self, cwd, sock, model, extra_args):
+        cmd = [self.claude, "--bg", "--model", model, *extra_args, "--messaging-socket-path", sock]
+        out = self.run(cmd, cwd=cwd, timeout=60, check=False)
         match = re.search(r"claude attach ([a-zA-Z0-9-]+)", out.stdout)
         if not match:
             raise RuntimeError("claude --bg returned no job id: " + (out.stdout + out.stderr)[-500:])
@@ -132,6 +134,38 @@ class Runtime:
                 return job, agent["sessionId"]
             self.sleep(0.2)
         raise RuntimeError(f"claude job {job} did not publish its session and socket")
+
+    def start_worker(self, worktree, sock, brief, model):
+        return self.start_claude(worktree, sock, model, [
+            "--dangerously-skip-permissions", "--settings", '{"crossSessionInbound":"accept"}',
+            "--append-system-prompt", brief])
+
+    def orch_socket_path(self, orch_id):
+        directory = Path("/tmp") / f"orchd-o-{orch_id}"
+        directory.mkdir(mode=0o700, exist_ok=True)
+        directory.chmod(0o700)  # the session crashes before init on any other mode
+        return str(directory / "o.sock")
+
+    def start_orch(self, orch_id, model, orch_home):
+        orch_home = Path(orch_home)
+        sock = self.orch_socket_path(orch_id)
+        mcp = Path(sock).parent / "mcp.json"
+        mcp.write_text(json.dumps({"mcpServers": {"orchd": {
+            "command": "/usr/bin/python3", "args": [ORCHD_BIN, "mcp"], "env": {"ORCHD_ORCH_ID": orch_id}}}}))
+        try:
+            agents = (orch_home / "AGENTS.md").read_text()
+        except OSError:
+            agents = ""
+        prompt = f"You are an orchd Orch. Your orch id is {orch_id}. Instructions from AGENTS.md follow:\n{agents}"
+        settings = {"crossSessionInbound": "accept",
+                    "permissions": {"allow": ["Read", "Edit", "Write", "mcp__orchd"]}}
+        job, session = self.start_claude(orch_home, sock, model, [
+            "--restricted", "--permission-mode", "dontAsk", "--strict-mcp-config", "--mcp-config", str(mcp),
+            "--settings", json.dumps(settings), "--append-system-prompt", prompt])
+        return sock, job, session
+
+    def attach(self, job):
+        os.execvp(self.claude, [self.claude, "attach", job])
 
     def stop_worker(self, job):
         self.run([self.claude, "stop", job], timeout=30, check=False)

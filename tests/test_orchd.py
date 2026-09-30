@@ -25,7 +25,7 @@ class FakeRuntime:
         return Path("/projects") / repo
 
     def claude_trusted(self, repo_path):
-        return repo_path.name != "untrusted"
+        return Path(repo_path).name != "untrusted"
 
     def create_worktree(self, repo_path, repo, task_id):
         return "base123", f"orchd/{task_id}", f"/projects/.orchd-worktrees/{repo}-{task_id}"
@@ -33,9 +33,19 @@ class FakeRuntime:
     def socket_path(self, task_id):
         return f"/tmp/orchd-{task_id}/w.sock"
 
-    def start_worker(self, worktree, sock, brief):
-        self.brief = brief
+    def start_worker(self, worktree, sock, brief, model):
+        self.brief, self.model = brief, model
         return "job1", "session1"
+
+    def orch_socket_path(self, orch_id):
+        return f"/tmp/orchd-o-{orch_id}/o.sock"
+
+    def start_orch(self, orch_id, model, orch_home):
+        self.orch_started = (orch_id, model, str(orch_home))
+        return self.orch_socket_path(orch_id), "orchjob", "orchsession"
+
+    def attach(self, job):
+        self.attached = job
 
     def send_uds(self, path, session_id, text):
         self.sent.append((path, session_id, text))
@@ -186,6 +196,37 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(self.rt.removed, [t["worktree"]])
 
 
+class OrchTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.con = store.connect(Path(self.tmp.name) / "t.db")
+        self.rt = FakeRuntime()
+
+    def tearDown(self):
+        os.environ.pop("ORCHD_ORCH_HOME", None)
+        self.tmp.cleanup()
+
+    def test_start_orch_registers_claude_row_with_socket_and_session(self):
+        row = core.start_orch(self.con, self.rt, "opus")
+        self.assertRegex(row["id"], r"^o[0-9a-f]{7}$")
+        self.assertEqual((row["kind"], row["model"], row["session_id"], row["job_id"]),
+                         ("claude", "claude-opus-5-5", "orchsession", "orchjob"))
+        self.assertTrue(row["socket"].endswith("/o.sock"))
+        core.stop_orch(self.con, self.rt, row["id"])
+        self.assertEqual(self.rt.stopped, ["orchjob"])
+        self.assertIsNotNone(store.get_orch(self.con, row["id"])["stopped_at"])
+
+    def test_unknown_model_key_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "unknown model"):
+            core.start_orch(self.con, self.rt, "gpt")
+
+    def test_untrusted_orch_home_is_refused(self):
+        os.environ["ORCHD_ORCH_HOME"] = str(Path(self.tmp.name) / "untrusted")
+        with self.assertRaisesRegex(ValueError, "trust"):
+            core.start_orch(self.con, self.rt, "opus")
+        self.assertFalse(hasattr(self.rt, "orch_started"))
+
+
 class MigrationTest(unittest.TestCase):
     V1_TASKS = """CREATE TABLE tasks(id TEXT PRIMARY KEY, repo TEXT NOT NULL, repo_path TEXT NOT NULL,
         title TEXT NOT NULL, instructions TEXT NOT NULL, done_when TEXT NOT NULL, orch_thread TEXT NOT NULL,
@@ -234,6 +275,25 @@ class McpTest(unittest.TestCase):
         self.assertNotIn("isError", replies[2]["result"])
         (row,) = json.loads(replies[3]["result"]["content"][0]["text"])
         self.assertEqual(row["orch_thread"], "thread-X")
+
+    def test_env_orch_id_wins_over_meta_thread(self):
+        os.environ["ORCHD_ORCH_ID"] = "oabc1234"
+        self.addCleanup(os.environ.pop, "ORCHD_ORCH_ID", None)
+        replies = self.run_server({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "dispatch", "_meta": {"threadId": "thread-Z"},
+            "arguments": {"repo": "demo", "title": "T", "instructions": "i", "done_when": "d"}}},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "list_open", "arguments": {}}})
+        (row,) = json.loads(replies[1]["result"]["content"][0]["text"])
+        self.assertEqual(row["orch_thread"], "oabc1234")
+
+    def test_codex_thread_is_registered_lazily_as_codex(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        con = store.connect(Path(tmp.name) / "t.db")
+        mcp_server.serve(io.StringIO(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+            "name": "list_open", "_meta": {"threadId": "thread-C"}, "arguments": {}}}) + "\n"),
+            io.StringIO(), con, FakeRuntime())
+        self.assertEqual(store.get_orch(con, "thread-C")["kind"], "codex")
 
     def test_tool_errors_are_reported_not_raised(self):
         (reply,) = self.run_server({"jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": {

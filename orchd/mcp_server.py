@@ -1,9 +1,12 @@
 """Line-delimited JSON-RPC MCP server for the Orch session (stdio).
 
-The caller's thread id comes from `params._meta.threadId`, which both codex exec
-and the Desktop app send on every tools/call (verified 2026-09-29).
+The caller's id is `ORCHD_ORCH_ID` from the environment when set (a Claude Orch started by
+`orchd orch`; Claude Code sends no thread id). Otherwise it is `params._meta.threadId`, which both
+codex exec and the Desktop app send on every tools/call (verified 2026-09-29); such a Codex thread is
+registered as a codex Orch on its first call.
 """
 import json
+import os
 import sys
 import traceback
 
@@ -71,7 +74,11 @@ def handle(msg, con, rt):
         result = {"tools": TOOLS}
     elif method == "tools/call":
         meta = params.get("_meta") or {}
-        thread = meta.get("threadId") or (meta.get("x-codex-turn-metadata") or {}).get("thread_id")
+        thread = os.environ.get("ORCHD_ORCH_ID")
+        if not thread:
+            thread = meta.get("threadId") or (meta.get("x-codex-turn-metadata") or {}).get("thread_id")
+            if thread:
+                store.register_orch(con, thread, "codex")
         try:
             data = call(params.get("name"), params.get("arguments") or {}, thread, con, rt)
             result = {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False, indent=1)}]}
