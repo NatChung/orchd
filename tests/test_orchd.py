@@ -134,6 +134,35 @@ class CoreTest(unittest.TestCase):
         core.answer(self.con, self.rt, t["id"], "Nat: yes, send it")
         self.assertEqual(self.rt.sent[-1][2], f"[orchd answer {t['id']}]\nNat: yes, send it")
 
+    def test_progress_reaches_orch_inbox_and_keeps_task_running(self):
+        t = self.dispatch()
+        core.ack(self.con, t["id"])
+        self.assertTrue(core.progress(self.con, self.rt, t["id"], "found the channel\nmore detail"))
+        self.assertEqual(store.get_task(self.con, t["id"])["status"], "acked")
+        self.assertIn("progress: found the channel", self.rt.woken[-1][2])
+        self.assertEqual([m["kind"] for m in core.inbox(self.con, "thread-A")], ["ack", "progress"])
+
+    def test_brief_routes_progress_through_orchd_and_forbids_peer_messaging(self):
+        self.dispatch()
+        self.assertIn("progress <task-id>", self.rt.brief)
+        self.assertIn("Never use SendMessage", self.rt.brief)
+        self.assertIn("in the background", self.rt.brief)
+
+    def test_claude_orch_is_woken_over_its_socket(self):
+        store.register_orch(self.con, "o-claude", "claude", model="claude-opus-5-5",
+                            socket="/tmp/orchd-o-x/o.sock", session_id="orch-session")
+        t = self.dispatch("o-claude")
+        core.report(self.con, self.rt, t["id"], "done", "ok", "")
+        self.assertEqual(self.rt.woken, [])
+        path, session, text = self.rt.sent[-1]
+        self.assertEqual((path, session), ("/tmp/orchd-o-x/o.sock", "orch-session"))
+        self.assertIn("done: ok", text)
+
+    def test_unregistered_thread_falls_back_to_codex_queue(self):
+        t = self.dispatch("legacy-codex-thread")
+        core.report(self.con, self.rt, t["id"], "done", "ok", "")
+        self.assertEqual(self.rt.woken[-1][:2], ("/fake/codex", "legacy-codex-thread"))
+
     def test_list_open_spans_all_threads_and_shows_liveness(self):
         self.dispatch("thread-A")
         self.dispatch("thread-B")
@@ -155,6 +184,29 @@ class CoreTest(unittest.TestCase):
         t = self.dispatch()
         self.assertEqual(core.close(self.con, self.rt, t["id"])["worktree"], "removed")
         self.assertEqual(self.rt.removed, [t["worktree"]])
+
+
+class MigrationTest(unittest.TestCase):
+    V1_TASKS = """CREATE TABLE tasks(id TEXT PRIMARY KEY, repo TEXT NOT NULL, repo_path TEXT NOT NULL,
+        title TEXT NOT NULL, instructions TEXT NOT NULL, done_when TEXT NOT NULL, orch_thread TEXT NOT NULL,
+        codex_bin TEXT NOT NULL, base TEXT, branch TEXT, worktree TEXT, socket TEXT, job_id TEXT,
+        session_id TEXT, status TEXT NOT NULL, note TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL)"""
+
+    def test_v1_database_gains_new_columns_and_keeps_rows(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "v1.db"
+            old = sqlite3.connect(path)
+            old.execute(self.V1_TASKS)
+            old.execute("INSERT INTO tasks VALUES('abc','r','/p','T','i','d','th','/codex',NULL,NULL,NULL,NULL,"
+                        "NULL,NULL,'acked',NULL,1,1)")
+            old.commit()
+            old.close()
+            con = store.connect(path)
+            cols = {r["name"] for r in con.execute("PRAGMA table_info(tasks)")}
+            self.assertTrue({"model", "model_reason", "task_type", "rework_of", "outcome", "rating"} <= cols)
+            self.assertEqual(store.get_task(con, "abc")["status"], "acked")
+            store.connect(path)  # second connect is a no-op
 
 
 class McpTest(unittest.TestCase):

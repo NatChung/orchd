@@ -36,7 +36,24 @@ CREATE TABLE IF NOT EXISTS messages(
     created_at REAL NOT NULL,
     read_at REAL
 );
+CREATE TABLE IF NOT EXISTS orchs(
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    model TEXT,
+    socket TEXT,
+    session_id TEXT,
+    job_id TEXT,
+    created_at REAL NOT NULL,
+    stopped_at REAL
+);
 """
+
+# Columns added after v1. Nullable so old rows and old code keep working against the same DB.
+TASK_COLUMNS = ("model TEXT", "model_reason TEXT", "task_type TEXT", "rework_of TEXT",
+                "found_by TEXT", "outcome TEXT", "rating INTEGER")
+
+# Message kinds the Orch reads in its inbox; the rest (dispatch, answer, close, usage) are the event log.
+ORCH_KINDS = ("ack", "progress", "report", "question")
 
 # starting -> running -> acked -> done|blocked|question -> closed; failed if launch breaks.
 OPEN = ("starting", "running", "acked", "done", "blocked", "question", "failed")
@@ -53,6 +70,13 @@ def connect(path=None):
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
     con.executescript(SCHEMA)
+    have = {r["name"] for r in con.execute("PRAGMA table_info(tasks)")}
+    for column in TASK_COLUMNS:
+        if column.split()[0] not in have:
+            try:
+                con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+            except sqlite3.OperationalError:  # another process added it first
+                pass
     return con
 
 
@@ -87,6 +111,20 @@ def open_tasks(con):
     return con.execute(f"SELECT * FROM tasks WHERE status IN ({marks}) ORDER BY created_at", OPEN).fetchall()
 
 
+def get_orch(con, orch_id):
+    return con.execute("SELECT * FROM orchs WHERE id=?", (orch_id,)).fetchone()
+
+
+def register_orch(con, id, kind, model=None, socket=None, session_id=None, job_id=None):
+    con.execute("INSERT OR IGNORE INTO orchs(id,kind,model,socket,session_id,job_id,created_at) "
+                "VALUES(?,?,?,?,?,?,?)", (id, kind, model, socket, session_id, job_id, time.time()))
+    return get_orch(con, id)
+
+
+def stop_orch(con, orch_id):
+    con.execute("UPDATE orchs SET stopped_at=? WHERE id=?", (time.time(), orch_id))
+
+
 def add_message(con, task_id, kind, body, evidence=None):
     cur = con.execute("INSERT INTO messages(task_id,kind,body,evidence,created_at) VALUES(?,?,?,?,?)",
                       (task_id, kind, body, evidence, time.time()))
@@ -96,8 +134,8 @@ def add_message(con, task_id, kind, body, evidence=None):
 def unread_for_thread(con, thread):
     return con.execute(
         "SELECT m.*, t.repo, t.title, t.status FROM messages m JOIN tasks t ON t.id=m.task_id "
-        "WHERE t.orch_thread=? AND m.read_at IS NULL AND m.kind IN ('ack','report','question') "
-        "ORDER BY m.id", (thread,)).fetchall()
+        f"WHERE t.orch_thread=? AND m.read_at IS NULL AND m.kind IN ({','.join('?' * len(ORCH_KINDS))}) "
+        "ORDER BY m.id", (thread, *ORCH_KINDS)).fetchall()
 
 
 def mark_read(con, ids):

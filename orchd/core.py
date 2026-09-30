@@ -23,6 +23,12 @@ Rules:
 - Before any outward send (email, Slack, LINE, calendar, posting comments to people) show the exact
   preview through `{cli} ask <task-id> "<question with full preview>"` and wait for the answer message.
   Only an answer that arrives as `[orchd answer <task-id>]` counts as Nat's decision.
+- For anything before the end (progress the Orch asked for, findings, blockers that need Nat), send
+  `{cli} progress <task-id> "<text>"`. It reaches the Orch that dispatched you; the task keeps running.
+  Never use SendMessage or any other peer messaging to report: other sessions on this machine are not
+  your Orch, and whatever you send them is lost to it.
+- Run anything that may take longer than a minute or two in the background and wait for its completion
+  event; do not poll in a foreground loop. Never `pgrep -f` a pattern that your own command line contains.
 - Finish with exactly one `{cli} report <task-id> --status done|blocked --summary "<one line>" --evidence "<commits, PR URL, test commands and results, what is left undone>"`.
 - If you need a decision, use `{cli} ask`; do not report blocked for questions Nat can answer.
 - Report facts only; say what you did not verify."""
@@ -85,8 +91,12 @@ def _short(text, limit=160):
 
 def _wake(con, rt, task, message_id, line):
     text = f"[orchd] {task['repo']}/{task['id']} {line} — 請呼叫 orchd 的 inbox 工具讀取。"
+    orch = store.get_orch(con, task["orch_thread"])
     try:
-        rt.wake_orch(task["codex_bin"], task["orch_thread"], text)
+        if orch is not None and orch["kind"] == "claude":
+            rt.send_uds(orch["socket"], orch["session_id"], text)
+        else:  # Codex Orch, including tasks dispatched before orchs were registered
+            rt.wake_orch(task["codex_bin"], task["orch_thread"], text)
     except Exception as error:  # the message is already stored; list_open still shows it
         con.execute("UPDATE messages SET wake_error=? WHERE id=?", (f"{type(error).__name__}: {error}"[:500], message_id))
         return False
@@ -107,6 +117,13 @@ def report(con, rt, task_id, status, summary, evidence):
     mid = store.add_message(con, task_id, "report", f"{status}: {summary}", evidence)
     store.update_task(con, task_id, status=status)
     return _wake(con, rt, task, mid, f"{status}: {_short(summary)}")
+
+
+def progress(con, rt, task_id, text):
+    """Interim update the Orch asked for or should know; the task keeps running."""
+    task = store.get_task(con, task_id)
+    mid = store.add_message(con, task_id, "progress", text)
+    return _wake(con, rt, task, mid, f"progress: {_short(text.splitlines()[0] if text.strip() else text)}")
 
 
 def ask(con, rt, task_id, question):

@@ -4,6 +4,7 @@
   orchd mcp                                   run the MCP server for an Orch session (stdio)
   orchd ack ID                                worker: acknowledge a task
   orchd report ID --status done|blocked --summary S [--evidence E]
+  orchd progress ID "text"                    worker: interim update to the Orch; the task keeps running
   orchd ask ID "question with full preview"   worker: ask Orch/Nat and wait for an answer
   orchd list                                  show open tasks across all Orch sessions
   orchd close ID                              stop a task's worker and clean its worktree if safe
@@ -30,6 +31,9 @@ def main(argv=None):
     rep.add_argument("--status", required=True, choices=["done", "blocked"])
     rep.add_argument("--summary", required=True)
     rep.add_argument("--evidence", default="")
+    prog = sub.add_parser("progress")
+    prog.add_argument("task_id")
+    prog.add_argument("text")
     ask = sub.add_parser("ask")
     ask.add_argument("task_id")
     ask.add_argument("question")
@@ -48,6 +52,9 @@ def main(argv=None):
     elif args.cmd == "report":
         woke = core.report(con, rt, args.task_id, args.status, args.summary, args.evidence)
         print(f"reported {args.task_id}" + ("" if woke else " (stored; waking Orch failed, it will see it in list_open)"))
+    elif args.cmd == "progress":
+        woke = core.progress(con, rt, args.task_id, args.text)
+        print(f"progress sent on {args.task_id}" + ("" if woke else " (stored; waking Orch failed)"))
     elif args.cmd == "ask":
         woke = core.ask(con, rt, args.task_id, args.question)
         print(f"asked on {args.task_id}; wait for an [orchd answer {args.task_id}] message"
