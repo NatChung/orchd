@@ -86,6 +86,20 @@ class ListOpenHealthTest(unittest.TestCase):
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(store.get_task(self.con, t["id"])["status"], "acked")
 
+    def test_owner_and_worker_health_fields_coexist_and_listing_is_read_only(self):
+        store.register_orch(self.con, "thread-A", "claude", job_id="owner-job", session_id="s", socket="/o.sock")
+        t = self.dispatch()
+        core.ack(self.con, t["id"])
+        self.rt.jobs = {"job1": {"state": "working"}}
+        before, changes = self.snapshot(), self.con.total_changes
+        row = self.row(t["id"])
+        for key in ("owner_health", "notification_delivery", "worker_health", "worker_alive", "status", "branch"):
+            self.assertIn(key, row)
+        self.assertEqual(row["worker_health"], "alive")
+        self.assertEqual(row["owner_health"]["state"], "dead")  # owner-job is absent from the daemon
+        self.assertEqual(self.con.total_changes, changes)
+        self.assertEqual(self.snapshot(), before)
+
     def test_running_task_gone_from_daemon_is_orphan(self):
         t = self.dispatch()
         self.rt.jobs = {}
