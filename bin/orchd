@@ -8,7 +8,7 @@
   orchd report ID --status done|blocked --summary S [--evidence E]
   orchd progress ID "text"                    worker: interim update to the Orch; the task keeps running
   orchd ask ID "question with full preview"   worker: ask Orch/Nat and wait for an answer
-  orchd list                                  show open tasks across all Orch sessions
+  orchd list                                  open tasks, worker/Orch health, unread notification failures
   orchd watch [--since HH:MM]                 live timeline of Orch <-> worker messages
   orchd summary [--since HH:MM]               per Orch: workers, models, questions, parallelism, tokens
   orchd close ID                              stop a task's worker and clean its worktree if safe
