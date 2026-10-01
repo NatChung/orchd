@@ -29,6 +29,18 @@ def worker_kind(model):
     return "codex" if model and model.startswith("gpt-") else "claude"
 
 
+CLAUDE_DEAD_STATES = ("failed",)  # the only dead state observed so far (a reaped worker); "blocked" is alive, waiting
+
+
+def claude_job_alive(jobs, job_id):
+    """Liveness of a Claude job from one `live_jobs()` snapshot: None when the query failed or there is no job,
+    False when the daemon no longer lists it or lists it as dead."""
+    if jobs is None or not job_id:
+        return None
+    job = jobs.get(job_id)
+    return job is not None and (job or {}).get("state") not in CLAUDE_DEAD_STATES
+
+
 def launch_env():
     """Keep a parent Claude session's variables and Orch id out of the sessions we start (belt and braces:
     the Claude daemon may spawn --bg sessions from its own environment anyway)."""

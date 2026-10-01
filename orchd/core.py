@@ -5,8 +5,9 @@ import shlex
 import uuid
 from pathlib import Path
 
-from . import store
-from .runtime import DEFAULT_ORCH_MODEL, DEFAULT_WORKER_MODEL, MODELS, worker_kind
+from . import store, worker_health
+from .orch_health import owner_health
+from .runtime import DEFAULT_ORCH_MODEL, DEFAULT_WORKER_MODEL, MODELS, claude_job_alive, worker_kind
 
 ORCHD = str(Path(__file__).resolve().parents[1] / "bin" / "orchd")
 
@@ -150,8 +151,14 @@ def _short(text, limit=160):
     return cut + "…"
 
 
+def wake_text(task, line):
+    """Notification text; carries the task's stored model so the Orch can tell Claude from Codex workers."""
+    model = (task["model"] or "").strip() or "unknown"  # tasks dispatched before models were stored have none
+    return f"[orchd] {task['repo']}/{task['id']} ({model}) {line} — 請呼叫 orchd 的 inbox 工具讀取。"
+
+
 def _wake(con, rt, task, message_id, line):
-    text = f"[orchd] {task['repo']}/{task['id']} {line} — 請呼叫 orchd 的 inbox 工具讀取。"
+    text = wake_text(task, line)
     orch = store.get_orch(con, task["orch_thread"])
     try:
         if orch is not None and orch["kind"] == "claude":
@@ -227,17 +234,25 @@ def answer(con, rt, task_id, text):
 
 
 def list_open(con, rt):
-    jobs = rt.live_jobs()
+    try:
+        jobs = rt.live_jobs()
+    except Exception:  # a failed status probe is not proof an Orch has exited
+        jobs = None
     out = []
     for t in store.open_tasks(con):
         if worker_kind(t["model"]) == "codex":  # between turns there is no process, only a resumable thread
             alive = True if t["job_id"] and rt.pid_alive(t["job_id"]) else (
                 None if t["status"] in ("question", "done", "blocked") else False)
         else:
-            alive = None if jobs is None or not t["job_id"] else t["job_id"] in jobs
+            alive = claude_job_alive(jobs, t["job_id"])
         out.append(dict(task_id=t["id"], repo=t["repo"], title=t["title"], status=t["status"],
                         worker_alive=alive, worktree=t["worktree"], branch=t["branch"],
-                        orch_thread=t["orch_thread"], note=t["note"]))
+                        orch_thread=t["orch_thread"], note=t["note"],
+                        owner_health=owner_health(store.get_orch(con, t["orch_thread"]), jobs),
+                        notification_delivery=store.notification_delivery(con, t["id"]),
+                        **worker_health.assess(t["status"], alive, worker_health.has_report(con, t["id"]),
+                                               task_id=t["id"], worktree=t["worktree"], branch=t["branch"],
+                                               base=t["base"])))
     return out
 
 
