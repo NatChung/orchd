@@ -15,8 +15,15 @@ Every worker in a repo pushes as the same GitHub account, and GitHub refuses `gh
 Nat's 2026-10 decision to let this batch's independent review passes auto-merge is carried in those tasks'
 instructions, not in the generic brief.
 
-## Not changed here (remaining gap for #8)
+## Coverage and what is not verified
 
-The Orch's shared `AGENTS.md` / config (outside this repo) should get the same wording: dispatch review tasks as
-separate tasks, say explicitly "review and merge" only when merge is authorized, and ask for comment + SHA as
-evidence. That needs a follow-up edit by whoever owns those files, so #8 stays open (partial).
+Covered in this repo (source: `worker_brief` in `orchd/core.py`, tests in `tests/test_review_policy.py`):
+review task is separate from the author's task, verdict via `--comment` with the reviewed SHA, merge only when the
+review task says so, using `--match-head-commit`, `blocked` when GitHub still requires something.
+
+Covered by the instructions passed in for this batch (task text, not a file in this repo): independent review
+worker checks against `done_when` and merges only on PASS.
+
+Not verified: whether the Orch's shared `AGENTS.md` / config (outside this repo) already says the same or lacks
+it. Nobody has read it for this change, so no gap is claimed and no edit to it is requested here. If someone
+checks it and finds a concrete missing rule, open a separate issue with that evidence.
