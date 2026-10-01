@@ -164,13 +164,11 @@ def wake_text(task, line):
 
 
 def _wake(con, rt, task, message_id, line):
-    text = wake_text(task, line)
-    orch = store.get_orch(con, task["orch_thread"])
     try:
-        if orch is not None and orch["kind"] == "claude":
-            rt.send_uds(orch["socket"], orch["session_id"], text)
-        else:  # Codex Orch, including tasks dispatched before orchs were registered
-            rt.wake_orch(task["codex_bin"], task["orch_thread"], text)
+        with store.task_delivery(con, [task["id"]]):
+            task = store.get_task(con, task["id"])
+            con.execute("UPDATE messages SET recipient_orch=? WHERE id=?", (task["orch_thread"], message_id))
+            _notify_orch(con, rt, task["orch_thread"], task["codex_bin"], wake_text(task, line))
     except Exception as error:  # the message is already stored; list_open still shows it
         con.execute("UPDATE messages SET wake_error=? WHERE id=?", (f"{type(error).__name__}: {error}"[:500], message_id))
         return False
@@ -397,7 +395,9 @@ def adopt(con, rt, new_orch, task_ids=(), from_orch=None, force=False):
 
     An old owner that is alive or unknown is refused unless force; only a confirmed-dead one moves freely.
     Unknown is not live proof. The move commits first, then both Orchs are woken best-effort: a failed wake
-    never undoes or repeats the move, it is recorded on the event row.
+    never undoes or repeats the move. The result explicitly says committed, with notification failures
+    recorded on the event row (or returned if recording itself failed). Each wake is serialized with
+    further moves of those tasks; superseded acquisitions are omitted from the target's wake.
     """
     task_ids = list(dict.fromkeys(task_ids))
     if not task_ids and not from_orch:
@@ -431,49 +431,86 @@ def adopt(con, rt, new_orch, task_ids=(), from_orch=None, force=False):
         if t["orch_thread"] == new_orch:
             raise ValueError(f"task {t['id']} already belongs to {new_orch}")
     olds = {}
+    old_rows = {}
     for t in tasks:
         owner = t["orch_thread"]
         if owner not in olds:
-            olds[owner] = owner_health(store.get_orch(con, owner), jobs)
+            old_rows[owner] = store.get_orch(con, owner)
+            olds[owner] = owner_health(old_rows[owner], jobs)
     blocked = {o: h for o, h in olds.items() if h["state"] != "dead"}
     if blocked and not force:
         detail = ", ".join(f"{o} is {h['state']} ({h['reason']})" for o, h in blocked.items())
         raise ValueError(f"refusing to adopt: {detail}. Only a confirmed-dead owner moves without --force; "
                          "unknown is not proof the owner is gone")
-    moves = []
+    moves = store.AdoptionMoves(target, old_rows)
     for t in tasks:
         health = olds[t["orch_thread"]]
         body = f"adopted from {t['orch_thread']} ({health['state']}): {_adopt_summary(con, t)}"
         evidence = json.dumps(dict(from_orch=t["orch_thread"], to_orch=new_orch, forced=bool(force),
-                                   old_owner_health=health), ensure_ascii=False)
+                                   recipient_orch=new_orch, old_owner_health=health), ensure_ascii=False)
         moves.append((t["id"], t["orch_thread"], body, evidence))
     message_ids = store.move_task_orch(con, moves, new_orch)
     old_notices = {}
+    notification_errors = {}
+    error_recording_failures = {}
     for owner, health in olds.items():
         if health["state"] == "dead":
             continue  # confirmed dead: nobody to tell
         owned = [t for t in tasks if t["orch_thread"] == owner]
         text = (f"[orchd] Nat moved {len(owned)} task(s) from you to {new_orch}: "
                 + ", ".join(f"{t['repo']}/{t['id']}" for t in owned) + ". They are no longer yours.")
-        mid = store.add_message(con, owned[0]["id"], "adopt_notice", text,
-                                json.dumps(dict(old_orch=owner, task_ids=[t["id"] for t in owned])))
+        mid = None
         try:
-            _notify_orch(con, rt, owner, owned[0]["codex_bin"], text)
-            old_notices[owner] = True
+            with store.task_delivery(con, [t["id"] for t in owned]):
+                # Removal notices describe this event, and make no current-ownership claim if the
+                # old owner has since reacquired any of the tasks.
+                if any(store.get_task(con, t["id"])["orch_thread"] == owner for t in owned):
+                    text = text.replace("They are no longer yours.", "Historical transfer; check inbox for current ownership.")
+                mid = store.add_message(con, owned[0]["id"], "adopt_notice", text,
+                                        json.dumps(dict(old_orch=owner, to_orch=new_orch,
+                                                        recipient_orch=owner, task_ids=[t["id"] for t in owned])))
+                con.execute("UPDATE messages SET recipient_orch=? WHERE id=?", (owner, mid))
+                _notify_orch(con, rt, owner, owned[0]["codex_bin"], text)
+                old_notices[owner] = True
         except Exception as error:  # evidence stays queryable on the event row
-            con.execute("UPDATE messages SET wake_error=? WHERE id=?",
-                        (f"{type(error).__name__}: {error}"[:500], mid))
+            failure = f"{type(error).__name__}: {error}"[:500]
+            notification_errors[owner] = failure
+            try:
+                if mid is not None:
+                    con.execute("UPDATE messages SET wake_error=? WHERE id=?", (failure, mid))
+                else:  # notice INSERT failed after the transfer committed: use its durable adopt events
+                    con.executemany("UPDATE messages SET notice_error=?, notice_recipient=? WHERE id=?",
+                                    [(failure, owner, mid) for t, mid in zip(tasks, message_ids)
+                                     if t["orch_thread"] == owner])
+            except Exception as recording_error:
+                error_recording_failures[owner] = f"{type(recording_error).__name__}: {recording_error}"[:500]
             old_notices[owner] = False
-    text = (f"[orchd] adopted {len(tasks)} task(s) from "
-            + ", ".join(sorted(olds)) + ": " + ", ".join(f"{t['repo']}/{t['id']}" for t in tasks)
-            + " — 請呼叫 orchd 的 inbox 工具讀取。")
+    superseded = None
+    current = tasks
+    new_owner_error = None
     try:
-        _notify_orch(con, rt, new_orch, tasks[0]["codex_bin"], text)
-        new_woken = True
+        with store.task_delivery(con, [t["id"] for t in tasks]):
+            current = [t for t in tasks if store.get_task(con, t["id"])["orch_thread"] == new_orch]
+            superseded = [t["id"] for t in tasks if t not in current]
+            # Never announce a stale acquisition. The committed events stay in history; only tasks
+            # still owned by the target are included in its current acquisition wake.
+            if current:
+                text = (f"[orchd] adopted {len(current)} task(s) from "
+                        + ", ".join(sorted({t["orch_thread"] for t in current})) + ": "
+                        + ", ".join(f"{t['repo']}/{t['id']}" for t in current)
+                        + " — 請呼叫 orchd 的 inbox 工具讀取。")
+                _notify_orch(con, rt, new_orch, current[0]["codex_bin"], text)
+            new_woken = bool(current)
     except Exception as error:
         new_woken = False
-        con.executemany("UPDATE messages SET wake_error=? WHERE id=?",
-                        [(f"{type(error).__name__}: {error}"[:500], m) for m in message_ids])
-    return dict(adopted=[t["id"] for t in tasks], to_orch=new_orch, forced=bool(force),
+        new_owner_error = f"{type(error).__name__}: {error}"[:500]
+        try:
+            con.executemany("UPDATE messages SET wake_error=? WHERE id=?",
+                            [(new_owner_error, mid) for t, mid in zip(tasks, message_ids) if t in current])
+        except Exception as recording_error:
+            error_recording_failures[new_orch] = f"{type(recording_error).__name__}: {recording_error}"[:500]
+    return dict(committed=True, adopted=[t["id"] for t in tasks], to_orch=new_orch, forced=bool(force),
+                superseded=superseded, notification_errors=notification_errors,
+                new_owner_error=new_owner_error, error_recording_failures=error_recording_failures,
                 from_orch={o: h["state"] for o, h in olds.items()},
                 new_owner_health=target_health, new_owner_woken=new_woken, old_owner_notified=old_notices)
