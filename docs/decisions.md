@@ -132,5 +132,5 @@
 - 持久化：沒有 schema migration。排隊答案是 `messages` 的 `kind=answer_queued` 列，`read_at` 為送出時間（NULL = 待送）；送出時再照舊寫 `kind=answer` 列。`answer_queued` 不在 `ORCH_KINDS`，不進 Orch inbox。MCP server / 機器重啟後排隊仍在。
 - 不重複、不覆蓋：檢查 worker 是否閒置、領取排隊列、spawn resume、更新 `job_id` 都在同一個 `BEGIN IMMEDIATE` 交易裡；spawn 失敗就 rollback。兩個 MCP process 同時 flush 只會有一個開回合。
 - close：已 close 的 task 不收也不送；排隊中的答案保留在 DB（可查），永遠不 dispatch。鎖內會再檢查一次 status。
-- Orch 的責任：看到 `queued`，等該 worker 下一次 progress / ask / report 叫醒並讀完 inbox 後，呼叫 `answer(flush=true)`（或帶新 text）。寫在 MCP `answer` 工具描述裡；`inbox`、`list_open` 不顯示 pending（不在 #12 範圍）。
+- Orch 的責任：看到 `queued`，等該 worker 下一次 progress / ask / report 叫醒並讀完 inbox 後，呼叫 `answer(flush=true)`（或帶新 text）。例外：task 在 `question` 狀態時拿到 `queued`，表示 worker 已經 ask、只是程序還沒退出，之後不會再叫醒 Orch；Orch 要稍後主動 `flush=true`（或等 `list_open` 的 `worker_alive` 變 null）。寫在 MCP `answer` 工具描述裡；`inbox`、`list_open` 不顯示 pending（不在 #12 範圍）。
 - 沒做：不自動送出（worker 回合結束後沒有東西觸發）、沒有 TTL / cancel、沒用 `codex queue`（只在 Desktop session 驗證過，對 `exec` thread 未驗證）。

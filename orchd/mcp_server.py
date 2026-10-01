@@ -49,7 +49,10 @@ TOOLS = [
                     "queues the answer (status queued: stored, NOT yet seen by the worker). Nothing sends queued "
                     "answers by itself: whenever that worker next reports, asks or sends progress and you read the "
                     "inbox, call answer with flush=true (or with a new text) to send every pending answer, oldest "
-                    "first, in one turn. failed: the turn could not start; the answers stay queued, retry with "
+                    "first, in one turn. If you get queued while the task is in status question, the worker already asked "
+                    "and is only finishing its exit, so no further wake will come: retry flush=true after a short "
+                    "wait, or once list_open shows worker_alive null. failed: the turn could not start; the answers "
+                    "stay queued, retry with "
                     "flush=true instead of resending the text. flush=true with no text also just shows pending.",
      "inputSchema": {"type": "object", "required": ["task_id"], "properties": {
          "task_id": {"type": "string"}, "text": {"type": "string", "description": "The answer; omit only with flush"},
