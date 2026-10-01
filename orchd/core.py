@@ -201,29 +201,64 @@ def inbox(con, orch_thread):
                  body=r["body"], evidence=r["evidence"], task_status=r["status"]) for r in rows]
 
 
-def answer(con, rt, task_id, text):
+class _ResumeFailed(Exception):
+    pass
+
+
+def answer(con, rt, task_id, text=None, flush=False):
+    """Deliver an answer, or queue it while a Codex worker is mid-turn.
+
+    Returns {status: delivered|queued|failed, delivered: n, pending: n}. A Codex worker cannot take a message
+    mid-turn, so its answers wait in FIFO order until a later `answer` (or `flush=True`) finds it between
+    turns; they then go out together as one new turn. Nothing else sends them (see docs/decisions.md)."""
     task = store.get_task(con, task_id)
     if task["status"] == "closed":
         raise ValueError(f"task {task_id} is closed")
-    message = f"[orchd answer {task_id}]\n{text}"
-    if worker_kind(task["model"]) == "codex":
-        if not task["session_id"] or not task["worktree"]:
-            raise ValueError(f"task {task_id} has no codex thread")
-        for _ in range(120):  # `orchd ask` wakes the Orch before the worker's turn has finished exiting
-            if not (task["job_id"] and rt.pid_alive(task["job_id"])):
-                break
-            rt.sleep(0.5)
-        else:
-            raise ValueError(f"task {task_id}'s codex worker is still in a turn; answer after it asks or reports")
-        job = rt.resume_codex_worker(task["worktree"], rt.codex_log(task_id), task["session_id"], message,
-                                     task["model"])
-        store.update_task(con, task_id, job_id=job)
-    else:
+    if text is None and not flush:
+        raise ValueError("answer needs text, or flush=true to send queued answers")
+    if worker_kind(task["model"]) != "codex":
+        if text is None:
+            return dict(status="delivered", delivered=0, pending=0)
         if not task["socket"] or not task["session_id"]:
             raise ValueError(f"task {task_id} has no running worker")
-        rt.send_uds(task["socket"], task["session_id"], message)
-    store.add_message(con, task_id, "answer", text)
-    store.update_task(con, task_id, status="acked")
+        rt.send_uds(task["socket"], task["session_id"], f"[orchd answer {task_id}]\n{text}")
+        store.add_message(con, task_id, "answer", text)
+        store.update_task(con, task_id, status="acked")
+        return dict(status="delivered", delivered=1, pending=0)
+    if not task["session_id"] or not task["worktree"]:
+        raise ValueError(f"task {task_id} has no codex thread")
+    if text is not None:  # stored before any attempt, so a busy turn or a failed resume loses nothing
+        store.add_message(con, task_id, store.QUEUED, text)
+    for _ in range(120):  # `orchd ask` wakes the Orch before the worker's turn has finished exiting
+        if not (task["job_id"] and rt.pid_alive(task["job_id"])):
+            break
+        rt.sleep(0.5)
+        task = store.get_task(con, task_id)
+    try:
+        with store.immediate(con):
+            task = store.get_task(con, task_id)  # re-read under the lock: another call may have resumed or closed
+            if task["status"] == "closed":
+                raise ValueError(f"task {task_id} is closed; its queued answers stay undelivered")
+            pending = store.pending_answers(con, task_id)
+            if not pending:  # nothing waits, even if a concurrent flush sent this call's text
+                return dict(status="delivered", delivered=0, pending=0)
+            if task["job_id"] and rt.pid_alive(task["job_id"]):
+                return dict(status="queued", delivered=0, pending=len(pending))
+            message = "\n\n".join(f"[orchd answer {task_id}]\n{row['body']}" for row in pending)
+            try:
+                job = rt.resume_codex_worker(task["worktree"], rt.codex_log(task_id), task["session_id"], message,
+                                             task["model"])
+            except Exception as error:
+                raise _ResumeFailed(error) from error
+            store.mark_read(con, [row["id"] for row in pending])
+            for row in pending:
+                store.add_message(con, task_id, "answer", row["body"])
+            store.update_task(con, task_id, job_id=job, status="acked")
+    except _ResumeFailed as failed:  # rolled back: every answer is still queued for the next flush
+        error = failed.__cause__
+        return dict(status="failed", delivered=0, pending=len(store.pending_answers(con, task_id)),
+                    error=f"{type(error).__name__}: {error}"[:500])
+    return dict(status="delivered", delivered=len(pending), pending=0)
 
 
 def list_open(con, rt):

@@ -3,6 +3,7 @@ import os
 import sqlite3
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 SCHEMA = """
@@ -141,3 +142,25 @@ def unread_for_thread(con, thread):
 def mark_read(con, ids):
     now = time.time()
     con.executemany("UPDATE messages SET read_at=? WHERE id=?", [(now, i) for i in ids])
+
+
+# Answers to a Codex worker that is mid-turn wait here (kind=answer_queued, read_at = delivered at) until the
+# Orch flushes them into the worker's next turn. Plain message rows, so no schema change.
+QUEUED = "answer_queued"
+
+
+@contextmanager
+def immediate(con):
+    """Hold SQLite's write lock for the block, so two `answer` calls cannot both resume the same thread."""
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        yield
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
+    con.execute("COMMIT")
+
+
+def pending_answers(con, task_id):
+    return con.execute("SELECT * FROM messages WHERE task_id=? AND kind=? AND read_at IS NULL ORDER BY id",
+                       (task_id, QUEUED)).fetchall()

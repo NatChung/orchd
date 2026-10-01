@@ -110,7 +110,7 @@
 - Luna 延後：GPT-6 Luna 便宜（$0.10/$0.50），但 Terminal-Bench 4.0 只有 13%，worker 主要做 shell/git/PR，不適合。有 Codex worker 後加 Luna 只需在 `MODELS` 多一行，要用時拿實際任務比較。
 - 設計：`codex exec` 沒有 `--bg`，一次只跑一個回合就結束。所以 Codex worker 是同一個 thread 上的一串程序：派工時 `codex exec --json`（brief＋任務放在同一個 prompt，因為沒有 `--append-system-prompt`；不寫 AGENTS.md 進 worktree，否則 worktree 一直是 dirty），回答時 `codex exec resume <thread>`。`session_id` 存 thread id，`job_id` 存目前回合的 pid，`socket` 為空。沒有另開欄位，worker 種類由 model 前綴 `gpt-` 判斷。
 - 跟 Claude worker 的行為差異：
-  - `orchd ask` 之後 Codex worker 要結束回合（不是等待）；答案以新回合送達。回合進行中 `answer` 會被拒。
+  - `orchd ask` 之後 Codex worker 要結束回合（不是等待）；答案以新回合送達。回合進行中的 `answer` 改為排隊（#12，見下節）。
   - 長指令在前景跑、給足 timeout：回合結束程序就結束，背景工作結束時沒有東西叫醒它。
   - `list_open` 的 `worker_alive`：pid 還在 = true；已 ask / report 而沒有程序 = null（可 resume）；其他情況沒有程序 = false（回合中途結束、沒有回報）。
   - `view_worker` 回合中會被拒；回合之間開 Ghostty 跑 `codex resume <thread>`。
@@ -119,3 +119,18 @@
   - `exec resume` 不帶 `-m` 會改用 config.toml 的預設 model（實測變成 Astra），所以每次 resume 都帶任務的 model。
   - MCP server 是長時間跑的 process，spawn 出來的 codex 結束後會變成 zombie，`kill(pid, 0)` 仍然成功；`pid_alive` 先用 `waitpid(WNOHANG)` 收掉。
 - 端到端（2026-09-30，scratch repo＋本機 bare remote，worker 為 GPT-6.1 Sol）：dispatch → ack → commit、push -u → report；另一個任務 ask → answer 走 `exec resume` → report → close（worktree 移除、usage 已記錄）。Orch thread 是假的，所以叫醒 Orch 記為 wake_error，符合預期。review 修正後在同一個 process 內重跑 ask → answer：兩個回合都是 gpt-6.1-sol。還沒從真正的 Orch（MCP）派過。
+
+## Codex worker 回合中的 answer 排隊（#12，2026-10-02）
+- 問題：`codex exec` 回合中收不到訊息，`answer` 等 60 秒後報 `still in a turn`，Orch 的指示送不進去。
+- 決定（Nat 選 A：lazy flush）：沒有 daemon、沒有 per-turn wrapper；排隊的答案只在 Orch 之後再呼叫 `answer` 時送出。
+- 交付契約：`answer(task_id, text?, flush?)` 回傳 `{status, delivered, pending}`。
+  - `queued`：已存進 DB，worker 還沒看到；task status 不變。
+  - `delivered`：沒有任何答案在排隊（`delivered` = 這次呼叫送出的則數，可能是 0：例如 flush 時沒有東西、或另一個呼叫已經一起送出）。
+  - `failed`：`exec resume` 起不來（附 `error`）；所有答案仍在排隊，用 `flush=true` 重試，不要重送 text。
+  - `text` 與 `flush` 至少要有一個；`flush=true` 不帶 text 也可用來查 pending。Claude worker 行為不變（UDS 直送，失敗照舊拋錯；`flush` 無事可做，回 delivered 0）。
+- 送出規則：仍保留最多 60 秒等待（`orchd ask` 叫醒 Orch 時 worker 回合還沒退出的 race）；回合已結束就把所有排隊答案依 FIFO（舊到新）加上本次 text，合成一個 resume 訊息，每段前綴 `[orchd answer <id>]`，只開一個回合。
+- 持久化：沒有 schema migration。排隊答案是 `messages` 的 `kind=answer_queued` 列，`read_at` 為送出時間（NULL = 待送）；送出時再照舊寫 `kind=answer` 列。`answer_queued` 不在 `ORCH_KINDS`，不進 Orch inbox。MCP server / 機器重啟後排隊仍在。
+- 不重複、不覆蓋：檢查 worker 是否閒置、領取排隊列、spawn resume、更新 `job_id` 都在同一個 `BEGIN IMMEDIATE` 交易裡；spawn 失敗就 rollback。兩個 MCP process 同時 flush 只會有一個開回合。
+- close：已 close 的 task 不收也不送；排隊中的答案保留在 DB（可查），永遠不 dispatch。鎖內會再檢查一次 status。
+- Orch 的責任：看到 `queued`，等該 worker 下一次 progress / ask / report 叫醒並讀完 inbox 後，呼叫 `answer(flush=true)`（或帶新 text）。寫在 MCP `answer` 工具描述裡；`inbox`、`list_open` 不顯示 pending（不在 #12 範圍）。
+- 沒做：不自動送出（worker 回合結束後沒有東西觸發）、沒有 TTL / cancel、沒用 `codex queue`（只在 Desktop session 驗證過，對 `exec` thread 未驗證）。
