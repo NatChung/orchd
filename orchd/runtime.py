@@ -288,6 +288,12 @@ class Runtime:
         except (OSError, ValueError):
             pass
 
+    def codex_running(self, pid):
+        """True while `pid` is still a codex process; a reused pid running something else does not count."""
+        if not pid or not self.pid_alive(pid):
+            return False
+        return "codex" in self.run(["ps", "-p", str(pid), "-o", "comm="], check=False).stdout
+
     def codex_usage(self, thread):
         """Token totals from the thread's rollout, mapped onto Claude's fields (codex input includes cached)."""
         root = Path(os.environ.get("ORCHD_CODEX_SESSIONS", Path.home() / ".codex" / "sessions"))

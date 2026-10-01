@@ -62,6 +62,16 @@ TOOLS = [
      "description": "Open a Ghostty window attached to a task's worker so Nat can watch or type. A Codex worker opens only "
                     "between turns, as `codex resume`; do not answer it while Nat is typing there.",
      "inputSchema": {"type": "object", "required": ["task_id"], "properties": {"task_id": {"type": "string"}}}},
+    {"name": "retry",
+     "description": "Replace a task's worker with a new one on the same worktree and branch, keeping all its local work "
+                    "(uncommitted, untracked, stash, commits). Any model is allowed: the same model, an upgrade, a "
+                    "downgrade or the other vendor; the from -> to change and your reason are recorded. Stops only "
+                    "that task's worker and starts nothing if it does not stop. Refused for closed tasks or a "
+                    "missing worktree. The new worker gets the task, its latest progress/report and your reason.",
+     "inputSchema": {"type": "object", "required": ["task_id", "model", "reason"], "properties": {
+         "task_id": {"type": "string"},
+         "model": {"type": "string", "enum": list(MODELS)},
+         "reason": {"type": "string", "description": "Why this worker is being replaced and why this model"}}}},
 ]
 
 
@@ -88,6 +98,10 @@ def call(name, args, thread, con, rt):
         return core.close(con, rt, args["task_id"], args.get("outcome"), args.get("rating"))
     if name == "view_worker":
         return core.view(con, rt, args["task_id"])
+    if name == "retry":
+        t = core.retry(con, rt, args["task_id"], args.get("model"), args.get("reason"))
+        return {"task_id": t["id"], "status": t["status"], "model": t["model"], "branch": t["branch"],
+                "worktree": t["worktree"]}
     raise ValueError(f"unknown tool {name}")
 
 

@@ -331,3 +331,123 @@ def stop_orch(con, rt, orch_id):
     if orch["job_id"]:
         rt.stop_worker(orch["job_id"])
     store.stop_orch(con, orch_id)
+
+
+RETRY_STOP_WAIT = 20  # polls of 0.5s: bounded so an MCP call never hangs on a worker that will not stop
+
+
+def _retry_failed(con, task_id, stage, error, **fields):
+    store.add_message(con, task_id, "retry_failed", json.dumps(dict(stage=stage, error=error[:500], **fields),
+                                                              ensure_ascii=False))
+
+
+def _worker_quiescent(rt, task):
+    """Stop exactly this task's worker once, then confirm it is gone; never touch any other job or pid."""
+    job = task["job_id"]
+    if not job:
+        return True
+    if worker_kind(task["model"]) == "codex":
+        gone = lambda: not rt.codex_running(job)  # noqa: E731
+        stop = rt.stop_codex
+    else:  # None means the job probe failed, which does not prove the worker stopped
+        gone = lambda: claude_job_alive(rt.live_jobs(), job) is False  # noqa: E731
+        stop = rt.stop_worker
+    if gone():
+        return True
+    stop(job)
+    for _ in range(RETRY_STOP_WAIT):
+        if gone():
+            return True
+        rt.sleep(0.5)
+    return False
+
+
+def _record_session_usage(con, rt, task, source):
+    """Usage of one worker session, tagged with its session id so a later close or retry never counts it twice."""
+    session = task["session_id"]
+    if not session:
+        return
+    for row in con.execute("SELECT body FROM messages WHERE task_id=? AND kind='usage'", (task["id"],)):
+        try:
+            if json.loads(row["body"]).get("session_id") == session:
+                return
+        except (ValueError, AttributeError):
+            continue
+    try:
+        usage = (rt.codex_usage if worker_kind(task["model"]) == "codex" else rt.claude_usage)(session)
+    except Exception:  # usage is bookkeeping; never block a retry
+        return
+    if usage:
+        store.add_message(con, task["id"], "usage", json.dumps(
+            dict(model=task["model"], session_id=session, job_id=task["job_id"], source=source, **usage)))
+
+
+def retry_message(con, task, from_model, to_model, reason):
+    latest = {kind: con.execute("SELECT body, evidence FROM messages WHERE task_id=? AND kind=? "
+                                "ORDER BY id DESC LIMIT 1", (task["id"], kind)).fetchone()
+              for kind in ("progress", "report")}
+    lines = [f"Latest {kind}: {row['body']}" + (f"\nEvidence: {row['evidence']}" if row["evidence"] else "")
+             for kind, row in latest.items() if row]
+    history = "\n".join(lines) or "The previous worker sent no progress or report."
+    return task_message(task) + f"""
+
+[orchd retry {task['id']}]
+You replace the previous worker of this task: {from_model} -> {to_model}. A retry on the same model is valid.
+Reason: {reason}
+{history}
+The previous worker may have left uncommitted, untracked, stashed or committed work in this worktree and branch.
+Keep all of it: inspect it with git status, git log and git stash list first, and never reset, clean, drop or
+overwrite it. Continue the same task with the instructions and done_when above.
+
+Start with: {worker_cli()} ack {task['id']}"""
+
+
+def retry(con, rt, task_id, model, reason):
+    """Replace a task's worker on the same worktree and branch with any model, recording from -> to and why."""
+    task = store.get_task(con, task_id)
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("retry needs a non-empty reason")
+    _choice("model", model, tuple(MODELS))
+    if task["status"] == "closed":
+        raise ValueError(f"task {task_id} is closed")
+    if task["status"] == "starting":
+        raise ValueError(f"task {task_id} is still starting its first worker")
+    worktree = task["worktree"]
+    if not worktree or not rt.exists(worktree):
+        raise ValueError(f"task {task_id} has no worktree to continue in ({worktree or 'none recorded'})")
+    to_model, kind = MODELS[model], worker_kind(MODELS[model])
+    if kind == "claude" and not rt.claude_trusted(task["repo_path"]):
+        raise ValueError(f"Claude has not trusted {task['repo_path']}. Ask Nat to run `claude` there once and "
+                         "accept the trust prompt, then retry again.")
+    from_model = task["model"]
+    old = dict(old_model=from_model, old_job_id=task["job_id"], old_session_id=task["session_id"])
+    if not _worker_quiescent(rt, task):
+        _retry_failed(con, task_id, "stop", f"worker {task['job_id']} is still running", to_model=to_model,
+                      reason=reason, **old)
+        raise ValueError(f"task {task_id}'s worker {task['job_id']} did not stop; no new worker was started")
+    _record_session_usage(con, rt, task, "retry")
+    attempt = con.execute("SELECT COUNT(*) FROM messages WHERE task_id=? AND kind IN ('retry','retry_failed')",
+                          (task_id,)).fetchone()[0] + 1
+    directory = Path(rt.socket_path(task_id)).parent  # a fresh socket and log per attempt: the old ones are stale
+    prompt = retry_message(con, task, from_model, to_model, reason)
+    try:
+        if kind == "codex":
+            job, session = rt.start_codex_worker(worktree, str(directory / f"codex-r{attempt}.jsonl"),
+                                                 worker_brief(worker_cli(), kind) + "\n\n" + prompt, to_model)
+            store.update_task(con, task_id, model=to_model, job_id=job, session_id=session, socket=None,
+                              status="running")
+        else:
+            sock = str(directory / f"w-r{attempt}.sock")
+            job, session = rt.start_worker(worktree, sock, worker_brief(worker_cli()), to_model)
+            store.update_task(con, task_id, model=to_model, job_id=job, session_id=session, socket=sock,
+                              status="running")  # stored before sending so a later close or retry stops it
+            rt.send_uds(sock, session, prompt)
+    except Exception as error:  # keep the worktree, branch and data; the task can be retried again
+        text = f"{type(error).__name__}: {error}"
+        _retry_failed(con, task_id, "spawn", text, to_model=to_model, reason=reason, **old)
+        store.update_task(con, task_id, status="failed", note=f"retry failed: {text}"[:1000])
+        raise
+    store.add_message(con, task_id, "retry", json.dumps(
+        dict(from_model=from_model, to_model=to_model, reason=reason, new_job_id=job, new_session_id=session,
+             **old), ensure_ascii=False))
+    return store.get_task(con, task_id)
