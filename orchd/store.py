@@ -134,7 +134,7 @@ def add_message(con, task_id, kind, body, evidence=None):
 
 def unread_for_thread(con, thread):
     return con.execute(
-        "SELECT m.*, t.repo, t.title, t.status FROM messages m JOIN tasks t ON t.id=m.task_id "
+        "SELECT m.*, t.repo, t.title, t.status, t.model FROM messages m JOIN tasks t ON t.id=m.task_id "
         f"WHERE t.orch_thread=? AND m.read_at IS NULL AND m.kind IN ({','.join('?' * len(ORCH_KINDS))}) "
         "ORDER BY m.id", (thread, *ORCH_KINDS)).fetchall()
 
