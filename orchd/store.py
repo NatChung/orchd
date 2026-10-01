@@ -138,6 +138,35 @@ def unread_for_thread(con, thread):
         "ORDER BY m.id", (thread, *ORCH_KINDS)).fetchall()
 
 
+def notification_delivery(con, task_id):
+    """Public inbox metadata only: never read/return body, evidence or raw errors.
+
+An error prefix can contain private text too. Return only a known built-in
+exception class name (including queue subprocess errors), otherwise 'unknown'.
+"""
+    import builtins
+    import subprocess
+
+    marks = ','.join('?' * len(ORCH_KINDS))
+    where = f"task_id=? AND read_at IS NULL AND kind IN ({marks})"
+    counts = con.execute(
+        f"SELECT COUNT(*) AS unread, COUNT(wake_error) AS failed FROM messages WHERE {where}",
+        (task_id, *ORCH_KINDS)).fetchone()
+    latest = con.execute(
+        "SELECT id,kind,created_at,substr(wake_error,1,instr(wake_error,':')-1) AS error_type "
+        f"FROM messages WHERE {where} AND wake_error IS NOT NULL ORDER BY id DESC LIMIT 1",
+        (task_id, *ORCH_KINDS)).fetchone()
+    failure = None
+    if latest is not None:
+        name = latest["error_type"]
+        error_class = getattr(builtins, name, None) or getattr(subprocess, name, None)
+        safe = isinstance(error_class, type) and issubclass(error_class, Exception)
+        failure = dict(message_id=latest["id"], kind=latest["kind"], created_at=latest["created_at"],
+                       error_type=name if safe else "unknown")
+    return dict(unread_count=counts["unread"], unread_wake_failed_count=counts["failed"],
+                latest_unread_wake_failure=failure)
+
+
 def mark_read(con, ids):
     now = time.time()
     con.executemany("UPDATE messages SET read_at=? WHERE id=?", [(now, i) for i in ids])

@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 
 from . import store
+from .orch_health import owner_health
 from .runtime import DEFAULT_ORCH_MODEL, DEFAULT_WORKER_MODEL, MODELS, worker_kind
 
 ORCHD = str(Path(__file__).resolve().parents[1] / "bin" / "orchd")
@@ -227,7 +228,10 @@ def answer(con, rt, task_id, text):
 
 
 def list_open(con, rt):
-    jobs = rt.live_jobs()
+    try:
+        jobs = rt.live_jobs()
+    except Exception:  # a failed status probe is not proof an Orch has exited
+        jobs = None
     out = []
     for t in store.open_tasks(con):
         if worker_kind(t["model"]) == "codex":  # between turns there is no process, only a resumable thread
@@ -237,7 +241,9 @@ def list_open(con, rt):
             alive = None if jobs is None or not t["job_id"] else t["job_id"] in jobs
         out.append(dict(task_id=t["id"], repo=t["repo"], title=t["title"], status=t["status"],
                         worker_alive=alive, worktree=t["worktree"], branch=t["branch"],
-                        orch_thread=t["orch_thread"], note=t["note"]))
+                        orch_thread=t["orch_thread"], note=t["note"],
+                        owner_health=owner_health(store.get_orch(con, t["orch_thread"]), jobs),
+                        notification_delivery=store.notification_delivery(con, t["id"])))
     return out
 
 

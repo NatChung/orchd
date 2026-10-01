@@ -40,7 +40,11 @@ TOOLS = [
     {"name": "list_open",
      "description": "List every task that is not closed, across all Orch sessions, with worker liveness. "
                     "worker_alive null: unknown, or a Codex worker between turns (it asked or reported and can "
-                    "still be answered); false: its process ended without a report.",
+                    "still be answered); false: its process ended without a report. "
+                    "owner_health is independent: alive/dead from a successful Claude job probe, unknown "
+                    "when unverified (including Codex owners). notification_delivery shows unread counts "
+                    "and safe wake-failure metadata without consuming inbox or revealing message content. "
+                    "This does not adopt tasks or change their owner.",
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "answer",
      "description": "Send an answer to a worker's question. For outward sends, pass Nat's decision verbatim. "
