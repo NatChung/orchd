@@ -121,6 +121,30 @@ class OrchHealthTest(unittest.TestCase):
         self.assertEqual(owner_health(owner, {"other": {"state": "failed"}}),
                          {"state": "dead", "reason": "job_absent"})
 
+    def test_failed_owner_job_with_live_process_evidence_is_not_dead(self):
+        owner = self.owner()
+        for status in ("idle", "waiting", "busy"):
+            with self.subTest(status=status):  # official mapper: live session + settled failed -> state failed + pid
+                jobs = {owner["job_id"]: {"state": "failed", "pid": 4242, "status": status}}
+                self.assertEqual(owner_health(owner, jobs), {"state": "alive", "reason": "job_present"})
+
+    def test_failed_owner_job_with_partial_or_bad_evidence_is_unknown(self):
+        owner = self.owner()
+        for extra in ({"pid": 4242}, {"status": "idle"}, {"pid": "4242", "status": "idle"},
+                      {"pid": True, "status": "idle"}, {"pid": 0, "status": "idle"},
+                      {"pid": 4242, "status": "newstatus"}, {"pid": None, "status": "idle"}):
+            with self.subTest(extra=extra):
+                jobs = {owner["job_id"]: {"state": "failed", **extra}}
+                self.assertEqual(owner_health(owner, jobs),
+                                 {"state": "unknown", "reason": "job_failed_unverified"})
+
+    def test_failed_owner_job_without_pid_or_status_is_dead_only_with_valid_query(self):
+        owner = self.owner()  # shape of the 15 real `claude agents --json --all` failed entries: no pid
+        jobs = {owner["job_id"]: {"state": "failed", "reapedMidWorkAt": "2026-10-01T11:04:36Z"}}
+        self.assertEqual(owner_health(owner, jobs), {"state": "dead", "reason": "job_failed"})
+        self.assertEqual(owner_health(owner, None), {"state": "unknown", "reason": "runtime_unavailable"})
+        self.assertEqual(owner_health(owner, []), {"state": "unknown", "reason": "runtime_invalid"})
+
     def test_stopped_at_is_bookkeeping_not_liveness_proof_and_is_preserved(self):
         self.owner()
         self.task()

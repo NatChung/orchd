@@ -4,6 +4,8 @@ Registry timestamps are bookkeeping, not liveness proof. Claude job membership
 is the available probe; Codex threads have no equivalent probe here.
 """
 
+LIVE_STATUSES = ("idle", "waiting", "busy")
+
 
 def owner_health(orch, jobs):
     state, reason = "unknown", "owner_unregistered"
@@ -21,12 +23,21 @@ def owner_health(orch, jobs):
         ):
             reason = "runtime_invalid"
         elif orch["job_id"] in jobs:
-            # Only an explicit terminal "failed" entry (no pid in the CLI JSON) is dead; done/idle
-            # and unknown states stay alive rather than guessed.
-            if jobs[orch["job_id"]].get("state") == "failed":
-                state, reason = "dead", "job_failed"
-            else:
+            # `state` is the task outcome, not process liveness: per
+            # https://code.claude.com/docs/en/agent-view#list-sessions-as-json pid/status appear only while the
+            # process is alive, and the CLI mapper can emit state=failed with a live pid + status idle/waiting.
+            # So failed is dead only when the entry carries no live-process evidence at all; evidence we cannot
+            # read is unknown, never guessed. pids are not probed locally (reuse proves nothing about identity).
+            entry = jobs[orch["job_id"]]
+            if entry.get("state") != "failed":
                 state, reason = "alive", "job_present"
+            elif entry.get("pid") is None and entry.get("status") is None:
+                state, reason = "dead", "job_failed"
+            elif (isinstance(entry.get("pid"), int) and not isinstance(entry["pid"], bool)
+                  and entry["pid"] > 0 and entry.get("status") in LIVE_STATUSES):
+                state, reason = "alive", "job_present"
+            else:
+                state, reason = "unknown", "job_failed_unverified"
         else:
             state, reason = "dead", "job_absent"
     return {"state": state, "reason": reason}
