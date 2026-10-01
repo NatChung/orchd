@@ -268,10 +268,13 @@ class CloseSubmoduleTest(unittest.TestCase):
         self.rt.jobs = RuntimeError("claude agents: daemon unreachable")
         self.assert_close_pending("efgh5678", wt, "job-x")
 
-    def test_listed_job_without_a_pid_is_not_taken_as_stopped(self):
+    def test_listed_job_with_live_process_evidence_is_not_taken_as_stopped(self):
         wt = self.plain_task(job_id="job-x")
-        self.rt.jobs = {"job-x": dict(state="blocked", pid=None)}  # seen live for a never-stopped orch session
-        self.assert_close_pending("efgh5678", wt, "pid unknown")
+        self.rt.stop_result = subprocess.CompletedProcess(["claude", "stop"], 1, "", "synthetic stop failure")
+        for listing, text in ((dict(state="failed", pid=os.getpid(), status="idle"), "failed, pid"),
+                              (dict(state="working", pid=None, status="busy"), "status busy")):
+            self.rt.jobs = {"job-x": listing}
+            self.assert_close_pending("efgh5678", wt, text)
 
     def test_stop_timeout_keeps_worktree_and_reports_stderr(self):
         wt = self.plain_task(job_id="job-x")
@@ -284,8 +287,8 @@ class CloseSubmoduleTest(unittest.TestCase):
         self.rt.stop_result = subprocess.CompletedProcess(["claude", "stop"], 1, "", "no such job")
         dead = subprocess.Popen(["true"])
         dead.wait()
-        for listing in ({}, {"job-gone": dict(state="failed", pid=os.getpid())},
-                        {"job-gone": dict(state="working", pid=dead.pid)}):
+        for listing in ({}, {"job-gone": dict(state="blocked")}, {"job-gone": dict(state="failed")},
+                        {"job-gone": dict(state="working", pid=dead.pid, status="busy")}):
             self.rt.jobs = listing
             self.rt.stop_task_worker("claude", "job-gone")
         self.assertEqual(core.close(self.con, self.rt, "efgh5678")["worktree"], "removed")

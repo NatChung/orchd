@@ -335,11 +335,14 @@ class Runtime:
         for _ in range(max(1, int(wait / 0.5))):
             jobs = self.live_jobs()
             listed = jobs.get(job) if jobs is not None else None
-            if jobs is not None and (listed is None or claude_job_alive(jobs, job) is False
+            if jobs is not None and (listed is None or (listed.get("pid") is None and listed.get("status") is None)
                                      or (listed.get("pid") and not self.pid_alive(listed["pid"]))):
-                return None  # stopped jobs drop out of the list; a listed job with no pid is not proof of anything
+                # stopped jobs drop out of the list, and pid/status are listed only while the process is alive
+                # (https://code.claude.com/docs/en/agent-view#list-sessions-as-json). `state` is the task outcome:
+                # state=failed can still carry a live pid, so it proves nothing here.
+                return None
             state = ("job list unavailable" if jobs is None else
-                     f"still listed as {listed.get('state')}, pid {listed.get('pid') or 'unknown'}")
+                     f"still listed as {listed.get('state')}, pid {listed.get('pid')}, status {listed.get('status')}")
             self.sleep(0.5)
         raise RuntimeError(f"claude worker {job} not confirmed stopped ({state}); claude stop: {stop_note}")
 
