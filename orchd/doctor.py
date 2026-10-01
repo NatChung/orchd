@@ -19,6 +19,11 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+try:  # Python 3.11+. Without it TOML cannot be judged: reported unknown, never guessed with regex
+    import tomllib
+except ImportError:  # pragma: no cover - depends on interpreter
+    tomllib = None
+
 PASS, FAIL, WARN, UNKNOWN = "pass", "fail", "warn", "unknown"
 REQUIRED, OPTIONAL, PROFILE = "required", "optional", "profile"
 
@@ -161,35 +166,90 @@ class Doctor:
         else:
             self.add("codex login", OPTIONAL, FAIL, f"not logged in (exit {rc})", SETUP_HINTS["codex-login"])
 
-    def _claude_trusted(self, path):
+    def _claude_json(self):
+        """(data, problem). problem is why ~/.claude.json cannot be judged; None when data is a usable dict."""
+        cfg = self.home / ".claude.json"
         try:
-            data = json.loads((self.home / ".claude.json").read_text())
+            data = json.loads(cfg.read_text())
+        except FileNotFoundError:
+            return None, f"{cfg} missing"
         except PermissionError:
+            return None, f"no permission to read {cfg}"
+        except OSError as exc:
+            return None, f"cannot read {cfg} ({type(exc).__name__})"
+        except ValueError:
+            return None, f"{cfg} is not valid JSON"
+        if not isinstance(data, dict):
+            return None, f"{cfg} is not a JSON object"
+        if not isinstance(data.get("projects", {}), dict):
+            return None, f"{cfg} has a malformed `projects` entry"
+        return data, None
+
+    def _claude_trusted(self, path):
+        """True / False when ~/.claude.json answers for this path; None (with self._claude_problem) when it cannot."""
+        data, problem = self._claude_json()
+        self._claude_problem = problem
+        if problem:
             return None
-        except (OSError, ValueError):
+        entry = (data.get("projects") or {}).get(str(path))
+        if entry is None:
             return False
-        return bool((data.get("projects") or {}).get(str(path), {}).get("hasTrustDialogAccepted"))
+        if not isinstance(entry, dict):
+            self._claude_problem = f"project entry for {path} is malformed"
+            return None
+        flag = entry.get("hasTrustDialogAccepted", False)
+        if not isinstance(flag, bool):
+            self._claude_problem = f"hasTrustDialogAccepted for {path} is not a boolean"
+            return None
+        return flag
 
     def check_orch_home(self):
         home = self.orch_home
         if not home.is_dir():
-            self.add("orch home", REQUIRED, FAIL, f"{home} missing",
+            self.add("orch home", REQUIRED, FAIL, f"{home} is not a directory" if home.exists() else f"{home} missing",
                      f"Create {home} with an AGENTS.md (see CONTEXT.md: Orch 家).")
             return
         try:
             (home / "AGENTS.md").read_text()
             self.add("orch home", REQUIRED, PASS, f"{home} has AGENTS.md")
-        except FileNotFoundError:
-            self.add("orch home", REQUIRED, FAIL, f"{home}/AGENTS.md missing", "Add the Orch's AGENTS.md.")
+        except (FileNotFoundError, IsADirectoryError):
+            self.add("orch home", REQUIRED, FAIL, f"{home}/AGENTS.md missing or not a file", "Add the Orch's AGENTS.md.")
         except OSError as exc:
             self.add("orch home", REQUIRED, UNKNOWN, f"cannot read {home}/AGENTS.md ({type(exc).__name__})")
         trusted = self._claude_trusted(home)
         if trusted is None:
-            self.add("orch home trusted in Claude", REQUIRED, UNKNOWN, "no permission to read ~/.claude.json")
+            self.add("orch home trusted in Claude", REQUIRED, UNKNOWN, f"not verified: {self._claude_problem}")
         else:
             self.add("orch home trusted in Claude", REQUIRED, PASS if trusted else FAIL,
                      "trusted" if trusted else f"{home} not trusted", "" if trusted else SETUP_HINTS["orch-trust"])
         self.check_codex_config(home)
+
+    HOME_PREFIX = re.compile(r"(?<![\w.~/-])/(?:Users|home)/[^/\s\"']+")
+
+    def _foreign_homes(self, text):
+        """Home-dir prefixes found in `text` that are not this machine's home. Only the prefix is returned."""
+        own = str(self.home)
+        text = re.sub(re.escape(own) + r"(?=/|$|[\s\"'])", "<home>", text)  # this machine's own home is fine
+        return {m.group(0) for m in self.HOME_PREFIX.finditer(text)}
+
+    def _mcp_foreign_homes(self, servers):
+        """{server name: foreign home prefixes} from command / args / cwd only; env and other fields are never read."""
+        found = {}
+        if not isinstance(servers, dict):
+            return found
+        for name, spec in servers.items():
+            if not isinstance(spec, dict):
+                continue
+            parts = [spec.get("command"), spec.get("cwd")]
+            args = spec.get("args")
+            parts += args if isinstance(args, list) else []
+            homes = set()
+            for part in parts:
+                if isinstance(part, str):
+                    homes |= self._foreign_homes(part)
+            if homes:
+                found[str(name)] = homes
+        return found
 
     def check_codex_config(self, home):
         cfg = self.home / ".codex" / "config.toml"
@@ -197,23 +257,71 @@ class Doctor:
             text = cfg.read_text()
         except FileNotFoundError:
             self.add("orch home trusted in Codex", OPTIONAL, WARN, f"{cfg} missing (only needed for Astra/Codex)")
-            return
+            codex = None
         except OSError as exc:
             self.add("orch home trusted in Codex", OPTIONAL, UNKNOWN, f"cannot read {cfg} ({type(exc).__name__})")
-            return
-        sections = re.findall(r'^\[projects\."([^"]+)"\]\s*\n((?:(?!\[).*\n?)*)', text, re.M)
-        trusted = {p for p, body in sections if re.search(r'trust_level\s*=\s*"trusted"', body)}
-        self.add("orch home trusted in Codex", OPTIONAL, PASS if str(home) in trusted else WARN,
-                 "trusted" if str(home) in trusted else f"{home} not trusted in {cfg}",
-                 "" if str(home) in trusted else "Add it to ~/.codex/config.toml yourself (trust_level = \"trusted\").")
-        stale = sorted(p for p in trusted if re.match(r"^/(Users|home)/[^/]+/", p)
-                       and not p.startswith(str(self.home) + "/") and p != str(self.home))
-        if stale:
-            self.add("codex config paths match this home", OPTIONAL, WARN,
-                     f"{len(stale)} trusted path(s) point at another home dir, e.g. {stale[0]}",
-                     "Fix those paths by hand if this config was copied from another machine.")
+            codex = None
         else:
-            self.add("codex config paths match this home", OPTIONAL, PASS, f"all under {self.home}")
+            codex = self._parse_toml(text)
+            if isinstance(codex, str):
+                self.add("orch home trusted in Codex", OPTIONAL, UNKNOWN, f"not verified: {codex}")
+            else:
+                projects = codex.get("projects")
+                projects = projects if isinstance(projects, dict) else {}
+                entry = projects.get(str(home))
+                ok = isinstance(entry, dict) and entry.get("trust_level") == "trusted"
+                self.add("orch home trusted in Codex", OPTIONAL, PASS if ok else WARN,
+                         "trusted" if ok else f"{home} not trusted in {cfg}",
+                         "" if ok else "Add it to ~/.codex/config.toml yourself (trust_level = \"trusted\").")
+        self.check_config_paths(codex, cfg)
+
+    @staticmethod
+    def _parse_toml(text):
+        """dict, or a short reason string when the text cannot be parsed."""
+        if tomllib is None:
+            return "this Python has no tomllib (3.11+); TOML is not guessed with regex"
+        try:
+            data = tomllib.loads(text)
+        except tomllib.TOMLDecodeError:
+            return "config.toml is not valid TOML"
+        return data
+
+    def check_config_paths(self, codex, codex_cfg):
+        """Trusted project keys and MCP command/args/cwd (Codex + Claude user/project) must not name another home."""
+        stale, problems, sources = {}, [], []
+        if isinstance(codex, dict):
+            sources.append("codex")
+            projects = codex.get("projects") if isinstance(codex.get("projects"), dict) else {}
+            for p, body in projects.items():
+                if isinstance(body, dict) and body.get("trust_level") == "trusted":
+                    for h in self._foreign_homes(p):
+                        stale.setdefault("trusted project path", set()).add(h)
+            for n, h in self._mcp_foreign_homes(codex.get("mcp_servers")).items():
+                stale[f"codex MCP {n}"] = h
+        elif isinstance(codex, str):
+            problems.append(f"codex: {codex}")
+        data, problem = self._claude_json()
+        if data is not None:
+            sources.append("claude")
+            for n, h in self._mcp_foreign_homes(data.get("mcpServers")).items():
+                stale[f"claude user MCP {n}"] = h
+            for path, entry in (data.get("projects") or {}).items():
+                if isinstance(entry, dict):
+                    for n, h in self._mcp_foreign_homes(entry.get("mcpServers")).items():
+                        stale[f"claude project MCP {n}"] = h
+        elif not problem.endswith("missing"):
+            problems.append(f"claude: {problem}")
+        if stale:
+            first, homes = sorted(stale.items())[0]
+            self.add("config paths match this home", OPTIONAL, WARN,
+                     f"{len(stale)} entry(ies) name another home dir, e.g. {first} -> {sorted(homes)[0]}",
+                     "Fix those paths by hand if this config was copied from another machine.")
+        elif problems or not sources:
+            self.add("config paths match this home", OPTIONAL, UNKNOWN,
+                     "not verified: " + ("; ".join(problems) if problems else "no readable config source"))
+        else:
+            self.add("config paths match this home", OPTIONAL, PASS,
+                     f"trusted paths and MCP command/args/cwd checked in {', '.join(sources)}: all under {self.home}")
 
     def check_repos_trust(self):
         try:
@@ -221,13 +329,17 @@ class Doctor:
         except FileNotFoundError:
             self.add("projects dir", REQUIRED, FAIL, f"{self.projects} missing", f"mkdir {self.projects}")
             return
-        except PermissionError:
-            self.add("projects dir", REQUIRED, UNKNOWN, f"no permission to list {self.projects}")
+        except NotADirectoryError:
+            self.add("projects dir", REQUIRED, FAIL, f"{self.projects} is a file, not a directory",
+                     f"Remove it and mkdir {self.projects}")
+            return
+        except OSError as exc:
+            self.add("projects dir", REQUIRED, UNKNOWN, f"cannot list {self.projects} ({type(exc).__name__})")
             return
         self.add("projects dir", REQUIRED, PASS, f"{self.projects}: {len(repos)} repos")
         state = [(r, self._claude_trusted(r)) for r in repos]
         if any(t is None for _, t in state):
-            self.add("repos trusted in Claude", OPTIONAL, UNKNOWN, "no permission to read ~/.claude.json")
+            self.add("repos trusted in Claude", OPTIONAL, UNKNOWN, f"not verified: {self._claude_problem}")
             return
         untrusted = [r.name for r, t in state if not t]
         self.add("repos trusted in Claude", OPTIONAL, WARN if untrusted else PASS,
@@ -236,9 +348,15 @@ class Doctor:
 
     def check_data_dir(self):
         d = self.data_dir
+        if d.exists() and not d.is_dir():
+            self.add("orchd data dir", REQUIRED, FAIL, f"{d} exists but is not a directory",
+                     f"Move {d} away so orchd can create its data dir.")
+            return
         target = d if d.exists() else d.parent
         if not target.exists():
             self.add("orchd data dir", REQUIRED, FAIL, f"{d} cannot be created ({target} missing)")
+        elif not target.is_dir():
+            self.add("orchd data dir", REQUIRED, FAIL, f"{d} cannot be created ({target} is not a directory)")
         elif os.access(target, os.W_OK | os.X_OK):
             self.add("orchd data dir", REQUIRED, PASS, f"{d} {'exists' if d.exists() else 'will be created'}")
         else:
@@ -309,12 +427,21 @@ class Doctor:
         keys = [k for k in keys if k.suffix != ".pub"]
         self.add("nat: ssh keys", PROFILE, PASS if len(keys) >= 4 else WARN, f"{len(keys)} id_ed25519* key files (expect 4)")
         cfgdir = self.home / ".config" / "ariontechs-ops"
-        tokens = sorted(cfgdir.glob("token-*.json")) if cfgdir.is_dir() else []
-        self.add("nat: email tokens", PROFILE, PASS if tokens else WARN,
-                 f"{len(tokens)} token file(s) present (contents not read)")
+        # credential locations per connectors/*/ops.py; existence of a regular file only, content never read
+        for label, pattern in (("email tokens", "token-*.json"), ("slack tokens", "slack-token-*.json"),
+                               ("line token", "line-token.json")):
+            try:
+                found = [p for p in sorted(cfgdir.glob(pattern)) if p.is_file()] if cfgdir.is_dir() else []
+            except OSError as exc:
+                self.add(f"nat: {label}", PROFILE, UNKNOWN, f"cannot list {cfgdir} ({type(exc).__name__})")
+                continue
+            self.add(f"nat: {label}", PROFILE, PASS if found else WARN,
+                     f"{len(found)} {pattern} file(s) present (contents not read)" if found
+                     else f"no {pattern} under {cfgdir}")
         for tool in ("slack-tools", "line-tools"):
             p = self.home / "projects" / "nat-assistant" / "connectors" / tool
-            self.add(f"nat: {tool}", PROFILE, PASS if p.is_dir() else WARN, "present" if p.is_dir() else f"{p} missing")
+            self.add(f"nat: {tool} code", PROFILE, PASS if p.is_dir() else WARN,
+                     "present" if p.is_dir() else f"{p} missing (code only; credentials checked above)")
 
     def run_all(self):
         self.check_cli_and_flags()

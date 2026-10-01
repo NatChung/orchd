@@ -10,6 +10,7 @@ from orchd import doctor
 HELP_FULL = "Usage: claude\n  --bg, --background\n  --messaging-socket-path <p>\n"
 HELP_BG = "Usage: claude\n  --bg, --background\n"
 SECRET = "sk-ant-SECRET-TOKEN-123"
+needs_toml = unittest.skipIf(doctor.tomllib is None, "no tomllib on this Python; doctor reports unknown")
 
 
 def make_runner(overrides=None):
@@ -154,6 +155,151 @@ class RequiredChecks(DoctorCase):
         self.assertEqual(d.checks[0].status, doctor.FAIL)
 
 
+class Boundaries(DoctorCase):
+    """Review f291526e: source missing/malformed/wrong-shaped is unknown; a wrong file type is a known fail;
+    one broken source never stops the other checks and never turns into a pass."""
+
+    def trust(self, by):
+        return by["orch home trusted in Claude"]
+
+    def test_missing_claude_json_is_unknown_not_fail(self):
+        (self.home / ".claude.json").unlink()
+        d, by = self.run_doctor()
+        self.assertEqual(self.trust(by).status, doctor.UNKNOWN)
+        self.assertIn("missing", self.trust(by).detail)
+        self.assertEqual(doctor.exit_code(d.checks), 2)
+
+    def test_malformed_claude_json_is_unknown(self):
+        (self.home / ".claude.json").write_text("{not json")
+        _, by = self.run_doctor()
+        self.assertEqual(self.trust(by).status, doctor.UNKNOWN)
+        self.assertEqual(by["repos trusted in Claude"].status, doctor.UNKNOWN)
+
+    def test_claude_json_wrong_shapes_do_not_crash(self):
+        for body in ('[]', '"x"', '{"projects": []}', '{"projects": "x"}',
+                     json.dumps({"projects": {str(self.orch): "x"}})):
+            (self.home / ".claude.json").write_text(body)
+            _, by = self.run_doctor()
+            self.assertEqual(self.trust(by).status, doctor.UNKNOWN, body)
+
+    def test_trust_flag_must_be_a_real_boolean(self):
+        for value, status in ((True, doctor.PASS), (False, doctor.FAIL), ("false", doctor.UNKNOWN),
+                              ("true", doctor.UNKNOWN), (1, doctor.UNKNOWN), (None, doctor.UNKNOWN)):
+            (self.home / ".claude.json").write_text(json.dumps(
+                {"projects": {str(self.orch): {"hasTrustDialogAccepted": value}}}))
+            _, by = self.run_doctor()
+            self.assertEqual(self.trust(by).status, status, repr(value))
+
+    def test_absent_project_entry_is_known_untrusted(self):
+        (self.home / ".claude.json").write_text(json.dumps({"projects": {}}))
+        _, by = self.run_doctor()
+        self.assertEqual(self.trust(by).status, doctor.FAIL)
+
+    @needs_toml
+    def test_codex_comment_does_not_count_as_trust(self):
+        (self.home / ".codex" / "config.toml").write_text(
+            f'[projects."{self.orch}"]\n# trust_level = "trusted"\ntrust_level = "untrusted"\n')
+        _, by = self.run_doctor()
+        self.assertEqual(by["orch home trusted in Codex"].status, doctor.WARN)
+
+    def test_invalid_toml_is_unknown_not_pass(self):
+        (self.home / ".codex" / "config.toml").write_text(
+            f'[projects."{self.orch}"\ntrust_level = "trusted"\n')
+        _, by = self.run_doctor()
+        self.assertEqual(by["orch home trusted in Codex"].status, doctor.UNKNOWN)
+        self.assertEqual(by["config paths match this home"].status, doctor.UNKNOWN)
+
+    def test_no_tomllib_is_unknown_never_regex_pass(self):
+        real = doctor.tomllib
+        doctor.tomllib = None
+        self.addCleanup(setattr, doctor, "tomllib", real)
+        _, by = self.run_doctor()
+        self.assertEqual(by["orch home trusted in Codex"].status, doctor.UNKNOWN)
+        self.assertIn("tomllib", by["orch home trusted in Codex"].detail)
+        self.assertEqual(by["config paths match this home"].status, doctor.UNKNOWN)
+
+    @needs_toml
+    def test_codex_mcp_command_with_old_home_is_flagged_without_secrets(self):
+        (self.home / ".codex" / "config.toml").write_text(
+            f'[projects."{self.orch}"]\ntrust_level = "trusted"\n\n'
+            '[mcp_servers.cg]\ncommand = "/Users/oldmac/.local/bin/codegraph"\n'
+            f'args = ["--token", "{SECRET}"]\nenv = {{ KEY = "{SECRET}" }}\n')
+        d, by = self.run_doctor()
+        c = by["config paths match this home"]
+        self.assertEqual(c.status, doctor.WARN)
+        self.assertIn("/Users/oldmac", c.detail)
+        self.assertIn("codex MCP cg", c.detail)
+        self.assertNotIn(SECRET, doctor.render(d.checks) + json.dumps([x.as_dict() for x in d.checks]))
+
+    def test_claude_user_and_project_mcp_paths_are_checked(self):
+        (self.home / ".claude.json").write_text(json.dumps({
+            "projects": {str(self.orch): {"hasTrustDialogAccepted": True,
+                                          "mcpServers": {"p": {"command": "node", "args": ["/home/olduser/s.js"]}}}}}))
+        _, by = self.run_doctor()
+        self.assertEqual(by["config paths match this home"].status, doctor.WARN)
+        self.assertIn("/home/olduser", by["config paths match this home"].detail)
+        (self.home / ".claude.json").write_text(json.dumps({
+            "projects": {}, "mcpServers": {"u": {"command": "/Users/oldmac/bin/x"}}}))
+        _, by = self.run_doctor()
+        self.assertIn("claude user MCP u", by["config paths match this home"].detail)
+
+    @needs_toml
+    def test_mcp_under_this_home_passes_and_names_what_was_checked(self):
+        (self.home / ".codex" / "config.toml").write_text(
+            f'[projects."{self.orch}"]\ntrust_level = "trusted"\n\n'
+            f'[mcp_servers.cg]\ncommand = "{self.home}/.local/bin/codegraph"\n')
+        _, by = self.run_doctor()
+        c = by["config paths match this home"]
+        self.assertEqual(c.status, doctor.PASS)
+        self.assertIn("MCP", c.detail)
+
+    def test_projects_path_that_is_a_regular_file_fails_and_others_continue(self):
+        f = self.home / "projfile"
+        f.write_text("x")
+        d = doctor.Doctor(runner=make_runner(), home=self.home, env={}, projects=f, tmp_root=str(self.sock_root),
+                          data_dir=self.home / "data", which=lambda n: n)
+        d.run_all()
+        by = {c.name: c for c in d.checks}
+        self.assertEqual(by["projects dir"].status, doctor.FAIL)
+        self.assertIn("socket dir (0700)", by)
+        self.assertIn("orchd data dir", by)
+        self.assertEqual(doctor.exit_code(d.checks), 1)
+
+    def test_data_dir_that_is_a_regular_file_fails(self):
+        f = self.home / "datafile"
+        f.write_text("user data")
+        d = doctor.Doctor(runner=make_runner(), home=self.home, env={}, data_dir=f)
+        d.check_data_dir()
+        self.assertEqual(d.checks[0].status, doctor.FAIL)
+        self.assertEqual(f.read_text(), "user data")  # user data untouched
+        g = self.home / "under-file" / "data"
+        (self.home / "under-file").write_text("x")
+        d = doctor.Doctor(runner=make_runner(), home=self.home, env={}, data_dir=g)
+        d.check_data_dir()
+        self.assertEqual(d.checks[0].status, doctor.FAIL)
+
+    def test_orch_home_that_is_a_file_fails(self):
+        f = self.home / "orchfile"
+        f.write_text("x")
+        d = doctor.Doctor(runner=make_runner(), home=self.home, env={}, orch_home=f)
+        d.check_orch_home()
+        self.assertEqual(d.checks[0].status, doctor.FAIL)
+
+    def test_empty_connector_dirs_and_token_dirs_are_not_credentials(self):
+        conn = self.home / "projects" / "nat-assistant" / "connectors"
+        (conn / "slack-tools").mkdir(parents=True)
+        (conn / "line-tools").mkdir(parents=True)
+        d, by = self.run_doctor(profile="nat")
+        for name in ("nat: slack tokens", "nat: line token", "nat: email tokens"):
+            self.assertEqual(by[name].status, doctor.WARN, name)
+        cfg = self.home / ".config" / "ariontechs-ops"
+        (cfg / "slack-token-x.json").mkdir(parents=True)  # a directory is not a token
+        (cfg / "line-token.json").mkdir()
+        _, by = self.run_doctor(profile="nat")
+        self.assertEqual(by["nat: slack tokens"].status, doctor.WARN)
+        self.assertEqual(by["nat: line token"].status, doctor.WARN)
+
+
 class OptionalChecks(DoctorCase):
     def test_missing_integrations_only_warn(self):
         d, by = self.run_doctor({("codex", "--version"): FileNotFoundError("codex"),
@@ -181,12 +327,13 @@ class OptionalChecks(DoctorCase):
         self.assertIn("repoB", by["repos trusted in Claude"].detail)
         self.assertNotIn("repoA", by["repos trusted in Claude"].detail)
 
+    @needs_toml
     def test_codex_config_with_other_machines_home_warns(self):
         (self.home / ".codex" / "config.toml").write_text(
             f'[projects."{self.orch}"]\ntrust_level = "trusted"\n\n'
             '[projects."/Users/someoneelse/projects/x"]\ntrust_level = "trusted"\n')
         _, by = self.run_doctor()
-        self.assertEqual(by["codex config paths match this home"].status, doctor.WARN)
+        self.assertEqual(by["config paths match this home"].status, doctor.WARN)
         self.assertEqual(by["orch home trusted in Codex"].status, doctor.PASS)
 
     def test_gh_partial_accounts_pass_with_broken_listed(self):
@@ -215,9 +362,12 @@ class ProfileAndSecrets(DoctorCase):
         cfg = self.home / ".config" / "ariontechs-ops"
         cfg.mkdir(parents=True)
         (cfg / "token-a.json").write_text(SECRET)
+        (cfg / "slack-token-a.json").write_text(SECRET)
+        (cfg / "line-token.json").write_text(SECRET)
         d, by = self.run_doctor(profile="nat")
         self.assertEqual(by["nat: ssh host aliases"].status, doctor.PASS)
-        self.assertEqual(by["nat: email tokens"].status, doctor.PASS)
+        for name in ("nat: email tokens", "nat: slack tokens", "nat: line token"):
+            self.assertEqual(by[name].status, doctor.PASS, name)
         self.assertNotIn(SECRET, json.dumps([c.as_dict() for c in d.checks]))
 
     def test_output_never_contains_secrets(self):
