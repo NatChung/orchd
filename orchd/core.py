@@ -6,7 +6,7 @@ import uuid
 from pathlib import Path
 
 from . import store
-from .runtime import DEFAULT_ORCH_MODEL, DEFAULT_WORKER_MODEL, MODELS, worker_kind
+from .runtime import DEFAULT_ORCH_MODEL, DEFAULT_WORKER_MODEL, MODELS, redact, worker_kind
 
 ORCHD = str(Path(__file__).resolve().parents[1] / "bin" / "orchd")
 
@@ -261,20 +261,30 @@ def close(con, rt, task_id, outcome=None, rating=None):
         _choice("outcome", outcome, OUTCOMES)
     if rating is not None and (isinstance(rating, bool) or not isinstance(rating, int) or not 1 <= rating <= 3):
         raise ValueError("rating must be an integer 1-3")
-    store.add_message(con, task_id, "close", json.dumps(dict(outcome=outcome, rating=rating)))
-    store.update_task(con, task_id, outcome=outcome, rating=rating)
+    fields = {k: v for k, v in (("outcome", outcome), ("rating", rating)) if v is not None}
+    if fields:
+        store.update_task(con, task_id, **fields)
     if task["job_id"]:
         (rt.stop_codex if worker_kind(task["model"]) == "codex" else rt.stop_worker)(task["job_id"])
     kept = None
     if task["worktree"]:
-        removable, reason = rt.worktree_state(task["worktree"], task["base"])
-        if removable:
-            rt.remove_worktree(task["repo_path"], task["worktree"])
-        else:
-            kept = reason
+        try:
+            removable, reason = rt.worktree_state(task["worktree"], task["base"])
+            if removable:
+                rt.remove_worktree(task["repo_path"], task["worktree"])
+            else:
+                kept = reason
+        except Exception as e:  # not closed: status stays as it was, so close can simply be run again
+            detail = redact(str(e))
+            store.update_task(con, task_id, note=f"close pending, worktree not removed (run close again): {detail}")
+            raise RuntimeError(f"close of {task_id} not finished, worktree {task['worktree']} left in place: "
+                               f"{detail}") from None
     _record_usage(con, rt, task)
+    task = store.get_task(con, task_id)
+    store.add_message(con, task_id, "close", json.dumps(dict(outcome=task["outcome"], rating=task["rating"])))
+    stale = (task["note"] or "").startswith("close pending")
     store.update_task(con, task_id, status="closed",
-                      note=(f"worktree kept: {kept}" if kept else task["note"]))
+                      note=(f"worktree kept: {kept}" if kept else None if stale else task["note"]))
     return dict(task_id=task_id, closed=True,
                 worktree=f"kept at {task['worktree']} ({kept})" if kept else "removed")
 
