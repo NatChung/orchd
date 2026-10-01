@@ -29,6 +29,14 @@ def redact(text):
     return re.sub(r"(://)[^/\s@]+@", r"\1***@", text)
 
 
+def error_detail(e):
+    """Text for a failed command: git's stderr when it has one, redacted, else the exception text."""
+    stderr = e.stderr if isinstance(e, subprocess.CalledProcessError) else None
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode(errors="replace")
+    return redact((stderr or "").strip() or str(e))
+
+
 def worker_kind(model):
     """A worker runs on the CLI of its model's vendor: GPT models on codex, the rest on claude."""
     return "codex" if model and model.startswith("gpt-") else "claude"
@@ -131,6 +139,12 @@ class Runtime:
         self.run(["git", "-C", str(repo_path), "worktree", "add", "-b", branch, str(path), base_commit])
         return base_commit, branch, str(path)
 
+    def dirty(self, path):
+        """Porcelain status that no git config can thin out: showUntrackedFiles=no and submodule `ignore`
+        settings would otherwise hide exactly the files a removal deletes."""
+        return self.run(["git", "-c", "status.showUntrackedFiles=all", "-C", path, "status", "--porcelain",
+                         "--untracked-files=all", "--ignore-submodules=none"]).stdout.strip()
+
     def submodule_paths(self, worktree):
         """Absolute paths of every initialized submodule, nested ones included."""
         out = self.run(["git", "-C", worktree, "submodule", "foreach", "--recursive", "--quiet",
@@ -138,26 +152,30 @@ class Runtime:
         return [line for line in out.splitlines() if line.strip()]
 
     def submodule_loss(self, worktree):
-        """First reason removing the worktree would lose data held inside an initialized submodule, else None.
-        Removing the worktree deletes the submodule's git dir too, so its stashes and local-only commits count."""
+        """Why this worktree's initialized submodules cannot be removed, else None.
+        Removing the worktree deletes the submodules' git dirs too (stashes, local branches, tags, reflog), and
+        git only removes a worktree holding submodules with --force, which checks nothing. Anything that cannot
+        be proven safe to delete is therefore kept: a clean-at-check submodule is no reason to force."""
+        held = None
         for path in self.submodule_paths(worktree):
             name = os.path.relpath(os.path.realpath(path), os.path.realpath(worktree))
-            if self.run(["git", "-C", path, "status", "--porcelain", "--untracked-files=all"]).stdout.strip():
+            if self.dirty(path):
                 return f"uncommitted changes in submodule {name}"
             if self.run(["git", "-C", path, "stash", "list"]).stdout.strip():
                 return f"stash in submodule {name}"
-            unpushed = self.run(["git", "-C", path, "rev-list", "--count", "HEAD", "--branches",
+            unpushed = self.run(["git", "-C", path, "rev-list", "--count", "HEAD", "--branches", "--tags",
                                  "--not", "--remotes"]).stdout.strip()
             if unpushed != "0":
                 return f"commits not pushed in submodule {name}"
-        return None
+            held = held or (f"initialized submodule {name}: git can only remove it with --force, which would "
+                            "delete its git dir unchecked; remove the worktree by hand after saving what you need")
+        return held
 
     def worktree_state(self, worktree, base):
         """Return (removable, reason). Removable only when nothing local would be lost."""
         if not self.exists(worktree):
             return True, "worktree already gone"
-        dirty = self.run(["git", "-C", worktree, "status", "--porcelain"]).stdout.strip()
-        if dirty:
+        if self.dirty(worktree):
             return False, "uncommitted changes"
         loss = self.submodule_loss(worktree)
         if loss:
@@ -177,28 +195,27 @@ class Runtime:
             return False, "local branch differs from its upstream"
         return True, "pushed"
 
-    def remove_worktree(self, repo_path, worktree):
-        """Remove a worktree the caller found safe. Raises RuntimeError carrying git's stderr on failure.
-        git refuses any worktree with an initialized submodule; `--force` is used for that case only, after
-        re-verifying that neither the worktree nor its submodules hold anything unsaved."""
+    def remove_worktree(self, repo_path, worktree, base=None):
+        """Remove a worktree the caller found safe; never with --force. Returns None when removed, or the reason
+        it was kept because something unsaved showed up after the caller's check. Raises RuntimeError carrying
+        git's stderr when git itself fails. The state is re-checked right before removal (`base` given) and git's
+        own clean check runs with untracked files forced visible, so only a sub-millisecond window remains, and
+        git still refuses a dirty tree inside it. The branch ref survives removal, so late commits are not lost."""
         if not self.exists(worktree):
-            return
-        cmd = ["git", "-C", str(repo_path), "worktree", "remove", worktree]
+            return None
         try:
-            try:
-                self.run(cmd)
-            except subprocess.CalledProcessError as e:
-                if "submodules cannot be moved or removed" not in (e.stderr or ""):
-                    raise
-                if self.run(["git", "-C", worktree, "status", "--porcelain"]).stdout.strip():
-                    raise RuntimeError("uncommitted changes appeared; worktree kept")
-                loss = self.submodule_loss(worktree)
-                if loss:
-                    raise RuntimeError(f"{loss}; worktree kept")
-                self.run(cmd[:-1] + ["--force", worktree])
+            if base is not None:
+                removable, reason = self.worktree_state(worktree, base)
+                if not removable:
+                    return reason
+            self.run(["git", "-c", "status.showUntrackedFiles=all", "-C", str(repo_path), "worktree", "remove",
+                      worktree])
         except subprocess.CalledProcessError as e:
-            detail = redact((e.stderr or "").strip() or f"exit {e.returncode}")
+            detail = error_detail(e)
+            if "contains modified or untracked files" in detail:
+                return "uncommitted changes appeared; worktree kept"
             raise RuntimeError(f"git worktree remove failed (exit {e.returncode}): {detail}") from None
+        return None
 
     # -- claude workers ---------------------------------------------------------
     def socket_path(self, task_id):

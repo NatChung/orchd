@@ -65,7 +65,7 @@ class FakeRuntime:
     def worktree_state(self, worktree, base):
         return self.removable
 
-    def remove_worktree(self, repo_path, worktree):
+    def remove_worktree(self, repo_path, worktree, base=None):
         self.removed.append(worktree)
 
     def open_viewer(self, job):

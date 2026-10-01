@@ -1,5 +1,7 @@
 """close with initialized submodules, failed removal and retry. Real git in a temp dir; ORCHD_HOME never touched."""
 import os
+import shutil
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -13,6 +15,25 @@ GIT = ["git", "-c", "user.email=t@t", "-c", "user.name=t", "-c", "protocol.file.
 
 def git(*args, cwd):
     return subprocess.run([*GIT, *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+
+
+class HookRuntime(Runtime):
+    """Runs a callback once, right before `git worktree remove`, to inject a change after all checks passed."""
+    before_remove = None
+    after_state = None  # runs once, right after the first state check, i.e. before removal re-checks
+
+    def worktree_state(self, worktree, base):
+        result = super().worktree_state(worktree, base)
+        if self.after_state:
+            hook, self.after_state = self.after_state, None
+            hook()
+        return result
+
+    def run(self, cmd, *a, **kw):
+        if "remove" in cmd and "worktree" in cmd and self.before_remove:
+            hook, self.before_remove = self.before_remove, None
+            hook()
+        return super().run(cmd, *a, **kw)
 
 
 class CloseSubmoduleTest(unittest.TestCase):
@@ -39,7 +60,7 @@ class CloseSubmoduleTest(unittest.TestCase):
         git("push", "-q", "-u", "origin", "main", cwd=repo)
         git("remote", "set-head", "origin", "main", cwd=repo)
         os.environ["ORCHD_PROJECTS"] = str(self.projects)
-        self.rt = Runtime()
+        self.rt = HookRuntime()
         self.repo = self.rt.repo_path("demo")
         self.base, self.branch, self.wt = self.rt.create_worktree(self.repo, "demo", "abcd1234")
         git("submodule", "update", "-q", "--init", cwd=self.wt)
@@ -62,9 +83,11 @@ class CloseSubmoduleTest(unittest.TestCase):
         self.assertTrue(Path(self.wt).exists())
         return result
 
-    def test_clean_submodule_worktree_is_closed_and_removed(self):
-        self.assertEqual(core.close(self.con, self.rt, "abcd1234", outcome="merged")["worktree"], "removed")
-        self.assertFalse(Path(self.wt).exists())
+    def test_clean_submodule_worktree_is_closed_but_kept_because_git_cannot_remove_it_safely(self):
+        result = core.close(self.con, self.rt, "abcd1234", outcome="merged")
+        self.assertIn("kept at", result["worktree"])
+        self.assertIn("submodule", result["worktree"])
+        self.assertTrue(Path(self.wt).exists())
         self.assertEqual(store.get_task(self.con, "abcd1234")["status"], "closed")
         self.assertEqual(len(self.close_events()), 1)
 
@@ -101,14 +124,99 @@ class CloseSubmoduleTest(unittest.TestCase):
         Path(self.wt, "p.txt").write_text("x")
         self.assert_kept("uncommitted changes")
 
-    def test_remove_worktree_refuses_to_force_when_data_appeared_after_the_check(self):
-        Path(self.sub, "late.txt").write_text("late")
-        with self.assertRaisesRegex(RuntimeError, "uncommitted changes"):
-            self.rt.remove_worktree(self.repo, self.wt)
-        self.assertEqual(Path(self.sub, "late.txt").read_text(), "late")
+    def plain_task(self, task_id="efgh5678"):
+        """A worktree whose submodule is not initialized, so git itself is allowed to remove it."""
+        base, branch, wt = self.rt.create_worktree(self.repo, "demo", task_id)
+        store.create_task(self.con, id=task_id, repo="demo", repo_path=str(self.repo), title="T", instructions="i",
+                          done_when="d", orch_thread="th", codex_bin="c", model="claude-sonnet-5-5",
+                          base=base, branch=branch, worktree=wt, status="done")
+        return wt
+
+    def hide_untracked(self):
+        git("config", "status.showUntrackedFiles", "no", cwd=self.repo)  # shared by every worktree
+
+    def test_plain_worktree_is_still_removed(self):
+        wt = self.plain_task()
+        self.assertEqual(core.close(self.con, self.rt, "efgh5678")["worktree"], "removed")
+        self.assertFalse(Path(wt).exists())
+
+    def test_hidden_untracked_setting_does_not_hide_parent_untracked_file(self):
+        self.hide_untracked()
+        Path(self.wt, "u.txt").write_text("keep me")
+        self.assert_kept("uncommitted changes")
+        self.assertEqual(Path(self.wt, "u.txt").read_text(), "keep me")
+        wt = self.plain_task()
+        Path(wt, "u.txt").write_text("keep me too")
+        result = core.close(self.con, self.rt, "efgh5678")
+        self.assertIn("kept at", result["worktree"])
+        self.assertEqual(Path(wt, "u.txt").read_text(), "keep me too")
+
+    def test_untracked_file_created_after_the_check_survives_even_with_hidden_setting(self):
+        self.hide_untracked()
+        wt = self.plain_task()
+        self.rt.before_remove = lambda: Path(wt, "late.txt").write_text("late")
+        result = core.close(self.con, self.rt, "efgh5678")
+        self.assertIn("kept at", result["worktree"])
+        self.assertEqual(Path(wt, "late.txt").read_text(), "late")
+
+    def test_submodule_stash_and_untracked_survive_and_git_is_never_asked_to_remove(self):
+        asked = []
+        real_run = self.rt.run
+        self.rt.run = lambda cmd, *a, **kw: (asked.append(cmd), real_run(cmd, *a, **kw))[1]
+        self.rt.after_state = lambda: (Path(self.sub, "late.txt").write_text("late"),
+                                       git("add", "late.txt", cwd=self.sub), git("stash", "-q", cwd=self.sub),
+                                       Path(self.sub, "late2.txt").write_text("late2"))
+        result = core.close(self.con, self.rt, "abcd1234")
+        self.assertIn("kept at", result["worktree"])
+        self.assertEqual(Path(self.sub, "late2.txt").read_text(), "late2")
+        self.assertIn("late.txt", git("stash", "show", "--name-only", cwd=self.sub))
+        self.assertFalse([c for c in asked if "remove" in c and "worktree" in c])
+
+    def test_commit_created_after_the_check_keeps_the_worktree(self):
+        wt = self.plain_task()
+        self.rt.after_state = lambda: git("commit", "-q", "--allow-empty", "-m", "late", cwd=wt)
+        result = core.close(self.con, self.rt, "efgh5678")
+        self.assertIn("commits not pushed", result["worktree"])
+        self.assertTrue(Path(wt).exists())
+
+    def test_git_error_in_state_check_carries_stderr(self):
+        not_repo = Path(self.tmp.name, "plain")
+        not_repo.mkdir()
+        self.con.execute("UPDATE tasks SET worktree=? WHERE id='abcd1234'", (str(not_repo),))
+        with self.assertRaisesRegex(RuntimeError, "not a git repository"):
+            core.close(self.con, self.rt, "abcd1234")
+        self.assertEqual(store.get_task(self.con, "abcd1234")["status"], "done")
+        self.assertIn("not a git repository", store.get_task(self.con, "abcd1234")["note"])
+
+    def test_db_failure_while_finishing_leaves_no_close_event_and_retry_emits_one(self):
+        real = store.update_task
+        calls = []
+
+        def flaky(con, task_id, **fields):
+            if fields.get("status") == "closed" and not calls:
+                calls.append(1)
+                raise sqlite3.OperationalError("database is locked")
+            return real(con, task_id, **fields)
+        store.update_task = flaky
+        self.addCleanup(setattr, store, "update_task", real)
+        with self.assertRaises(sqlite3.OperationalError):
+            core.close(self.con, self.rt, "abcd1234", outcome="merged")
+        self.assertEqual(self.close_events(), [])
+        self.assertEqual(store.get_task(self.con, "abcd1234")["status"], "done")
+        core.close(self.con, self.rt, "abcd1234")
+        self.assertEqual(len(self.close_events()), 1)
+        self.assertEqual(store.get_task(self.con, "abcd1234")["status"], "closed")
+        self.assertEqual(store.get_task(self.con, "abcd1234")["outcome"], "merged")
+
+    def test_tag_only_commit_in_submodule_is_kept(self):
+        git("checkout", "-q", "--detach", cwd=self.sub)
+        git("commit", "-q", "--allow-empty", "-m", "tagged", cwd=self.sub)
+        git("tag", "saved", cwd=self.sub)
+        git("checkout", "-q", "--detach", "origin/main", cwd=self.sub)
+        self.assertEqual(self.rt.worktree_state(self.wt, self.base)[1], "commits not pushed in submodule vendor")
 
     def test_missing_worktree_can_be_closed(self):
-        self.rt.remove_worktree(self.repo, self.wt)
+        shutil.rmtree(self.wt)
         self.assertFalse(Path(self.wt).exists())
         self.assertEqual(core.close(self.con, self.rt, "abcd1234")["worktree"], "removed")
         self.assertEqual(store.get_task(self.con, "abcd1234")["status"], "closed")
@@ -126,7 +234,7 @@ class FailingRemoveRuntime:
     def worktree_state(self, worktree, base):
         return True, "pushed"
 
-    def remove_worktree(self, repo_path, worktree):
+    def remove_worktree(self, repo_path, worktree, base=None):
         if self.error:
             raise self.error
         self.removed.append(worktree)

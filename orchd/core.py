@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import store
 from .orch_health import owner_health
-from .runtime import DEFAULT_ORCH_MODEL, DEFAULT_WORKER_MODEL, MODELS, redact, worker_kind
+from .runtime import DEFAULT_ORCH_MODEL, DEFAULT_WORKER_MODEL, MODELS, error_detail, worker_kind
 
 ORCHD = str(Path(__file__).resolve().parents[1] / "bin" / "orchd")
 
@@ -276,21 +276,24 @@ def close(con, rt, task_id, outcome=None, rating=None):
     if task["worktree"]:
         try:
             removable, reason = rt.worktree_state(task["worktree"], task["base"])
-            if removable:
-                rt.remove_worktree(task["repo_path"], task["worktree"])
-            else:
-                kept = reason
+            kept = rt.remove_worktree(task["repo_path"], task["worktree"], task["base"]) if removable else reason
         except Exception as e:  # not closed: status stays as it was, so close can simply be run again
-            detail = redact(str(e))
+            detail = error_detail(e)
             store.update_task(con, task_id, note=f"close pending, worktree not removed (run close again): {detail}")
             raise RuntimeError(f"close of {task_id} not finished, worktree {task['worktree']} left in place: "
                                f"{detail}") from None
-    _record_usage(con, rt, task)
     task = store.get_task(con, task_id)
-    store.add_message(con, task_id, "close", json.dumps(dict(outcome=task["outcome"], rating=task["rating"])))
     stale = (task["note"] or "").startswith("close pending")
-    store.update_task(con, task_id, status="closed",
-                      note=(f"worktree kept: {kept}" if kept else None if stale else task["note"]))
+    con.execute("BEGIN IMMEDIATE")  # usage + close event + terminal status land together or not at all
+    try:
+        _record_usage(con, rt, task)
+        store.add_message(con, task_id, "close", json.dumps(dict(outcome=task["outcome"], rating=task["rating"])))
+        store.update_task(con, task_id, status="closed",
+                          note=(f"worktree kept: {kept}" if kept else None if stale else task["note"]))
+        con.execute("COMMIT")
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
     return dict(task_id=task_id, closed=True,
                 worktree=f"kept at {task['worktree']} ({kept})" if kept else "removed")
 
