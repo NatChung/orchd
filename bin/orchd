@@ -11,6 +11,7 @@
   orchd list                                  open tasks, worker/Orch health, unread notification failures
   orchd watch [--since HH:MM]                 live timeline of Orch <-> worker messages
   orchd summary [--since HH:MM]               per Orch: workers, models, questions, parallelism, tokens
+  orchd doctor [--profile nat] [--json]       read-only machine check; exit 1 required fail, 2 required unknown
   orchd close ID                              stop a task's worker and clean its worktree if safe
 """
 import argparse
@@ -51,7 +52,17 @@ def main(argv=None):
     for name in ("watch", "summary"):
         sub.add_parser(name).add_argument("--since", help="HH:MM today (default: last 30 minutes for watch, all for summary)")
     sub.add_parser("close").add_argument("task_id")
+    doc = sub.add_parser("doctor")
+    doc.add_argument("--profile", choices=["nat"], help="also check Nat's own machine layout (accounts, SSH aliases, connectors)")
+    doc.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+
+    if args.cmd == "doctor":  # read-only; must not touch the DB
+        from orchd import doctor
+        checks = doctor.Doctor(profile=args.profile).run_all()
+        print(json.dumps([c.as_dict() for c in checks], ensure_ascii=False, indent=1) if args.json
+              else doctor.render(checks))
+        return doctor.exit_code(checks)
 
     if args.cmd == "mcp":
         from orchd import mcp_server
