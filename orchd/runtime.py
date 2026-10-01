@@ -25,16 +25,25 @@ USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", 
 
 
 def redact(text):
-    """Drop credentials embedded in URLs (https://user:token@host) from error text we keep."""
-    return re.sub(r"(://)[^/\s@]+@", r"\1***@", text)
+    """Drop credentials embedded in URLs (scheme://user:token@host) from error text we keep. The userinfo runs
+    to the last @ before the host's path, so passwords holding a raw or encoded @ go too; every URL is done."""
+    return re.sub(r"(://)[^\s/?#'\"]*@", r"\1***@", text)
+
+
+def _text(value):
+    return (value.decode(errors="replace") if isinstance(value, bytes) else value or "").strip()
 
 
 def error_detail(e):
-    """Text for a failed command: git's stderr when it has one, redacted, else the exception text."""
-    stderr = e.stderr if isinstance(e, subprocess.CalledProcessError) else None
-    if isinstance(stderr, bytes):
-        stderr = stderr.decode(errors="replace")
-    return redact((stderr or "").strip() or str(e))
+    """Text for a failed command, redacted: its stderr, else its stdout, else the exception text. A timeout says
+    so and keeps whatever the command wrote before it was killed."""
+    if isinstance(e, subprocess.TimeoutExpired):
+        out = [f"{Path(str(e.cmd[0] if isinstance(e.cmd, (list, tuple)) else e.cmd)).name} timed out after "
+               f"{e.timeout:g}s", _text(e.stderr), _text(e.output)]
+        return redact(": ".join(part for part in out if part))
+    if isinstance(e, subprocess.CalledProcessError):
+        return redact(_text(e.stderr) or _text(e.output) or str(e))
+    return redact(str(e)) or type(e).__name__
 
 
 def worker_kind(model):
@@ -309,6 +318,58 @@ class Runtime:
 
     def stop_worker(self, job):
         self.run([self.claude, "stop", job], timeout=30, check=False)
+
+    def stop_task_worker(self, kind, job, marks=(), wait=10.0):
+        """Stop one task's worker and confirm it is gone; raise RuntimeError when that cannot be confirmed (the
+        stop failed or timed out while the worker still runs, or its state cannot be read). Only this job/pid is
+        touched. Callers keep the worktree and the task open on error, so a later call simply retries."""
+        if kind == "codex":
+            return self._stop_codex_confirmed(job, [m for m in marks if m], wait)
+        try:
+            result = self.run([self.claude, "stop", job], timeout=30, check=False)
+            stop_note = (f"exit {result.returncode}: " + redact(_text(result.stderr) or _text(result.stdout))
+                         if result.returncode else "stop sent")
+        except (OSError, subprocess.SubprocessError) as e:
+            stop_note = error_detail(e)
+        state = "job list unavailable"
+        for _ in range(max(1, int(wait / 0.5))):
+            jobs = self.live_jobs()
+            listed = jobs.get(job) if jobs is not None else None
+            if jobs is not None and (listed is None or claude_job_alive(jobs, job) is False
+                                     or not listed.get("pid") or not self.pid_alive(listed["pid"])):
+                return None
+            state = "job list unavailable" if jobs is None else f"still listed as {listed.get('state')}"
+            self.sleep(0.5)
+        raise RuntimeError(f"claude worker {job} not confirmed stopped ({state}); claude stop: {stop_note}")
+
+    def _stop_codex_confirmed(self, pid, marks, wait):
+        """A Codex turn's pid may be long gone and reused, so only a process that is codex *and* runs this task's
+        worktree or thread is ours; anything else means our worker already exited."""
+        def ours():
+            if not self.pid_alive(pid):
+                return False
+            try:
+                ps = self.run(["ps", "-p", str(pid), "-o", "args="], timeout=10, check=False)
+            except (OSError, subprocess.SubprocessError) as e:
+                raise RuntimeError(f"codex worker {pid} not confirmed stopped: {error_detail(e)}") from None
+            if ps.returncode not in (0, 1):
+                raise RuntimeError(f"codex worker {pid} not confirmed stopped: ps exit {ps.returncode}: "
+                                   f"{redact(_text(ps.stderr))}")
+            args = ps.stdout
+            return "codex" in args and any(m in args for m in marks)
+        if not ours():
+            return None
+        try:
+            os.killpg(int(pid), 15)
+        except ProcessLookupError:
+            return None
+        except (OSError, ValueError) as e:
+            raise RuntimeError(f"codex worker {pid} not confirmed stopped: kill failed: {e}") from None
+        for _ in range(max(1, int(wait / 0.2))):
+            self.sleep(0.2)
+            if not ours():
+                return None
+        raise RuntimeError(f"codex worker {pid} still running {wait:g}s after SIGTERM; not confirmed stopped")
 
     def live_jobs(self):
         try:
