@@ -110,6 +110,60 @@ class DeliveryTest(unittest.TestCase):
         self.assertEqual(self.owner(), "old")
         self.assertEqual(self.targets(), [])
 
+    def test_notice_and_error_recording_failures_still_return_committed_and_attempt_new_wake(self):
+        self.con.execute("CREATE TRIGGER fail_notice BEFORE INSERT ON messages WHEN NEW.kind='adopt_notice' "
+                         "BEGIN SELECT RAISE(ABORT, 'notice unavailable'); END")
+        self.con.execute("CREATE TRIGGER fail_error_record BEFORE UPDATE OF notice_error ON messages "
+                         "BEGIN SELECT RAISE(ABORT, 'record unavailable'); END")
+        out = core.adopt(self.con, self.rt, "new", ["task"], force=True)
+        self.assertTrue(out["committed"])
+        self.assertEqual(self.owner(), "new")
+        self.assertTrue(out["new_owner_woken"])
+        self.assertIn("record unavailable", out["error_recording_failures"]["old"])
+        self.assertEqual(self.targets(), ["new"])
+
+    def test_partial_batch_superseded_acquisition_mentions_only_remaining_owned_task(self):
+        store.create_task(self.con, id="task2", repo="scratch", repo_path=self.tmp.name,
+                          title="second", instructions="PRIVATE", done_when="x", orch_thread="old",
+                          codex_bin="/mock/codex", status="running")
+        first_committed, second_finished = threading.Event(), threading.Event()
+        original = store.move_task_orch
+        outcomes, errors = [], []
+
+        def paused(con, moves, target):
+            ids = original(con, moves, target)
+            if target == "new":
+                first_committed.set()
+                if not second_finished.wait(5):
+                    raise TimeoutError("second adopt")
+            return ids
+
+        def first():
+            con = store.connect(self.db)
+            try:
+                outcomes.append(core.adopt(con, self.rt, "new", ["task", "task2"], force=True))
+            except Exception as error:
+                errors.append(error)
+            finally:
+                con.close()
+        with patch.object(store, "move_task_orch", paused):
+            thread = threading.Thread(target=first)
+            thread.start()
+            try:
+                self.assertTrue(first_committed.wait(5))
+                core.adopt(self.con, self.rt, "other", ["task2"], force=True)
+            finally:
+                second_finished.set()
+                thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(outcomes[0]["superseded"], ["task2"])
+        acquisition = [c[-1] for c in self.rt.commands if c[c.index("--thread") + 1] == "new"
+                       and "adopted" in c[-1]]
+        self.assertEqual(len(acquisition), 1)
+        self.assertIn("adopted 1 task(s)", acquisition[0])
+        self.assertNotIn("scratch/task2", acquisition[0])
+
     def test_transport_holds_task_lock_across_processes_but_not_sqlite_write_lock(self):
         sending, release = threading.Event(), threading.Event()
         errors = []
