@@ -159,6 +159,25 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(core.inbox(self.con, "thread-B"), [])
         self.assertEqual(store.get_task(self.con, b["id"])["status"], "running")
 
+    def test_notifications_name_the_stored_model_and_keep_task_and_kind(self):
+        for model in core.MODELS.values():
+            t = self.dispatch()
+            store.update_task(self.con, t["id"], model=model)  # the stored model is what the text must show
+            before = len(self.rt.woken)
+            core.ack(self.con, t["id"])
+            core.progress(self.con, self.rt, t["id"], "half way")
+            core.ask(self.con, self.rt, t["id"], "ok?\nmore")
+            core.report(self.con, self.rt, t["id"], "done", "finished", "")
+            texts = [w[2] for w in self.rt.woken[before:]]
+            self.assertEqual(len(texts), 3)
+            for text, kind in zip(texts, ("progress", "question", "done")):
+                self.assertIn(f"[orchd] demo/{t['id']} ({model}) {kind}: ", text)
+
+    def test_notification_without_stored_model_says_unknown(self):
+        for model in (None, ""):
+            text = core.wake_text(dict(repo="r", id="abc", model=model), "done: x")
+            self.assertIn("r/abc (unknown) done: x", text)
+
     def test_report_is_kept_when_wake_fails(self):
         t = self.dispatch()
         self.rt.wake_fails = True
