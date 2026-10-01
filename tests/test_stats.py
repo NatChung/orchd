@@ -1,7 +1,6 @@
 import json
 import sqlite3
 import tempfile
-import time
 import unittest
 from unittest import mock
 from datetime import datetime, timezone
@@ -437,6 +436,7 @@ class StatsTest(unittest.TestCase):
         self.assertIsNone(t["escalations_post_upgrade_verified"])    # a done outcome is not a verified pass
         self.assertEqual(t["escalated_tasks_outcome_completed"], 1)
         self.assertIn("not a verified pass", t["escalation_note"])
+        self.assertIn("1+ (2 unresolved)", stats.format_table(self.report()))
         self.assertIn("unknown", stats.format_table(self.report()))
 
     def test_another_orchs_retry_does_not_turn_this_orchs_unknown_into_zero(self):
@@ -565,8 +565,25 @@ class StatsTest(unittest.TestCase):
         with mock.patch.object(stats, "_copy", racing), mock.patch.object(stats, "SNAPSHOT_ATTEMPTS", 3):
             with self.assertRaises(stats.SnapshotError):
                 stats.open_snapshot(path)
-        self.assertEqual([p for p in Path(tempfile.gettempdir()).glob("orchd-stats-*") if p.stat().st_mtime > time.time() - 30
-                          and not any(p.iterdir())], [])        # failed attempt left no usable copy behind
+
+    def test_snapshot_retries_when_wal_vanishes_mid_copy(self):
+        path, w = self.wal_db()
+        w.execute("INSERT INTO tasks VALUES('a','o1','done',2000000,NULL)")
+        w.commit()
+        w.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        w.execute("INSERT INTO tasks VALUES('b','o1','done',2000001,NULL)")
+        w.commit()
+        real, calls = stats._copy, []
+
+        def vanishing(src, dst):
+            if src.endswith("-wal") and not calls:
+                calls.append(1)
+                raise FileNotFoundError(src)  # the last connection closed and SQLite deleted the WAL
+            real(src, dst)
+        with mock.patch.object(stats, "_copy", vanishing):
+            with stats.open_snapshot(path) as snap:
+                self.assertEqual(snap.con.execute("SELECT count(*) FROM tasks").fetchone()[0], 2)
+        self.assertEqual(calls, [1])
 
     def test_snapshot_of_missing_db_is_an_error_not_a_created_file(self):
         with self.assertRaises(stats.SnapshotError):

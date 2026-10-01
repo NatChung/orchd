@@ -103,12 +103,15 @@ class Snapshot:
                 before = _fingerprint(path)
                 if "" not in before:
                     raise SnapshotError(f"no DB at {path}")
-                for suffix in _SUFFIXES:
-                    target = os.path.join(self._dir, "snap.db" + suffix)
-                    if os.path.exists(target):
-                        os.unlink(target)
-                    if suffix in before:
-                        _copy(str(path) + suffix, target)
+                try:
+                    for suffix in _SUFFIXES:
+                        target = os.path.join(self._dir, "snap.db" + suffix)
+                        if os.path.exists(target):
+                            os.unlink(target)
+                        if suffix in before:
+                            _copy(str(path) + suffix, target)
+                except FileNotFoundError:  # the writer closed and removed -wal/-journal mid-copy: it changed
+                    continue
                 if _fingerprint(path) == before:  # nothing moved (write, checkpoint) while copying
                     break
             else:
@@ -576,7 +579,7 @@ def format_table(report):
         for name, group in [("*", row["total"]), *row["by_task_type"].items()]:
             cells = [_show(group[c]) for c in cols]
             if group["escalations"] is not None and group["escalations_unresolved"]:
-                cells[cols.index("escalations")] += f" (>= ; {group['escalations_unresolved']} unresolved)"
+                cells[cols.index("escalations")] += f"+ ({group['escalations_unresolved']} unresolved)"
             lines.append(f"{row['orch']} / {name} | " + " | ".join(cells)
                          + f" | {_cost_cell(group)} | {_show(group['worker_tokens']['coverage'])}")
         t = row["orch_tokens"]
