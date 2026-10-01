@@ -54,7 +54,7 @@ TASK_COLUMNS = ("model TEXT", "model_reason TEXT", "task_type TEXT", "rework_of 
                 "found_by TEXT", "outcome TEXT", "rating INTEGER")
 
 # Message kinds the Orch reads in its inbox; the rest (dispatch, answer, close, usage) are the event log.
-ORCH_KINDS = ("ack", "progress", "report", "question")
+ORCH_KINDS = ("ack", "progress", "report", "question", "adopt")
 
 # starting -> running -> acked -> done|blocked|question -> closed; failed if launch breaks.
 OPEN = ("starting", "running", "acked", "done", "blocked", "question", "failed")
@@ -166,6 +166,38 @@ exception class name (including queue subprocess errors), otherwise 'unknown'.
                        error_type=name if safe else "unknown")
     return dict(unread_count=counts["unread"], unread_wake_failed_count=counts["failed"],
                 latest_unread_wake_failure=failure)
+
+
+def latest_message(con, task_id, kind):
+    return con.execute("SELECT * FROM messages WHERE task_id=? AND kind=? ORDER BY id DESC LIMIT 1",
+                       (task_id, kind)).fetchone()
+
+
+def move_task_orch(con, moves, to_orch):
+    """Move open tasks to another Orch and log one adopt event each, all in one transaction.
+
+    moves: [(task_id, expected_from_orch, body, evidence)]. Only tasks.orch_thread changes: messages
+    (and their read_at), worktree, branch, job and worker process stay as they were. Any failure, or a task
+    that closed or changed owner since the caller looked, rolls the whole batch back. Returns the adopt
+    message ids in order.
+    """
+    marks = ",".join("?" * len(OPEN))
+    con.execute("BEGIN IMMEDIATE")
+    try:
+        ids = []
+        now = time.time()
+        for task_id, from_orch, body, evidence in moves:
+            cur = con.execute(
+                f"UPDATE tasks SET orch_thread=?, updated_at=? WHERE id=? AND orch_thread=? AND status IN ({marks})",
+                (to_orch, now, task_id, from_orch, *OPEN))
+            if cur.rowcount != 1:
+                raise ValueError(f"task {task_id} changed owner or closed while adopting; nothing was moved")
+            ids.append(add_message(con, task_id, "adopt", body, evidence))
+        con.execute("COMMIT")
+        return ids
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
 
 
 def mark_read(con, ids):

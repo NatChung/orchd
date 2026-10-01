@@ -373,3 +373,107 @@ def stop_orch(con, rt, orch_id):
     if orch["job_id"]:
         rt.stop_worker(orch["job_id"])
     store.stop_orch(con, orch_id)
+
+
+def _notify_orch(con, rt, orch_id, codex_bin, text):
+    orch = store.get_orch(con, orch_id)
+    if orch is not None and orch["kind"] == "claude":
+        rt.send_uds(orch["socket"], orch["session_id"], text)
+    else:  # Codex Orch, or an owner that was never registered
+        rt.wake_orch(codex_bin, orch_id, text)
+
+
+def _adopt_summary(con, task):
+    parts = [f"status={task['status']}"]
+    for kind in ("question", "report"):  # read or not: a read-but-unanswered question must not vanish
+        m = store.latest_message(con, task["id"], kind)
+        if m is not None:
+            parts.append(f"latest {kind}: {_short(m['body'])}")
+    return "; ".join(parts)
+
+
+def adopt(con, rt, new_orch, task_ids=(), from_orch=None, force=False):
+    """Operator-run (CLI) transfer of open tasks to another Orch. Never automatic.
+
+    An old owner that is alive or unknown is refused unless force; only a confirmed-dead one moves freely.
+    Unknown is not live proof. The move commits first, then both Orchs are woken best-effort: a failed wake
+    never undoes or repeats the move, it is recorded on the event row.
+    """
+    task_ids = list(dict.fromkeys(task_ids))
+    if not task_ids and not from_orch:
+        raise ValueError("name the task ids to adopt, or --from OLD_ORCH for all of its open tasks")
+    target = store.get_orch(con, new_orch)
+    if target is None:
+        raise ValueError(f"unknown orch {new_orch}; the new owner must be registered")
+    if target["stopped_at"] is not None:
+        raise ValueError(f"orch {new_orch} is stopped")
+    try:
+        jobs = rt.live_jobs()
+    except Exception:
+        jobs = None
+    target_health = owner_health(target, jobs)
+    if target_health["state"] == "dead":
+        raise ValueError(f"orch {new_orch} is dead ({target_health['reason']})")
+    open_by_id = {t["id"]: t for t in store.open_tasks(con)}
+    if task_ids:
+        for tid in task_ids:
+            if tid not in open_by_id:
+                store.get_task(con, tid)  # KeyError for unknown ids
+                raise ValueError(f"task {tid} is closed")
+            if from_orch and open_by_id[tid]["orch_thread"] != from_orch:
+                raise ValueError(f"task {tid} belongs to {open_by_id[tid]['orch_thread']}, not {from_orch}")
+        tasks = [open_by_id[t] for t in task_ids]
+    else:
+        tasks = [t for t in open_by_id.values() if t["orch_thread"] == from_orch]
+        if not tasks:
+            raise ValueError(f"orch {from_orch} has no open tasks")
+    for t in tasks:
+        if t["orch_thread"] == new_orch:
+            raise ValueError(f"task {t['id']} already belongs to {new_orch}")
+    olds = {}
+    for t in tasks:
+        owner = t["orch_thread"]
+        if owner not in olds:
+            olds[owner] = owner_health(store.get_orch(con, owner), jobs)
+    blocked = {o: h for o, h in olds.items() if h["state"] != "dead"}
+    if blocked and not force:
+        detail = ", ".join(f"{o} is {h['state']} ({h['reason']})" for o, h in blocked.items())
+        raise ValueError(f"refusing to adopt: {detail}. Only a confirmed-dead owner moves without --force; "
+                         "unknown is not proof the owner is gone")
+    moves = []
+    for t in tasks:
+        health = olds[t["orch_thread"]]
+        body = f"adopted from {t['orch_thread']} ({health['state']}): {_adopt_summary(con, t)}"
+        evidence = json.dumps(dict(from_orch=t["orch_thread"], to_orch=new_orch, forced=bool(force),
+                                   old_owner_health=health), ensure_ascii=False)
+        moves.append((t["id"], t["orch_thread"], body, evidence))
+    message_ids = store.move_task_orch(con, moves, new_orch)
+    old_notices = {}
+    for owner, health in olds.items():
+        if health["state"] == "dead":
+            continue  # confirmed dead: nobody to tell
+        owned = [t for t in tasks if t["orch_thread"] == owner]
+        text = (f"[orchd] Nat moved {len(owned)} task(s) from you to {new_orch}: "
+                + ", ".join(f"{t['repo']}/{t['id']}" for t in owned) + ". They are no longer yours.")
+        mid = store.add_message(con, owned[0]["id"], "adopt_notice", text,
+                                json.dumps(dict(old_orch=owner, task_ids=[t["id"] for t in owned])))
+        try:
+            _notify_orch(con, rt, owner, owned[0]["codex_bin"], text)
+            old_notices[owner] = True
+        except Exception as error:  # evidence stays queryable on the event row
+            con.execute("UPDATE messages SET wake_error=? WHERE id=?",
+                        (f"{type(error).__name__}: {error}"[:500], mid))
+            old_notices[owner] = False
+    text = (f"[orchd] adopted {len(tasks)} task(s) from "
+            + ", ".join(sorted(olds)) + ": " + ", ".join(f"{t['repo']}/{t['id']}" for t in tasks)
+            + " — 請呼叫 orchd 的 inbox 工具讀取。")
+    try:
+        _notify_orch(con, rt, new_orch, tasks[0]["codex_bin"], text)
+        new_woken = True
+    except Exception as error:
+        new_woken = False
+        con.executemany("UPDATE messages SET wake_error=? WHERE id=?",
+                        [(f"{type(error).__name__}: {error}"[:500], m) for m in message_ids])
+    return dict(adopted=[t["id"] for t in tasks], to_orch=new_orch, forced=bool(force),
+                from_orch={o: h["state"] for o, h in olds.items()},
+                new_owner_health=target_health, new_owner_woken=new_woken, old_owner_notified=old_notices)
