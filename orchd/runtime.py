@@ -336,9 +336,10 @@ class Runtime:
             jobs = self.live_jobs()
             listed = jobs.get(job) if jobs is not None else None
             if jobs is not None and (listed is None or claude_job_alive(jobs, job) is False
-                                     or not listed.get("pid") or not self.pid_alive(listed["pid"])):
-                return None
-            state = "job list unavailable" if jobs is None else f"still listed as {listed.get('state')}"
+                                     or (listed.get("pid") and not self.pid_alive(listed["pid"]))):
+                return None  # stopped jobs drop out of the list; a listed job with no pid is not proof of anything
+            state = ("job list unavailable" if jobs is None else
+                     f"still listed as {listed.get('state')}, pid {listed.get('pid') or 'unknown'}")
             self.sleep(0.5)
         raise RuntimeError(f"claude worker {job} not confirmed stopped ({state}); claude stop: {stop_note}")
 
@@ -349,7 +350,7 @@ class Runtime:
             if not self.pid_alive(pid):
                 return False
             try:
-                ps = self.run(["ps", "-p", str(pid), "-o", "args="], timeout=10, check=False)
+                ps = self.run(["ps", "-ww", "-p", str(pid), "-o", "args="], timeout=10, check=False)
             except (OSError, subprocess.SubprocessError) as e:
                 raise RuntimeError(f"codex worker {pid} not confirmed stopped: {error_detail(e)}") from None
             if ps.returncode not in (0, 1):
