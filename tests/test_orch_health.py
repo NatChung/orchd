@@ -108,6 +108,19 @@ class OrchHealthTest(unittest.TestCase):
                 self.assertEqual(owner_health(owner, jobs),
                                  {"state": "unknown", "reason": "runtime_invalid"})
 
+    def test_listed_failed_owner_job_is_dead_but_other_listed_states_are_not(self):
+        owner = self.owner()
+        failed = {owner["job_id"]: {"state": "failed", "reapedMidWorkAt": "2026-10-01T11:04:36Z"}}
+        self.assertEqual(owner_health(owner, failed), {"state": "dead", "reason": "job_failed"})
+        for entry in ({"state": "working"}, {"state": "blocked"}, {"state": "done", "status": "idle"},
+                      {"state": "somethingnew"}, {}):
+            with self.subTest(entry=entry):  # idle/done live jobs and unknown states are never guessed dead
+                self.assertEqual(owner_health(owner, {owner["job_id"]: entry}),
+                                 {"state": "alive", "reason": "job_present"})
+        self.assertEqual(owner_health(owner, None), {"state": "unknown", "reason": "runtime_unavailable"})
+        self.assertEqual(owner_health(owner, {"other": {"state": "failed"}}),
+                         {"state": "dead", "reason": "job_absent"})
+
     def test_stopped_at_is_bookkeeping_not_liveness_proof_and_is_preserved(self):
         self.owner()
         self.task()

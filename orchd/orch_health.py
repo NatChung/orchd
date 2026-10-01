@@ -21,7 +21,12 @@ def owner_health(orch, jobs):
         ):
             reason = "runtime_invalid"
         elif orch["job_id"] in jobs:
-            state, reason = "alive", "job_present"
+            # Only an explicit terminal "failed" entry (no pid in the CLI JSON) is dead; done/idle
+            # and unknown states stay alive rather than guessed.
+            if jobs[orch["job_id"]].get("state") == "failed":
+                state, reason = "dead", "job_failed"
+            else:
+                state, reason = "alive", "job_present"
         else:
             state, reason = "dead", "job_absent"
     return {"state": state, "reason": reason}
