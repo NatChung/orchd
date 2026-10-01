@@ -151,9 +151,15 @@ def _short(text, limit=160):
     return cut + "…"
 
 
+def task_model(task):
+    """The task's stored full model id; "unknown" for tasks dispatched before models were stored (null/empty)."""
+    model = task["model"]
+    return model.strip() if isinstance(model, str) and model.strip() else "unknown"
+
+
 def wake_text(task, line):
     """Notification text; carries the task's stored model so the Orch can tell Claude from Codex workers."""
-    model = (task["model"] or "").strip() or "unknown"  # tasks dispatched before models were stored have none
+    model = task_model(task)
     return f"[orchd] {task['repo']}/{task['id']} ({model}) {line} — 請呼叫 orchd 的 inbox 工具讀取。"
 
 
@@ -205,7 +211,8 @@ def inbox(con, orch_thread):
     rows = store.unread_for_thread(con, orch_thread)
     store.mark_read(con, [r["id"] for r in rows])
     return [dict(task_id=r["task_id"], repo=r["repo"], title=r["title"], kind=r["kind"],
-                 body=r["body"], evidence=r["evidence"], task_status=r["status"]) for r in rows]
+                 body=r["body"], evidence=r["evidence"], task_status=r["status"],
+                 model=task_model(r)) for r in rows]
 
 
 def answer(con, rt, task_id, text):
@@ -246,7 +253,7 @@ def list_open(con, rt):
         else:
             alive = claude_job_alive(jobs, t["job_id"])
         out.append(dict(task_id=t["id"], repo=t["repo"], title=t["title"], status=t["status"],
-                        worker_alive=alive, worktree=t["worktree"], branch=t["branch"],
+                        model=task_model(t), worker_alive=alive, worktree=t["worktree"], branch=t["branch"],
                         orch_thread=t["orch_thread"], note=t["note"],
                         owner_health=owner_health(store.get_orch(con, t["orch_thread"]), jobs),
                         notification_delivery=store.notification_delivery(con, t["id"]),
