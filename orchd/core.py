@@ -150,8 +150,14 @@ def _short(text, limit=160):
     return cut + "…"
 
 
+def wake_text(task, line):
+    """Notification text; carries the task's stored model so the Orch can tell Claude from Codex workers."""
+    model = (task["model"] or "").strip() or "unknown"  # tasks dispatched before models were stored have none
+    return f"[orchd] {task['repo']}/{task['id']} ({model}) {line} — 請呼叫 orchd 的 inbox 工具讀取。"
+
+
 def _wake(con, rt, task, message_id, line):
-    text = f"[orchd] {task['repo']}/{task['id']} {line} — 請呼叫 orchd 的 inbox 工具讀取。"
+    text = wake_text(task, line)
     orch = store.get_orch(con, task["orch_thread"])
     try:
         if orch is not None and orch["kind"] == "claude":
