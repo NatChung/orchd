@@ -338,11 +338,12 @@ class CodexWorkerTest(unittest.TestCase):
         core.ask(self.con, self.rt, t["id"], "Send it?")
         self.rt.alive_pids = {"4242"}
         self.rt.sleep = lambda s: None
-        with self.assertRaisesRegex(ValueError, "still in a turn"):
-            core.answer(self.con, self.rt, t["id"], "yes")
+        self.assertEqual(core.answer(self.con, self.rt, t["id"], "yes"), dict(status="queued", delivered=0, pending=1))
+        self.assertEqual(self.rt.resumed, [])
         polls = []
         self.rt.sleep = lambda s: polls.append(s) or (len(polls) == 3 and self.rt.alive_pids.clear())
-        core.answer(self.con, self.rt, t["id"], "yes")  # the asking turn exits a moment after the Orch is woken
+        # the asking turn exits a moment after the Orch is woken
+        self.assertEqual(core.answer(self.con, self.rt, t["id"], flush=True), dict(status="delivered", delivered=1, pending=0))
         self.assertEqual(len(polls), 3)
         self.assertEqual(self.rt.resumed, [("thread-W", f"[orchd answer {t['id']}]\nyes", "gpt-6.1-sol")])
         core.close(self.con, self.rt, t["id"])

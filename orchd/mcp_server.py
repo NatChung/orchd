@@ -48,10 +48,19 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "answer",
      "description": "Send an answer to a worker's question. For outward sends, pass Nat's decision verbatim. "
-                    "A Codex worker gets it as a new turn on its thread; if its previous turn is still running this "
-                    "waits up to 60s, then fails with 'still in a turn': answer again after it asks or reports.",
-     "inputSchema": {"type": "object", "required": ["task_id", "text"], "properties": {
-         "task_id": {"type": "string"}, "text": {"type": "string"}}}},
+                    "Returns status delivered|queued|failed with delivered and pending counts. A Codex worker gets "
+                    "answers as a new turn on its thread; if its turn is still running this waits up to 60s, then "
+                    "queues the answer (status queued: stored, NOT yet seen by the worker). Nothing sends queued "
+                    "answers by itself: whenever that worker next reports, asks or sends progress and you read the "
+                    "inbox, call answer with flush=true (or with a new text) to send every pending answer, oldest "
+                    "first, in one turn. If you get queued while the task is in status question, the worker already asked "
+                    "and is only finishing its exit, so no further wake will come: retry flush=true after a short "
+                    "wait, or once list_open shows worker_alive null. failed: the turn could not start; the answers "
+                    "stay queued, retry with "
+                    "flush=true instead of resending the text. flush=true with no text also just shows pending.",
+     "inputSchema": {"type": "object", "required": ["task_id"], "properties": {
+         "task_id": {"type": "string"}, "text": {"type": "string", "description": "The answer; omit only with flush"},
+         "flush": {"type": "boolean", "description": "Send queued answers to an idle Codex worker"}}}},
     {"name": "close",
      "description": "Close a task: stop its worker, remove its worktree if clean and pushed, otherwise keep it and say why.",
      "inputSchema": {"type": "object", "required": ["task_id"], "properties": {
@@ -82,8 +91,7 @@ def call(name, args, thread, con, rt):
     if name == "list_open":
         return core.list_open(con, rt)
     if name == "answer":
-        core.answer(con, rt, args["task_id"], args["text"])
-        return {"sent": True}
+        return core.answer(con, rt, args["task_id"], args.get("text"), flush=bool(args.get("flush")))
     if name == "close":
         return core.close(con, rt, args["task_id"], args.get("outcome"), args.get("rating"))
     if name == "view_worker":
