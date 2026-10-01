@@ -5,9 +5,9 @@ import shlex
 import uuid
 from pathlib import Path
 
-from . import store
+from . import store, worker_health
 from .orch_health import owner_health
-from .runtime import DEFAULT_ORCH_MODEL, DEFAULT_WORKER_MODEL, MODELS, worker_kind
+from .runtime import DEFAULT_ORCH_MODEL, DEFAULT_WORKER_MODEL, MODELS, claude_job_alive, worker_kind
 
 ORCHD = str(Path(__file__).resolve().parents[1] / "bin" / "orchd")
 
@@ -244,12 +244,15 @@ def list_open(con, rt):
             alive = True if t["job_id"] and rt.pid_alive(t["job_id"]) else (
                 None if t["status"] in ("question", "done", "blocked") else False)
         else:
-            alive = None if jobs is None or not t["job_id"] else t["job_id"] in jobs
+            alive = claude_job_alive(jobs, t["job_id"])
         out.append(dict(task_id=t["id"], repo=t["repo"], title=t["title"], status=t["status"],
                         worker_alive=alive, worktree=t["worktree"], branch=t["branch"],
                         orch_thread=t["orch_thread"], note=t["note"],
                         owner_health=owner_health(store.get_orch(con, t["orch_thread"]), jobs),
-                        notification_delivery=store.notification_delivery(con, t["id"])))
+                        notification_delivery=store.notification_delivery(con, t["id"]),
+                        **worker_health.assess(t["status"], alive, worker_health.has_report(con, t["id"]),
+                                               task_id=t["id"], worktree=t["worktree"], branch=t["branch"],
+                                               base=t["base"])))
     return out
 
 
