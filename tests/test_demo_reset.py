@@ -4,10 +4,12 @@ import io
 import os
 import socket
 import subprocess
+import shutil
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 from orchd import store
 
@@ -26,7 +28,7 @@ def sh(*cmd, cwd=None):
 
 class DemoResetTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="demoreset-")).resolve()
+        self.tmp = Path(tempfile.mkdtemp(prefix="dr-", dir="/tmp")).resolve()  # short: AF_UNIX paths max ~104 bytes
         self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(self.tmp)]))
         t = self.tmp
         self.home, self.projects, self.remotes, self.socks = t / "home", t / "projects", t / "remotes", t / "socks"
@@ -215,6 +217,146 @@ class DemoResetTest(unittest.TestCase):
         code, out = self.run_reset()
         self.assertEqual(code, 2)
         self.assertIn("no orchd DB", out)
+
+    def test_safety_repo_path_mismatch(self):
+        tid, wt, _ = self.make_task()
+        self.con.execute('UPDATE tasks SET repo_path=? WHERE id=?',
+                         (str(self.tmp / 'other-projects' / REPO), tid))
+        code, out = self.run_reset('--apply')
+        self.assertTrue(wt.exists(), f'Foreign repo_path accepted; exit={code}\n{out}')
+
+    def test_safety_remote_changed_after_plan(self):
+        tid, wt, _ = self.make_task()
+        branch = f'orchd/{tid}'
+        original = sh('git', 'rev-parse', 'HEAD', cwd=wt)
+        plan_task = demo_reset.Reset.plan_task
+        def mutate_after_plan(plan, task):
+            plan_task(plan, task)
+            (wt / 'later.txt').write_text('new remote data\n')
+            sh('git', 'add', '.', cwd=wt)
+            sh('git', 'commit', '-m', 'concurrent remote update', cwd=wt)
+            sh('git', 'push', 'origin', branch, cwd=wt)
+            self.new_remote = sh('git', 'rev-parse', 'HEAD', cwd=wt)
+            sh('git', 'reset', '--hard', original, cwd=wt)
+        with patch.object(demo_reset.Reset, 'plan_task', mutate_after_plan):
+            code, out = self.run_reset('--apply')
+        actual = sh('git', 'ls-remote', str(self.remote), f'refs/heads/{branch}')
+        self.assertIn(self.new_remote, actual, f'Concurrent remote commit deleted; exit={code}\n{out}')
+
+    def test_safety_remove_failure_keeps_branches(self):
+        tid, wt, _ = self.make_task()
+        branch = f'orchd/{tid}'
+        plan_task = demo_reset.Reset.plan_task
+        def dirty_after_plan(plan, task):
+            plan_task(plan, task)
+            (wt / 'untracked-after-plan.txt').write_text('keep\n')
+        with patch.object(demo_reset.Reset, 'plan_task', dirty_after_plan):
+            code, out = self.run_reset('--apply')
+        self.assertTrue(wt.exists(), out)
+        self.assertIn(branch, self.branches(), f'Failed remove still deleted local branch; exit={code}\n{out}')
+
+    def test_safety_moved_dirty_worktree_keeps_branch(self):
+        tid, wt, _ = self.make_task()
+        moved = self.tmp / 'elsewhere'
+        sh('git', 'worktree', 'move', str(wt), str(moved), cwd=self.repo)
+        (moved / 'untracked.txt').write_text('keep\n')
+        code, out = self.run_reset('--apply')
+        self.assertIn(f'orchd/{tid}', self.branches(), f'Dirty moved worktree branch deleted; exit={code}\n{out}')
+
+    def test_safety_symlink_socket_parent(self):
+        tid, _, _ = self.make_task()
+        self.socks.rename(self.tmp / 'original-socks')
+        foreign = self.tmp / 'foreign-socks'
+        target = foreign / f'orchd-{tid}'
+        target.mkdir(parents=True)
+        sock = target / 'w.sock'
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(str(sock))
+        server.close()
+        self.socks.symlink_to(foreign, target_is_directory=True)
+        code, out = self.run_reset('--apply')
+        self.assertTrue(sock.exists(), f'Socket through symlinked parent deleted; exit={code}\n{out}')
+
+    def test_safety_dry_run_no_sqlite_sidecars(self):
+        self.make_task()
+        self.con.close()
+        before = sorted(p.name for p in self.home.iterdir())
+        code, out = self.run_reset()
+        after = sorted(p.name for p in self.home.iterdir())
+        self.assertEqual(before, after, f'Dry run created SQLite sidecars; exit={code}\n{out}')
+
+    def test_safety_foreign_pushurl(self):
+        tid, _, _ = self.make_task()
+        foreign = self.tmp / 'foreign.git'
+        sh('git', 'clone', '--bare', str(self.remote), str(foreign))
+        sh('git', 'remote', 'set-url', '--push', 'origin', str(foreign), cwd=self.repo)
+        code, out = self.run_reset('--apply')
+        actual = sh('git', 'ls-remote', str(foreign), f'refs/heads/orchd/{tid}')
+        self.assertTrue(actual, f'Foreign push destination deleted; exit={code}\n{out}')
+
+    def test_safety_socket_replaced_after_plan(self):
+        _, _, sdir = self.make_task()
+        sock = sdir / 'w.sock'
+        plan_task = demo_reset.Reset.plan_task
+        def replace_after_plan(plan, task):
+            plan_task(plan, task)
+            sock.unlink()
+            sock.write_text('foreign regular file\n')
+        with patch.object(demo_reset.Reset, 'plan_task', replace_after_plan):
+            code, out = self.run_reset('--apply')
+        self.assertTrue(sock.exists(), f'Replacement regular file deleted; exit={code}\n{out}')
+
+    def test_safety_repo_wide_prune(self):
+        _, wt, _ = self.make_task()
+        unrelated = self.tmp / 'unrelated'
+        sh('git', 'worktree', 'add', '-b', 'orchd/deadbeef', str(unrelated), 'main', cwd=self.repo)
+        shutil.rmtree(unrelated)
+        shutil.rmtree(wt)
+        before = sh('git', 'worktree', 'list', '--porcelain', cwd=self.repo)
+        self.assertIn(str(unrelated), before)
+        code, out = self.run_reset('--apply')
+        after = sh('git', 'worktree', 'list', '--porcelain', cwd=self.repo)
+        self.assertIn(str(unrelated), after, f'Unrelated registration pruned; exit={code}\n{out}')
+
+    def test_safety_null_resource_fields(self):
+        tid, wt, _ = self.make_task()
+        self.con.execute('UPDATE tasks SET branch=NULL, worktree=NULL, socket=NULL WHERE id=?', (tid,))
+        code, out = self.run_reset('--apply')
+        self.assertTrue(wt.exists(), f'Unattributed resource deleted; exit={code}\n{out}')
+
+    def test_safety_wal_contents_are_read_not_ignored(self):
+        # a writer still holds the DB open: a new closed task lives only in the WAL. It must be seen
+        # (so the open task still blocks the reset) and no sidecar may be created or changed in home.
+        _, wt, _ = self.make_task()
+        self.make_task(status="running")
+        names = sorted(p.name for p in self.home.iterdir())
+        self.assertIn("orchd.db-wal", names)
+        code, out = self.run_reset("--apply")
+        self.assertEqual(code, 2, out)
+        self.assertTrue(wt.exists())
+        self.assertEqual(sorted(p.name for p in self.home.iterdir()), names)
+
+    def test_safety_socket_connect_error_is_not_proof_of_death(self):
+        _, wt, sdir = self.make_task()
+        with patch.object(demo_reset.socket.socket, "connect", side_effect=PermissionError("denied")):
+            code, out = self.run_reset("--apply")
+        self.assertEqual(code, 1, out)
+        self.assertTrue((sdir / "w.sock").exists())
+        self.assertTrue(wt.exists())
+
+    def test_safety_local_commit_after_plan_keeps_branch_and_worktree(self):
+        tid, wt, _ = self.make_task()
+        plan_task = demo_reset.Reset.plan_task
+        def commit_after_plan(plan, task):
+            plan_task(plan, task)
+            (wt / "late.txt").write_text("late\n")
+            sh("git", "add", ".", cwd=wt)
+            sh("git", "commit", "-m", "late", cwd=wt)
+        with patch.object(demo_reset.Reset, "plan_task", commit_after_plan):
+            code, out = self.run_reset("--apply")
+        self.assertEqual(code, 1, out)
+        self.assertTrue((wt / "late.txt").exists())
+        self.assertIn(f"orchd/{tid}", self.branches())
 
 
 if __name__ == "__main__":
