@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from orchd import doctor
 
@@ -343,6 +344,172 @@ class OptionalChecks(DoctorCase):
         self.assertEqual(by["gh accounts"].status, doctor.WARN)
         self.assertIn("usable: NatChung", by["gh accounts"].detail)
         self.assertIn("broken: nat862", by["gh accounts"].detail)
+
+
+class EncodingAndSchema(DoctorCase):
+    """Review of 2b1cdb6: non-UTF-8 bytes in any source must be unknown for that source and never stop later
+    checks; wrong-typed MCP containers/servers/fields must be unknown, not skipped into a pass. Valid shapes
+    (URL servers, absent optional fields) stay pass."""
+
+    BAD = b"\xff\xfe[\x00p\x00]\x00"
+
+    def healthy_names(self, profile=None):
+        d, _ = self.run_doctor(profile=profile)
+        return [c.name for c in d.checks]
+
+    def assert_completes(self, d, profile=None):
+        self.assertEqual([c.name for c in d.checks], self.healthy_names(profile))
+
+    def paths(self, by):
+        return by["config paths match this home"]
+
+    def leaked(self, d):
+        return SECRET in doctor.render(d.checks) + json.dumps([c.as_dict() for c in d.checks])
+
+    def write_mcp(self, servers, where="user"):
+        """Claude-only source: the Codex config is removed so a Python without tomllib cannot mask the result."""
+        (self.home / ".codex" / "config.toml").unlink(missing_ok=True)
+        body = {"projects": {str(self.orch): {"hasTrustDialogAccepted": True}}}
+        if where == "user":
+            body["mcpServers"] = servers
+        else:
+            body["projects"][str(self.orch)]["mcpServers"] = servers
+        (self.home / ".claude.json").write_text(json.dumps(body))
+
+    def test_non_utf8_orch_agents_is_unknown_and_later_checks_run(self):
+        (self.orch / "AGENTS.md").write_bytes(self.BAD)
+        d, by = self.run_doctor()
+        self.assertEqual(by["orch home"].status, doctor.UNKNOWN)
+        self.assertIn("UTF-8", by["orch home"].detail)
+        self.assertEqual(by["orch home trusted in Claude"].status, doctor.PASS)
+        self.assert_completes(d)
+        self.assertEqual(doctor.exit_code(d.checks), 2)
+        self.assertEqual((self.orch / "AGENTS.md").read_bytes(), self.BAD)  # user data untouched
+
+    def test_non_utf8_codex_config_is_unknown_for_trust_and_paths(self):
+        cfg = self.home / ".codex" / "config.toml"
+        cfg.write_bytes(self.BAD)
+        d, by = self.run_doctor()
+        self.assertEqual(by["orch home trusted in Codex"].status, doctor.UNKNOWN)
+        self.assertIn("UTF-8", by["orch home trusted in Codex"].detail)
+        self.assertEqual(self.paths(by).status, doctor.UNKNOWN)  # claude alone must not make it a pass
+        self.assert_completes(d)
+        self.assertEqual(cfg.read_bytes(), self.BAD)
+
+    def test_unreadable_codex_config_is_unknown_for_paths_too(self):
+        real = Path.read_text
+
+        def deny(path, *a, **kw):
+            if path.name == "config.toml":
+                raise PermissionError(13, "denied")
+            return real(path, *a, **kw)
+        with mock.patch.object(Path, "read_text", deny):
+            d, by = self.run_doctor()
+        self.assertEqual(by["orch home trusted in Codex"].status, doctor.UNKNOWN)
+        self.assertEqual(self.paths(by).status, doctor.UNKNOWN)
+        self.assert_completes(d)
+
+    def test_non_utf8_ssh_config_is_unknown_and_profile_continues(self):
+        (self.home / ".ssh").mkdir()
+        (self.home / ".ssh" / "config").write_bytes(self.BAD)
+        d, by = self.run_doctor(profile="nat")
+        self.assertEqual(by["nat: ssh host aliases"].status, doctor.UNKNOWN)
+        self.assert_completes(d, profile="nat")
+        self.assertEqual(doctor.exit_code(d.checks), 0)  # profile never decides the exit code
+
+    def test_non_utf8_claude_json_is_unknown_and_labelled_as_encoding(self):
+        (self.home / ".claude.json").write_bytes(self.BAD)
+        d, by = self.run_doctor()
+        self.assertEqual(by["orch home trusted in Claude"].status, doctor.UNKNOWN)
+        self.assertIn("UTF-8", by["orch home trusted in Claude"].detail)
+        self.assertEqual(self.paths(by).status, doctor.UNKNOWN)
+        self.assert_completes(d)
+
+    def test_wrong_typed_claude_mcp_is_unknown_without_leaking_values(self):
+        cases = {
+            "container list": ([], "user"),
+            "container str": (SECRET, "user"),
+            "server str": ({"s": SECRET}, "user"),
+            "server list": ({"s": [SECRET]}, "project"),
+            "args str": ({"s": {"command": "node", "args": f"--token {SECRET}"}}, "user"),
+            "args item int": ({"s": {"command": "node", "args": [1]}}, "project"),
+            "args item dict": ({"s": {"command": "node", "args": [{"k": SECRET}]}}, "user"),
+            "command int": ({"s": {"command": 5}}, "user"),
+            "command list": ({"s": {"command": [SECRET]}}, "project"),
+            "cwd dict": ({"s": {"command": "node", "cwd": {"p": SECRET}}}, "user"),
+        }
+        for label, (servers, where) in cases.items():
+            self.write_mcp(servers, where)
+            d, by = self.run_doctor()
+            self.assertEqual(self.paths(by).status, doctor.UNKNOWN, label)
+            self.assertFalse(self.leaked(d), label)
+            self.assert_completes(d)
+
+    def test_wrong_typed_claude_project_entry_is_unknown_for_paths(self):
+        (self.home / ".codex" / "config.toml").unlink()
+        (self.home / ".claude.json").write_text(json.dumps(
+            {"projects": {str(self.orch): {"hasTrustDialogAccepted": True}, "/x": SECRET}}))
+        d, by = self.run_doctor()
+        self.assertEqual(self.paths(by).status, doctor.UNKNOWN)
+        self.assertFalse(self.leaked(d))
+
+    def test_valid_claude_mcp_shapes_stay_pass(self):
+        servers = {
+            "url": {"type": "http", "url": "https://example.com/mcp", "headers": {"Authorization": SECRET}},
+            "sse": {"type": "sse", "url": "https://example.com/sse"},
+            "bare": {"command": "npx"},
+            "full": {"command": f"{self.home}/.local/bin/x", "args": ["-y", f"{self.home}/s.js"],
+                     "cwd": str(self.home), "env": {"TOKEN": SECRET}},
+            "empty args": {"command": "node", "args": []},
+        }
+        for where in ("user", "project"):
+            self.write_mcp(servers, where)
+            d, by = self.run_doctor()
+            self.assertEqual(self.paths(by).status, doctor.PASS, where)
+            self.assertFalse(self.leaked(d))
+        self.write_mcp({})
+        _, by = self.run_doctor()
+        self.assertEqual(self.paths(by).status, doctor.PASS)
+
+    def test_stale_path_still_warns_next_to_a_wrong_typed_sibling(self):
+        self.write_mcp({"old": {"command": "/Users/oldmac/bin/x"}, "bad": {"command": 5}})
+        _, by = self.run_doctor()
+        self.assertEqual(self.paths(by).status, doctor.WARN)
+        self.assertIn("/Users/oldmac", self.paths(by).detail)
+
+    @needs_toml
+    def test_wrong_typed_codex_mcp_is_unknown(self):
+        trust = f'[projects."{self.orch}"]\ntrust_level = "trusted"\n\n'
+        cases = {
+            "container str": f'mcp_servers = "{SECRET}"\n' + trust,
+            "container list": 'mcp_servers = [1]\n' + trust,
+            "server str": trust + f'[mcp_servers]\ns = "{SECRET}"\n',
+            "args str": trust + f'[mcp_servers.s]\ncommand = "node"\nargs = "--token {SECRET}"\n',
+            "args item int": trust + '[mcp_servers.s]\ncommand = "node"\nargs = [1]\n',
+            "command int": trust + '[mcp_servers.s]\ncommand = 5\n',
+            "cwd array": trust + f'[mcp_servers.s]\ncommand = "node"\ncwd = ["{SECRET}"]\n',
+            "projects str": f'projects = "{SECRET}"\n',
+        }
+        for label, text in cases.items():
+            (self.home / ".codex" / "config.toml").write_text(text)
+            d, by = self.run_doctor()
+            self.assertEqual(self.paths(by).status, doctor.UNKNOWN, label)
+            self.assertFalse(self.leaked(d), label)
+            self.assert_completes(d)
+
+    @needs_toml
+    def test_valid_codex_mcp_shapes_stay_pass(self):
+        (self.home / ".codex" / "config.toml").write_text(
+            f'[projects."{self.orch}"]\ntrust_level = "trusted"\n\n'
+            '[mcp_servers.url]\nurl = "https://example.com/mcp"\n'
+            f'bearer_token_env_var = "TOKEN"\n\n'
+            '[mcp_servers.bare]\ncommand = "npx"\n\n'
+            f'[mcp_servers.full]\ncommand = "{self.home}/x"\nargs = ["-y", "{self.home}/s.js"]\n'
+            f'cwd = "{self.home}"\nenv = {{ TOKEN = "{SECRET}" }}\n')
+        d, by = self.run_doctor()
+        self.assertEqual(by["orch home trusted in Codex"].status, doctor.PASS)
+        self.assertEqual(self.paths(by).status, doctor.PASS)
+        self.assertFalse(self.leaked(d))
 
 
 class ProfileAndSecrets(DoctorCase):

@@ -170,13 +170,15 @@ class Doctor:
         """(data, problem). problem is why ~/.claude.json cannot be judged; None when data is a usable dict."""
         cfg = self.home / ".claude.json"
         try:
-            data = json.loads(cfg.read_text())
+            data = json.loads(cfg.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None, f"{cfg} missing"
         except PermissionError:
             return None, f"no permission to read {cfg}"
         except OSError as exc:
             return None, f"cannot read {cfg} ({type(exc).__name__})"
+        except UnicodeDecodeError:
+            return None, f"{cfg} is not UTF-8 text"
         except ValueError:
             return None, f"{cfg} is not valid JSON"
         if not isinstance(data, dict):
@@ -210,12 +212,14 @@ class Doctor:
                      f"Create {home} with an AGENTS.md (see CONTEXT.md: Orch 家).")
             return
         try:
-            (home / "AGENTS.md").read_text()
+            (home / "AGENTS.md").read_text(encoding="utf-8")
             self.add("orch home", REQUIRED, PASS, f"{home} has AGENTS.md")
         except (FileNotFoundError, IsADirectoryError):
             self.add("orch home", REQUIRED, FAIL, f"{home}/AGENTS.md missing or not a file", "Add the Orch's AGENTS.md.")
         except OSError as exc:
             self.add("orch home", REQUIRED, UNKNOWN, f"cannot read {home}/AGENTS.md ({type(exc).__name__})")
+        except UnicodeDecodeError:
+            self.add("orch home", REQUIRED, UNKNOWN, f"{home}/AGENTS.md is not UTF-8 text")
         trusted = self._claude_trusted(home)
         if trusted is None:
             self.add("orch home trusted in Claude", REQUIRED, UNKNOWN, f"not verified: {self._claude_problem}")
@@ -232,35 +236,56 @@ class Doctor:
         text = re.sub(re.escape(own) + r"(?=/|$|[\s\"'])", "<home>", text)  # this machine's own home is fine
         return {m.group(0) for m in self.HOME_PREFIX.finditer(text)}
 
-    def _mcp_foreign_homes(self, servers):
-        """{server name: foreign home prefixes} from command / args / cwd only; env and other fields are never read."""
-        found = {}
+    def _mcp_foreign_homes(self, servers, label):
+        """({server name: foreign home prefixes}, problems) from command / args / cwd only; env and other fields
+        are never read. Absent fields (URL servers) are fine; a present field of the wrong type is a problem, so
+        the paths cannot be judged. Problems name the field and its type, never its value."""
+        found, problems = {}, []
+        if servers is None:
+            return found, problems
         if not isinstance(servers, dict):
-            return found
+            return found, [f"{label} MCP servers is {type(servers).__name__}, not a table"]
         for name, spec in servers.items():
             if not isinstance(spec, dict):
+                problems.append(f"{label} MCP {name} is {type(spec).__name__}, not a table")
                 continue
-            parts = [spec.get("command"), spec.get("cwd")]
+            parts, bad = [], []
+            for field in ("command", "cwd"):
+                value = spec.get(field)
+                if isinstance(value, str):
+                    parts.append(value)
+                elif value is not None:
+                    bad.append(f"{field} is {type(value).__name__}")
             args = spec.get("args")
-            parts += args if isinstance(args, list) else []
+            if isinstance(args, list):
+                for i, arg in enumerate(args):
+                    if isinstance(arg, str):
+                        parts.append(arg)
+                    else:
+                        bad.append(f"args[{i}] is {type(arg).__name__}")
+            elif args is not None:
+                bad.append(f"args is {type(args).__name__}")
+            problems += [f"{label} MCP {name}: {b}" for b in bad]
             homes = set()
             for part in parts:
-                if isinstance(part, str):
-                    homes |= self._foreign_homes(part)
+                homes |= self._foreign_homes(part)
             if homes:
                 found[str(name)] = homes
-        return found
+        return found, problems
 
     def check_codex_config(self, home):
         cfg = self.home / ".codex" / "config.toml"
         try:
-            text = cfg.read_text()
+            text = cfg.read_text(encoding="utf-8")
         except FileNotFoundError:
             self.add("orch home trusted in Codex", OPTIONAL, WARN, f"{cfg} missing (only needed for Astra/Codex)")
-            codex = None
-        except OSError as exc:
-            self.add("orch home trusted in Codex", OPTIONAL, UNKNOWN, f"cannot read {cfg} ({type(exc).__name__})")
-            codex = None
+            codex = None  # no Codex source; the paths check judges the other sources
+        except OSError as exc:  # exists but unreadable: the paths check must not pass without it
+            codex = f"cannot read {cfg} ({type(exc).__name__})"
+            self.add("orch home trusted in Codex", OPTIONAL, UNKNOWN, codex)
+        except UnicodeDecodeError:
+            codex = f"{cfg} is not UTF-8 text"
+            self.add("orch home trusted in Codex", OPTIONAL, UNKNOWN, codex)
         else:
             codex = self._parse_toml(text)
             if isinstance(codex, str):
@@ -291,24 +316,35 @@ class Doctor:
         stale, problems, sources = {}, [], []
         if isinstance(codex, dict):
             sources.append("codex")
-            projects = codex.get("projects") if isinstance(codex.get("projects"), dict) else {}
+            projects = codex.get("projects", {})
+            if not isinstance(projects, dict):
+                problems.append(f"codex: projects is {type(projects).__name__}, not a table")
+                projects = {}
             for p, body in projects.items():
                 if isinstance(body, dict) and body.get("trust_level") == "trusted":
                     for h in self._foreign_homes(p):
                         stale.setdefault("trusted project path", set()).add(h)
-            for n, h in self._mcp_foreign_homes(codex.get("mcp_servers")).items():
+            found, bad = self._mcp_foreign_homes(codex.get("mcp_servers"), "codex")
+            problems += bad
+            for n, h in found.items():
                 stale[f"codex MCP {n}"] = h
         elif isinstance(codex, str):
             problems.append(f"codex: {codex}")
         data, problem = self._claude_json()
         if data is not None:
             sources.append("claude")
-            for n, h in self._mcp_foreign_homes(data.get("mcpServers")).items():
+            found, bad = self._mcp_foreign_homes(data.get("mcpServers"), "claude user")
+            problems += bad
+            for n, h in found.items():
                 stale[f"claude user MCP {n}"] = h
             for path, entry in (data.get("projects") or {}).items():
-                if isinstance(entry, dict):
-                    for n, h in self._mcp_foreign_homes(entry.get("mcpServers")).items():
-                        stale[f"claude project MCP {n}"] = h
+                if not isinstance(entry, dict):
+                    problems.append(f"claude: a project entry is {type(entry).__name__}, not an object")
+                    continue
+                found, bad = self._mcp_foreign_homes(entry.get("mcpServers"), "claude project")
+                problems += bad
+                for n, h in found.items():
+                    stale[f"claude project MCP {n}"] = h
         elif not problem.endswith("missing"):
             problems.append(f"claude: {problem}")
         if stale:
@@ -415,9 +451,12 @@ class Doctor:
                  "Log in yourself: `gh auth login` per account." if missing else "")
         cfg = self.home / ".ssh" / "config"
         try:
-            hosts = set(re.findall(r"^\s*Host\s+(\S+)", cfg.read_text(), re.M))
+            hosts = set(re.findall(r"^\s*Host\s+(\S+)", cfg.read_text(encoding="utf-8"), re.M))
         except OSError as exc:
             self.add("nat: ssh host aliases", PROFILE, WARN, f"cannot read {cfg} ({type(exc).__name__})")
+            hosts = None
+        except UnicodeDecodeError:
+            self.add("nat: ssh host aliases", PROFILE, UNKNOWN, f"{cfg} is not UTF-8 text")
             hosts = None
         if hosts is not None:
             gone = [h for h in NAT_SSH_ALIASES if h not in hosts]
