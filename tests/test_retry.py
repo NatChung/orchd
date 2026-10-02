@@ -357,6 +357,20 @@ class RetryReviewRegressionTest(unittest.TestCase):
         self.assertIn("left from codex", self.rt.sent[-1][2])
         self.assertEqual(store.pending_answers(self.con, t["id"]), [])
 
+    def test_claude_answer_while_task_is_locked_is_queued_not_lost(self):
+        t = self.dispatch("sonnet")
+        other = store.connect(self.db)
+        real = store.task_delivery
+        store.task_delivery = lambda con, ids, timeout=65: real(con, ids, 0.1)
+        try:
+            with real(other, [t["id"]]):
+                out = core.answer(self.con, self.rt, t["id"], "decision while retrying")
+        finally:
+            store.task_delivery = real
+        self.assertEqual((out["status"], out["pending"]), ("queued", 1))
+        self.assertEqual(core.answer(self.con, self.rt, t["id"], flush=True)["delivered"], 1)
+        self.assertIn("decision while retrying", self.rt.sent[-1][2])
+
     # 2. the new worker started but the DB write failed: it is stopped and recorded, never untracked
     def test_commit_failure_stops_new_worker_and_records_it(self):
         t = self.dispatch("sol")
@@ -378,6 +392,7 @@ class RetryReviewRegressionTest(unittest.TestCase):
         self.assertEqual(len(store.pending_answers(self.con, t["id"])), 2)  # the killed thread's copy is gone
         r = core.retry(self.con, self.rt, t["id"], "sol", "again")
         self.assertEqual((r["status"], len(store.pending_answers(self.con, t["id"]))), ("running", 0))
+        self.assertIsNone(r["note"])  # the failure note does not outlive the retry that fixed it
 
     def test_new_worker_that_will_not_stop_is_recorded_as_possibly_running(self):
         t = self.dispatch("sonnet")

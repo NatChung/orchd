@@ -265,15 +265,21 @@ def answer(con, rt, task_id, text=None, flush=False):
     if text is None and not flush:
         raise ValueError("answer needs text, or flush=true to send queued answers")
     if worker_kind(task["model"]) != "codex":
-        with store.task_delivery(con, [task_id]):
-            task = store.get_task(con, task_id)
-            if task["status"] == "closed":
-                raise ValueError(f"task {task_id} is closed")
-            if worker_kind(task["model"]) == "claude":
-                return _deliver_to_claude(con, rt, task, text)
-            if text is not None:  # a retry switched it to Codex meanwhile: queue it for that worker's next turn
+        try:
+            with store.task_delivery(con, [task_id]):
+                task = store.get_task(con, task_id)
+                if task["status"] == "closed":
+                    raise ValueError(f"task {task_id} is closed")
+                if worker_kind(task["model"]) == "claude":
+                    return _deliver_to_claude(con, rt, task, text)
+                if text is not None:  # a retry switched it to Codex meanwhile: queue it for that worker's next turn
+                    store.add_message(con, task_id, store.QUEUED, text)
+                return dict(status="queued", delivered=0, pending=len(store.pending_answers(con, task_id)))
+        except TimeoutError:  # a retry or close holds the task: keep the answer for the next answer or flush
+            if text is not None:
                 store.add_message(con, task_id, store.QUEUED, text)
-            return dict(status="queued", delivered=0, pending=len(store.pending_answers(con, task_id)))
+            return dict(status="queued", delivered=0, pending=len(store.pending_answers(con, task_id)),
+                        error="task busy (retry or close in progress); flush again once it finishes")
     if not task["session_id"] or not task["worktree"]:
         raise ValueError(f"task {task_id} has no codex thread")
     if text is not None:  # stored before any attempt, so a busy turn or a failed resume loses nothing
@@ -590,7 +596,8 @@ def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT):
                     raise _Superseded(f"worktree {worktree} was removed")
                 # Guards against a lifecycle step that did not take the task lock (an older orchd's close).
                 changed = con.execute(
-                    "UPDATE tasks SET model=?, job_id=?, session_id=?, socket=?, status='running', updated_at=? "
+                    "UPDATE tasks SET model=?, job_id=?, session_id=?, socket=?, status='running', updated_at=?, "
+                    "note=CASE WHEN note LIKE 'retry failed%' THEN NULL ELSE note END "  # a stale failure note
                     "WHERE id=? AND status<>'closed' AND job_id IS ?",
                     (*new.values(), time.time(), task_id, task["job_id"])).rowcount
                 if changed != 1:
