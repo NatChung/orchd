@@ -33,8 +33,11 @@ PRICES = dict(
         "claude-opus-5-5": dict(input="4", cache_read="0.2", output="20", cache_write="5", source=_ANTHROPIC),
         "gpt-6.1-sol": dict(input="2", cache_read="0.1", output="10", cache_write="2.5", source=_OPENAI),
     })
-# Only the Claude family has an ordering we can state; any other model pair is "unordered", never an upgrade.
-MODEL_TIERS = ("haiku", "sonnet", "opus")
+# This project's worker routing tiers (docs/decisions.md #13 and the 2026-09-30 Sol entry): M = sonnet / sol,
+# H = opus. A routing policy, not a quality ranking across families. Keyed by alias and full model id; any other
+# model has no tier here, so a retry involving it is unresolved, never a counted zero.
+ROUTING_TIERS = {"sonnet": 1, "sol": 1, "opus": 2,
+                 "claude-sonnet-5-5": 1, "gpt-6.1-sol": 1, "claude-opus-5-5": 2}
 FIELDS = ("input", "cache_creation", "cache_read", "output")  # disjoint buckets; total = their sum
 COMPLETED = ("merged", "done")  # outcome values that count as a completed task
 MILLION = Decimal(1_000_000)
@@ -240,16 +243,20 @@ def claude_transcript_usage(root, session_id, since=None):
 
 
 def _counter(info):
-    """Cumulative counter dict from a token_count info, or None when input/output are not valid ints."""
+    """Cumulative counter dict from a token_count info, or None when input/output are not valid ints.
+    cached is None (unknown, not 0) when cached_input_tokens is missing, invalid or larger than input_tokens;
+    write_bad marks a present-but-invalid cache_write_input_tokens (an absent one reports nothing)."""
     usage = info.get("total_token_usage")
     if not isinstance(usage, dict):
         return None
     inp, outp = _count(usage.get("input_tokens")), _count(usage.get("output_tokens"))
     if inp is None or outp is None:
         return None
-    get = lambda k: _count(usage.get(k)) or 0  # noqa: E731
+    cached = _count(usage.get("cached_input_tokens"))
+    write = _count(usage.get("cache_write_input_tokens"))
     total = _count(usage.get("total_tokens"))
-    return dict(input=inp, cached=get("cached_input_tokens"), write=get("cache_write_input_tokens"), output=outp,
+    return dict(input=inp, cached=cached if cached is not None and cached <= inp else None, write=write or 0,
+                write_bad=usage.get("cache_write_input_tokens") is not None and write is None, output=outp,
                 total=inp + outp if total is None else total, reported_total=total is not None)
 
 
@@ -261,14 +268,16 @@ def codex_rollout_usage(root, thread, since=None):
     that still goes down in time order is a reset and counts from zero. The baseline for the first in-window
     increment is the last counter before the window; with none and a session that began before the window
     that delta is unknown, so it is skipped and the result is partial. Files of one thread add up.
-    input_tokens includes cached_input_tokens (reported input = input - cached). The cache-write counter's
+    input_tokens includes cached_input_tokens (reported input = input - cached). When either end of an increment
+    has no valid cached counter, that increment's input cannot be split: it goes to `input_cache_split_unknown`
+    (neither uncached input nor cache read, unpriced) and the result is partial. The cache-write counter's
     relation to input_tokens is NOT established by the source, so it is kept raw in `cache_write_raw`, not
     added to any bucket, and flagged partial; a total_tokens that disagrees with input+output is flagged too."""
     files = sorted(Path(root).glob(f"**/rollout-*-{thread}.jsonl"))
     if not files:
         return None
     add, events, resets, partial = dict(input=0, cached=0, write=0, output=0), 0, 0, []
-    usable = mismatched = 0
+    usable = mismatched = split_unknown = cache_unknown_events = write_bad = 0
     for path in files:
         entries = list(_lines(path))
         start = min((t for t in (parse_ts(e.get("timestamp")) for e in entries) if t is not None), default=None)
@@ -306,16 +315,23 @@ def codex_rollout_usage(root, thread, since=None):
                     prev = cur
                     partial.append(f"{path.name}: no counter before the window, first in-window delta unknown")
                     continue
-            if cur["total"] < prev["total"]:
-                resets += 1
-                inc = cur
-            else:
-                inc = {k: max(0, cur[k] - prev[k]) for k in add}
+            reset = cur["total"] < prev["total"]
+            resets += reset
+            base = dict.fromkeys(add, 0) if reset else prev
+            inc = {k: max(0, cur[k] - base[k]) for k in ("input", "write", "output")}
+            known = cur["cached"] is not None and base["cached"] is not None
             prev = cur
             if in_window:
                 events += 1
-                for k in add:
+                write_bad += cur["write_bad"]
+                for k in ("write", "output"):
                     add[k] += inc[k]
+                if known:
+                    add["cached"] += max(0, cur["cached"] - base["cached"])
+                    add["input"] += inc["input"]
+                else:
+                    split_unknown += inc["input"]
+                    cache_unknown_events += 1
     if not usable:
         return _no_usage(partial + ["rollout has no usable token_count record"])
     if add["write"]:
@@ -323,8 +339,14 @@ def codex_rollout_usage(root, thread, since=None):
                        "input_tokens is not established by the source")
     if mismatched:
         partial.append(f"{mismatched} event(s) where total_tokens != input+output (cache-write accounting unclear)")
+    if cache_unknown_events:
+        partial.append(f"{cache_unknown_events} event(s) without a valid cached_input_tokens: {split_unknown} input "
+                       "token(s) not split into uncached/cache read (not assumed zero)")
+    if write_bad:
+        partial.append(f"{write_bad} event(s) with an invalid cache_write_input_tokens, not counted")
     return dict(input=max(0, add["input"] - add["cached"]), cache_creation=0, cache_read=add["cached"],
-                output=add["output"], cache_write_raw=add["write"], messages=events, resets=resets, partial=partial)
+                output=add["output"], input_cache_split_unknown=split_unknown, cache_write_raw=add["write"],
+                messages=events, resets=resets, partial=partial)
 
 
 def estimate_cost(model, usage, prices=PRICES, bucket_unknown=False):
@@ -361,36 +383,104 @@ def _rate(num, den):
     return None if not den else round(num / den, 4)
 
 
+def _final_session(task, msgs):
+    """The task's last worker session id: tasks.session_id, else the newest successful retry's new_session_id
+    when no failed retry came after it. None when the data cannot say."""
+    if isinstance(task.get("session_id"), str) and task["session_id"]:
+        return task["session_id"]
+    attempts = [m for m in msgs if m["kind"] in ("retry", "retry_failed")]
+    if attempts and attempts[-1]["kind"] == "retry":
+        sid = _json(attempts[-1]["body"]).get("new_session_id")
+        return sid if isinstance(sid, str) and sid else None
+    return None
+
+
+def _task_usage(task, msgs):
+    """One closed task's worker usage, summed over its sessions.
+
+    Every worker session counts once. A usage row tagged with session_id (written for a replaced session at
+    retry) is deduplicated by that id, the last valid row winning. The untagged row is the close-time reading of
+    the final session; an untagged row older than the newest retry is stale. The untagged row is added when it
+    is provably a session no tagged row covers, dropped when the final session id is already tagged, and left
+    out with the task marked partial when the data cannot tell (no final session id). Every session a retry
+    replaced must have its own row (a retry without old_session_id cannot be checked), else partial.
+    Returns (sessions {sid or None: (model, buckets, missing)}, status) where status is one of
+    'complete' | 'partial' | 'stale' | 'invalid'."""
+    rows = [m for m in msgs if m["kind"] == "usage"]
+    retries = [m for m in msgs if m["kind"] == "retry"]
+    last_retry = retries[-1]["id"] if retries else None
+    tagged, untagged, gaps, bad = {}, None, False, 0
+    for m in rows:
+        body = _json(m["body"])
+        sid = body.get("session_id")
+        parsed = read_usage(body)
+        if isinstance(sid, str) and sid:
+            if parsed is None:
+                bad += 1
+                tagged.setdefault(sid, None)
+            else:
+                tagged[sid] = (body.get("model") or task["model"], *parsed)
+        elif last_retry is not None and m["id"] < last_retry:
+            continue  # a reading taken before a later retry: it cannot be the final number
+        elif parsed is None:
+            bad += 1
+            untagged = None
+        else:
+            untagged = (body.get("model") or task["model"], *parsed)
+    sessions = {sid: v for sid, v in tagged.items() if v is not None}
+    gaps = bad > 0 or len(sessions) < len(tagged)
+    for r in retries:
+        old = _json(r["body"]).get("old_session_id")
+        if not (isinstance(old, str) and old in sessions):
+            gaps = True  # the replaced session has no valid usage of its own (or the event does not name it)
+    final = _final_session(task, msgs)
+    if untagged is not None:
+        if final is not None and final not in tagged:
+            sessions[final] = untagged
+        elif final is None and not tagged:
+            sessions[None] = untagged  # one session, never retried or tagged: nothing to overlap with
+        elif final is None:
+            gaps = True  # may or may not be one of the tagged sessions: leave it out, say partial
+    elif final is None and not retries and len(sessions) == 1:
+        pass  # never retried: the one tagged session is the only session
+    elif final is None or final not in sessions:
+        gaps = True  # the final session has no usage row
+    if not sessions:
+        return sessions, "invalid" if bad else "stale"
+    return sessions, "partial" if gaps else "complete"
+
+
 def _worker_usage(tasks, msgs_by_task, closed_ids):
-    """Latest usage message per closed task. Missing, malformed (no valid counters) and stale (a retry came
-    after it) usage is not coverage. A valid record lacking a cache bucket counts but marks the cost partial."""
-    covered, stale, invalid, buckets = 0, [], [], {}
+    """Usage per closed task across all of its worker sessions (see _task_usage). Only a task whose every
+    session is accounted for is coverage; a partial task still adds its known sessions (a lower bound) and
+    keeps the cost incomplete. A valid record lacking a cache bucket counts but marks the cost partial."""
+    covered, stale, invalid, partial, buckets = 0, [], [], [], {}
     for t in tasks:
         if t["id"] not in closed_ids:
             continue
         msgs = msgs_by_task.get(t["id"], [])
-        usage = [m for m in msgs if m["kind"] == "usage"]
-        if not usage:
+        if not any(m["kind"] == "usage" for m in msgs):
             continue
-        if any(m["kind"] == "retry" and m["id"] > usage[-1]["id"] for m in msgs):
-            stale.append(t["id"])
+        sessions, status = _task_usage(t, msgs)
+        if status in ("stale", "invalid"):
+            (stale if status == "stale" else invalid).append(t["id"])
             continue
-        body = _json(usage[-1]["body"])
-        parsed = read_usage(body)
-        if parsed is None:
-            invalid.append(t["id"])
-            continue
-        counters, missing = parsed
-        covered += 1
-        slot = buckets.setdefault(body.get("model") or t["model"], dict(_zero(), tasks=0, bucket_unknown_tasks=0))
-        slot["tasks"] += 1
-        slot["bucket_unknown_tasks"] += bool(missing)
-        for field in FIELDS:
-            slot[field] += counters[field]
-    return dict(covered=covered, stale=stale, invalid=invalid, by_model=buckets)
+        if status == "complete":
+            covered += 1
+        else:
+            partial.append(t["id"])
+        for model, counters, missing in sessions.values():
+            slot = buckets.setdefault(model, dict(_zero(), tasks=0, sessions=0, bucket_unknown_tasks=0))
+            slot["sessions"] += 1
+            for field in FIELDS:
+                slot[field] += counters[field]
+        for model in {v[0] for v in sessions.values()}:
+            buckets[model]["tasks"] += 1
+            buckets[model]["bucket_unknown_tasks"] += any(v[2] for v in sessions.values() if v[0] == model)
+    return dict(covered=covered, stale=stale, invalid=invalid, partial=partial, by_model=buckets)
 
 
-def _cost_block(by_model, prices, closed, covered):
+def _cost_block(by_model, prices, closed, covered, partial_tasks=0):
     total, complete, unknown, unpriced, unverified, priced = Decimal(0), True, [], {}, {}, 0
     for model, usage in by_model.items():
         cost, ok, miss, unver = estimate_cost(model, usage, prices, bool(usage["bucket_unknown_tasks"]))
@@ -404,32 +494,29 @@ def _cost_block(by_model, prices, closed, covered):
             unpriced[k] = unpriced.get(k, 0) + v
         for k, v in unver.items():
             unverified[k] = unverified.get(k, 0) + v
-    missing_tasks = closed - covered
+    missing_tasks = closed - covered - partial_tasks
     return dict(usd_estimate=str(total) if priced else None,
-                complete=complete and not unknown and not missing_tasks and bool(closed),
-                missing_usage_tasks=missing_tasks, unknown_models=unknown, unpriced_tokens=unpriced,
+                complete=complete and not unknown and not missing_tasks and not partial_tasks and bool(closed),
+                missing_usage_tasks=missing_tasks, partial_usage_tasks=partial_tasks, unknown_models=unknown,
+                unpriced_tokens=unpriced,
                 unverified_tokens=unverified,
                 note="API list-price estimate (not a bill); a lower bound when PARTIAL")
 
 
 def _tier(model):
-    if isinstance(model, str):
-        for rank, name in enumerate(MODEL_TIERS):
-            if name in model.lower():
-                return rank
-    return None
+    return ROUTING_TIERS.get(model.strip().lower()) if isinstance(model, str) else None
 
 
 def classify_retry(body):
-    """'upgrade' | 'not_upgrade' | 'unresolved' for one retry event body. Needs both models named; reads
-    from/to or from_model/to_model and ignores any other field (the event schema is not settled). An upgrade
-    is a higher tier of the same ordered family; same model, a downgrade, or models we cannot order are not."""
-    old = body.get("from") or body.get("from_model")
-    new = body.get("to") or body.get("to_model")
-    if not isinstance(old, str) or not isinstance(new, str):
+    """'upgrade' | 'not_upgrade' | 'unresolved' for one retry event body. Reads from/to, from_model/to_model or
+    old_model and ignores any other field (the event schema is not settled). An upgrade is a move to a higher
+    routing tier (Sol -> Opus counts); same tier or a downgrade is not. A missing model, or a model without a
+    routing tier, is unresolved: it is never counted as a known non-upgrade."""
+    a = _tier(body.get("from") or body.get("from_model") or body.get("old_model"))
+    b = _tier(body.get("to") or body.get("to_model"))
+    if a is None or b is None:
         return "unresolved"
-    a, b = _tier(old), _tier(new)
-    return "upgrade" if a is not None and b is not None and b > a else "not_upgrade"
+    return "upgrade" if b > a else "not_upgrade"
 
 
 def _group(tasks, all_tasks, msgs_by_task, prices):
@@ -443,7 +530,7 @@ def _group(tasks, all_tasks, msgs_by_task, prices):
     reworked_origin = {t["rework_of"] for t in all_tasks if t["rework_of"]}
     done_originals = [t for t in done if not t["rework_of"]]
     usage = _worker_usage(tasks, msgs_by_task, closed)
-    cost = _cost_block(usage["by_model"], prices, len(closed), usage["covered"])
+    cost = _cost_block(usage["by_model"], prices, len(closed), usage["covered"], len(usage["partial"]))
     # Event coverage per source is not established: no events of a kind in THIS group is unknown, never 0.
     have = lambda kind: kinds[kind] > 0  # noqa: E731
     retried = {m["task_id"] for m in msgs if m["kind"] == "retry"}
@@ -477,8 +564,9 @@ def _group(tasks, all_tasks, msgs_by_task, prices):
         escalations_complete=(unresolved == 0) if have("retry") else None,
         escalated_tasks_outcome_completed=(sum(1 for t in done if t["id"] in upgraded) if have("retry") else None),
         escalations_post_upgrade_verified=None,
-        escalation_note="escalation = retry to a higher model tier (from/to); same model, downgrade or "
-                        "unorderable models are not; retries without from/to are unresolved. Whether an upgrade "
+        escalation_note="escalation = retry to a higher project routing tier (M = sonnet/sol, H = opus; a routing "
+                        "policy, not a quality ranking); same tier or downgrade is not; a retry without both models "
+                        "or with a model outside those tiers is unresolved. Whether an upgrade "
                         "then passed verification is unknown: no post-upgrade verify role is recorded, and a "
                         "done outcome is not a verified pass",
         verify_events=kinds["verify"] if have("verify") else None,
@@ -490,7 +578,7 @@ def _group(tasks, all_tasks, msgs_by_task, prices):
         proxy_note="no-retry / no-rework among completed tasks: proxies for model choice, not model accuracy",
         worker_tokens=dict(by_model=usage["by_model"], tasks_with_usage=usage["covered"], closed_tasks=len(closed),
                            open_tasks=len(tasks) - len(closed), usage_stale_after_retry=usage["stale"],
-                           usage_malformed=usage["invalid"],
+                           usage_malformed=usage["invalid"], usage_partial_sessions=usage["partial"],
                            coverage=f"{usage['covered']}/{len(closed)}" if closed else None),
         cost=cost,
         cost_per_completed_usd=(str(Decimal(cost["usd_estimate"]) / len(done))
@@ -511,8 +599,12 @@ def orch_tokens(orch, thread, since, claude_root, codex_root, prices):
         return dict(kind=kind, source="unusable", model=model, tokens=None, partial=usage["partial"])
     cost, complete, unpriced, unverified = estimate_cost(model, usage, prices)
     tokens = {k: usage[k] for k in FIELDS}
+    split_unknown = usage.get("input_cache_split_unknown") or 0
+    if split_unknown and cost is not None:
+        unpriced = dict(unpriced, input_cache_split_unknown=split_unknown)
     return dict(kind=kind, source="transcript" if kind == "claude" else "rollout", model=model, tokens=tokens,
-                total=sum(tokens.values()), events=usage["messages"], counter_resets=usage.get("resets"),
+                total=sum(tokens.values()) + split_unknown, events=usage["messages"],
+                counter_resets=usage.get("resets"), input_cache_split_unknown=usage.get("input_cache_split_unknown"),
                 cache_write_unattributed=usage.get("cache_write_raw"),
                 partial=usage["partial"], cost_usd_estimate=None if cost is None else str(cost),
                 cost_complete=(complete and not usage["partial"]) if cost is not None else None,
@@ -525,7 +617,7 @@ def stats(con, since=None, claude_root=None, codex_root=None, prices=PRICES):
     codex_root = codex_root or os.environ.get("ORCHD_CODEX_SESSIONS", Path.home() / ".codex" / "sessions")
     tasks = [dict(r) for r in con.execute("SELECT * FROM tasks ORDER BY created_at")]
     for t in tasks:
-        for col in ("model", "task_type", "rework_of", "found_by", "outcome"):
+        for col in ("model", "task_type", "rework_of", "found_by", "outcome", "session_id"):
             t.setdefault(col, None)
     msgs_by_task = {}
     for m in con.execute("SELECT * FROM messages ORDER BY id"):

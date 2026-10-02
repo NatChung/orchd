@@ -421,7 +421,7 @@ class StatsTest(unittest.TestCase):
     def test_escalation_is_a_model_tier_upgrade_not_a_retry(self):
         cases = [({"from": "claude-sonnet-5-5", "to": "claude-sonnet-5-5"}, 0),   # same model
                  ({"from": "claude-opus-5-5", "to": "claude-sonnet-5-5"}, 0),     # downgrade
-                 ({"from": "claude-sonnet-5-5", "to": "gpt-6.1-sol"}, 0),         # other family: no ordering
+                 ({"from": "claude-sonnet-5-5", "to": "gpt-6.1-sol"}, 0),         # same routing tier (M)
                  ({"from_model": "claude-sonnet-5-5", "to_model": "claude-opus-5-5"}, 1)]  # tolerated alt names
         for body, want in cases:
             with self.subTest(body=body):
@@ -447,6 +447,160 @@ class StatsTest(unittest.TestCase):
         self.assertIsNone(mine["retries"])
         self.assertIsNone(mine["escalations"])
         self.assertEqual(self.total("o2")["escalations"], 1)
+
+    # -- multi-session worker usage (retry writes one tagged row per replaced session; close one untagged) -------
+
+    def sessions_task(self, final_session="new", **retry_extra):
+        self.task("a", model="claude-opus-5-5", session_id=final_session)
+        self.msg("a", "usage", dict(model="claude-sonnet-5-5", session_id="old", job_id="j0", source="retry",
+                                    **self.counters(1_000_000)))
+        self.msg("a", "retry", dict(from_model="claude-sonnet-5-5", to_model="claude-opus-5-5", reason="r",
+                                    old_model="claude-sonnet-5-5", old_session_id="old", old_job_id="j0",
+                                    new_session_id="new", new_job_id="j1", **retry_extra))
+
+    def counters(self, n, **extra):
+        return dict(input_tokens=n, output_tokens=0, cache_creation_input_tokens=0, cache_read_input_tokens=0, **extra)
+
+    def test_retry_sessions_all_cost_once_and_complete(self):
+        for final in ("new", None):  # final session from tasks.session_id, or from the retry's new_session_id
+            with self.subTest(final=final):
+                for tbl in ("messages", "tasks"):
+                    self.con.execute(f"DELETE FROM {tbl}")
+                self.sessions_task(final)
+                self.close("a", "merged", self.counters(500_000), model="claude-opus-5-5")  # untagged final
+                t = self.total()
+                self.assertEqual(Decimal(t["cost"]["usd_estimate"]), Decimal(4))  # Sonnet 1M x $2 + Opus 500k x $4
+                self.assertTrue(t["cost"]["complete"])
+                self.assertEqual((t["worker_tokens"]["coverage"], t["cost"]["partial_usage_tasks"]), ("1/1", 0))
+                by = t["worker_tokens"]["by_model"]
+                self.assertEqual((by["claude-sonnet-5-5"]["input"], by["claude-opus-5-5"]["input"]),
+                                 (1_000_000, 500_000))
+
+    def test_duplicate_tagged_session_counts_once(self):
+        self.sessions_task()
+        self.msg("a", "usage", dict(model="claude-sonnet-5-5", session_id="old", source="retry",
+                                    **self.counters(1_000_000)))
+        self.close("a", "merged", self.counters(500_000), model="claude-opus-5-5")
+        t = self.total()
+        self.assertEqual(Decimal(t["cost"]["usd_estimate"]), Decimal(4))
+        self.assertEqual(t["worker_tokens"]["by_model"]["claude-sonnet-5-5"]["sessions"], 1)
+
+    def test_untagged_final_that_is_a_tagged_session_is_not_double_counted(self):
+        # retry recorded s0, then failed to spawn: the task still points at s0 and close reads s0 again
+        self.task("a", session_id="s0")
+        self.msg("a", "usage", dict(model="claude-sonnet-5-5", session_id="s0", source="retry",
+                                    **self.counters(1_000_000)))
+        self.msg("a", "retry_failed", dict(stage="spawn", error="x", old_session_id="s0"))
+        self.close("a", "merged", self.counters(1_000_000))
+        t = self.total()
+        self.assertEqual(Decimal(t["cost"]["usd_estimate"]), Decimal(2))
+        self.assertTrue(t["cost"]["complete"])
+
+    def test_untagged_final_of_unknown_session_next_to_tagged_rows_is_partial(self):
+        self.task("a")  # no tasks.session_id, and the newest attempt failed: the final session is unknown
+        self.msg("a", "usage", dict(model="claude-sonnet-5-5", session_id="s0", source="retry",
+                                    **self.counters(1_000_000)))
+        self.msg("a", "retry_failed", dict(stage="spawn", error="x", old_session_id="s0"))
+        self.close("a", "merged", self.counters(1_000_000))
+        t = self.total()
+        self.assertFalse(t["cost"]["complete"])
+        self.assertEqual((t["cost"]["partial_usage_tasks"], t["cost"]["missing_usage_tasks"]), (1, 0))
+        self.assertEqual(t["worker_tokens"]["usage_partial_sessions"], ["a"])
+        self.assertEqual(Decimal(t["cost"]["usd_estimate"]), Decimal(2))  # lower bound: the overlap is unknown
+        self.assertEqual(t["worker_tokens"]["coverage"], "0/1")
+        self.assertIn("PARTIAL", stats.format_table(self.report()))
+
+    def test_retry_without_usage_of_replaced_session_is_partial_not_complete(self):
+        cases = {"legacy retry names no old session": dict(old_session_id=None),
+                 "replaced session has no usage row": dict(old_session_id="gone")}
+        for name, extra in cases.items():
+            with self.subTest(name):
+                for tbl in ("messages", "tasks"):
+                    self.con.execute(f"DELETE FROM {tbl}")
+                self.task("a", model="claude-opus-5-5", session_id="new")
+                self.msg("a", "retry", dict(from_model="claude-sonnet-5-5", to_model="claude-opus-5-5", **extra))
+                self.close("a", "merged", self.counters(500_000), model="claude-opus-5-5")
+                t = self.total()
+                self.assertFalse(t["cost"]["complete"])
+                self.assertEqual(t["worker_tokens"]["usage_partial_sessions"], ["a"])
+                self.assertEqual(Decimal(t["cost"]["usd_estimate"]), Decimal(2))  # only the final session is known
+
+    def test_malformed_tagged_session_row_keeps_task_partial(self):
+        self.sessions_task()
+        self.con.execute("DELETE FROM messages WHERE kind='usage'")
+        self.msg("a", "usage", dict(model="claude-sonnet-5-5", session_id="old", input_tokens="x", output_tokens=0))
+        self.close("a", "merged", self.counters(500_000), model="claude-opus-5-5")
+        t = self.total()
+        self.assertFalse(t["cost"]["complete"])
+        self.assertEqual(t["worker_tokens"]["usage_partial_sessions"], ["a"])
+        self.assertNotIn("claude-sonnet-5-5", t["worker_tokens"]["by_model"])
+
+    def test_stats_reads_without_changing_the_db(self):
+        self.sessions_task()
+        self.close("a", "merged", self.counters(500_000), model="claude-opus-5-5")
+        self.con.commit()
+        before = self.con.total_changes
+        rows = [tuple(r) for r in self.con.execute("SELECT * FROM messages ORDER BY id")]
+        self.report()
+        self.assertEqual(self.con.total_changes, before)
+        self.assertEqual([tuple(r) for r in self.con.execute("SELECT * FROM messages ORDER BY id")], rows)
+
+    # -- escalation by project routing tier ----------------------------------------------------------
+
+    def test_escalation_follows_project_routing_tiers(self):
+        cases = [({"from_model": "gpt-6.1-sol", "to_model": "claude-opus-5-5"}, (1, 0, True)),   # M -> H
+                 ({"old_model": "gpt-6.1-sol", "to_model": "claude-opus-5-5"}, (1, 0, True)),    # PR30 field
+                 ({"from": "sol", "to": "opus"}, (1, 0, True)),
+                 ({"from": "claude-opus-5-5", "to": "gpt-6.1-sol"}, (0, 0, True)),               # H -> M
+                 ({"from": "claude-sonnet-5-5", "to": "gpt-6.1-sol"}, (0, 0, True)),             # same tier
+                 ({"from": "future-model-A", "to": "future-model-B"}, (0, 1, False)),            # no tier
+                 ({"from": "claude-haiku-4-5", "to": "claude-opus-5-5"}, (0, 1, False)),         # not routed
+                 ({"from": "claude-sonnet-5-5", "to": 7}, (0, 1, False))]                        # bad schema
+        for body, want in cases:
+            with self.subTest(body=body):
+                for tbl in ("messages", "tasks"):
+                    self.con.execute(f"DELETE FROM {tbl}")
+                t = self.retry_total(body)
+                self.assertEqual((t["escalations"], t["escalations_unresolved"], t["escalations_complete"]), want)
+        self.assertIn("not a quality ranking", t["escalation_note"])
+
+    # -- Codex cache counters ---------------------------------------------------------------------
+
+    def test_codex_missing_or_malformed_cache_counter_is_unknown_not_zero(self):
+        drop = object()
+        cases = {"missing": drop, "malformed": "malformed", "null": None, "negative": -1, "above input": 150}
+        for name, cached in cases.items():
+            with self.subTest(name):
+                extra = {} if cached is drop else {"cached_input_tokens": cached}
+                self.codex_events("th1", [(T0 - 10, 0, 0, {}), (T0 + 1, 100, 10, extra)])
+                if cached is drop:
+                    path = next(self.codex.glob("rollout-*-th1.jsonl"))
+                    lines = [json.loads(x) for x in path.read_text().splitlines()]
+                    del lines[-1]["payload"]["info"]["total_token_usage"]["cached_input_tokens"]
+                    path.write_text("\n".join(json.dumps(x) for x in lines))
+                u = stats.codex_rollout_usage(self.codex, "th1", T0)
+                self.assertEqual((u["input"], u["cache_read"], u["input_cache_split_unknown"], u["output"]),
+                                 (0, 0, 100, 10))
+                self.assertTrue(any("cached_input_tokens" in n for n in u["partial"]))
+
+    def test_codex_cache_split_unknown_is_unpriced_and_in_total(self):
+        self.codex_events("th1", [(T0 - 10, 0, 0, {}), (T0 + 1, 100, 10, {"cached_input_tokens": 40}),
+                                  (T0 + 2, 160, 20, {"cached_input_tokens": "?"}),
+                                  (T0 + 3, 200, 30, {"cached_input_tokens": 50})])
+        u = stats.codex_rollout_usage(self.codex, "th1", T0)
+        # only 0->100 has both ends known; 100->160 and 160->200 touch the unknown sample
+        self.assertEqual((u["input"], u["cache_read"], u["input_cache_split_unknown"]), (60, 40, 100))
+        t = stats.orch_tokens({"kind": "codex", "model": None, "session_id": None}, "th1", T0,
+                              self.claude, self.codex, stats.PRICES)
+        self.assertEqual(t["total"], 60 + 40 + 30 + 100)
+        self.assertEqual(t["input_cache_split_unknown"], 100)
+        self.assertIsNone(t["cost_usd_estimate"])  # Astra's model is unknown; nothing priced either way
+
+    def test_codex_invalid_cache_write_counter_is_flagged(self):
+        self.codex_events("th1", [(T0 - 10, 0, 0, {}), (T0 + 1, 100, 10, {"cache_write_input_tokens": "x"})])
+        u = stats.codex_rollout_usage(self.codex, "th1", T0)
+        self.assertEqual((u["input"], u["cache_write_raw"]), (100, 0))
+        self.assertTrue(any("cache_write_input_tokens" in n for n in u["partial"]))
 
     # -- table / prices ---------------------------------------------------------------------------
 
