@@ -14,17 +14,24 @@ Which ledger is trusted:
 - Dry-run reads a private copy of the DB (+WAL) and never opens the live file, so it creates no
   sidecars. It is a snapshot: a writer may change the DB right after; the dry-run is advisory.
 - --apply first takes the same snapshot (an open demo task there stops it without touching the live
-  DB), then opens the live DB and holds SQLite's write lock (BEGIN IMMEDIATE, then ROLLBACK: nothing is
-  written) from the authoritative re-read through the last removal. No writer can open or reopen a task
-  while it holds the lock; orchd writers wait (busy timeout 30s), so the hold stops starting new work
-  after LOCK_BUDGET_S. If the lock cannot be had within LOCK_WAIT_S, it refuses to run.
+  DB), then opens the live DB and holds SQLite's write lock (BEGIN IMMEDIATE ... ROLLBACK) from the
+  authoritative re-read through the last removal. No writer can open or reopen a task while it holds
+  the lock. It writes no rows; opening the live DB does create -wal/-shm for the duration, and if it is
+  the last connection on close SQLite checkpoints a WAL left by others into orchd.db (content unchanged).
+  orchd writers wait up to 30s (store.connect busy timeout): no new task chain starts after
+  LOCK_BUDGET_S, so the hold is that plus the chain already in flight (up to ~7 git calls, each
+  capped at GIT_TIMEOUT_S); keep demo runs small enough for that to stay under 30s. If the lock cannot be had within LOCK_WAIT_S, it refuses to run.
 
 Which resource is acted on: every directory inspected (repo, worktree, bare remote) is held open by
 descriptor from inspection to removal, and git runs inside that held directory (fchdir + a relative
 GIT_DIR), so swapping a pathname after planning cannot redirect a deletion; a pathname that no longer
-names the held directory is refused. A worktree is first `git worktree move`d into a fresh private
-directory and removed (no --force) only if what arrived there is the inspected one; otherwise it is
-moved back. Branch deletes are compare-and-delete on the expected SHA.
+names the held directory is refused. A worktree is first `git worktree move`d into a fresh random
+0700 directory beside it and removed (no --force) only if what arrived there is the inspected one;
+otherwise it is moved back. That defeats a substitution at the planned pathname; a process that
+enumerates .orchd-worktrees and races the random name is outside this model. If the script dies
+mid-step a worktree can be left at .orchd-worktrees/.demo-reset-*/<name>, still registered
+(`git worktree list` shows it, `git worktree move` brings it back).
+Branch deletes are compare-and-delete on the expected SHA.
 
 Exit codes: 0 clean, 1 something was refused, 2 refused to run at all (open demo task, busy DB, bad input).
 Not done: stopping leftover Claude Orchs (`orchd orch-stop`), and unattributed `orchd/*` branches
@@ -46,6 +53,7 @@ from pathlib import Path
 
 DEMO_REPOS = ("demo-shop-api", "demo-shop-web", "demo-shop-docs")
 TASK_ID = re.compile(r"^[0-9a-f]{8}$")
+# no inherited GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE/...: they would redirect git away from the held directory
 GIT_ENV = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 GIT_ENV["GIT_OPTIONAL_LOCKS"] = "0"  # `git status` must not touch the index in a dry-run
 GIT_TIMEOUT_S = 10
@@ -461,7 +469,8 @@ class Reset:
         try:
             repo.git(".git", "worktree", "move", str(wt.path), str(dest))
         except Exception:
-            quarantine.rmdir()
+            with contextlib.suppress(OSError):  # keep the move error, not a cleanup error
+                quarantine.rmdir()
             raise
         # nobody else knows `quarantine`: what arrived there stays what we check until we remove it
         arrived = os.lstat(dest)
