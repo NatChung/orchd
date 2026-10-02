@@ -134,3 +134,10 @@
 - close：已 close 的 task 不收也不送；排隊中的答案保留在 DB（可查），永遠不 dispatch。鎖內會再檢查一次 status。
 - Orch 的責任：看到 `queued`，等該 worker 下一次 progress / ask / report 叫醒並讀完 inbox 後，呼叫 `answer(flush=true)`（或帶新 text）。例外：task 在 `question` 狀態時拿到 `queued`，表示 worker 已經 ask、只是程序還沒退出，之後不會再叫醒 Orch；Orch 要稍後主動 `flush=true`（或等 `list_open` 的 `worker_alive` 變 null）。寫在 MCP `answer` 工具描述裡；`inbox`、`list_open` 不顯示 pending（不在 #12 範圍）。
 - 沒做：不自動送出（worker 回合結束後沒有東西觸發）、沒有 TTL / cancel、沒用 `codex queue`（只在 Desktop session 驗證過，對 `exec` thread 未驗證）。
+
+## followup（#5 剩餘，2026-10-02）
+- 契約：`followup(task_id, message)` 對未 closed 的既有 task 追加指示；同 task / worktree / branch / session / owner，不換模型（換模型用 `retry`）、不自動 retry、不建新 task。missing（KeyError）、closed、空 message 一律拒絕，不寫 event。
+- 交付：直接走 `answer()`，不另起路徑。Claude worker 在 task lock 下 `send_uds`；Codex worker 回合中則進同一條 `answer_queued` FIFO（status `queued`），之後 `answer(flush=true)` 與其他排隊答案依序合成一個 resume 回合，不重開 worker、不丟 queue。task lock 忙或 send 失敗：queued + error，或例外往上拋，Orch 看得到。
+- 訊息：以 `[orchd answer <id>]` 包裝（worker 已認得），內文開頭 `[followup]` 說明這不是回答、請 `ack`、可 `progress`、最後新 `report`。交付後 status 回 `acked`；原本的 report / evidence 列不動。
+- 紀錄：每次被接受的請求寫一列 `kind=followup` 事件（JSON：message、from_status、model、session_id、status、pending/error）。不在 `ORCH_KINDS`，不進 inbox；`orchd stats` 已經在數這個 kind。worker 的第二次 report 照常叫醒 Orch。
+- 沒做（#5 仍開）：Codex Orch `approval_mode` 加 `retry` / `followup`、更新 Orch AGENTS.md（皆為全域 / 共用檔，待 Nat 決定）、真 worker pilot / E2E。沒有 CLI 子命令（`retry` / `answer` 也沒有）。已知限制同 answer：Claude 送達 at-least-once。

@@ -84,6 +84,18 @@ TOOLS = [
          "task_id": {"type": "string"},
          "model": {"type": "string", "enum": list(MODELS)},
          "reason": {"type": "string", "description": "Why this worker is being replaced and why this model"}}}},
+    {"name": "followup",
+     "description": "Add an instruction to an open task: the same worker, worktree, branch and session continue; the model "
+                    "never changes (use retry for that) and no new task or owner is created. Refused for a closed or "
+                    "unknown task. It uses the answer delivery path: a Claude worker is sent it at once under the task "
+                    "lock; a Codex worker mid-turn queues it in the same FIFO as answers (status queued; flush with "
+                    "answer flush=true after its next progress/ask/report). Returns status delivered|queued|failed "
+                    "with delivered and pending counts, and errors if it could not be sent (nothing is lost if "
+                    "queued). The worker's earlier report and events are kept; it acks, may send progress, and ends "
+                    "with a new report, which wakes you as usual.",
+     "inputSchema": {"type": "object", "required": ["task_id", "message"], "properties": {
+         "task_id": {"type": "string"},
+         "message": {"type": "string", "description": "The next instruction, with any new scope or done_when"}}}},
 ]
 
 
@@ -113,6 +125,8 @@ def call(name, args, thread, con, rt):
         t = core.retry(con, rt, args["task_id"], args.get("model"), args.get("reason"))
         return {"task_id": t["id"], "status": t["status"], "model": t["model"], "branch": t["branch"],
                 "worktree": t["worktree"]}
+    if name == "followup":
+        return core.followup(con, rt, args["task_id"], args.get("message"))
     raise ValueError(f"unknown tool {name}")
 
 

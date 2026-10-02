@@ -329,6 +329,36 @@ def answer(con, rt, task_id, text=None, flush=False):
     return dict(status="delivered", delivered=len(pending), pending=0)
 
 
+FOLLOWUP_HEAD = ("[followup] New instruction for this same task, not an answer to a question. Keep working on this "
+                 "worktree and branch; the earlier report stays as it was. Run `ack`, send `progress` if it is long, "
+                 "and finish with a new `report`.")
+
+
+def followup(con, rt, task_id, message):
+    """Add an instruction to an open task: same worker, worktree and session, no model change.
+
+    Rides on `answer` for delivery (Codex FIFO queue and resume, Claude send under the task lock), so a busy Codex
+    turn queues it and a busy task lock queues it with an error. Refused for a missing or closed task. One
+    `followup` event row is written once the request is accepted, with the delivery result; a delivery that raises
+    is recorded as failed and re-raised, so the Orch always sees it."""
+    task = store.get_task(con, task_id)  # KeyError for a missing task
+    if task["status"] == "closed":
+        raise ValueError(f"task {task_id} is closed; open a new task instead")
+    if not isinstance(message, str) or not message.strip():
+        raise ValueError("followup needs a non-empty message")
+    event = dict(message=message, from_status=task["status"], model=task["model"], session_id=task["session_id"])
+    try:
+        result = answer(con, rt, task_id, f"{FOLLOWUP_HEAD}\n\n{message}")
+    except Exception as error:
+        event.update(status="failed", error=f"{type(error).__name__}: {error}"[:500])
+        if "closed" not in str(error):  # a close that raced us is a refusal, not a followup event
+            store.add_message(con, task_id, "followup", json.dumps(event, ensure_ascii=False))
+        raise
+    event.update(result)
+    store.add_message(con, task_id, "followup", json.dumps(event, ensure_ascii=False))
+    return result
+
+
 def list_open(con, rt):
     try:
         jobs = rt.live_jobs()
