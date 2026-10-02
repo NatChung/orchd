@@ -1,8 +1,10 @@
 """close with initialized submodules, failed removal and retry. Real git in a temp dir; ORCHD_HOME never touched."""
+import hashlib
 import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -325,17 +327,64 @@ class CloseSubmoduleTest(unittest.TestCase):
         self.assertEqual(len(self.close_events()), 1)
         self.assertFalse(Path(wt).exists())
 
-    def test_close_waits_a_bounded_time_for_another_close_then_leaves_task_retryable(self):
-        wt = self.plain_task()
-        with core._close_lock(self.con, "efgh5678"):
-            started = time.monotonic()
-            with self.assertRaisesRegex(RuntimeError, "already in progress"):
-                core.close(self.con, self.rt, "efgh5678", lock_wait=0.3)
-            self.assertLess(time.monotonic() - started, 5)
-        self.assertEqual(store.get_task(self.con, "efgh5678")["status"], "done")
+    def hold_delivery_lock(self, task_id, seconds):
+        """Another process (adopt, retry, an older close) holding the task's delivery lock."""
+        db = self.con.execute("PRAGMA database_list").fetchone()["file"]
+        code = ("import sys, time; from orchd import store\n"
+                "with store.task_delivery(store.connect(sys.argv[1]), [sys.argv[2]], timeout=5):\n"
+                "    print('locked', flush=True); time.sleep(float(sys.argv[3]))")
+        child = subprocess.Popen([sys.executable, "-c", code, db, task_id, str(seconds)], stdout=subprocess.PIPE,
+                                 text=True, cwd=Path(core.__file__).resolve().parents[1])
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        self.assertEqual(child.stdout.readline().strip(), "locked")
+        return child
+
+    def test_close_uses_the_canonical_task_delivery_lock_file(self):
+        self.plain_task()
+        db = Path(self.con.execute("PRAGMA database_list").fetchone()["file"])
+        core.close(self.con, self.rt, "efgh5678")
+        lock = db.resolve().with_name(db.name + ".delivery-locks") / hashlib.sha256(b"efgh5678").hexdigest()
+        self.assertTrue(lock.exists())
+        self.assertFalse((db.parent / "close-locks").exists())
+
+    def test_close_times_out_on_a_delivery_lock_held_by_another_process_and_changes_nothing(self):
+        wt = self.plain_task(job_id="job-x")
+        stops = []
+        self.rt.stop_task_worker = lambda *a: stops.append(a)
+        child = self.hold_delivery_lock("efgh5678", 30)
+        started = time.monotonic()
+        with self.assertRaisesRegex(RuntimeError, "delivery lock"):
+            core.close(self.con, self.rt, "efgh5678", outcome="merged", lock_wait=0.3)
+        self.assertLess(time.monotonic() - started, 5)
+        task = store.get_task(self.con, "efgh5678")
+        self.assertEqual((task["status"], task["outcome"], task["note"]), ("done", None, None))
+        self.assertEqual((stops, self.close_events()), ([], []))
         self.assertTrue(Path(wt).exists())
+        child.kill()
+        child.wait()  # process exit releases the flock
         self.assertEqual(core.close(self.con, self.rt, "efgh5678")["worktree"], "removed")
         self.assertEqual(len(self.close_events()), 1)
+
+    def test_another_process_cannot_take_the_delivery_lock_while_close_holds_it(self):
+        self.plain_task()
+        db = self.con.execute("PRAGMA database_list").fetchone()["file"]
+        seen = []
+
+        def probe():
+            other = store.connect(db)
+            try:
+                with store.task_delivery(other, ["efgh5678"], timeout=0.2):
+                    seen.append("acquired")
+            except TimeoutError:
+                seen.append("busy")
+            finally:
+                other.close()
+        self.rt.after_state = probe  # runs inside close, between the state check and removal
+        self.assertEqual(core.close(self.con, self.rt, "efgh5678")["worktree"], "removed")
+        self.assertEqual(seen, ["busy"])
+        probe()
+        self.assertEqual(seen, ["busy", "acquired"])
 
     def test_status_written_closed_by_someone_else_mid_close_emits_no_second_event(self):
         self.plain_task()

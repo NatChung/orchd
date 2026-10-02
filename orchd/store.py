@@ -1,5 +1,7 @@
 """SQLite state: one row per task, plus the messages exchanged about it."""
 import os
+import fcntl
+import hashlib
 import sqlite3
 import time
 import uuid
@@ -79,6 +81,38 @@ def connect(path=None):
             except sqlite3.OperationalError:  # another process added it first
                 pass
     return con
+
+
+@contextmanager
+def task_delivery(con, task_ids, timeout=65):
+    """Cross-process task locks for ownership changes and transport, never a SQLite write lock.
+
+    Ordered batches cannot deadlock. The wait is bounded; process exit releases flock. Keep lock files
+    (unlinking a file while another process waits on it would create two independent locks).
+    """
+    database = con.execute("PRAGMA database_list").fetchone()[2]
+    if not database:
+        raise ValueError("task delivery requires a file-backed database")
+    directory = Path(database).resolve().with_name(Path(database).name + ".delivery-locks")
+    directory.mkdir(exist_ok=True)
+    handles = []
+    deadline = time.monotonic() + timeout
+    try:
+        for task_id in sorted(set(task_ids)):
+            handle = open(directory / hashlib.sha256(task_id.encode()).hexdigest(), "a")
+            handles.append(handle)
+            while True:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("task delivery busy; retry after the current notification")
+                    time.sleep(0.01)
+        yield
+    finally:
+        for handle in reversed(handles):
+            handle.close()
 
 
 def new_task_id():
