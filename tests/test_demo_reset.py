@@ -374,6 +374,14 @@ class DemoResetTest(unittest.TestCase):
         # no WAL at snapshot time; a writer then creates one and commits a running demo task
         _, wt, sdir = self.make_task()
         self.con.close()
+        # closing the last connection removes the WAL on some SQLite builds (3.53) but not others (3.51):
+        # reopen and leave WAL mode, which checkpoints into the DB file and deletes the WAL on every build
+        fixture = sqlite3.connect(self.home / "orchd.db")
+        try:
+            fixture.execute("PRAGMA journal_mode=DELETE")
+            self.assertEqual(fixture.execute("SELECT status FROM tasks").fetchone()[0], "closed")
+        finally:
+            fixture.close()
         self.assertFalse((self.home / "orchd.db-wal").exists())
         load_tasks = demo_reset.load_tasks
         def dispatch_after_snapshot(home, repos):
