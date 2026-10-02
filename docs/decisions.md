@@ -134,3 +134,13 @@
 - close：已 close 的 task 不收也不送；排隊中的答案保留在 DB（可查），永遠不 dispatch。鎖內會再檢查一次 status。
 - Orch 的責任：看到 `queued`，等該 worker 下一次 progress / ask / report 叫醒並讀完 inbox 後，呼叫 `answer(flush=true)`（或帶新 text）。例外：task 在 `question` 狀態時拿到 `queued`，表示 worker 已經 ask、只是程序還沒退出，之後不會再叫醒 Orch；Orch 要稍後主動 `flush=true`（或等 `list_open` 的 `worker_alive` 變 null）。寫在 MCP `answer` 工具描述裡；`inbox`、`list_open` 不顯示 pending（不在 #12 範圍）。
 - 沒做：不自動送出（worker 回合結束後沒有東西觸發）、沒有 TTL / cancel、沒用 `codex queue`（只在 Desktop session 驗證過，對 `exec` thread 未驗證）。
+
+## 驗證鎖與獨立同 SHA 重跑（#4，2026-10-02）
+- 決定（Nat 選）：hash 鎖＋由另一個 worker 在同一個 SHA 重跑。作者自己跑過不算驗收；同一個本機 UID 下只做到 tamper-evident，不是 tamperproof，Orch 要再核對驗證 worker 自己的回報。
+- `dispatch` 多三個可選欄位：`verify`（指令）、`manual_checks`、`verifies`（要驗證的作者任務 id；必須存在且未 close）。新增三個 nullable 欄位，沒有 migration；dispatch 事件只在有值時多帶這些 key。
+- `lock_verify(task_id, paths, command?)`（MCP，Orch 在作者回報之後呼叫）：讀作者 worktree（不寫），記下目前 HEAD、每個 path 在該 HEAD 的 git object hash、指令（預設 dispatch 的 `verify`）。拒絕：任務已 close、驗證任務本身、worktree 有未 commit 或 untracked 檔案、路徑為絕對路徑或含空段／`.`／`..`／`.git`／反斜線、該 commit 沒追蹤、路徑或其上層是 symlink／submodule、目錄底下有 symlink／submodule。路徑從 `git ls-tree` 比對，不碰檔案系統。再鎖一次會回傳 `changed_paths`（跟上一個鎖不同的 hash），可抓到「先鎖測試、之後被改弱」。
+- `orchd verify <驗證任務 id>`（驗證 worker 自己跑）：拒絕沒有 `verifies`、驗自己、作者已 close、作者沒有鎖、跟作者同一個 session、自己的 worktree 不乾淨；拒絕時不 checkout。之後在自己的 worktree `checkout --detach` 鎖住的 SHA、重算 hash（`hash_ok`）、跑鎖住的指令、記 exit、輸出尾段、`dirty`（跑完 `status --porcelain` 有東西）、`head_after`，寫成作者任務的 `verification` 訊息；乾淨才切回原 branch，dirty 就留著不丟。exit 0 pass／1 fail／2 拒絕。
+- 判定 `verify.status`：`none`（沒鎖）／`locked`（還沒有獨立重跑）／`pass`／`fail`／`stale`（作者 branch 目前的 tip ≠ 鎖的 SHA，任何新 commit 都算）。pass 要同時符合：對應最新的鎖、exit 0、hash_ok、不 dirty、HEAD 沒變、驗證者 ≠ 作者、作者 tip = 鎖的 SHA。DB 裡記錄的 `passed` 不採信，每次重算。作者 tip 讀 `refs/heads/<branch>`，worktree 刪了也查得到。
+- `inbox` 每筆多 `verification`（驗證任務顯示它驗證的那個任務，`role: verifier`）。沒有鎖也不是驗證任務就直接 `{state: none}`，不跑 git。
+- 紀錄是 `messages` 的 `verify_lock`／`verification` 列（跟 `answer_queued` 一樣），不在 `ORCH_KINDS`，不改任務生命週期，也不動 `report`。
+- 沒做：真正兩個 worker 的實測、MCP server 重啟後新工具才會出現（不在本票）、自動派驗證 worker、從 PR 讀 head SHA（以本機 branch tip 為準）、worker brief 沒加 verify 說明（派工指示要寫明跑 `orchd verify <自己的 id>`）。

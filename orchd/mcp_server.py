@@ -10,7 +10,7 @@ import os
 import sys
 import traceback
 
-from . import core, store
+from . import core, store, verify as verification
 from .runtime import DEFAULT_WORKER_MODEL, MODELS, Runtime
 
 TOOLS = [
@@ -33,7 +33,25 @@ TOOLS = [
          "task_type": {"type": "string", "enum": list(core.TASK_TYPES)},
          "rework_of": {"type": "string", "description": "Task id this task redoes or fixes"},
          "found_by": {"type": "string", "enum": list(core.FOUND_BY),
-                      "description": "Who found the problem; only with rework_of"}}}},
+                      "description": "Who found the problem; only with rework_of"},
+         "verify": {"type": "string", "description": "Runnable command that proves done_when; lock_verify locks it"},
+         "manual_checks": {"type": "string", "description": "Only what truly cannot be scripted"},
+         "verifies": {"type": "string", "description":
+                      "Author task id this worker independently verifies: it runs `orchd verify <its own task id>`, "
+                      "which reruns the author's locked command at the locked SHA"}}}},
+    {"name": "lock_verify",
+     "description": "Lock a task's verify command after its author reports: orchd records the author's current HEAD, "
+                    "the git object hash of each path (the test/verify files) at that HEAD, and the command. Refused "
+                    "if the worktree is dirty or a path is absolute, has '..' or .git, is untracked, or goes through "
+                    "a symlink. Re-locking returns changed_paths against the previous lock. Then dispatch a different "
+                    "worker with verifies=<task_id>. The author's own test runs never count as acceptance; inbox "
+                    "verification.state is pass only after that independent rerun passed at the locked SHA and the "
+                    "author has made no newer commit (otherwise stale). Same local user: tamper-evident, not "
+                    "tamperproof, so also check the verifier's own report.",
+     "inputSchema": {"type": "object", "required": ["task_id", "paths"], "properties": {
+         "task_id": {"type": "string"},
+         "paths": {"type": "array", "items": {"type": "string"}, "description": "Repo-relative files or dirs to hash"},
+         "command": {"type": "string", "description": "Defaults to the task's dispatch verify"}}}},
     {"name": "inbox",
      "description": "Read unread acks, progress, reports and questions for tasks you dispatched; each message carries the task's "
                     "stored full model id in `model` (\"unknown\" for tasks dispatched before models were stored). "
@@ -83,7 +101,8 @@ def call(name, args, thread, con, rt):
                           instructions=args["instructions"], done_when=args["done_when"],
                           model=args.get("model") or DEFAULT_WORKER_MODEL, model_reason=args.get("model_reason"),
                           task_type=args.get("task_type"), rework_of=args.get("rework_of"),
-                          found_by=args.get("found_by"))
+                          found_by=args.get("found_by"), verify=args.get("verify"),
+                          manual_checks=args.get("manual_checks"), verifies=args.get("verifies"))
         return {"task_id": t["id"], "status": t["status"], "branch": t["branch"], "worktree": t["worktree"],
                 "orch_id": thread, "model": t["model"],
                 "other_open_on_repo": core.other_open_on_repo(con, t["repo"], thread, t["id"])}
@@ -95,6 +114,8 @@ def call(name, args, thread, con, rt):
         return core.list_open(con, rt)
     if name == "answer":
         return core.answer(con, rt, args["task_id"], args.get("text"), flush=bool(args.get("flush")))
+    if name == "lock_verify":
+        return verification.lock(con, args["task_id"], args.get("paths"), args.get("command"), orch_thread=thread)
     if name == "close":
         return core.close(con, rt, args["task_id"], args.get("outcome"), args.get("rating"))
     if name == "view_worker":

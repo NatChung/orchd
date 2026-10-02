@@ -5,7 +5,7 @@ import shlex
 import uuid
 from pathlib import Path
 
-from . import store, worker_health
+from . import store, verify as verification, worker_health
 from .orch_health import owner_health
 from .runtime import DEFAULT_ORCH_MODEL, DEFAULT_WORKER_MODEL, MODELS, claude_job_alive, worker_kind
 
@@ -90,7 +90,8 @@ def _choice(name, value, valid):
 
 
 def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, model=DEFAULT_WORKER_MODEL,
-             model_reason=None, task_type=None, rework_of=None, found_by=None):
+             model_reason=None, task_type=None, rework_of=None, found_by=None, verify=None, manual_checks=None,
+             verifies=None):
     if not orch_thread:
         raise ValueError("dispatch needs the caller's thread id")
     _choice("model", model, tuple(MODELS))
@@ -106,6 +107,13 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
             store.get_task(con, rework_of)
         except KeyError:
             raise ValueError(f"rework_of: unknown task {rework_of}") from None
+    if verifies:
+        try:
+            verified = store.get_task(con, verifies)
+        except KeyError:
+            raise ValueError(f"verifies: unknown task {verifies}") from None
+        if verified["status"] == "closed":
+            raise ValueError(f"verifies: task {verifies} is closed")
     repo_path = rt.repo_path(repo)
     kind = worker_kind(MODELS[model])
     if kind == "claude" and not rt.claude_trusted(repo_path):
@@ -115,10 +123,12 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
     task = store.create_task(con, id=task_id, repo=repo, repo_path=str(repo_path), title=title,
                              instructions=instructions, done_when=done_when,
                              orch_thread=orch_thread, codex_bin=rt.codex, model=MODELS[model],
-                             model_reason=model_reason, task_type=task_type, rework_of=rework_of, found_by=found_by)
+                             model_reason=model_reason, task_type=task_type, rework_of=rework_of, found_by=found_by,
+                             verify=verify, manual_checks=manual_checks, verifies=verifies)
+    spec = {k: v for k, v in dict(verify=verify, manual_checks=manual_checks, verifies=verifies).items() if v}
     store.add_message(con, task_id, "dispatch", json.dumps(
         dict(model=MODELS[model], model_reason=model_reason, task_type=task_type,
-             rework_of=rework_of, found_by=found_by), ensure_ascii=False))
+             rework_of=rework_of, found_by=found_by, **spec), ensure_ascii=False))
     try:
         base, branch, worktree = rt.create_worktree(repo_path, repo, task_id)
         store.update_task(con, task_id, base=base, branch=branch, worktree=worktree)
@@ -219,9 +229,15 @@ def ask(con, rt, task_id, question):
 def inbox(con, orch_thread):
     rows = store.unread_for_thread(con, orch_thread)
     store.mark_read(con, [r["id"] for r in rows])
+    checked = {}
+    for r in rows:  # only tasks with a lock or a verifies link shell out to git
+        if r["task_id"] not in checked:
+            task = store.get_task(con, r["task_id"])
+            checked[r["task_id"]] = (verification.status(con, task["id"]) if verification.has_any(con, task)
+                                     else dict(state="none"))
     return [dict(task_id=r["task_id"], repo=r["repo"], title=r["title"], kind=r["kind"],
                  body=r["body"], evidence=r["evidence"], task_status=r["status"],
-                 model=task_model(r)) for r in rows]
+                 model=task_model(r), verification=checked[r["task_id"]]) for r in rows]
 
 
 class _ResumeFailed(Exception):

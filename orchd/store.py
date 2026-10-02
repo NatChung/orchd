@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS orchs(
 
 # Columns added after v1. Nullable so old rows and old code keep working against the same DB.
 TASK_COLUMNS = ("model TEXT", "model_reason TEXT", "task_type TEXT", "rework_of TEXT",
-                "found_by TEXT", "outcome TEXT", "rating INTEGER")
+                "found_by TEXT", "outcome TEXT", "rating INTEGER",
+                "verify TEXT", "manual_checks TEXT", "verifies TEXT")
 
 # Message kinds the Orch reads in its inbox; the rest (dispatch, answer, close, usage) are the event log.
 ORCH_KINDS = ("ack", "progress", "report", "question")
