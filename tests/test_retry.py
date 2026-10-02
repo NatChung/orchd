@@ -468,17 +468,35 @@ class RetryReviewRegressionTest(unittest.TestCase):
         retries = [json.loads(r["body"]) for r in self.rows(t["id"], "retry")]
         self.assertEqual(retries[1]["old_job_id"], retries[0]["new_job_id"])
 
-    def test_close_without_the_lock_during_spawn_never_leaves_a_running_task(self):
-        t = self.dispatch("sonnet")  # today's close does not take the task lock; the commit guard catches it
-        results = []
-        self.slow("start_worker", during=lambda: results.append(core.close(store.connect(self.db), self.rt, t["id"])))
-        with self.assertRaisesRegex(Exception, "closed"):
+    def test_commit_guard_catches_a_close_that_skipped_the_lock(self):
+        t = self.dispatch("sonnet")  # an older orchd's close: no task lock, worktree removed, status closed
+
+        def close_without_lock():
+            other = store.connect(self.db)
+            store.update_task(other, t["id"], status="closed")
+            self.rt.missing.add(t["worktree"])
+        self.slow("start_worker", during=close_without_lock)
+        with self.assertRaisesRegex(Exception, "removed|closed"):
             core.retry(self.con, self.rt, t["id"], "opus", "x")
         final = store.get_task(self.con, t["id"])
-        self.assertEqual((final["status"], results[0]["closed"]), ("closed", True))
-        self.assertEqual(self.rt.jobs, {})  # the new worker was stopped too
+        self.assertEqual((final["status"], final["job_id"]), ("closed", "job1"))  # never reopened as running
+        self.assertNotIn("job2", self.rt.jobs)  # the new worker was stopped
         (failed,) = [json.loads(r["body"]) for r in self.rows(t["id"], "retry_failed")]
-        self.assertEqual((failed["stage"], failed["new_stopped"]), ("commit", True))
+        self.assertEqual((failed["stage"], failed["new_job_id"], failed["new_stopped"]), ("commit", "job2", True))
+
+    def test_close_from_another_process_during_retry_ends_closed_with_no_worker(self):
+        t = self.dispatch("sonnet")  # whichever runs first, nothing is left running and close reports truthfully
+        results, threads = [], []
+        self.slow("start_worker", hold=1.0, during=lambda: threads.append(self.in_thread(
+            lambda c: core.close(c, self.rt, t["id"]), results)))
+        try:
+            core.retry(self.con, self.rt, t["id"], "opus", "x")
+        except Exception:  # noqa: BLE001 - close won the race; the commit guard refused
+            pass
+        threads[0].join()
+        self.assertEqual(results[0]["closed"], True, results)
+        self.assertEqual(store.get_task(self.con, t["id"])["status"], "closed")
+        self.assertEqual(self.rt.jobs, {})
 
     def test_lifecycle_step_holding_the_task_lock_blocks_retry_without_side_effects(self):
         t = self.dispatch("sonnet")  # how close (PR #14) and adopt (PR #27) hold it: same file, same helper
