@@ -293,7 +293,7 @@ QUEUED = "answer_queued"
 
 @contextmanager
 def immediate(con):
-    """Hold SQLite's write lock for the block, so two `answer` calls cannot both resume the same thread."""
+    """Hold SQLite's write lock for the block (short commits only; never around a spawn or a socket send)."""
     con.execute("BEGIN IMMEDIATE")
     try:
         yield

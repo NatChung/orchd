@@ -322,5 +322,255 @@ class FollowupAcceptanceTest(unittest.TestCase):
         self.assertIn("flush", tool["description"])
 
 
+class FollowupReceiptBoundaryTest(unittest.TestCase):
+    """PR #32 review 94c5cd97 v2: committed acceptance identity, every after-acceptance lock timeout, a send whose
+    receipt fails, and a Codex resume spawned with no SQL write lock held (shared with plain answer flush)."""
+
+    setUp, tearDown, done_task, events = (FollowupAcceptanceTest.setUp, FollowupAcceptanceTest.tearDown,
+                                          FollowupAcceptanceTest.done_task, FollowupAcceptanceTest.events)
+    holder, stage = FollowupAcceptanceTest.holder, FollowupAcceptanceTest.stage
+
+    def peer(self, code, *args):
+        """Run `code` in another process on the same database (a real second connection)."""
+        return subprocess.check_output([sys.executable, "-c", "import sys\nfrom orchd import store\n"
+                                        "c=store.connect(sys.argv[1])\n" + code + "\nc.close()\n",
+                                        str(self.db), *args], cwd=REPO_ROOT, text=True).strip()
+
+    def stops(self, confirmed=True):
+        stopped = []
+
+        def stop(kind, job, marks=(), wait=10.0):
+            stopped.append((kind, job, tuple(marks)))
+            if not confirmed:
+                raise RuntimeError(f"pid {job} still running")
+        self.rt.stop_task_worker = stop
+        return stopped
+
+    # P1: a rolled-back acceptance id is never used
+    def test_rolled_back_acceptance_id_reused_by_another_process_report_is_not_overwritten(self):
+        t = self.done_task("sol")
+        self.con.execute("CREATE TRIGGER fail_queue BEFORE INSERT ON messages WHEN NEW.kind='answer_queued' "
+                         "BEGIN SELECT RAISE(ABORT,'injected queue failure'); END")
+        real_immediate, real_add, staged, reused = store.immediate, store.add_message, [], []
+
+        def add(c, task_id, kind, body, evidence=None):
+            row_id = real_add(c, task_id, kind, body, evidence)
+            if kind == "followup":
+                staged.append(row_id)
+            return row_id
+
+        @contextlib.contextmanager
+        def rollback_then_competing_report(c):
+            try:
+                with real_immediate(c):
+                    yield
+            except sqlite3.IntegrityError:  # rolled back: another process now inserts a report
+                reused.append(int(self.peer("print(store.add_message(c,sys.argv[2],'report','done: competing',"
+                                            "'their evidence'))", t["id"])))
+                raise
+        with patch.object(store, "immediate", rollback_then_competing_report), patch.object(store, "add_message", add):
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "injected queue failure"):
+                core.followup(self.con, self.rt, t["id"], "rejected queue insert")
+        self.assertEqual(staged, reused)  # the id really was reused
+        row = self.con.execute("SELECT task_id,kind,body,evidence FROM messages WHERE id=?", (reused[0],)).fetchone()
+        self.assertEqual(tuple(row), (t["id"], "report", "done: competing", "their evidence"))
+        self.assertEqual((self.events(t), store.pending_answers(self.con, t["id"]), self.rt.resumed), ([], [], []))
+        (first,) = [r for r in self.con.execute("SELECT body,evidence FROM messages WHERE task_id=? AND kind='report' "
+                                                "ORDER BY id", (t["id"],))][:1]
+        self.assertEqual(tuple(first), ("done: prior result", "prior evidence"))
+
+    def test_record_only_writes_the_row_with_this_acceptance_token(self):
+        t = self.done_task()
+        core.followup(self.con, self.rt, t["id"], "one")
+        core.followup(self.con, self.rt, t["id"], "one")
+        first, second = self.events(t)
+        self.assertNotEqual(first["token"], second["token"])
+        self.assertEqual((first["status"], second["status"]), ("delivered", "delivered"))
+        # Another writer replaced the event body after acceptance: the result update matches nothing.
+        self.con.execute("CREATE TRIGGER swap AFTER INSERT ON messages WHEN NEW.kind='followup' BEGIN "
+                         "UPDATE messages SET body='{\"other\": 1}' WHERE id=NEW.id; END")
+        out = core.followup(self.con, self.rt, t["id"], "two")
+        self.assertEqual(out["status"], "delivered")
+        self.assertIn("not found", out["record_error"])
+        self.assertEqual(self.events(t)[-1], {"other": 1})
+
+    # P2: every lock timeout after acceptance is the accepted/queued receipt
+    def test_accepted_codex_switched_to_claude_whose_lock_is_busy_returns_queued_then_flush_delivers_once(self):
+        t = self.done_task("sol")
+        real, calls = store.task_delivery, []
+        with contextlib.ExitStack() as stack:
+            def acquire(c, ids, timeout=65):
+                calls.append(1)
+                if len(calls) == 2:  # an independent retry switched the task to a Claude worker after acceptance
+                    store.update_task(c, t["id"], model="claude-sonnet-5-5", socket="/fake/c.sock", session_id="s2")
+                if len(calls) == 3:  # and another process holds the real lock when we take it again
+                    self.stage(stack.enter_context(self.holder(t)), "hold")
+                return real(c, ids, timeout=0.05)
+            with patch.object(store, "task_delivery", acquire):
+                out = core.followup(self.con, self.rt, t["id"], "accepted before the switch")
+        self.assertEqual((out["status"], out["delivered"], out["pending"]), ("queued", 0, 1))
+        self.assertIn("busy", out["error"])
+        self.assertEqual((self.events(t)[0]["status"], self.rt.sent), ("queued", []))
+        self.assertEqual(core.answer(self.con, self.rt, t["id"], flush=True), dict(status="delivered", delivered=1, pending=0))
+        self.assertEqual(len(self.rt.sent), 1)
+        self.assertTrue(self.rt.sent[0][2].endswith("accepted before the switch"))
+        self.assertEqual(core.answer(self.con, self.rt, t["id"], flush=True)["delivered"], 0)
+
+    def test_plain_answer_switched_to_claude_with_busy_lock_still_raises(self):
+        t = self.done_task("sol")
+        real, calls = store.task_delivery, []
+
+        def acquire(c, ids, timeout=65):
+            calls.append(1)
+            if len(calls) == 1:
+                store.update_task(c, t["id"], model="claude-sonnet-5-5", socket="/fake/c.sock", session_id="s2")
+            if len(calls) == 2:
+                raise TimeoutError("busy")
+            return real(c, ids, timeout=timeout)
+        with patch.object(store, "task_delivery", acquire):
+            with self.assertRaises(TimeoutError):
+                core.answer(self.con, self.rt, t["id"], "plain")
+        self.assertEqual(len(store.pending_answers(self.con, t["id"])), 1)  # stored before any attempt, as before
+
+    # P3: a send that succeeded is never reported as not sent
+    def test_claude_send_ok_receipt_failure_is_delivered_with_record_error_and_no_resend(self):
+        t = self.done_task()
+        self.con.execute("CREATE TRIGGER fail_receipt BEFORE UPDATE ON tasks WHEN NEW.status='acked' "
+                         "BEGIN SELECT RAISE(ABORT,'injected receipt failure'); END")
+        out = core.followup(self.con, self.rt, t["id"], "sent once")
+        self.assertEqual((out["status"], out["delivered"], out["pending"]), ("delivered", 1, 0))
+        self.assertIn("injected receipt failure", out["record_error"])
+        self.assertEqual(len(self.rt.sent), 1)
+        (event,) = self.events(t)
+        self.assertEqual(event["status"], "delivered")
+        self.assertIn("injected receipt failure", event["record_error"])
+        self.assertEqual(store.get_task(self.con, t["id"])["status"], "done")  # the receipt really was not written
+        self.assertEqual([r[0] for r in self.con.execute("SELECT evidence FROM messages WHERE task_id=? AND "
+                                                         "kind='report'", (t["id"],))], ["prior evidence"])
+        self.assertEqual(core.answer(self.con, self.rt, t["id"], flush=True)["delivered"], 0)  # nothing to resend
+        self.assertEqual(len(self.rt.sent), 1)
+
+    def test_receipt_failure_names_queued_rows_that_went_out(self):
+        t = self.done_task("sol")
+        self.rt.alive_pids = {"4242"}
+        core.answer(self.con, self.rt, t["id"], "queued for codex")
+        (row,) = store.pending_answers(self.con, t["id"])
+        store.update_task(self.con, t["id"], model="claude-sonnet-5-5", socket="/fake/c.sock", session_id="s2")
+        self.con.execute("CREATE TRIGGER fail_receipt BEFORE UPDATE ON tasks WHEN NEW.status='acked' "
+                         "BEGIN SELECT RAISE(ABORT,'injected receipt failure'); END")
+        out = core.followup(self.con, self.rt, t["id"], "and this")
+        self.assertEqual((out["status"], out["delivered"], out["pending"]), ("delivered", 2, 1))
+        self.assertIn(f"[{row['id']}]", out["record_error"])
+        self.assertIn("do not flush", out["record_error"])
+
+    def test_plain_answer_receipt_failure_still_raises(self):
+        t = self.done_task()
+        self.con.execute("CREATE TRIGGER fail_receipt BEFORE UPDATE ON tasks WHEN NEW.status='acked' "
+                         "BEGIN SELECT RAISE(ABORT,'injected receipt failure'); END")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "injected receipt failure"):
+            core.answer(self.con, self.rt, t["id"], "plain")
+        self.assertEqual(len(self.rt.sent), 1)
+
+    # P4: no SQL write transaction across the Codex resume (followup and plain answer share the flush)
+    def test_codex_resume_holds_no_sql_write_lock_another_process_can_write(self):
+        for call in ("followup", "answer"):
+            with self.subTest(call=call):
+                t = self.done_task("sol")
+                real, seen = self.rt.resume_codex_worker, []
+
+                def resume(*args):
+                    seen.append(self.con.in_transaction)
+                    # a real second process takes SQLite's write lock while the resume is in flight
+                    seen.append(self.peer("c.execute('PRAGMA busy_timeout=200')\nwith store.immediate(c):\n"
+                                          " store.add_message(c,sys.argv[2],'progress','peer wrote')\nprint('ok')",
+                                          t["id"]))
+                    return real(*args)
+                with patch.object(self.rt, "resume_codex_worker", resume):
+                    out = (core.followup(self.con, self.rt, t["id"], "go") if call == "followup"
+                           else core.answer(self.con, self.rt, t["id"], "go"))
+                self.assertEqual(out, dict(status="delivered", delivered=1, pending=0))
+                self.assertEqual(seen, [False, "ok"])
+                task = store.get_task(self.con, t["id"])
+                self.assertEqual((task["job_id"], task["status"], task["session_id"]), ("4343", "acked", "thread-W"))
+
+    def test_resume_commit_failure_stops_that_worker_and_keeps_mixed_queue_fifo(self):
+        for call in ("followup", "answer"):
+            with self.subTest(call=call):
+                t = self.done_task("sol")
+                self.rt.alive_pids = {"4242"}
+                core.answer(self.con, self.rt, t["id"], "plain first")
+                core.followup(self.con, self.rt, t["id"], "followup second")
+                self.rt.alive_pids, self.rt.resumed = set(), []
+                stopped = self.stops()
+                self.con.execute("CREATE TRIGGER fail_commit BEFORE UPDATE ON tasks WHEN NEW.job_id='4343' "
+                                 "BEGIN SELECT RAISE(ABORT,'injected commit failure'); END")
+                out = (core.followup(self.con, self.rt, t["id"], "third") if call == "followup"
+                       else core.answer(self.con, self.rt, t["id"], flush=True))
+                n = 3 if call == "followup" else 2
+                self.assertEqual((out["status"], out["delivered"], out["pending"], out["uncertain"]), ("failed", 0, n, True))
+                self.assertIn("injected commit failure", out["error"])
+                self.assertIn("4343 had started", out["error"])
+                self.assertIn("was stopped", out["error"])
+                self.assertEqual(stopped, [("codex", "4343", (t["worktree"], "thread-W"))])
+                task = store.get_task(self.con, t["id"])
+                self.assertEqual((task["job_id"], task["status"]), (t["job_id"], "done"))  # no orphan job recorded
+                self.assertEqual(self.con.execute("SELECT COUNT(*) FROM messages WHERE task_id=? AND kind='answer'",
+                                                  (t["id"],)).fetchone()[0], 0)
+                self.con.execute("DROP TRIGGER fail_commit")
+                self.assertEqual(core.answer(self.con, self.rt, t["id"], flush=True)["delivered"], n)
+                message = self.rt.resumed[-1][1]
+                self.assertLess(message.index("plain first"), message.index("followup second"))
+                self.assertEqual(core.answer(self.con, self.rt, t["id"], flush=True)["delivered"], 0)
+                if call == "followup":
+                    self.assertEqual([e["status"] for e in self.events(t)], ["queued", "failed"])
+
+    def test_resume_commit_failure_with_unconfirmed_stop_keeps_the_pid_so_no_second_resume(self):
+        t = self.done_task("sol")
+        stopped = self.stops(confirmed=False)
+        self.con.execute("CREATE TRIGGER fail_commit BEFORE UPDATE ON tasks WHEN NEW.status='acked' "
+                         "BEGIN SELECT RAISE(ABORT,'injected commit failure'); END")
+        out = core.followup(self.con, self.rt, t["id"], "maybe running")
+        self.assertEqual((out["status"], out["pending"], out["uncertain"]), ("failed", 1, True))
+        self.assertIn("4343", out["error"])
+        self.assertIn("MAY STILL BE RUNNING", out["error"])
+        self.assertEqual(len(stopped), 1)
+        self.assertEqual(store.get_task(self.con, t["id"])["job_id"], "4343")
+        self.rt.alive_pids = {"4343"}
+        self.assertEqual(core.answer(self.con, self.rt, t["id"], flush=True)["status"], "queued")
+        self.assertEqual(len(self.rt.resumed), 1)  # never a second actor on the thread
+
+    def test_resume_superseded_by_another_writer_is_stopped(self):
+        for change in ("closed", "read"):
+            with self.subTest(change=change):
+                t = self.done_task("sol")
+                stopped = self.stops()
+                real = self.rt.resume_codex_worker
+
+                def resume(*args):  # a writer that did not take the task lock (an older orchd) lands meanwhile
+                    if change == "closed":
+                        self.peer("c.execute(\"UPDATE tasks SET status='closed' WHERE id=?\",(sys.argv[2],))", t["id"])
+                    else:
+                        self.peer("c.execute(\"UPDATE messages SET read_at=1 WHERE task_id=? AND kind='answer_queued'\","
+                                  "(sys.argv[2],))", t["id"])
+                    return real(*args)
+                with patch.object(self.rt, "resume_codex_worker", resume):
+                    out = core.answer(self.con, self.rt, t["id"], "x")
+                self.assertEqual((out["status"], out["uncertain"]), ("failed", True))
+                self.assertIn("_Superseded", out["error"])
+                self.assertEqual(stopped, [("codex", "4343", (t["worktree"], "thread-W"))])
+                self.assertNotEqual(store.get_task(self.con, t["id"])["job_id"], "4343")
+
+    def test_spawn_failure_receipt_unchanged_and_nothing_stopped(self):
+        t = self.done_task("sol")
+        stopped = self.stops()
+
+        def fail(*a):
+            raise RuntimeError("codex down")
+        self.rt.resume_codex_worker = fail
+        out = core.answer(self.con, self.rt, t["id"], "x")
+        self.assertEqual(out, dict(status="failed", delivered=0, pending=1, error="RuntimeError: codex down"))
+        self.assertEqual(stopped, [])
+
+
 if __name__ == "__main__":
     unittest.main()

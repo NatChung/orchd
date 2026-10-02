@@ -253,9 +253,11 @@ class _ToClaude(Exception):
     pass
 
 
-def _deliver_to_claude(con, rt, task, text):
+def _deliver_to_claude(con, rt, task, text, keep_sent=False):
     """Caller holds the task lock. Queued answers left from a Codex worker go first, oldest first, then `text`,
-    all in one message; the receipt (read_at + one `answer` row each) is written only after the send succeeded."""
+    all in one message; the receipt (read_at + one `answer` row each) is written only after the send succeeded.
+    A receipt that fails after a successful send raises, unless `keep_sent` (followup): then the result stays
+    `delivered` and carries `record_error` naming the queued rows that went out but still read as pending."""
     task_id = task["id"]
     pending = store.pending_answers(con, task_id)
     bodies = [row["body"] for row in pending] + ([text] if text is not None else [])
@@ -265,11 +267,20 @@ def _deliver_to_claude(con, rt, task, text):
         raise ValueError(f"task {task_id} has no running worker"
                          + (f"; {len(pending)} queued answer(s) stay pending" if pending else ""))
     rt.send_uds(task["socket"], task["session_id"], "\n\n".join(f"[orchd answer {task_id}]\n{b}" for b in bodies))
-    with store.immediate(con):
-        store.mark_read(con, [row["id"] for row in pending])
-        for body in bodies:
-            store.add_message(con, task_id, "answer", body)
-        store.update_task(con, task_id, status="acked")
+    try:
+        with store.immediate(con):
+            store.mark_read(con, [row["id"] for row in pending])
+            for body in bodies:
+                store.add_message(con, task_id, "answer", body)
+            store.update_task(con, task_id, status="acked")
+    except Exception as error:
+        if not keep_sent:
+            raise
+        sent = [row["id"] for row in pending]
+        return dict(status="delivered", delivered=len(bodies), pending=len(sent),
+                    record_error=(f"sent, but the delivery receipt was not written: {type(error).__name__}: {error}"
+                                  + (f"; queued answer rows {sent} went out in this send and still read as pending,"
+                                     " do not flush them again" if sent else ""))[:500])
     return dict(status="delivered", delivered=len(bodies), pending=0)
 
 
@@ -304,7 +315,9 @@ def _answer(con, rt, task_id, text=None, flush=False, accept=None):
     mid-turn, so its answers wait in FIFO order until a later `answer` (or `flush=True`) finds it between
     turns; they then go out together as one new turn. Nothing else sends them (see docs/decisions.md).
     Delivery runs under the task lock shared with retry and close, and re-reads the task there, so it reaches
-    whichever worker the task has at that moment (a retry may have replaced a Codex worker with a Claude one)."""
+    whichever worker the task has at that moment (a retry may have replaced a Codex worker with a Claude one).
+    No SQLite write transaction is open during a spawn or send; a Codex resume's receipt is a short compare-and-set
+    afterwards (`_commit_resume`), and a resumed worker whose receipt cannot be committed is stopped."""
     task = store.get_task(con, task_id)
     if task["status"] == "closed":
         raise ValueError(f"task {task_id} is closed")
@@ -319,7 +332,7 @@ def _answer(con, rt, task_id, text=None, flush=False, accept=None):
                 if accept is not None:  # followup: record acceptance under this lock, after the re-check, before any send
                     accept(task)
                 if worker_kind(task["model"]) == "claude":
-                    return _deliver_to_claude(con, rt, task, text)
+                    return _deliver_to_claude(con, rt, task, text, keep_sent=accept is not None)
                 if text is not None:  # a retry switched it to Codex meanwhile: queue it for that worker's next turn
                     store.add_message(con, task_id, store.QUEUED, text)
                 return dict(status="queued", delivered=0, pending=len(store.pending_answers(con, task_id)))
@@ -340,7 +353,7 @@ def _answer(con, rt, task_id, text=None, flush=False, accept=None):
         rt.sleep(0.5)
         task = store.get_task(con, task_id)
     try:
-        with store.task_delivery(con, [task_id]), store.immediate(con):
+        with store.task_delivery(con, [task_id]):
             task = store.get_task(con, task_id)  # re-read under the lock: another call may have resumed or closed
             if task["status"] == "closed":
                 raise ValueError(f"task {task_id} is closed; its queued answers stay undelivered")
@@ -357,10 +370,9 @@ def _answer(con, rt, task_id, text=None, flush=False, accept=None):
                                              task["model"])
             except Exception as error:
                 raise _ResumeFailed(error) from error
-            store.mark_read(con, [row["id"] for row in pending])
-            for row in pending:
-                store.add_message(con, task_id, "answer", row["body"])
-            store.update_task(con, task_id, job_id=job, status="acked")
+            failed = _commit_resume(con, rt, task, pending, job)
+            if failed:
+                return failed
     except TimeoutError:  # only the delivery lock can time out here
         if accept is None:
             raise
@@ -368,18 +380,64 @@ def _answer(con, rt, task_id, text=None, flush=False, accept=None):
         return dict(status="queued", delivered=0, pending=len(store.pending_answers(con, task_id)),
                     error="task busy (retry or close in progress); flush again once it finishes")
     except _ToClaude:  # rolled back nothing (no write yet); deliver the queue to the Claude worker instead
-        with store.task_delivery(con, [task_id]):
-            task = store.get_task(con, task_id)
-            if task["status"] == "closed":
-                raise ValueError(f"task {task_id} is closed; its queued answers stay undelivered") from None
-            if worker_kind(task["model"]) == "claude":
-                return _deliver_to_claude(con, rt, task, None)
+        try:
+            with store.task_delivery(con, [task_id]):
+                task = store.get_task(con, task_id)
+                if task["status"] == "closed":
+                    raise ValueError(f"task {task_id} is closed; its queued answers stay undelivered") from None
+                if worker_kind(task["model"]) == "claude":
+                    return _deliver_to_claude(con, rt, task, None, keep_sent=accept is not None)
+        except TimeoutError:
+            if accept is None:
+                raise
+            # followup: accepted and queued already; a busy lock here is the same receipt as the one above
+            return dict(status="queued", delivered=0, pending=len(store.pending_answers(con, task_id)),
+                        error="task busy (retry or close in progress); flush again once it finishes")
         return dict(status="queued", delivered=0, pending=len(store.pending_answers(con, task_id)))
     except _ResumeFailed as failed:  # rolled back: every answer is still queued for the next flush
         error = failed.__cause__
         return dict(status="failed", delivered=0, pending=len(store.pending_answers(con, task_id)),
                     error=f"{type(error).__name__}: {error}"[:500])
     return dict(status="delivered", delivered=len(pending), pending=0)
+
+
+def _commit_resume(con, rt, task, pending, job):
+    """Receipt for a Codex resume, spawned under the task lock with no SQL transaction open. One short write
+    transaction, compare-and-set like retry's commit: the task is still open on the same model, thread and previous
+    job, and every answer sent is still unread. If that cannot be committed, the resumed worker is stopped through
+    close's helper (only this pid, matched by worktree and thread) and the answers stay queued. Returns None once
+    committed, else the failed receipt."""
+    task_id, sent = task["id"], [row["id"] for row in pending]
+    try:
+        with store.immediate(con):
+            changed = con.execute(
+                "UPDATE tasks SET job_id=?, status='acked', updated_at=? WHERE id=? AND status<>'closed' AND model=? "
+                "AND session_id IS ? AND job_id IS ?",
+                (job, time.time(), task_id, task["model"], task["session_id"], task["job_id"])).rowcount
+            if changed != 1:
+                raise _Superseded("the task was closed or its worker changed during the resume")
+            unread = con.execute(f"SELECT COUNT(*) FROM messages WHERE id IN ({','.join('?' * len(sent))}) "
+                                 "AND read_at IS NULL", sent).fetchone()[0]
+            if unread != len(sent):
+                raise _Superseded("its queued answers were marked delivered by another call during the resume")
+            store.mark_read(con, sent)
+            for row in pending:
+                store.add_message(con, task_id, "answer", row["body"])
+    except Exception as error:
+        detail = f"{type(error).__name__}: {error}"
+        not_stopped = _stop_confirmed(rt, "codex", job, (task["worktree"], task["session_id"]))
+        if not_stopped:  # keep the pid on the task so the next flush finds it alive and queues instead of resuming
+            try:
+                con.execute("UPDATE tasks SET job_id=? WHERE id=? AND status<>'closed' AND job_id IS ?",
+                            (job, task_id, task["job_id"]))
+            except Exception:
+                pass
+        state = (f"MAY STILL BE RUNNING ({not_stopped}); do not flush until it has exited" if not_stopped
+                 else "was stopped")
+        return dict(status="failed", delivered=0, pending=len(store.pending_answers(con, task_id)), uncertain=True,
+                    error=f"receipt not written ({detail}); resumed worker {job} had started on the queued answers "
+                          f"and {state}; they stay queued"[:500])
+    return None
 
 
 FOLLOWUP_HEAD = ("[followup] New instruction for this same task, not an answer to a question. Keep working on this "
@@ -397,41 +455,53 @@ def followup(con, rt, task_id, message):
     adopt holds it) TimeoutError is raised and nothing is accepted, queued or sent: retry later. The row is then
     updated with the delivery result. A delivery that raises marks it failed and re-raises; a failed update after
     a successful delivery does not raise (the instruction went out): the receipt carries `record_error` and the
-    row stays `accepted`. A Codex task whose lock turns busy after acceptance returns the queued receipt, since a
-    later flush runs it. Delivery is not exactly-once: a send and its receipt are separate steps. A close that
+    row stays `accepted`. Only the committed acceptance row is ever updated (same id, task, kind and exact body with
+    its token), so a rolled-back id reused by another process is left alone. A lock that turns busy after
+    acceptance returns the queued receipt, since a later flush runs it. A Claude send whose receipt fails stays
+    `delivered` with `record_error`. Delivery is not exactly-once: a send and its receipt are separate steps. A close that
     finishes after acceptance leaves any queued instruction undelivered, same as a queued answer."""
     task = store.get_task(con, task_id)  # KeyError for a missing task
     if task["status"] == "closed":
         raise ValueError(f"task {task_id} is closed; open a new task instead")
     if not isinstance(message, str) or not message.strip():
         raise ValueError("followup needs a non-empty message")
-    event = dict(message=message, from_status=task["status"], model=task["model"], session_id=task["session_id"])
-    accepted = {}
+    event = dict(message=message, from_status=task["status"], model=task["model"], session_id=task["session_id"],
+                 token=uuid.uuid4().hex)
+    accepted = {}  # id and exact body of the acceptance row as written; it counts only once committed
 
     def accept(locked_task):
         if accepted:  # a timeout fallback after the lock section already accepted it
             return
         event.update(from_status=locked_task["status"], model=locked_task["model"],
                      session_id=locked_task["session_id"], status="accepted")
-        accepted["id"] = store.add_message(con, task_id, "followup", json.dumps(event, ensure_ascii=False))
+        body = json.dumps(event, ensure_ascii=False)
+        accepted.update(id=store.add_message(con, task_id, "followup", body), body=body)
 
     def record():
-        con.execute("UPDATE messages SET body=? WHERE id=?", (json.dumps(event, ensure_ascii=False), accepted["id"]))
+        """Compare-and-set on the committed acceptance row: the same id, task, kind and exact body (with its
+        token). A rolled-back insert whose id another process reused matches nothing and is never written."""
+        if not accepted or con.in_transaction:
+            return 0
+        return con.execute("UPDATE messages SET body=? WHERE id=? AND task_id=? AND kind='followup' AND body=?",
+                           (json.dumps(event, ensure_ascii=False), accepted["id"], task_id, accepted["body"])).rowcount
     try:
         result = _answer(con, rt, task_id, f"{FOLLOWUP_HEAD}\n\n{message}", accept=accept)
     except Exception as error:
-        if accepted:  # no exception text decides this: an event exists only if acceptance ran
-            event.update(status="failed", error=f"{type(error).__name__}: {error}"[:500])
-            try:
-                record()
-            except Exception:  # the original error is the one the Orch must see
-                pass
+        # No exception text decides this: only a committed acceptance row is marked failed.
+        event.update(status="failed", error=f"{type(error).__name__}: {error}"[:500])
+        try:
+            record()
+        except Exception:  # the original error is the one the Orch must see
+            pass
         raise
     event.update(result)
     try:
-        record()
+        if record() != 1:
+            raise LookupError("the committed followup event row was not found")
     except Exception as error:
-        result = dict(result, record_error=f"{type(error).__name__}: {error}"[:300])
+        problem = f"followup event not updated: {type(error).__name__}: {error}"
+        result = dict(result, record_error=(f"{result['record_error']}; {problem}" if result.get("record_error")
+                                            else problem)[:600])
     return result
 
 
