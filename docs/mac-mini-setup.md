@@ -33,6 +33,10 @@ Generic: git, python3 3.11+, Claude Code (`--bg`), Codex, gh, the three logins, 
 orchd checkout, Orch home, Orch trust in Claude and Codex, Orch `.codex/config.toml` paths (flags another
 machine's `/Users/<x>`), `orchd` MCP in `~/.codex/config.toml`, per-repo Claude trust, writable state and `/tmp`.
 
+The wizard itself starts on any Python 3. Without `tomllib` (3.9/3.10, e.g. macOS `/usr/bin/python3`) the three checks that
+read Codex TOML (Orch Codex trust, Orch `.codex/config.toml` paths, `orchd` MCP) report `unknown` with that reason; they are
+never guessed with regex. Everything else runs unchanged. Run it with Python 3.11+ for the full result.
+
 Nat profile: the four GitHub accounts (gh login + new SSH key + `~/.ssh/config` alias), per-repo git emails,
 nat-email / nat-slack / nat-line connector directories, and codegraph / rtk / gcloud / fastlane (report only).
 
