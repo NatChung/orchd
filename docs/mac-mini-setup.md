@@ -27,6 +27,10 @@ user.name|user.email`, and `ssh-keygen -l -f -` (public-key text on stdin, never
 Each open step shows who runs it (Nat, at the target machine's own terminal), the exact command, the source it was
 checked from, and the receipt that proves it worked.
 
+Worker choices: `sol` (GPT-6.1 Sol on Codex, default and preferred) and `sonnet` (claude-sonnet-5-5,
+when switching vendors). Both CLIs are checked by the wizard; doctor reports Codex as optional for machines
+using only Claude. Per-repo Claude trust checks apply to Sonnet workers; Sol runs on Codex.
+
 ## 2. Generic environment vs Nat profile
 
 Generic: git, python3 3.11+, Claude Code (`--bg`), Codex, gh, the three logins, a global git author, an SSH key,

@@ -30,12 +30,13 @@ PRICES = dict(
     cache_write_note="published rate applied; TTL / context tier of each write is not in the usage data, so partial",
     models={
         "claude-sonnet-5-5": dict(input="2", cache_read="0.2", output="10", cache_write="2.5", source=_ANTHROPIC),
+        # Retained for historical worker records and current Claude Orch costs.
         "claude-opus-5-5": dict(input="4", cache_read="0.2", output="20", cache_write="5", source=_ANTHROPIC),
         "gpt-6.1-sol": dict(input="2", cache_read="0.1", output="10", cache_write="2.5", source=_OPENAI),
     })
-# This project's worker routing tiers (docs/decisions.md #13 and the 2026-09-30 Sol entry): M = sonnet / sol,
-# H = opus. A routing policy, not a quality ranking across families. Keyed by alias and full model id; any other
-# model has no tier here, so a retry involving it is unresolved, never a counted zero.
+# Historical worker routing tiers (docs/decisions.md #13 and the 2026-09-30 Sol entry): M = sonnet / sol,
+# H = opus (removed from worker choices). Historical event classification, not a quality ranking across families.
+# Keyed by alias and full model id; any other model has no tier here, so its retries are unresolved, not counted zero.
 ROUTING_TIERS = {"sonnet": 1, "sol": 1, "opus": 2,
                  "claude-sonnet-5-5": 1, "gpt-6.1-sol": 1, "claude-opus-5-5": 2}
 FIELDS = ("input", "cache_creation", "cache_read", "output")  # disjoint buckets; total = their sum
@@ -510,8 +511,8 @@ def _tier(model):
 def classify_retry(body):
     """'upgrade' | 'not_upgrade' | 'unresolved' for one retry event body. Reads from/to, from_model/to_model or
     old_model and ignores any other field (the event schema is not settled). An upgrade is a move to a higher
-    routing tier (Sol -> Opus counts); same tier or a downgrade is not. A missing model, or a model without a
-    routing tier, is unresolved: it is never counted as a known non-upgrade."""
+    historical routing tier (Sol -> Opus counts for old events); same tier or a downgrade is not. A missing model,
+    or a model without a routing tier, is unresolved: it is never counted as a known non-upgrade."""
     a = _tier(body.get("from") or body.get("from_model") or body.get("old_model"))
     b = _tier(body.get("to") or body.get("to_model"))
     if a is None or b is None:
@@ -564,7 +565,7 @@ def _group(tasks, all_tasks, msgs_by_task, prices):
         escalations_complete=(unresolved == 0) if have("retry") else None,
         escalated_tasks_outcome_completed=(sum(1 for t in done if t["id"] in upgraded) if have("retry") else None),
         escalations_post_upgrade_verified=None,
-        escalation_note="escalation = retry to a higher project routing tier (M = sonnet/sol, H = opus; a routing "
+        escalation_note="escalation = retry to a higher historical routing tier (M = sonnet/sol, H = opus; an old routing "
                         "policy, not a quality ranking); same tier or downgrade is not; a retry without both models "
                         "or with a model outside those tiers is unresolved. Whether an upgrade "
                         "then passed verification is unknown: no post-upgrade verify role is recorded, and a "

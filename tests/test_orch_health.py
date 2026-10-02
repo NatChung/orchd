@@ -29,6 +29,7 @@ class OrchHealthTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def task(self, owner="owner-A", **kwargs):
+        kwargs = {"model": "sonnet", **kwargs}  # Claude process-health fixtures use job1 / live_jobs
         return core.dispatch(self.con, self.rt, orch_thread=owner, repo="demo", title="T",
                              instructions="do it", done_when="tests pass", model_reason="clear scope",
                              task_type="code", **kwargs)

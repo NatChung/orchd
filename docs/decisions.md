@@ -1,5 +1,16 @@
 # 新 Orch 系統決策紀錄（grilling 2026-09-29）
 
+## 現行 worker 模型（2026-10-03）
+
+Worker 只可選 `sol`（GPT-6.1 Sol / Codex，預設、優先使用）與 `sonnet`
+（claude-sonnet-5-5，換另一家時用）。`dispatch` 與 `retry` 拒絕 `opus`：它已從 worker 選項移除。
+Claude Orch 的現行選項仍為 `opus` 與 `sonnet`，預設 `opus`，不受 worker 政策影響。
+舊任務的模型欄位、成本與舊升級事件照常顯示，不 migrate、不刪除。
+
+## 歷史決策紀錄
+
+以下保留各日期當時的決策、模型選項與升級草案，供解讀歷史資料；worker 現行選項以本頁上方為準。
+
 1. 基調：輕量。鎖放在權限層（OS/CLI 強制），流程不做會死鎖的狀態機。
 2. 只鎖 Orch，目的是讓 Orch 不能自己做事、只能派工（也省 Astra token）。worker 權限全開。
 3. Orch 家 = `~/projects/orch`，只能讀寫這裡；不碰任何專案 repo（含不讀 code/diff）。

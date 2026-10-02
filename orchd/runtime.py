@@ -17,8 +17,10 @@ from pathlib import Path
 
 ORCHD_BIN = str(Path(__file__).resolve().parents[1] / "bin" / "orchd")
 
-MODELS = {"sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5", "sol": "gpt-6.1-sol"}
-DEFAULT_WORKER_MODEL = "sonnet"
+WORKER_MODELS = {"sol": "gpt-6.1-sol", "sonnet": "claude-sonnet-5-5"}
+# Claude Orch choices are independent of the worker policy; its current default stays unchanged.
+ORCH_MODELS = {"sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}
+DEFAULT_WORKER_MODEL = "sol"
 DEFAULT_ORCH_MODEL = "opus"
 CODEX_FLAGS = ["--json", "--dangerously-bypass-approvals-and-sandbox"]
 USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")

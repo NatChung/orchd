@@ -62,7 +62,7 @@ class ListOpenHealthTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def dispatch(self, **kw):
-        kw = {"model_reason": "clear scope", "task_type": "code", **kw}
+        kw = {"model": "sonnet", "model_reason": "clear scope", "task_type": "code", **kw}
         return core.dispatch(self.con, self.rt, orch_thread="thread-A", repo="demo", title="T",
                              instructions="do it", done_when="tests pass", **kw)
 

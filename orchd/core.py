@@ -10,8 +10,8 @@ from pathlib import Path
 
 from . import store, verify as verification, worker_health
 from .orch_health import owner_health
-from .runtime import (DEFAULT_ORCH_MODEL, DEFAULT_WORKER_MODEL, MODELS, claude_job_alive, error_detail,
-                      worker_kind)
+from .runtime import (DEFAULT_ORCH_MODEL, DEFAULT_WORKER_MODEL, ORCH_MODELS, WORKER_MODELS,
+                      claude_job_alive, error_detail, worker_kind)
 
 ORCHD = str(Path(__file__).resolve().parents[1] / "bin" / "orchd")
 
@@ -98,7 +98,7 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
              verifies=None):
     if not orch_thread:
         raise ValueError("dispatch needs the caller's thread id")
-    _choice("model", model, tuple(MODELS))
+    _choice("model", model, tuple(WORKER_MODELS))
     if not isinstance(model_reason, str) or not model_reason.strip():
         raise ValueError("dispatch needs a non-empty model_reason")
     _choice("task_type", task_type, TASK_TYPES)
@@ -119,19 +119,19 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
         if verified["status"] == "closed":
             raise ValueError(f"verifies: task {verifies} is closed")
     repo_path = rt.repo_path(repo)
-    kind = worker_kind(MODELS[model])
+    kind = worker_kind(WORKER_MODELS[model])
     if kind == "claude" and not rt.claude_trusted(repo_path):
         raise ValueError(f"Claude has not trusted {repo_path}. Ask Nat to run `claude` there once and accept "
                          "the trust prompt, then dispatch again.")
     task_id = store.new_task_id()
     task = store.create_task(con, id=task_id, repo=repo, repo_path=str(repo_path), title=title,
                              instructions=instructions, done_when=done_when,
-                             orch_thread=orch_thread, codex_bin=rt.codex, model=MODELS[model],
+                             orch_thread=orch_thread, codex_bin=rt.codex, model=WORKER_MODELS[model],
                              model_reason=model_reason, task_type=task_type, rework_of=rework_of, found_by=found_by,
                              verify=verify, manual_checks=manual_checks, verifies=verifies)
     spec = {k: v for k, v in dict(verify=verify, manual_checks=manual_checks, verifies=verifies).items() if v}
     store.add_message(con, task_id, "dispatch", json.dumps(
-        dict(model=MODELS[model], model_reason=model_reason, task_type=task_type,
+        dict(model=WORKER_MODELS[model], model_reason=model_reason, task_type=task_type,
              rework_of=rework_of, found_by=found_by, **spec), ensure_ascii=False))
     try:
         base, branch, worktree = rt.create_worktree(repo_path, repo, task_id)
@@ -140,11 +140,11 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
             task = store.get_task(con, task_id)
             job, session = rt.start_codex_worker(worktree, rt.codex_log(task_id),
                                                  worker_brief(worker_cli(), kind) + "\n\n" + task_message(task),
-                                                 MODELS[model])
+                                                 WORKER_MODELS[model])
             store.update_task(con, task_id, job_id=job, session_id=session, status="running")
         else:
             sock = rt.socket_path(task_id)
-            job, session = rt.start_worker(worktree, sock, worker_brief(worker_cli()), MODELS[model])
+            job, session = rt.start_worker(worktree, sock, worker_brief(worker_cli()), WORKER_MODELS[model])
             store.update_task(con, task_id, socket=sock, job_id=job, session_id=session, status="running")
             task = store.get_task(con, task_id)
             rt.send_uds(sock, session, task_message(task))
@@ -629,15 +629,14 @@ def orch_home():
 
 
 def start_orch(con, rt, model_key=DEFAULT_ORCH_MODEL):
-    if model_key not in MODELS or worker_kind(MODELS[model_key]) != "claude":
-        raise ValueError(f"unknown model {model_key!r}; use one of {', '.join(MODELS)}")
+    _choice("model", model_key, tuple(ORCH_MODELS))
     home = orch_home()
     if not rt.claude_trusted(home):
         raise ValueError(f"Claude has not trusted {home}. Run `claude` in that directory once and accept "
                          "the trust prompt, then run `orchd orch` again.")
     orch_id = "o" + uuid.uuid4().hex[:7]
-    sock, job, session = rt.start_orch(orch_id, MODELS[model_key], home)
-    return store.register_orch(con, orch_id, "claude", model=MODELS[model_key], socket=sock,
+    sock, job, session = rt.start_orch(orch_id, ORCH_MODELS[model_key], home)
+    return store.register_orch(con, orch_id, "claude", model=ORCH_MODELS[model_key], socket=sock,
                                session_id=session, job_id=job)
 
 
@@ -751,7 +750,7 @@ def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT):
     no other lifecycle step in between. The SQLite write lock is only held for the final commit."""
     if not isinstance(reason, str) or not reason.strip():
         raise ValueError("retry needs a non-empty reason")
-    _choice("model", model, tuple(MODELS))
+    _choice("model", model, tuple(WORKER_MODELS))
     with store.task_delivery(con, [task_id], lock_wait):
         task = store.get_task(con, task_id)
         if task["status"] == "closed":
@@ -761,7 +760,7 @@ def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT):
         worktree = task["worktree"]
         if not worktree or not rt.exists(worktree):
             raise ValueError(f"task {task_id} has no worktree to continue in ({worktree or 'none recorded'})")
-        to_model, kind = MODELS[model], worker_kind(MODELS[model])
+        to_model, kind = WORKER_MODELS[model], worker_kind(WORKER_MODELS[model])
         if kind == "claude" and not rt.claude_trusted(task["repo_path"]):
             raise ValueError(f"Claude has not trusted {task['repo_path']}. Ask Nat to run `claude` there once and "
                              "accept the trust prompt, then retry again.")

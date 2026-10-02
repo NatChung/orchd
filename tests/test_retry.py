@@ -9,7 +9,7 @@ import unittest
 from pathlib import Path
 
 from orchd import core, mcp_server, store
-from orchd.runtime import MODELS, Runtime
+from orchd.runtime import WORKER_MODELS, Runtime
 from tests.test_orchd import FakeRuntime
 
 
@@ -115,7 +115,7 @@ class RetryTest(unittest.TestCase):
         t = self.dispatch()
         for reason in (None, "", "   "):
             with self.assertRaises(ValueError):
-                core.retry(self.con, self.rt, t["id"], "opus", reason)
+                core.retry(self.con, self.rt, t["id"], "sonnet", reason)
         self.assertEqual((self.rt.stopped, self.rt.started), ([], []))
 
     def test_unknown_model_is_refused(self):
@@ -124,19 +124,36 @@ class RetryTest(unittest.TestCase):
             core.retry(self.con, self.rt, t["id"], "gpt-9", "stuck")
         self.assertEqual(self.rt.stopped, [])
 
+    def test_removed_opus_is_refused_before_stopping_or_recording_a_retry(self):
+        t = self.dispatch()
+        before = dict(store.get_task(self.con, t["id"]))
+        for model in ("opus", "claude-opus-5-5"):
+            with self.subTest(model=model), self.assertRaisesRegex(ValueError, "use one of sol, sonnet"):
+                core.retry(self.con, self.rt, t["id"], model, "switch worker")
+        self.assertEqual((self.rt.stopped, self.rt.started), ([], []))
+        self.assertEqual(dict(store.get_task(self.con, t["id"])), before)
+        self.assertEqual(self.events(t["id"], "retry"), [])
+
+    def test_historical_opus_task_can_retry_to_a_supported_worker(self):
+        t = self.dispatch()
+        store.update_task(self.con, t["id"], model="claude-opus-5-5")
+        r = core.retry(self.con, self.rt, t["id"], "sol", "use default worker")
+        self.assertEqual(r["model"], "gpt-6.1-sol")
+        (event,) = self.events(t["id"], "retry")
+        self.assertEqual(event["old_model"], "claude-opus-5-5")
+
     def test_any_model_change_is_allowed_and_recorded(self):
-        for start, target in (("sonnet", "sonnet"), ("sonnet", "opus"), ("opus", "sonnet"),
-                              ("sonnet", "sol"), ("sol", "sonnet"), ("sol", "sol")):
+        for start, target in (("sonnet", "sonnet"), ("sonnet", "sol"), ("sol", "sonnet"), ("sol", "sol")):
             with self.subTest(start=start, target=target):
                 t = self.dispatch(start)
                 if start == "sol":
                     self.rt.codex_live.add(t["job_id"])
                 r = core.retry(self.con, self.rt, t["id"], target, f"{start} to {target}")
                 self.assertEqual((r["model"], r["status"], r["worktree"], r["branch"]),
-                                 (MODELS[target], "running", t["worktree"], t["branch"]))
+                                 (WORKER_MODELS[target], "running", t["worktree"], t["branch"]))
                 (event,) = self.events(t["id"], "retry")
                 self.assertEqual((event["from_model"], event["to_model"], event["reason"]),
-                                 (MODELS[start], MODELS[target], f"{start} to {target}"))
+                                 (WORKER_MODELS[start], WORKER_MODELS[target], f"{start} to {target}"))
                 self.assertEqual((event["old_job_id"], event["new_job_id"]), (t["job_id"], r["job_id"]))
                 self.assertEqual(self.rt.started[-1][1], t["worktree"])
 
@@ -173,22 +190,22 @@ class RetryTest(unittest.TestCase):
         t = self.dispatch("sol")
         self.con.execute("UPDATE tasks SET repo_path='/projects/untrusted' WHERE id=?", (t["id"],))
         with self.assertRaises(ValueError):
-            core.retry(self.con, self.rt, t["id"], "opus", "escalate")
+            core.retry(self.con, self.rt, t["id"], "sonnet", "escalate")
         self.assertEqual(self.rt.stopped, [])
 
     def test_closed_and_missing_worktree_are_refused_before_any_stop(self):
         t = self.dispatch()
         self.rt.missing.add(t["worktree"])
         with self.assertRaisesRegex(ValueError, "no worktree"):
-            core.retry(self.con, self.rt, t["id"], "opus", "escalate")
+            core.retry(self.con, self.rt, t["id"], "sonnet", "escalate")
         self.rt.missing.clear()
         store.update_task(self.con, t["id"], status="closed")
         with self.assertRaisesRegex(ValueError, "closed"):
-            core.retry(self.con, self.rt, t["id"], "opus", "escalate")
+            core.retry(self.con, self.rt, t["id"], "sonnet", "escalate")
         u = self.dispatch()
         store.update_task(self.con, u["id"], worktree=None)
         with self.assertRaisesRegex(ValueError, "no worktree"):
-            core.retry(self.con, self.rt, u["id"], "opus", "escalate")
+            core.retry(self.con, self.rt, u["id"], "sonnet", "escalate")
         self.assertEqual((self.rt.stopped, self.rt.started), ([], []))
         self.assertEqual(self.events(t["id"], "retry") + self.events(u["id"], "retry"), [])
 
@@ -196,7 +213,7 @@ class RetryTest(unittest.TestCase):
         t = self.dispatch()
         self.rt.stop_ignored.add("job1")
         with self.assertRaisesRegex(ValueError, "did not stop"):
-            core.retry(self.con, self.rt, t["id"], "opus", "escalate")
+            core.retry(self.con, self.rt, t["id"], "sonnet", "escalate")
         self.assertEqual(self.rt.started, [])
         self.assertEqual(self.rt.stopped, ["job1"])  # stopped once, only its own job
         self.assertEqual(len(self.rt.slept), core.RETRY_STOP_WAIT)  # bounded wait
@@ -205,20 +222,20 @@ class RetryTest(unittest.TestCase):
         (failed,) = self.events(t["id"], "retry_failed")
         self.assertEqual((failed["stage"], failed["old_job_id"]), ("stop", "job1"))
         self.rt.stop_ignored.clear()  # once it stops, the same retry goes through
-        r = core.retry(self.con, self.rt, t["id"], "opus", "escalate")
-        self.assertEqual(r["model"], MODELS["opus"])
+        r = core.retry(self.con, self.rt, t["id"], "sonnet", "escalate")
+        self.assertEqual(r["model"], WORKER_MODELS["sonnet"])
 
     def test_unverifiable_claude_job_probe_counts_as_not_stopped(self):
         t = self.dispatch()
         self.rt.live_jobs = lambda: None
         with self.assertRaises(ValueError):
-            core.retry(self.con, self.rt, t["id"], "opus", "escalate")
+            core.retry(self.con, self.rt, t["id"], "sonnet", "escalate")
         self.assertEqual(self.rt.started, [])
 
     def test_running_codex_turn_is_stopped_by_its_own_pid_only(self):
         t = self.dispatch("sol")
         self.rt.codex_live.update({t["job_id"], "999"})
-        core.retry(self.con, self.rt, t["id"], "opus", "escalate")
+        core.retry(self.con, self.rt, t["id"], "sonnet", "escalate")
         self.assertEqual(self.rt.stopped, [("codex", t["job_id"])])
         self.assertIn("999", self.rt.codex_live)
         u = self.dispatch("sol")  # between turns there is nothing to stop
@@ -245,7 +262,7 @@ class RetryTest(unittest.TestCase):
         t = self.dispatch("sol")
         self.rt.codex_unreadable.add(t["job_id"])
         with self.assertRaisesRegex(ValueError, "did not stop.*ps exit 2"):
-            core.retry(self.con, self.rt, t["id"], "opus", "escalate")
+            core.retry(self.con, self.rt, t["id"], "sonnet", "escalate")
         self.assertEqual((self.rt.stopped, self.rt.started), ([], []))
         after = store.get_task(self.con, t["id"])
         self.assertEqual((after["job_id"], after["model"]), (t["job_id"], t["model"]))
@@ -258,14 +275,14 @@ class RetryTest(unittest.TestCase):
         real_start = self.rt.start_worker
         self.rt.start_worker = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no socket"))
         with self.assertRaises(RuntimeError):
-            core.retry(self.con, self.rt, t["id"], "opus", "escalate")
+            core.retry(self.con, self.rt, t["id"], "sonnet", "escalate")
         after = store.get_task(self.con, t["id"])
         self.assertEqual((after["status"], after["worktree"], after["branch"]), ("failed", t["worktree"], t["branch"]))
         self.assertIn("retry failed", after["note"])
         self.assertEqual(self.rt.removed, [])
         self.assertEqual(self.events(t["id"], "retry_failed")[0]["stage"], "spawn")
         self.rt.start_worker = real_start
-        r = core.retry(self.con, self.rt, t["id"], "opus", "escalate again")
+        r = core.retry(self.con, self.rt, t["id"], "sonnet", "escalate again")
         self.assertEqual(r["status"], "running")
         self.assertEqual(self.rt.removed, [])
 
@@ -273,11 +290,11 @@ class RetryTest(unittest.TestCase):
         t = self.dispatch()
         self.rt.send_uds = lambda *a: (_ for _ in ()).throw(OSError("refused"))
         with self.assertRaises(OSError):
-            core.retry(self.con, self.rt, t["id"], "opus", "escalate")
+            core.retry(self.con, self.rt, t["id"], "sonnet", "escalate")
         after = store.get_task(self.con, t["id"])
         self.assertEqual((after["status"], after["job_id"]), ("failed", "job2"))
         del self.rt.send_uds
-        core.retry(self.con, self.rt, t["id"], "opus", "again")
+        core.retry(self.con, self.rt, t["id"], "sonnet", "again")
         self.assertIn("job2", self.rt.stopped)
 
     def test_each_session_usage_is_recorded_once_across_retries_and_close(self):
@@ -292,41 +309,41 @@ class RetryTest(unittest.TestCase):
             t = self.dispatch()
             self.rt.start_worker = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
             with self.assertRaises(RuntimeError):
-                core.retry(self.con, self.rt, t["id"], "opus", "first try")
+                core.retry(self.con, self.rt, t["id"], "sonnet", "first try")
             del self.rt.start_worker
-            core.retry(self.con, self.rt, t["id"], "opus", "second try")  # same old session: not counted again
-            core.retry(self.con, self.rt, t["id"], "opus", "third")
+            core.retry(self.con, self.rt, t["id"], "sonnet", "second try")  # same old session: not counted again
+            core.retry(self.con, self.rt, t["id"], "sonnet", "third")
             core.close(self.con, self.rt, t["id"])
         finally:
             os.environ.pop("ORCHD_CLAUDE_PROJECTS")
         usage = self.events(t["id"], "usage")
         self.assertEqual([u["input_tokens"] for u in usage], [10, 20, 30])
         self.assertEqual([u.get("session_id") for u in usage], ["session1", "session2", None])
-        self.assertEqual([u["model"] for u in usage], ["claude-sonnet-5-5", "claude-opus-5-5", "claude-opus-5-5"])
+        self.assertEqual([u["model"] for u in usage], ["claude-sonnet-5-5", "claude-sonnet-5-5", "claude-sonnet-5-5"])
         retries = self.events(t["id"], "retry")
         self.assertEqual([(r["old_job_id"], r["old_session_id"], r["old_model"]) for r in retries],
-                         [("job1", "session1", "claude-sonnet-5-5"), ("job2", "session2", "claude-opus-5-5")])
+                         [("job1", "session1", "claude-sonnet-5-5"), ("job2", "session2", "claude-sonnet-5-5")])
 
     def test_retry_events_stay_out_of_the_orch_inbox(self):
         t = self.dispatch()
-        core.retry(self.con, self.rt, t["id"], "opus", "escalate")
+        core.retry(self.con, self.rt, t["id"], "sonnet", "escalate")
         self.assertEqual(core.inbox(self.con, "thread-A"), [])
 
     def test_mcp_retry_tool(self):
         tool = next(x for x in mcp_server.TOOLS if x["name"] == "retry")
         self.assertEqual(tool["inputSchema"]["required"], ["task_id", "model", "reason"])
-        self.assertEqual(tool["inputSchema"]["properties"]["model"]["enum"], list(MODELS))
+        self.assertEqual(tool["inputSchema"]["properties"]["model"]["enum"], list(WORKER_MODELS))
         t = self.dispatch()
         out = io.StringIO()
         calls = [{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "retry", "arguments": {
                      "task_id": t["id"], "model": "sol", "reason": "second vendor"}, "_meta": {"threadId": "thread-A"}}},
                  {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "retry", "arguments": {
-                     "task_id": t["id"], "model": "opus"}, "_meta": {"threadId": "thread-A"}}}]
+                     "task_id": t["id"], "model": "opus", "reason": "removed model"}, "_meta": {"threadId": "thread-A"}}}]
         mcp_server.serve(io.StringIO("\n".join(json.dumps(c) for c in calls) + "\n"), out, self.con, self.rt)
         ok, refused = [json.loads(line)["result"] for line in out.getvalue().splitlines()]
         self.assertEqual(json.loads(ok["content"][0]["text"])["model"], "gpt-6.1-sol")
         self.assertTrue(refused["isError"])
-        self.assertIn("reason", refused["content"][0]["text"])
+        self.assertIn("use one of sol, sonnet", refused["content"][0]["text"])
 
 
 class RetryReviewRegressionTest(unittest.TestCase):
@@ -450,12 +467,12 @@ class RetryReviewRegressionTest(unittest.TestCase):
         self.rt.send_uds = lambda *a: (_ for _ in ()).throw(OSError("refused"))
         self.rt.stop_ignored.add("job2")
         with self.assertRaises(OSError):
-            core.retry(self.con, self.rt, t["id"], "opus", "x")
+            core.retry(self.con, self.rt, t["id"], "sonnet", "x")
         after = store.get_task(self.con, t["id"])
-        self.assertEqual((after["job_id"], after["model"], after["status"]), ("job2", MODELS["opus"], "failed"))
+        self.assertEqual((after["job_id"], after["model"], after["status"]), ("job2", WORKER_MODELS["sonnet"], "failed"))
         self.assertIn("job2 MAY STILL BE RUNNING", after["note"])
         with self.assertRaisesRegex(ValueError, "did not stop"):  # the next retry targets it, not the old job
-            core.retry(self.con, self.rt, t["id"], "opus", "again")
+            core.retry(self.con, self.rt, t["id"], "sonnet", "again")
 
     def test_unrecordable_failure_names_the_new_job_in_the_error(self):
         t = self.dispatch("sol")
@@ -478,24 +495,24 @@ class RetryReviewRegressionTest(unittest.TestCase):
                 self.rt.stopped.clear()
                 self.rt.stop_ignored.add(t["job_id"])
                 with self.assertRaisesRegex(ValueError, "did not stop"):
-                    core.retry(self.con, self.rt, t["id"], "opus", "x")
+                    core.retry(self.con, self.rt, t["id"], "sonnet", "x")
                 self.assertEqual((self.rt.stopped, self.rt.started), ([t["job_id"]], []))
                 self.rt.stop_ignored.clear()
-                core.retry(self.con, self.rt, t["id"], "opus", "x")
+                core.retry(self.con, self.rt, t["id"], "sonnet", "x")
                 self.assertEqual(len(self.rt.started), 1)
 
     def test_listed_job_counts_as_gone_only_without_a_live_process(self):
         t = self.dispatch("sonnet")
         job = self.rt.jobs[t["job_id"]]
         self.rt.alive_pids.discard(job["pid"])  # listed, pid dead: gone, so the retry goes on
-        core.retry(self.con, self.rt, t["id"], "opus", "x")
+        core.retry(self.con, self.rt, t["id"], "sonnet", "x")
         # main's stop_task_worker sends `claude stop` to the task's own job before checking; nothing else is touched
         self.assertEqual((self.rt.stopped, len(self.rt.started)), ([t["job_id"]], 1))
         u = self.dispatch("sonnet")
         self.rt.jobs[u["job_id"]] = {"state": "working", "status": "busy"}  # status without pid: still running
         self.rt.stop_ignored.add(u["job_id"])
         with self.assertRaises(ValueError):
-            core.retry(self.con, self.rt, u["id"], "opus", "x")
+            core.retry(self.con, self.rt, u["id"], "sonnet", "x")
 
     # 4-6. other MCP processes: separate connections on separate threads, contending on the task lock
     def slow(self, name, hold=0.3, during=None):
@@ -526,7 +543,7 @@ class RetryReviewRegressionTest(unittest.TestCase):
         t = self.dispatch("sonnet")
         self.slow("start_worker")
         results = []
-        threads = [self.in_thread(lambda c: core.retry(c, self.rt, t["id"], "opus", "parallel"), results)
+        threads = [self.in_thread(lambda c: core.retry(c, self.rt, t["id"], "sonnet", "parallel"), results)
                    for _ in range(2)]
         for th in threads:
             th.join()
@@ -547,7 +564,7 @@ class RetryReviewRegressionTest(unittest.TestCase):
             self.rt.missing.add(t["worktree"])
         self.slow("start_worker", during=close_without_lock)
         with self.assertRaisesRegex(Exception, "removed|closed"):
-            core.retry(self.con, self.rt, t["id"], "opus", "x")
+            core.retry(self.con, self.rt, t["id"], "sonnet", "x")
         final = store.get_task(self.con, t["id"])
         self.assertEqual((final["status"], final["job_id"]), ("closed", "job1"))  # never reopened as running
         self.assertNotIn("job2", self.rt.jobs)  # the new worker was stopped
@@ -560,7 +577,7 @@ class RetryReviewRegressionTest(unittest.TestCase):
         self.slow("start_worker", hold=1.0, during=lambda: threads.append(self.in_thread(
             lambda c: core.close(c, self.rt, t["id"]), results)))
         try:
-            core.retry(self.con, self.rt, t["id"], "opus", "x")
+            core.retry(self.con, self.rt, t["id"], "sonnet", "x")
         except Exception:  # noqa: BLE001 - close won the race; the commit guard refused
             pass
         threads[0].join()
@@ -573,7 +590,7 @@ class RetryReviewRegressionTest(unittest.TestCase):
         other = store.connect(self.db)
         with store.task_delivery(other, [t["id"]]):
             with self.assertRaises(TimeoutError):
-                core.retry(self.con, self.rt, t["id"], "opus", "x", lock_wait=0.2)
+                core.retry(self.con, self.rt, t["id"], "sonnet", "x", lock_wait=0.2)
         self.assertEqual((self.rt.stopped, self.rt.started), ([], []))
         self.assertEqual(store.get_task(self.con, t["id"])["job_id"], "job1")
 
@@ -645,7 +662,7 @@ class RealCodexStopTest(unittest.TestCase):
 
     def task(self, pid):
         store.create_task(self.con, id="t1", repo="demo", repo_path=str(self.wt), title="T", instructions="i",
-                          done_when="d", orch_thread="thread-A", codex_bin="/fake/codex", model=MODELS["sol"],
+                          done_when="d", orch_thread="thread-A", codex_bin="/fake/codex", model=WORKER_MODELS["sol"],
                           base="x", branch="orchd/t1", worktree=str(self.wt), job_id=str(pid),
                           session_id="thread-old", status="blocked")
 
@@ -729,11 +746,11 @@ class RetryKeepsWorktreeTest(unittest.TestCase):
         rt = Rt()
         con = store.connect(Path(self.tmp.name) / "t.db")
         store.create_task(con, id="t1", repo="demo", repo_path=str(self.repo), title="T", instructions="i",
-                          done_when="d", orch_thread="thread-A", codex_bin="/fake/codex", model=MODELS["sonnet"],
+                          done_when="d", orch_thread="thread-A", codex_bin="/fake/codex", model=WORKER_MODELS["sonnet"],
                           base="x", branch="orchd/t1", worktree=self.wt, job_id="job1", session_id="session1",
                           socket="/tmp/x/w.sock", status="blocked")
         before = self.snapshot()
-        core.retry(con, rt, "t1", "opus", "escalate")
+        core.retry(con, rt, "t1", "sonnet", "escalate")
         self.assertEqual(self.snapshot(), before)
         self.assertEqual((commands, rt.removed), ([], []))
         self.assertEqual(rt.started[0][1], self.wt)

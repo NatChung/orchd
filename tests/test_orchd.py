@@ -108,7 +108,7 @@ class CoreTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def dispatch(self, thread="thread-A", repo="demo", **kw):
-        kw = {"model_reason": "clear scope", "task_type": "code", **kw}
+        kw = {"model": "sonnet", "model_reason": "clear scope", "task_type": "code", **kw}
         return core.dispatch(self.con, self.rt, orch_thread=thread, repo=repo, title="T",
                              instructions="do it", done_when="tests pass", **kw)
 
@@ -163,7 +163,7 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(store.get_task(self.con, b["id"])["status"], "running")
 
     def test_notifications_name_the_stored_model_and_keep_task_and_kind(self):
-        for model in core.MODELS.values():
+        for model in core.WORKER_MODELS.values():
             t = self.dispatch()
             store.update_task(self.con, t["id"], model=model)  # the stored model is what the text must show
             before = len(self.rt.woken)
@@ -244,13 +244,21 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(self.rt.stopped, ["job1"])
         self.assertEqual(store.open_tasks(self.con), [])
 
-    def test_dispatch_defaults_to_sonnet_and_logs_event(self):
-        t = self.dispatch()
-        self.assertEqual((t["model"], t["model_reason"], t["task_type"]), ("claude-sonnet-5-5", "clear scope", "code"))
-        self.assertEqual(self.rt.model, "claude-sonnet-5-5")
+    def test_dispatch_defaults_to_sol_and_logs_event(self):
+        t = core.dispatch(self.con, self.rt, orch_thread="thread-A", repo="demo", title="T",
+                          instructions="do it", done_when="tests pass", model_reason="clear scope", task_type="code")
+        self.assertEqual((t["model"], t["model_reason"], t["task_type"]), ("gpt-6.1-sol", "clear scope", "code"))
+        self.assertEqual(self.rt.model, "gpt-6.1-sol")
         row = self.con.execute("SELECT body FROM messages WHERE kind='dispatch'").fetchone()
         self.assertEqual(json.loads(row[0])["model_reason"], "clear scope")
-        self.assertEqual(self.dispatch(model="opus")["model"], "claude-opus-5-5")
+        self.assertEqual(self.dispatch(model="sonnet")["model"], "claude-sonnet-5-5")
+
+    def test_dispatch_refuses_removed_opus_before_creating_a_task(self):
+        for model in ("opus", "claude-opus-5-5"):
+            with self.subTest(model=model), self.assertRaisesRegex(ValueError, "use one of sol, sonnet"):
+                self.dispatch(model=model)
+        self.assertEqual(store.open_tasks(self.con), [])
+        self.assertEqual((self.rt.sent, self.rt.removed), ([], []))
 
     def test_dispatch_refuses_bad_parameters_before_any_worktree(self):
         bad = [dict(model="gpt"), dict(model_reason=""), dict(model_reason=None), dict(task_type="nope"),
@@ -459,7 +467,7 @@ class OrchTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_start_orch_registers_claude_row_with_socket_and_session(self):
-        row = core.start_orch(self.con, self.rt, "opus")
+        row = core.start_orch(self.con, self.rt)  # Orch default remains independent of worker default
         self.assertRegex(row["id"], r"^o[0-9a-f]{7}$")
         self.assertEqual((row["kind"], row["model"], row["session_id"], row["job_id"]),
                          ("claude", "claude-opus-5-5", "orchsession", "orchjob"))
@@ -467,6 +475,10 @@ class OrchTest(unittest.TestCase):
         core.stop_orch(self.con, self.rt, row["id"])
         self.assertEqual(self.rt.stopped, ["orchjob"])
         self.assertIsNotNone(store.get_orch(self.con, row["id"])["stopped_at"])
+
+    def test_sonnet_orch_is_still_supported(self):
+        row = core.start_orch(self.con, self.rt, "sonnet")
+        self.assertEqual(row["model"], "claude-sonnet-5-5")
 
     def test_unknown_model_key_is_refused(self):
         with self.assertRaisesRegex(ValueError, "unknown model"):
@@ -584,7 +596,7 @@ class McpTest(unittest.TestCase):
         self.assertEqual(row["orch_thread"], "thread-X")
         dispatched = json.loads(replies[2]["result"]["content"][0]["text"])
         self.assertEqual((dispatched["orch_id"], dispatched["model"], dispatched["other_open_on_repo"]),
-                         ("thread-X", "claude-sonnet-5-5", []))
+                         ("thread-X", "gpt-6.1-sol", []))
 
     def test_env_orch_id_wins_over_meta_thread(self):
         os.environ["ORCHD_ORCH_ID"] = "oabc1234"

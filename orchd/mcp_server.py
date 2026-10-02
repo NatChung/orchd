@@ -11,7 +11,7 @@ import sys
 import traceback
 
 from . import core, store, verify as verification
-from .runtime import DEFAULT_WORKER_MODEL, MODELS, Runtime
+from .runtime import DEFAULT_WORKER_MODEL, WORKER_MODELS, Runtime
 
 TOOLS = [
     {"name": "dispatch",
@@ -24,11 +24,9 @@ TOOLS = [
          "title": {"type": "string"},
          "instructions": {"type": "string", "description": "Goal, scope, allowed actions, what to report"},
          "done_when": {"type": "string", "description": "Checkable completion conditions"},
-         "model": {"type": "string", "enum": list(MODELS), "description":
-                   "sonnet = default for clear-scope implementation and writing verify scripts; sol = GPT-6.1 Sol "
-                   "on Codex, same tier as sonnet, use it for a second vendor (e.g. reviewing sonnet's work); "
-                   "opus = ambiguous requirements, cross-repo, outward communication, review, or after the "
-                   "M tier failed twice"},
+         "model": {"type": "string", "enum": list(WORKER_MODELS), "default": DEFAULT_WORKER_MODEL,
+                   "description": "sol = GPT-6.1 Sol on Codex, the default and preferred worker; "
+                                  "sonnet = Claude Sonnet 5.5, use when switching to another vendor"},
          "model_reason": {"type": "string", "description": "One sentence: why this model for this task"},
          "task_type": {"type": "string", "enum": list(core.TASK_TYPES)},
          "rework_of": {"type": "string", "description": "Task id this task redoes or fixes"},
@@ -97,13 +95,15 @@ TOOLS = [
      "inputSchema": {"type": "object", "required": ["task_id"], "properties": {"task_id": {"type": "string"}}}},
     {"name": "retry",
      "description": "Replace a task's worker with a new one on the same worktree and branch, keeping all its local work "
-                    "(uncommitted, untracked, stash, commits). Any model is allowed: the same model, an upgrade, a "
-                    "downgrade or the other vendor; the from -> to change and your reason are recorded. Stops only "
+                    "(uncommitted, untracked, stash, commits). Use sol (the default and preferred worker) or "
+                    "sonnet when switching to another vendor; the from -> to change and your reason are recorded. Stops only "
                     "that task's worker and starts nothing if it does not stop. Refused for closed tasks or a "
                     "missing worktree. The new worker gets the task, its latest progress/report and your reason.",
      "inputSchema": {"type": "object", "required": ["task_id", "model", "reason"], "properties": {
          "task_id": {"type": "string"},
-         "model": {"type": "string", "enum": list(MODELS)},
+         "model": {"type": "string", "enum": list(WORKER_MODELS),
+                   "description": "sol = GPT-6.1 Sol on Codex, the default and preferred worker; "
+                                  "sonnet = Claude Sonnet 5.5, use when switching to another vendor"},
          "reason": {"type": "string", "description": "Why this worker is being replaced and why this model"}}}},
     {"name": "followup",
      "description": "Add an instruction to an open task: the same worker, worktree, branch and session continue; the model "

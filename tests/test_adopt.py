@@ -20,7 +20,7 @@ class AdoptTest(unittest.TestCase):
 
     def task(self, owner="old", repo="demo"):
         t = core.dispatch(self.con, self.rt, orch_thread=owner, repo=repo, title="T", instructions="x",
-                          done_when="y", model_reason="r", task_type="code")
+                          done_when="y", model="sonnet", model_reason="r", task_type="code")
         self.rt.sent.clear()
         return t["id"]
 
