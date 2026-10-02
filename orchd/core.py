@@ -471,7 +471,7 @@ def stop_orch(con, rt, orch_id):
     store.stop_orch(con, orch_id)
 
 
-RETRY_STOP_WAIT = 20  # polls of 0.5s: bounded so an MCP call never hangs on a worker that will not stop
+RETRY_STOP_WAIT = 20  # x 0.5s = stop_task_worker's wait: bounded so an MCP call never hangs on a stuck worker
 RETRY_LOCK_WAIT = 65  # seconds a retry waits for the task's close, answer flush or other retry to finish
 
 
