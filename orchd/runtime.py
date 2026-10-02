@@ -24,6 +24,28 @@ CODEX_FLAGS = ["--json", "--dangerously-bypass-approvals-and-sandbox"]
 USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 
 
+def redact(text):
+    """Drop credentials embedded in URLs (scheme://user:token@host) from error text we keep. The userinfo runs
+    to the last @ before the host's path, so passwords holding a raw or encoded @ go too; every URL is done."""
+    return re.sub(r"(://)[^\s/?#'\"]*@", r"\1***@", text)
+
+
+def _text(value):
+    return (value.decode(errors="replace") if isinstance(value, bytes) else value or "").strip()
+
+
+def error_detail(e):
+    """Text for a failed command, redacted: its stderr, else its stdout, else the exception text. A timeout says
+    so and keeps whatever the command wrote before it was killed."""
+    if isinstance(e, subprocess.TimeoutExpired):
+        out = [f"{Path(str(e.cmd[0] if isinstance(e.cmd, (list, tuple)) else e.cmd)).name} timed out after "
+               f"{e.timeout:g}s", _text(e.stderr), _text(e.output)]
+        return redact(": ".join(part for part in out if part))
+    if isinstance(e, subprocess.CalledProcessError):
+        return redact(_text(e.stderr) or _text(e.output) or str(e))
+    return redact(str(e)) or type(e).__name__
+
+
 def worker_kind(model):
     """A worker runs on the CLI of its model's vendor: GPT models on codex, the rest on claude."""
     return "codex" if model and model.startswith("gpt-") else "claude"
@@ -138,13 +160,47 @@ class Runtime:
         self.run(["git", "-C", str(repo_path), "worktree", "add", "-b", branch, str(path), base_commit])
         return base_commit, branch, str(path)
 
+    def dirty(self, path):
+        """Porcelain status that no git config can thin out: showUntrackedFiles=no and submodule `ignore`
+        settings would otherwise hide exactly the files a removal deletes."""
+        return self.run(["git", "-c", "status.showUntrackedFiles=all", "-C", path, "status", "--porcelain",
+                         "--untracked-files=all", "--ignore-submodules=none"]).stdout.strip()
+
+    def submodule_paths(self, worktree):
+        """Absolute paths of every initialized submodule, nested ones included."""
+        out = self.run(["git", "-C", worktree, "submodule", "foreach", "--recursive", "--quiet",
+                        'echo "$toplevel/$sm_path"']).stdout
+        return [line for line in out.splitlines() if line.strip()]
+
+    def submodule_loss(self, worktree):
+        """Why this worktree's initialized submodules cannot be removed, else None.
+        Removing the worktree deletes the submodules' git dirs too (stashes, local branches, tags, reflog), and
+        git only removes a worktree holding submodules with --force, which checks nothing. Anything that cannot
+        be proven safe to delete is therefore kept: a clean-at-check submodule is no reason to force."""
+        held = None
+        for path in self.submodule_paths(worktree):
+            name = os.path.relpath(os.path.realpath(path), os.path.realpath(worktree))
+            if self.dirty(path):
+                return f"uncommitted changes in submodule {name}"
+            if self.run(["git", "-C", path, "stash", "list"]).stdout.strip():
+                return f"stash in submodule {name}"
+            unpushed = self.run(["git", "-C", path, "rev-list", "--count", "HEAD", "--branches", "--tags",
+                                 "--not", "--remotes"]).stdout.strip()
+            if unpushed != "0":
+                return f"commits not pushed in submodule {name}"
+            held = held or (f"initialized submodule {name}: git can only remove it with --force, which would "
+                            "delete its git dir unchecked; remove the worktree by hand after saving what you need")
+        return held
+
     def worktree_state(self, worktree, base):
         """Return (removable, reason). Removable only when nothing local would be lost."""
         if not self.exists(worktree):
             return True, "worktree already gone"
-        dirty = self.run(["git", "-C", worktree, "status", "--porcelain"]).stdout.strip()
-        if dirty:
+        if self.dirty(worktree):
             return False, "uncommitted changes"
+        loss = self.submodule_loss(worktree)
+        if loss:
+            return False, loss
         head = self.run(["git", "-C", worktree, "rev-parse", "HEAD"]).stdout.strip()
         if head == base:
             return True, "no new commits"
@@ -160,9 +216,27 @@ class Runtime:
             return False, "local branch differs from its upstream"
         return True, "pushed"
 
-    def remove_worktree(self, repo_path, worktree):
-        if self.exists(worktree):
-            self.run(["git", "-C", str(repo_path), "worktree", "remove", worktree])
+    def remove_worktree(self, repo_path, worktree, base=None):
+        """Remove a worktree the caller found safe; never with --force. Returns None when removed, or the reason
+        it was kept because something unsaved showed up after the caller's check. Raises RuntimeError carrying
+        git's stderr when git itself fails. The state is re-checked right before removal (`base` given) and git's
+        own clean check runs with untracked files forced visible, so only a sub-millisecond window remains, and
+        git still refuses a dirty tree inside it. The branch ref survives removal, so late commits are not lost."""
+        if not self.exists(worktree):
+            return None
+        try:
+            if base is not None:
+                removable, reason = self.worktree_state(worktree, base)
+                if not removable:
+                    return reason
+            self.run(["git", "-c", "status.showUntrackedFiles=all", "-C", str(repo_path), "worktree", "remove",
+                      worktree])
+        except subprocess.CalledProcessError as e:
+            detail = error_detail(e)
+            if "contains modified or untracked files" in detail:
+                return "uncommitted changes appeared; worktree kept"
+            raise RuntimeError(f"git worktree remove failed (exit {e.returncode}): {detail}") from None
+        return None
 
     # -- claude workers ---------------------------------------------------------
     def socket_path(self, task_id):
@@ -244,6 +318,62 @@ class Runtime:
 
     def stop_worker(self, job):
         self.run([self.claude, "stop", job], timeout=30, check=False)
+
+    def stop_task_worker(self, kind, job, marks=(), wait=10.0):
+        """Stop one task's worker and confirm it is gone; raise RuntimeError when that cannot be confirmed (the
+        stop failed or timed out while the worker still runs, or its state cannot be read). Only this job/pid is
+        touched. Callers keep the worktree and the task open on error, so a later call simply retries."""
+        if kind == "codex":
+            return self._stop_codex_confirmed(job, [m for m in marks if m], wait)
+        try:
+            result = self.run([self.claude, "stop", job], timeout=30, check=False)
+            stop_note = (f"exit {result.returncode}: " + redact(_text(result.stderr) or _text(result.stdout))
+                         if result.returncode else "stop sent")
+        except (OSError, subprocess.SubprocessError) as e:
+            stop_note = error_detail(e)
+        state = "job list unavailable"
+        for _ in range(max(1, int(wait / 0.5))):
+            jobs = self.live_jobs()
+            listed = jobs.get(job) if jobs is not None else None
+            if jobs is not None and (listed is None or (listed.get("pid") is None and listed.get("status") is None)
+                                     or (listed.get("pid") and not self.pid_alive(listed["pid"]))):
+                # stopped jobs drop out of the list, and pid/status are listed only while the process is alive
+                # (https://code.claude.com/docs/en/agent-view#list-sessions-as-json). `state` is the task outcome:
+                # state=failed can still carry a live pid, so it proves nothing here.
+                return None
+            state = ("job list unavailable" if jobs is None else
+                     f"still listed as {listed.get('state')}, pid {listed.get('pid')}, status {listed.get('status')}")
+            self.sleep(0.5)
+        raise RuntimeError(f"claude worker {job} not confirmed stopped ({state}); claude stop: {stop_note}")
+
+    def _stop_codex_confirmed(self, pid, marks, wait):
+        """A Codex turn's pid may be long gone and reused, so only a process that is codex *and* runs this task's
+        worktree or thread is ours; anything else means our worker already exited."""
+        def ours():
+            if not self.pid_alive(pid):
+                return False
+            try:
+                ps = self.run(["ps", "-ww", "-p", str(pid), "-o", "args="], timeout=10, check=False)
+            except (OSError, subprocess.SubprocessError) as e:
+                raise RuntimeError(f"codex worker {pid} not confirmed stopped: {error_detail(e)}") from None
+            if ps.returncode not in (0, 1):
+                raise RuntimeError(f"codex worker {pid} not confirmed stopped: ps exit {ps.returncode}: "
+                                   f"{redact(_text(ps.stderr))}")
+            args = ps.stdout
+            return "codex" in args and any(m in args for m in marks)
+        if not ours():
+            return None
+        try:
+            os.killpg(int(pid), 15)
+        except ProcessLookupError:
+            return None
+        except (OSError, ValueError) as e:
+            raise RuntimeError(f"codex worker {pid} not confirmed stopped: kill failed: {e}") from None
+        for _ in range(max(1, int(wait / 0.2))):
+            self.sleep(0.2)
+            if not ours():
+                return None
+        raise RuntimeError(f"codex worker {pid} still running {wait:g}s after SIGTERM; not confirmed stopped")
 
     def live_jobs(self):
         try:

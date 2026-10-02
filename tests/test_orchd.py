@@ -65,7 +65,7 @@ class FakeRuntime:
     def worktree_state(self, worktree, base):
         return self.removable
 
-    def remove_worktree(self, repo_path, worktree):
+    def remove_worktree(self, repo_path, worktree, base=None):
         self.removed.append(worktree)
 
     def open_viewer(self, job):
@@ -87,6 +87,9 @@ class FakeRuntime:
 
     def stop_codex(self, pid):
         self.stopped.append(("codex", pid))
+
+    def stop_task_worker(self, kind, job, marks=()):
+        self.stopped.append(job if kind == "claude" else (kind, job))
 
     def open_codex_viewer(self, worktree, thread):
         self.viewed.append(("codex", thread))
