@@ -426,11 +426,11 @@ def generic_steps(env):
     # A caller's ORCHD_ORCH_HOME under a foreign --home names the caller's Orch, not the target's: no verdict.
     blocked = env.path_override("ORCHD_ORCH_HOME")
     if blocked:
-        for sid, title, src in (("orch-home", "Orch home present", "ORCHD_ORCH_HOME set (name only; value not used)"),
-                                ("trust-orch-claude", "Orch home trusted in Claude", "~/.claude.json projects[<path>].hasTrustDialogAccepted"),
-                                ("trust-orch-codex", "Orch home trusted in Codex", "~/.codex/config.toml projects.<path>.trust_level"),
-                                ("orch-config-paths", "Orch .codex/config.toml paths match this HOME", "TOML keys and strings scanned for /Users/<x> or /home/<x>")):
-            steps.append(Step(sid, "generic", title, who, UNKNOWN, blocked, src,
+        for sid, title in (("orch-home", "Orch home present"), ("trust-orch-claude", "Orch home trusted in Claude"),
+                           ("trust-orch-codex", "Orch home trusted in Codex"),
+                           ("orch-config-paths", "Orch .codex/config.toml paths match this HOME")):
+            steps.append(Step(sid, "generic", title, who, UNKNOWN, blocked,
+                              "ORCHD_ORCH_HOME set (name only; nothing read)",
                               ["# unset ORCHD_ORCH_HOME and re-run, or run this wizard as the target user on the target machine"],
                               "re-run this wizard: step shows pass"))
     else:
@@ -484,7 +484,7 @@ def generic_steps(env):
     blocked = env.path_override("ORCHD_HOME")
     if blocked:
         steps.append(Step("orchd-home", "generic", "orchd state dir writable", who, UNKNOWN, blocked,
-                          "ORCHD_HOME set (name only; value not used)",
+                          "ORCHD_HOME set (name only; nothing probed)",
                           ["# unset ORCHD_HOME and re-run, or run this wizard as the target user on the target machine"], ""))
     for sid, title, path in ((() if blocked else (("orchd-home", "orchd state dir writable", env.orchd_home),))
                              + (("tmp-sockets", "/tmp usable for worker sockets", Path("/tmp")),)):

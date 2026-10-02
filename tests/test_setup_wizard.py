@@ -755,6 +755,7 @@ class OrchdPathOverrideTest(unittest.TestCase):
             st = steps[sid]
             self.assertEqual(st.status, sw.UNKNOWN, sid)
             self.assertIn(name, st.detail, sid)
+            self.assertIn(name, st.source, sid)  # no claim that a file was read or scanned
             for text in (st.detail, st.source, st.receipt, *st.commands):
                 self.assertNotIn(str(self.caller), text, sid)
 
