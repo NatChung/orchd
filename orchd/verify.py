@@ -12,11 +12,14 @@ not tamperproof. The Orch cross-checks it against the verifier's own report.
 
 The locked command runs as its own process group; whatever is left of that group is killed and confirmed gone
 before the tree is judged or restored. A child that leaves the group (setsid, setpgid, a daemon) is not caught.
+Supported: POSIX (macOS, Linux) with Python 3.9+; anything else is refused before the checkout.
 """
 import json
 import os
+import select
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -25,6 +28,7 @@ from . import store
 LOCK, RESULT = "verify_lock", "verification"
 TAIL = 4000
 CLEANUP_WAIT = 5.0  # seconds to see the command's process group empty after SIGKILL
+SUPPORTED = "POSIX (macOS, Linux) with Python 3.9 or newer"
 SYMLINK, GITLINK = "120000", "160000"
 
 
@@ -112,6 +116,10 @@ def lock(con, task_id, paths, command=None, orch_thread=None):
 
 def run(con, verifier_id, timeout=None):
     """Verifier worker: rerun the author's locked command at the locked SHA in the verifier's own worktree."""
+    missing = unsupported()
+    if missing:
+        raise ValueError(f"this host can't run a locked command with confirmed cleanup (missing: {', '.join(missing)}); "
+                         f"verify needs {SUPPORTED}")
     v = store.get_task(con, verifier_id)
     author_id = v["verifies"]
     if not author_id:
@@ -169,40 +177,75 @@ def run(con, verifier_id, timeout=None):
     return record
 
 
-def _execute(command, cwd, timeout):
-    """Run command in a new session, then kill what is left of its process group. Returns (exit, output, cleanup).
+def unsupported():
+    """What this host lacks for _execute; checked before the checkout so a missing piece refuses instead of crashing."""
+    missing = [] if os.name == "posix" else [f"POSIX process groups (os.name is {os.name!r})"]
+    missing += [f"os.{name}" for name in ("killpg", "setsid", "pipe") if not hasattr(os, name)]
+    missing += [] if hasattr(select, "select") else ["select.select"]
+    missing += [] if sys.executable and os.access(sys.executable, os.X_OK) else ["an executable sys.executable"]
+    missing += [] if os.access("/bin/sh", os.X_OK) else ["/bin/sh"]
+    return missing
 
-    The group id is the shell's pid, reserved until orchd reaps the shell, so SIGKILL is sent only before that
-    reap and can't reach an unrelated process; afterwards the group is only probed with signal 0. cleanup is True
-    once the group is empty. Output goes to a file: a background child holding a pipe would stall the read."""
+
+# The holder leads the command's process group: it runs the command as its child, reaps it, reports the exit
+# status, then blocks on stdin. While it lives (or is an unreaped zombie of orchd) its pid, the group id, can't
+# be reused, so orchd's SIGKILL to the group can't reach an unrelated process. Plain Python, no os.waitid.
+_HOLDER = """import os, subprocess, sys
+code = subprocess.call(["/bin/sh", "-c", sys.argv[1]], stdin=subprocess.DEVNULL)
+os.write(int(sys.argv[2]), b"%d\\n" % code)
+sys.stdin.buffer.read()
+"""
+
+
+def _execute(command, cwd, timeout):
+    """Run command under a holder in a new session, then kill what is left of its group. Returns (exit, output, cleanup).
+
+    SIGKILL goes to the group before orchd lets the holder go and reaps it; afterwards the group is only probed
+    with signal 0. cleanup is True once the group is empty. Output goes to a file: a background child holding a
+    pipe would stall the read."""
     with tempfile.TemporaryFile() as out:
-        proc = subprocess.Popen(command, shell=True, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out,
-                                stderr=subprocess.STDOUT, start_new_session=True)
-        exited = False
+        status_r, status_w = os.pipe()
         try:
-            exited = _wait_unreaped(proc.pid, timeout)
-        finally:
             try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass  # only the unreaped shell is left; _group_gone decides
-            proc.wait()
+                proc = subprocess.Popen([sys.executable, "-I", "-c", _HOLDER, command, str(status_w)], cwd=cwd,
+                                        stdin=subprocess.PIPE, stdout=out, stderr=subprocess.STDOUT,
+                                        start_new_session=True, pass_fds=(status_w,))
+            finally:
+                os.close(status_w)
+            try:
+                exited, code = _read_status(status_r, timeout)
+            finally:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass  # the holder is already gone; _group_gone decides
+                proc.stdin.close()  # lets a holder that was not killed exit
+                proc.wait()
+        finally:
+            os.close(status_r)
         cleanup = _group_gone(proc.pid)
         out.seek(0)
         output = out.read().decode(errors="replace")
     if not exited:
         return None, output + "\n[orchd] timed out", cleanup
-    return proc.returncode, output, cleanup
+    if code is None:
+        return None, output + "\n[orchd] the command's holder ended without an exit status", cleanup
+    return code, output, cleanup
 
 
-def _wait_unreaped(pid, timeout):
-    """Wait for the shell to exit without reaping it (WNOWAIT keeps its pid, the group id, reserved)."""
+def _read_status(fd, timeout):
+    """(exited, exit status) from the holder's status pipe; (False, None) on timeout, (True, None) if it closed early."""
     deadline = None if timeout is None else time.monotonic() + timeout
-    while not os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG):
-        if deadline is not None and time.monotonic() >= deadline:
-            return False
-        time.sleep(0.02)
-    return True
+    data = b""
+    while not data.endswith(b"\n"):
+        wait = None if deadline is None else max(0.0, deadline - time.monotonic())
+        if not select.select([fd], [], [], wait)[0]:
+            return False, None
+        chunk = os.read(fd, 64)
+        if not chunk:
+            return True, None
+        data += chunk
+    return True, int(data)
 
 
 def _group_gone(pgid):

@@ -269,6 +269,24 @@ class VerifyTest(unittest.TestCase):
         self.assert_writer_gone_and_nothing_landed(pidfile, delay=2)
         self.assertEqual(json.loads(done.stdout)["cleanup"], True)
 
+    def test_a_command_that_kills_its_holder_is_a_fail_and_its_background_writer_is_killed_too(self):
+        # The holder (group leader) dies before orchd's SIGKILL; as orchd's unreaped child it still reserves the
+        # group id, so the group kill reaches the writer and nothing unrelated.
+        command, pidfile = self.late_writer("kill -9 $PPID; sleep 30")
+        self.lock(command=command)
+        started = time.monotonic()
+        result = verify.run(self.con, "V")
+        self.assertLess(time.monotonic() - started, 10)
+        self.assert_writer_gone_and_nothing_landed(pidfile)
+        self.assertEqual((result["exit"], result["passed"], result["cleanup"], result["dirty"], result["restored"]),
+                         (None, False, True, False, True))
+        self.assertIn("without an exit status", result["tail"])
+
+    def test_signal_exit_status_is_kept_and_fails(self):
+        self.lock(command="kill -TERM $$")
+        result = verify.run(self.con, "V")
+        self.assertEqual((result["exit"], result["passed"], result["cleanup"]), (-15, False, True))
+
     def test_unconfirmed_cleanup_is_a_fail_and_the_tree_stays_at_the_locked_sha(self):
         # No test process can be made unkillable, so pretend the group never empties.
         lock = self.lock(command="true")
@@ -396,6 +414,48 @@ class VerifyTest(unittest.TestCase):
         store.update_task(self.con, "A", status="closed")
         with self.assertRaisesRegex(ValueError, "is closed"):
             core.dispatch(self.con, rt, verifies="A", **kw)
+
+    # --- host capabilities: checked before anything is checked out --------------------------------------
+
+    def test_this_host_has_what_verify_needs(self):
+        self.assertEqual(verify.unsupported(), [])
+
+    def assert_untouched_after_refusal(self, head):
+        self.assertEqual((self.branch(self.wv), git(self.wv, "rev-parse", "HEAD")), ("orchd/V", head))
+        self.assertEqual((self.wv / "notes.txt").read_text(), "mine\n")  # the user's uncommitted file stays
+        self.assertEqual(git(self.wv, "status", "--porcelain", "--untracked-files=all"), "?? notes.txt")
+        self.assertIsNone(self.con.execute("SELECT 1 FROM messages WHERE kind=?", (verify.RESULT,)).fetchone())
+        self.assertEqual(verify.status(self.con, "A")["state"], "locked")
+
+    def test_a_host_without_process_group_kill_is_refused_before_the_checkout(self):
+        self.lock()
+        head = git(self.wv, "rev-parse", "HEAD")
+        (self.wv / "notes.txt").write_text("mine\n")
+        killpg = os.killpg
+        del os.killpg
+        try:
+            with self.assertRaisesRegex(ValueError, r"missing: os\.killpg.*Python 3\.9 or newer"):
+                verify.run(self.con, "V")
+        finally:
+            os.killpg = killpg
+        self.assert_untouched_after_refusal(head)
+        with mock.patch.object(verify.os, "name", "nt"), self.assertRaisesRegex(ValueError, "POSIX process groups"):
+            verify.run(self.con, "V")
+        self.assert_untouched_after_refusal(head)
+
+    def test_cli_refuses_with_exit_2_on_a_host_without_process_group_kill(self):
+        self.lock()
+        head = git(self.wv, "rev-parse", "HEAD")
+        (self.wv / "notes.txt").write_text("mine\n")
+        env = dict(os.environ, ORCHD_HOME=str(self.home))
+        shim = ("import os, runpy, sys; del os.killpg; sys.argv = [sys.argv[1], 'verify', 'V']; "
+                "runpy.run_path(sys.argv[0], run_name='__main__')")
+        done = subprocess.run([sys.executable, "-c", shim, str(CLI)], capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(done.returncode, 2, done.stderr)
+        self.assertIn("verify refused", done.stderr)
+        self.assertIn("missing: os.killpg", done.stderr)
+        self.assertNotIn("Traceback", done.stderr)
+        self.assert_untouched_after_refusal(head)
 
     def test_cli_exit_codes_pass_fail_refused(self):
         env = dict(os.environ, ORCHD_HOME=str(self.home))
