@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -33,7 +34,7 @@ class Fake:
     def which(self, name):
         return f"/fake/bin/{name}" if name in self.tools else None
 
-    def __call__(self, argv):
+    def __call__(self, argv, input=None):
         self.calls.append(argv)
         if argv[:3] == ["gh", "auth", "status"]:
             body = "".join(f"github.com\n  \u2713 Logged in to github.com account {x} (keyring)\n  - Token: {SECRET}\n" for x in self.gh_accounts)
@@ -50,14 +51,15 @@ class Fake:
         if argv[0] == "git" and argv[1] == "config":
             return 0, "x\n"
         if argv[0] == "ssh-keygen":
-            return (0, "256 SHA256:abc nat (ED25519)\n") if self.pub_ok else (1, "not a public key")
+            return (0, "256 SHA256:abc nat (ED25519)\n") if self.pub_ok and input else (1, "not a public key")
         return 0, f"{argv[0]} 1.0\n"
 
 
 def make_env(tmp, fake, home_name="home"):
     home = Path(tmp) / home_name
     (home / "projects").mkdir(parents=True)
-    env = sw.Env(home=home, projects=home / "projects", runner=fake, which=fake.which, environ={})
+    # The wizard is run by the user whose HOME it checks: anything else is the --home override case (TargetEnvironmentTest).
+    env = sw.Env(home=home, projects=home / "projects", runner=fake, which=fake.which, environ={"HOME": str(home)})
     return env
 
 
@@ -66,7 +68,7 @@ def write_key(env, name, body="PRIVATE", pub=True):
     ssh.mkdir(exist_ok=True)
     (ssh / name).write_text(body)
     if pub:
-        (ssh / (name + ".pub")).write_text("ssh-ed25519 AAAA test")
+        (ssh / (name + ".pub")).write_text("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeFakeFakeFakeFakeFakeFakeFakeFakeFakeFake test\n")
 
 
 def by_id(steps):
@@ -205,9 +207,7 @@ class WizardTest(unittest.TestCase):
         """Exact argv match; no prefix or arity wildcards."""
         exact = set(sw.READ_ONLY_ARGV)
         for argv in fake.calls:
-            ok = tuple(argv) in exact or (len(argv) == 4 and argv[:3] == ["ssh-keygen", "-l", "-f"]
-                                          and argv[3] == str(env.home / ".ssh" / Path(argv[3]).name) and argv[3].endswith(".pub"))
-            self.assertTrue(ok, argv)
+            self.assertIn(tuple(argv), exact, argv)
 
     def test_commands_are_printed_not_executed(self):
         fake = Fake()
@@ -280,21 +280,21 @@ class WizardTest(unittest.TestCase):
 
     def test_claude_login_needs_logged_in_true_not_just_exit_0(self):
         class LoggedOutRc0(Fake):
-            def __call__(self, argv):
+            def __call__(self, argv, input=None):
                 if argv[:3] == ["claude", "auth", "status"]:
                     self.calls.append(argv)
                     return 0, json.dumps({"loggedIn": False})
-                return super().__call__(argv)
+                return super().__call__(argv, input)
         env = make_env(self.tmp.name, LoggedOutRc0(tools={"claude"}))
         self.assertEqual(by_id(sw.build_plan(env, "generic"))["login-claude"].status, sw.UNKNOWN)
 
     def test_codex_not_logged_in_text_is_not_pass_even_rc0(self):
         class Rc0(Fake):
-            def __call__(self, argv):
+            def __call__(self, argv, input=None):
                 if argv[:3] == ["codex", "login", "status"]:
                     self.calls.append(argv)
                     return 0, "Not logged in"
-                return super().__call__(argv)
+                return super().__call__(argv, input)
         env = make_env(self.tmp.name, Rc0(tools={"codex"}))
         self.assertEqual(by_id(sw.build_plan(env, "generic"))["login-codex"].status, sw.UNKNOWN)
 
@@ -321,6 +321,11 @@ class WizardTest(unittest.TestCase):
         opened = []
         real_open = Path.open
         real_rt, real_rb = Path.read_text, Path.read_bytes
+        real_os_open = os.open
+
+        def spy_os_open(path, *a, **k):
+            opened.append(Path(os.fspath(path)).name)
+            return real_os_open(path, *a, **k)
 
         def spy_open(self_, *a, **k):
             opened.append(self_.name)
@@ -333,13 +338,15 @@ class WizardTest(unittest.TestCase):
         def spy_rb(self_, *a, **k):
             opened.append(self_.name)
             return real_rb(self_, *a, **k)
-        Path.open, Path.read_text, Path.read_bytes = spy_open, spy_rt, spy_rb
+        Path.open, Path.read_text, Path.read_bytes, sw.os.open = spy_open, spy_rt, spy_rb, spy_os_open
         try:
             sw.build_plan(env, "all")
         finally:
-            Path.open, Path.read_text, Path.read_bytes = real_open, real_rt, real_rb
-        for name in (".credentials.json", "auth.json", "id_ed25519_nat862", "id_ed25519_nat862.pub"):
+            Path.open, Path.read_text, Path.read_bytes, sw.os.open = real_open, real_rt, real_rb, real_os_open
+        for name in (".credentials.json", "auth.json", "id_ed25519_nat862"):
             self.assertNotIn(name, opened)
+        # Round 2: the .pub IS read now (public material, O_NOFOLLOW, format-checked) so ssh-keygen gets text, not a path.
+        self.assertIn("id_ed25519_nat862.pub", opened)
 
     def test_not_a_key_file_is_not_pass(self):
         fake = Fake(tools={"gh"}, gh_accounts=["nat862"], pub_ok=False)
@@ -421,6 +428,7 @@ class WizardTest(unittest.TestCase):
             ["gh", "repo", "clone", "x"], ["python3", "-c", "import os;os.remove('x')"], ["python3", "-m", "pip", "install", "x"],
             ["ssh-keygen", "-y", "-f", str(env.home / ".ssh" / "id_x")], ["ssh-keygen", "-l", "-f", str(env.home / ".ssh" / "id_x")],
             ["ssh-keygen", "-l", "-f", "/etc/ssh/ssh_host_rsa_key.pub"], ["ssh-keygen", "-l", "-f", pub + ".pub", "-x"],
+            ["ssh-keygen", "-l", "-f", pub], ["ssh-keygen", "-l", "-f", "-", "-v"], ["ssh-keygen", "-l", "-f", "/dev/stdin"],
             ["ssh-keygen", "-t", "ed25519", "-f", pub], ["brew", "install", "gh"], ["xcode-select", "--install"],
             ["gh", "--version", "extra"], ["git", "--version", "--x"],
         ]
@@ -428,7 +436,7 @@ class WizardTest(unittest.TestCase):
             with self.assertRaises(ValueError, msg=argv):
                 env.run(argv)
         self.assertEqual(fake.calls, [])
-        env.run(["ssh-keygen", "-l", "-f", pub])  # the one allowed shape
+        env.run(["ssh-keygen", "-l", "-f", "-"], input="ssh-ed25519 AAAA x\n")  # round 2: the one allowed shape, text on stdin
         env.run(["git", "config", "--global", "--get", "user.email"])
 
     def test_allowlist_is_pinned_to_this_exact_set(self):
@@ -438,7 +446,278 @@ class WizardTest(unittest.TestCase):
             ("python3", "-c", "import sys;print(sys.version_info >= (3, 11))"), ("claude", "--help"),
             ("claude", "auth", "status"), ("codex", "login", "status"), ("gh", "auth", "status"),
             ("git", "config", "--global", "--get", "user.name"), ("git", "config", "--global", "--get", "user.email"),
+            ("ssh-keygen", "-l", "-f", "-"),
         })
+
+
+def real_env(tmp, name, process_home=None, extra=None):
+    """Env with the REAL runner (no Fake): only used for git and ssh-keygen on scratch files, never for live logins."""
+    home = Path(tmp) / name
+    home.mkdir(parents=True, exist_ok=True)
+    environ = {"HOME": str(process_home or home), "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+    environ.update(extra or {})
+    return sw.Env(home=home, projects=home / "projects", environ=environ)
+
+
+def gitconfig(home, email="t@example.com"):
+    Path(home).mkdir(parents=True, exist_ok=True)
+    (Path(home) / ".gitconfig").write_text(f"[user]\n\tname = T\n\temail = {email}\n")
+
+
+def keypair(ssh_dir, name="id_ed25519"):
+    """A throwaway Ed25519 pair made for the test in a scratch dir. Never ~/.ssh."""
+    import subprocess
+    ssh_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "scratch", "-f", str(ssh_dir / name)],
+                   check=True, stdin=subprocess.DEVNULL, capture_output=True)
+    return ssh_dir / name
+
+
+class TargetEnvironmentTest(unittest.TestCase):
+    """Round 2, finding 1: --home must not borrow the process HOME / GIT_CONFIG_* / provider overrides."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_real_git_actual_home_has_identity_target_empty_is_missing(self):
+        actual = Path(self.tmp.name) / "actual"
+        gitconfig(actual)
+        env = real_env(self.tmp.name, "target", process_home=actual)
+        self.assertEqual(sw.git_identity(env).status, sw.MISSING)
+
+    def test_real_git_target_has_identity_actual_empty_is_pass(self):
+        actual = Path(self.tmp.name) / "actual"
+        actual.mkdir()
+        env = real_env(self.tmp.name, "target", process_home=actual)
+        gitconfig(env.home)
+        self.assertEqual(sw.git_identity(env).status, sw.PASS)
+
+    def test_real_git_same_home_both_ways(self):
+        env = real_env(self.tmp.name, "h")
+        self.assertEqual(sw.git_identity(env).status, sw.MISSING)
+        gitconfig(env.home)
+        self.assertEqual(sw.git_identity(env).status, sw.PASS)
+
+    def test_real_git_config_overrides_are_unknown_not_a_verdict(self):
+        other = Path(self.tmp.name) / "other"
+        gitconfig(other)
+        for extra in ({"GIT_CONFIG_GLOBAL": str(other / ".gitconfig")}, {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.email",
+                      "GIT_CONFIG_VALUE_0": "x@y"}, {"XDG_CONFIG_HOME": str(other)}, {"GIT_CONFIG_PARAMETERS": "'user.name'='x'"}):
+            for target_has in (False, True):
+                env = real_env(self.tmp.name, f"t{len(extra)}{target_has}", extra=extra)
+                if target_has:
+                    gitconfig(env.home)
+                step = sw.git_identity(env)
+                self.assertEqual(step.status, sw.UNKNOWN, (extra, target_has))
+                for k in extra:
+                    if k.startswith(("GIT_CONFIG_GLOBAL", "XDG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS")):
+                        self.assertIn(k, step.detail)
+                self.assertNotIn("x@y", step.detail)
+                self.assertNotIn(str(other), step.detail)
+
+    def test_home_override_makes_live_logins_unknown_even_if_process_user_is_logged_in(self):
+        fake = Fake(tools={"claude", "codex", "gh"}, gh_accounts=["nat862", "NatChung"])
+        env = make_env(self.tmp.name, fake)
+        env.environ = {"HOME": str(Path(self.tmp.name) / "someone-else")}
+        write_key(env, "id_ed25519_nat862")
+        (env.home / ".ssh" / "config").write_text("Host github-nat862\n")
+        steps = by_id(sw.build_plan(env, "all"))
+        for sid in ("login-claude", "login-codex", "login-gh", "gh-nat862"):
+            self.assertEqual(steps[sid].status, sw.UNKNOWN, sid)
+            self.assertIn("HOME", steps[sid].detail, sid)
+        # NatChung has no key in this HOME: missing for that reason, and its gh login is still not claimed either way.
+        self.assertEqual(steps["gh-NatChung"].status, sw.MISSING)
+        self.assertIn("gh login for NatChung not checked", steps["gh-NatChung"].detail)
+        auth = [a for a in fake.calls if a[1:2] in (["auth"], ["login"])]
+        self.assertEqual(auth, [])  # not even asked: the answer would describe the wrong user
+
+    def test_home_override_real_runner_never_writes_into_target_home(self):
+        """gh and codex create dirs under $HOME on startup. A stub that does the same must not touch --home."""
+        bin_dir = Path(self.tmp.name) / "bin"
+        bin_dir.mkdir()
+        for name in ("gh", "codex", "claude"):
+            stub = bin_dir / name
+            stub.write_text('#!/bin/sh\nmkdir -p "$HOME/.stub-state"\necho "stub 1.0"\n')
+            stub.chmod(0o755)
+        actual = Path(self.tmp.name) / "actual"
+        actual.mkdir()
+        env = real_env(self.tmp.name, "target", process_home=actual)
+        env.environ["PATH"] = f"{bin_dir}:{env.environ['PATH']}"
+        env.which = lambda n: shutil.which(n, path=env.environ["PATH"])
+        gitconfig(env.home)
+        before = snapshot(env.home)
+        steps = by_id(sw.build_plan(env, "generic"))
+        self.assertEqual(snapshot(env.home), before)
+        self.assertEqual(steps["git-identity"].status, sw.PASS)  # git alone reads the target HOME
+        self.assertEqual(steps["login-gh"].status, sw.UNKNOWN)
+
+    def test_home_override_missing_key_is_still_missing(self):
+        env = make_env(self.tmp.name, Fake(tools={"gh"}, gh_accounts=["nat862"]))
+        env.environ = {"HOME": "/nonexistent-process-home"}
+        self.assertEqual(by_id(sw.build_plan(env, "nat"))["gh-nat862"].status, sw.MISSING)
+
+    def test_provider_overrides_make_that_provider_unknown_names_only(self):
+        cases = {
+            "login-gh": ["GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR", "GH_ENTERPRISE_TOKEN", "GH_HOST", "XDG_CONFIG_HOME"],
+            "login-claude": ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR"],
+            "login-codex": ["OPENAI_API_KEY", "CODEX_HOME"],
+        }
+        for sid, names in cases.items():
+            for name in names:
+                fake = Fake(tools={"claude", "codex", "gh"}, gh_accounts=["nat862"])
+                env = make_env(self.tmp.name, fake, home_name=f"{sid}-{name}")
+                env.environ[name] = SECRET
+                step = by_id(sw.build_plan(env, "generic"))[sid]
+                self.assertEqual(step.status, sw.UNKNOWN, (sid, name))
+                self.assertIn(name, step.detail)
+                self.assertNotIn(SECRET, step.detail)
+
+    def test_config_dir_overrides_make_trust_and_mcp_file_checks_unknown(self):
+        env = make_env(self.tmp.name, Fake(tools={"claude", "codex"}))
+        orch = env.orch_home
+        orch.mkdir(parents=True)
+        (orch / "AGENTS.md").write_text("x")
+        (env.home / ".claude.json").write_text(json.dumps({"projects": {str(orch): {"hasTrustDialogAccepted": True}}}))
+        (env.home / ".codex").mkdir()
+        (env.home / ".codex" / "config.toml").write_text(f'[projects."{orch}"]\ntrust_level = "trusted"\n[mcp_servers.orchd]\ncommand = "x"\n')
+        env.environ.update({"CLAUDE_CONFIG_DIR": "/elsewhere", "CODEX_HOME": "/elsewhere2"})
+        steps = by_id(sw.build_plan(env, "generic"))
+        for sid in ("trust-orch-claude", "trust-orch-codex", "mcp-orchd-codex"):
+            self.assertEqual(steps[sid].status, sw.UNKNOWN, sid)
+
+    def test_matching_home_without_overrides_still_passes(self):
+        env = make_env(self.tmp.name, Fake(tools={"claude", "codex", "gh"}, gh_accounts=["nat862"]))
+        steps = by_id(sw.build_plan(env, "generic"))
+        for sid in ("login-claude", "login-codex", "login-gh"):
+            self.assertEqual(steps[sid].status, sw.PASS, sid)
+
+
+class PublicKeyOnlyTest(unittest.TestCase):
+    """Round 2, finding 2: real disposable keys, real ssh-keygen. The .pub must be a public key, not private material."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.env = real_env(self.tmp.name, "h")
+        self.key = keypair(self.env.home / ".ssh")
+        self.pub = Path(str(self.key) + ".pub")
+
+    def test_real_pair_passes(self):
+        self.assertTrue(sw.pub_key_ok(self.env, self.key))
+
+    def test_pub_symlink_to_private_is_refused(self):
+        self.pub.unlink()
+        self.pub.symlink_to(self.key)
+        self.assertFalse(sw.pub_key_ok(self.env, self.key))
+
+    def test_pub_symlink_to_a_real_public_key_is_refused_too(self):
+        elsewhere = keypair(Path(self.tmp.name) / "other")
+        self.pub.unlink()
+        self.pub.symlink_to(str(elsewhere) + ".pub")
+        self.assertFalse(sw.pub_key_ok(self.env, self.key))
+
+    def test_pub_with_private_key_copy_is_refused(self):
+        self.pub.write_bytes(self.key.read_bytes())
+        self.assertFalse(sw.pub_key_ok(self.env, self.key))
+
+    def test_pub_hardlinked_to_private_is_refused(self):
+        self.pub.unlink()
+        os.link(self.key, self.pub)
+        self.assertFalse(sw.pub_key_ok(self.env, self.key))
+
+    def test_garbage_and_non_regular_pub_are_refused(self):
+        self.pub.write_text("ssh-ed25519 not-base64!!\n")
+        self.assertFalse(sw.pub_key_ok(self.env, self.key))
+        self.pub.write_text("ssh-ed25519 AAAA test")  # well-formed shape but not a key: ssh-keygen says no
+        self.assertFalse(sw.pub_key_ok(self.env, self.key))
+        self.pub.unlink()
+        os.mkfifo(self.pub)
+        self.assertFalse(sw.pub_key_ok(self.env, self.key))  # must not block on a FIFO
+
+    def test_private_key_is_never_opened_and_ssh_keygen_never_sees_a_path(self):
+        opened, argvs = [], []
+        real_os_open = os.open
+
+        def spy(path, *a, **k):
+            opened.append(os.fspath(path))
+            return real_os_open(path, *a, **k)
+        real_run = self.env.run
+
+        def run_spy(argv, **k):
+            argvs.append(list(argv))
+            return real_run(argv, **k)
+        self.env.run = run_spy
+        os.open = spy
+        try:
+            self.assertTrue(sw.pub_key_ok(self.env, self.key))
+        finally:
+            os.open = real_os_open
+        self.assertNotIn(str(self.key), opened)
+        self.assertEqual(argvs, [["ssh-keygen", "-l", "-f", "-"]])
+
+    def test_ssh_keys_step_with_private_copy_as_pub_is_not_pass(self):
+        self.pub.write_bytes(self.key.read_bytes())
+        steps = by_id(sw.build_plan(sw.Env(home=self.env.home, projects=self.env.home / "projects",
+                                           runner=lambda argv, **k: (1, ""), which=lambda _: None, environ=self.env.environ), "generic"))
+        self.assertNotEqual(steps["ssh-keys"].status, sw.PASS)
+
+
+class HomeBoundaryTest(unittest.TestCase):
+    """Round 2, finding 3: HOME is a whole path component, never a prefix that swallows '/Users/Nat Space'."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cfg = Path(self.tmp.name) / "c.toml"
+
+    def scan(self, home, text):
+        env = make_env(self.tmp.name, Fake(), home_name=f"x{len(list(Path(self.tmp.name).iterdir()))}")
+        env.home = Path(home)
+        self.cfg.write_text(text)
+        return sw.foreign_homes(env, self.cfg)
+
+    def test_reviewer_repro_quoted_command_with_space(self):
+        text = "[mcp_servers.orchd]\ncommand='/Users/Nat Space/projects/orchd/bin/orchd'\n"
+        self.assertEqual(self.scan("/Users/Nat", text), ["/Users/Nat Space"])
+        self.assertEqual(self.scan("/Users/Nat Space", text), [])
+
+    def test_prefix_overlap_and_linux_homes_with_spaces(self):
+        self.assertEqual(self.scan("/Users/Nat", '"/Users/Natalie/x" = 1\n'), ["/Users/Natalie"])
+        self.assertEqual(self.scan("/Users/Nat", '"/Users/Nat/x" = 1\nk = "/Users/Nat"\n'), [])
+        self.assertEqual(self.scan("/home/a b", 'a = ["/home/a b/x", "/home/a bc/y", "/home/a"]\n'), ["/home/a", "/home/a bc"])
+        self.assertEqual(self.scan("/home/a", 'p = "/home/a b/x"\n'), ["/home/a b"])
+
+    def test_unparseable_toml_is_unknown_not_pass(self):
+        self.assertIsNone(self.scan("/Users/Nat", "this is = = not toml '/Users/old/x'\n"))
+
+
+class CodexStatusShapeTest(unittest.TestCase):
+    """Round 2, finding 4: only the affirmative shapes codex prints count as logged in."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def status(self, rc, text, name):
+        class F(Fake):
+            def __call__(self, argv, **k):
+                if argv[:3] == ["codex", "login", "status"]:
+                    return rc, text
+                return super().__call__(argv, **k)
+        env = make_env(self.tmp.name, F(tools={"codex"}), home_name=name)
+        return by_id(sw.build_plan(env, "generic"))["login-codex"].status
+
+    def test_affirmative_shapes_pass(self):
+        self.assertEqual(self.status(0, "Logged in using ChatGPT\n", "a"), sw.PASS)
+        self.assertEqual(self.status(0, "Logged in using an API key - sk-proj-***ABCD\n", "b"), sw.PASS)
+
+    def test_anything_else_with_rc0_is_unknown(self):
+        for i, text in enumerate(("Unable to determine whether you are logged in", "Error checking login status: logged in?",
+                                  "You are not logged in", "warning: x\nLogged in using ChatGPT", "logged in", "",
+                                  "Logged in using a token from somewhere", "Not logged in")):
+            self.assertEqual(self.status(0, text, f"u{i}"), sw.UNKNOWN, text)
+        self.assertEqual(self.status(1, "Logged in using ChatGPT", "rc1"), sw.UNKNOWN)
 
 if __name__ == "__main__":
     unittest.main()

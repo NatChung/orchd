@@ -19,7 +19,7 @@ Statuses: `pass`, `missing`, `unknown` (could not verify; never counted as pass)
 
 Commands it runs are a fixed read-only allowlist (exact argv, enforced in code and pinned by a test): `--version`
 and `claude --help`, `claude auth status`, `codex login status`, `gh auth status`, `git config --global --get
-user.name|user.email`, and `ssh-keygen -l -f <key>.pub`. Anything else is refused. `--strict` also applies to
+user.name|user.email`, and `ssh-keygen -l -f -` (public-key text on stdin, never a path). Anything else is refused. `--strict` also applies to
 `--interactive` (quitting early with open steps exits 1).
 
 Each open step shows who runs it (Nat, at the target machine's own terminal), the exact command, the source it was
@@ -44,9 +44,23 @@ nat-email / nat-slack / nat-line connector directories, and codegraph / rtk / gc
   `loggedIn: true`; `codex login status` saying logged in). A non-zero `gh` exit (e.g. one invalid token) is `unknown`.
   Credential files and `apiKey`-style config values are never read as proof or shown; of `~/.claude.json` and
   `~/.codex/config.toml` only trust flags and `mcp_servers.orchd` presence are kept.
-- SSH keys: private key files are never opened; a key counts only if its `.pub` passes `ssh-keygen -l`. Whether the
-  private half matches it is not checked.
-- Login state falls back to `unknown` when `claude auth status` / `codex login status` fail or are unsupported.
+- SSH keys: private key files are never opened. The `.pub` is opened without following symlinks and must be a
+  regular, single-link file of at most 16 KiB holding exactly one public-key line; a symlink (even to a real public
+  key), a hard link, a FIFO or a copy of private key material is refused before anything runs. Only then is its text
+  fed to `ssh-keygen -l -f -`. Whether the private half matches it, and whether GitHub accepts it, are not checked.
+- Login state falls back to `unknown` when `claude auth status` / `codex login status` fail or are unsupported. Codex
+  passes only when its first line is `Logged in using ChatGPT` or `Logged in using an API key`; any other wording,
+  even with exit 0 (e.g. `Unable to determine whether you are logged in`), is `unknown`.
+- `--home` pointing anywhere but the HOME of the user running the wizard: gh, Claude and Codex keep logins in that
+  user's keyring, so their login steps are `unknown` and are not run. `git config --global` is run with
+  `HOME=<--home>` so it reads the target; other commands keep the caller's environment and never write into `--home`.
+- Environment overrides make the matching provider `unknown` (names reported, values never shown): git
+  `GIT_CONFIG*`, `XDG_CONFIG_HOME`; gh `GH_CONFIG_DIR`, `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GH_HOST`;
+  Claude `CLAUDE_CONFIG_DIR`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`; Codex
+  `CODEX_HOME`, `OPENAI_API_KEY`. `CLAUDE_CONFIG_DIR` / `CODEX_HOME` also make the trust and MCP file checks `unknown`.
+- Orch `.codex/config.toml` is parsed as TOML; a home dir ends at the next `/` or the end of the string, so
+  `/Users/Nat Space` is foreign to HOME `/Users/Nat`. Unparseable TOML is `unknown`. A shell-like string such as
+  `cd /Users/x && y` is flagged whole (errs to `missing`, never to `pass`).
 - `orchd doctor` (PR #22) is not run or parsed. If absent from the checkout the step says so; it is never a pass.
 
 Logins use each CLI's own browser flow; nobody pastes a token. Generate new SSH keys on the mini and register the

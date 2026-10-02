@@ -15,6 +15,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tomllib
@@ -38,7 +39,26 @@ READ_ONLY_ARGV = {
     ("python3", "-c", PY_VERSION_CHECK), ("claude", "--help"),
     ("claude", "auth", "status"), ("codex", "login", "status"), ("gh", "auth", "status"),
     ("git", "config", "--global", "--get", "user.name"), ("git", "config", "--global", "--get", "user.email"),
+    ("ssh-keygen", "-l", "-f", "-"),  # fingerprint of already-validated public key text on stdin; never a path
 }
+# Environment variables that make a provider read state from somewhere other than the target HOME. When one is set,
+# that provider's verdict would describe the override, not the target, so it is `unknown`. Only names are reported.
+PROVIDER_OVERRIDES = {
+    "git": ("GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_PARAMETERS", "XDG_CONFIG_HOME"),
+    "gh": ("GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "GH_HOST",
+           "XDG_CONFIG_HOME"),
+    "claude": ("CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+               "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"),
+    "codex": ("CODEX_HOME", "OPENAI_API_KEY", "CODEX_API_KEY"),
+}
+# Providers whose login lives in the OS keyring of the user running the wizard, not under HOME: with --home pointing
+# elsewhere their answer is about the wrong user.
+KEYRING_PROVIDERS = ("gh", "claude", "codex")
+PUB_KEY_LINE = re.compile(r"(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521)|sk-ssh-ed25519@openssh\.com"
+                          r"|sk-ecdsa-sha2-nistp256@openssh\.com) [A-Za-z0-9+/]+={0,3}(?: [^\x00\r\n]*)?\n?")
+PUB_KEY_MAX = 16384
+CODEX_LOGGED_IN = re.compile(r"Logged in using (?:ChatGPT|an API key)\b")
 MIN_NOTE = "orchd needs `claude --bg` and the hidden `--messaging-socket-path` flag (Claude Code 2.1.284 was tested)"
 
 
@@ -52,24 +72,45 @@ class Env:
 
     def allowed(self, argv):
         """Fixed read-only argv allowlist. Anything else (logins, config writes, key reads) is refused."""
-        a = tuple(argv)
-        if a in READ_ONLY_ARGV:
-            return True
-        if len(a) == 4 and a[:3] == ("ssh-keygen", "-l", "-f"):
-            pub = Path(a[3])  # fingerprint of a PUBLIC key file only; the private key is never opened
-            return pub.suffix == ".pub" and pub.parent == self.home / ".ssh"
-        return False
+        return tuple(argv) in READ_ONLY_ARGV
 
-    def run(self, argv, timeout=20):
+    def run(self, argv, timeout=20, input=None):
+        """`git config --global` runs with the TARGET HOME so it reads the machine being checked. Other tools keep the
+        caller's environment: gh and codex create state dirs under HOME on startup, and their logins are not judged
+        under --home anyway (see blocker)."""
         if not self.allowed(argv):
             raise ValueError(f"refusing non-allowlisted command: {argv!r}")
         if self.runner:
-            return self.runner(argv)
+            return self.runner(argv) if input is None else self.runner(argv, input=input)
+        child = dict(self.environ, HOME=str(self.home)) if argv[0] == "git" else dict(self.environ)
         try:
-            p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+            p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=child,
+                               **({"input": input} if input is not None else {"stdin": subprocess.DEVNULL}))
             return p.returncode, p.stdout + p.stderr
         except (OSError, subprocess.SubprocessError):
             return 127, ""
+
+    def home_is_process_home(self):
+        cur = self.environ.get("HOME")
+        try:
+            return bool(cur) and Path(cur).resolve() == self.home.resolve()
+        except OSError:
+            return False
+
+    def overrides(self, provider):
+        names = PROVIDER_OVERRIDES[provider]
+        return sorted(k for k in self.environ if k in names or (provider == "git" and re.fullmatch(r"GIT_CONFIG_(KEY|VALUE)_\d+", k)))
+
+    def blocker(self, provider, live=True):
+        """Why this provider's state cannot be attributed to the target HOME, or None. Names only, never values."""
+        why = []
+        if live and provider in KEYRING_PROVIDERS and not self.home_is_process_home():
+            why.append(f"--home {self.home} is not the HOME of the user running the wizard; its {provider} login is in that "
+                       "user's keyring, so it was not checked")
+        found = self.overrides(provider)
+        if found:
+            why.append(f"{', '.join(found)} set in the environment overrides where {provider} reads its state")
+        return "; ".join(why) or None
 
     @property
     def orch_home(self):
@@ -119,6 +160,8 @@ def read_toml(path):
 
 
 def claude_trusted(env, path):
+    if "CLAUDE_CONFIG_DIR" in env.environ:
+        return UNKNOWN, "CLAUDE_CONFIG_DIR is set, so Claude does not read ~/.claude.json; trust not checked"
     # ~/.claude.json can also hold an apiKey. Keep only the one trust boolean; every other key is dropped at once
     # and never used for a verdict or shown.
     data = read_json(env.home / ".claude.json")
@@ -130,6 +173,8 @@ def claude_trusted(env, path):
 
 
 def codex_trusted(env, path):
+    if "CODEX_HOME" in env.environ:
+        return UNKNOWN, "CODEX_HOME is set, so Codex does not read ~/.codex/config.toml; trust not checked"
     data = read_toml(env.home / ".codex" / "config.toml")
     if data is None:
         return UNKNOWN, f"{env.home}/.codex/config.toml unreadable or missing"
@@ -155,6 +200,9 @@ def gh_state(env):
     non-zero exit means gh could not confirm every account, so callers must not report pass."""
     if not env.which("gh"):
         return None
+    why = env.blocker("gh")
+    if why:
+        return "blocked", why
     rc, out = env.run(["gh", "auth", "status"])
     ok = sorted(set(re.findall(r"Logged in to \S+ account (\S+)", out)))
     bad = sorted(set(re.findall(r"Failed to log in to \S+ account (\S+)", out)))
@@ -163,19 +211,49 @@ def gh_state(env):
 
 def gh_login_ok(state, acct=None):
     """True only when gh exits 0 (every stored token verified) and the account is listed as logged in."""
-    if state is None or state[0] != 0:
+    if state is None or state[0] != 0 or state[0] == "blocked":
         return False
     return bool(state[1]) if acct is None else acct in state[1]
 
 
+def read_public_key(env, pub):
+    """Text of `pub` only if it is safe to treat as public: a regular, non-symlinked file directly in HOME/.ssh with
+    exactly one public-key line. Anything else (a symlink, a FIFO, a copy of a private key) is None and is not read
+    beyond the size limit. The private key itself is never opened."""
+    if pub.parent != env.home / ".ssh" or pub.suffix != ".pub":
+        return None
+    try:
+        fd = os.open(pub, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > PUB_KEY_MAX or st.st_nlink != 1:
+            return None
+        raw = os.read(fd, PUB_KEY_MAX + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    try:
+        text = raw.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+    if "PRIVATE KEY" in text or not PUB_KEY_LINE.fullmatch(text):
+        return None
+    return text
+
+
 def pub_key_ok(env, key):
-    """The private key file must exist (stat only) and its .pub must parse as a public key. The private file is
-    never opened, so a file of garbage cannot pass by existing and a real key is never read."""
-    pub = Path(str(key) + ".pub")
-    if not key.is_file() or not pub.is_file():
+    """The private key file must exist (stat only) and its .pub must be public-key text that `ssh-keygen -l` accepts
+    from stdin. ssh-keygen never gets a path, so a .pub swapped for private material after the check is not read."""
+    if not key.is_file():
+        return False
+    text = read_public_key(env, Path(str(key) + ".pub"))
+    if text is None:
         return False
     try:
-        rc, _ = env.run(["ssh-keygen", "-l", "-f", str(pub)])
+        rc, _ = env.run(["ssh-keygen", "-l", "-f", "-"], input=text)
     except ValueError:
         return False
     return rc == 0
@@ -192,16 +270,52 @@ def ssh_hosts(env):
     return hosts
 
 
+def toml_strings(node):
+    """Every key and string value in a parsed TOML document. Each is one unit: its own quotes are its boundary."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            yield k
+            yield from toml_strings(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from toml_strings(v)
+    elif isinstance(node, str):
+        yield node
+
+
 def foreign_homes(env, path):
-    """Absolute /Users/<x> or /home/<x> paths in a config that do not belong to this machine's HOME."""
-    try:
-        text = Path(path).read_text()
-    except OSError:
+    """/Users/<x> or /home/<x> home dirs in a TOML config that are not this machine's HOME, or None if unparseable.
+    The home component runs to the next '/' or the end of the TOML string, so '/Users/Nat Space' is not '/Users/Nat'
+    plus text. A shell-like string ('cd /Users/x && y') is flagged whole: that errs to missing, never to pass."""
+    data = read_toml(path)
+    if data is None:
         return None
-    # Blank out this machine's own HOME first (it may contain spaces), then look for other users' home dirs.
-    text = re.sub(re.escape(str(env.home)) + r"(?=[/\"'\s]|$)", "<HOME>", text)
-    found = {m.strip() for m in re.findall(r"/(?:Users|home)/[^/\"'\n]+", text)}
+    home = str(env.home).rstrip("/")
+    found = set()
+    for unit in toml_strings(data):
+        for m in re.finditer(r"/(?:Users|home)/([^/]+)", unit):
+            own = unit.startswith(home, m.start()) and unit[m.start() + len(home):m.start() + len(home) + 1] in ("", "/")
+            if not own:
+                found.add(f"{unit[m.start():m.end(1)]}".strip())
+    del data
     return sorted(found)
+
+
+def git_identity(env):
+    who = "Nat, at the target machine's own terminal"
+    why = env.blocker("git", live=False)
+    if why:
+        st, d = UNKNOWN, f"not checked: {why}"
+    else:
+        ident = []
+        for key in ("user.name", "user.email"):
+            rc, out = env.run(["git", "config", "--global", "--get", key])
+            ident.append(bool(rc == 0 and out.strip()))
+        st, d = (PASS, "user.name and user.email set") if all(ident) else (MISSING, "global user.name or user.email missing")
+    return Step("git-identity", "generic", "git global author identity set", who, st, d,
+                f"`git config --global user.name/user.email` with HOME={env.home} (set or unset only)",
+                ["git config --global user.name '<your name>'", "git config --global user.email '<your email>'"],
+                "`git config --global user.email` prints your address. Per-repo emails are separate (see nat profile).")
 
 
 # -- generic steps ----------------------------------------------------------------------------------------------
@@ -231,7 +345,9 @@ def generic_steps(env):
     steps.append(tool_step(env, "gh", "generic", who, "GitHub CLI installed", ["brew install gh"], "`gh --version` prints a version"))
 
     # Logins: the web flow makes the provider show a one-time code / URL to Nat. No token is typed or pasted.
-    if env.which("claude"):
+    if env.which("claude") and env.blocker("claude"):
+        st, d = UNKNOWN, f"not checked: {env.blocker('claude')}"
+    elif env.which("claude"):
         rc, out = env.run(["claude", "auth", "status"])
         try:
             logged_in = json.loads(out).get("loggedIn") is True
@@ -243,11 +359,15 @@ def generic_steps(env):
         st, d = MISSING, "claude not installed"
     steps.append(Step("login-claude", "generic", "Claude Code logged in", who, st, d, "`claude auth status` exit code + loggedIn flag (output discarded)",
                       ["claude   # then /login and follow the browser flow"], "re-run this wizard: step shows pass"))
-    if env.which("codex"):
+    if env.which("codex") and env.blocker("codex"):
+        st, d = UNKNOWN, f"not checked: {env.blocker('codex')}"
+    elif env.which("codex"):
         rc, out = env.run(["codex", "login", "status"])
-        low = out.lower()
-        st, d = ((PASS, "`codex login status` exit 0 and says logged in") if rc == 0 and "logged in" in low and "not logged in" not in low
-                 else (UNKNOWN, "`codex login status` did not say logged in (failed or logged out); login state unverified"))
+        first = next((l.strip() for l in out.splitlines() if l.strip()), "")
+        st, d = ((PASS, "`codex login status` exit 0 and starts with `Logged in using ChatGPT|an API key`")
+                 if rc == 0 and CODEX_LOGGED_IN.match(first)
+                 else (UNKNOWN, "`codex login status` did not print a recognised logged-in line (failed, logged out, or "
+                                "unrecognised wording); login state unverified"))
     else:
         st, d = MISSING, "codex not installed"
     steps.append(Step("login-codex", "generic", "Codex logged in", who, st, d, "`codex login status` exit code + wording (output discarded)",
@@ -255,6 +375,8 @@ def generic_steps(env):
     gh = gh_state(env)
     if gh is None:
         st, d = MISSING, "gh not installed"
+    elif gh[0] == "blocked":
+        st, d = UNKNOWN, f"not checked: {gh[1]}"
     elif gh_login_ok(gh):
         st, d = PASS, f"gh exit 0, accounts logged in: {', '.join(gh[1])}"
     elif gh[0] == 1 and not gh[1] and not gh[2]:
@@ -267,16 +389,7 @@ def generic_steps(env):
                       ["gh auth login --web   # run directly in a terminal; not via the `!` prefix, it needs the interactive device code"],
                       "`gh auth status` lists the account"))
 
-    # Git author identity
-    ident = []
-    for key in ("user.name", "user.email"):
-        rc, out = env.run(["git", "config", "--global", "--get", key])
-        ident.append(bool(rc == 0 and out.strip()))
-    steps.append(Step("git-identity", "generic", "git global author identity set", who, PASS if all(ident) else MISSING,
-                      "user.name and user.email set" if all(ident) else "global user.name or user.email missing",
-                      "`git config --global user.name/user.email` (set or unset only)",
-                      ["git config --global user.name '<your name>'", "git config --global user.email '<your email>'"],
-                      "`git config --global user.email` prints your address. Per-repo emails are separate (see nat profile)."))
+    steps.append(git_identity(env))
 
     # SSH
     ssh_dir = env.home / ".ssh"
@@ -285,8 +398,10 @@ def generic_steps(env):
     st = PASS if good else UNKNOWN if names else MISSING
     steps.append(Step("ssh-keys", "generic", "an SSH key exists for GitHub push", who, st,
                       f"key files: {', '.join(names) or 'none'}; public key valid for: {', '.join(good) or 'none'} "
-                      "(private key contents are never read; validity comes from `ssh-keygen -l` on the .pub file)",
-                      f"{ssh_dir} directory listing + `ssh-keygen -l -f <key>.pub`",
+                      "(private key contents are never read; a .pub that is a symlink or holds anything but one public-key "
+                      "line is refused before `ssh-keygen -l`)",
+                      f"{ssh_dir} directory listing + public-key format check of <key>.pub (regular file, no symlink) + "
+                      "`ssh-keygen -l -f -` on that text",
                       [f"ssh-keygen -t ed25519 -f {q(ssh_dir / 'id_ed25519')}   # generate a NEW key on this machine; never copy private keys from the old one",
                        f"cat {q(ssh_dir / 'id_ed25519.pub')}   # add this PUBLIC key at https://github.com/settings/keys"],
                       "`ssh -T git@github.com` replies `Hi <account>!` (Nat runs it; this wizard does no network call)"))
@@ -312,20 +427,21 @@ def generic_steps(env):
     cfg = home / ".codex" / "config.toml"
     foreign = foreign_homes(env, cfg)
     if foreign is None:
-        st, d = UNKNOWN, f"{cfg} not readable"
+        st, d = UNKNOWN, f"{cfg} not readable or not valid TOML"
     elif foreign:
         st, d = MISSING, f"{cfg} hardcodes another machine's paths: {', '.join(foreign)}"
     else:
         st, d = PASS, f"no foreign home paths in {cfg}"
     steps.append(Step("orch-config-paths", "generic", "Orch .codex/config.toml paths match this HOME", who, st, d,
-                      "text scan of the file for /Users/<x> or /home/<x>",
+                      "TOML keys and strings scanned for /Users/<x> or /home/<x>",
                       [f"# edit {q(cfg)} so every /Users/<old> becomes {q(env.home)} (it is a tracked file in the orch repo: commit on a branch, do not edit blindly)"],
                       "re-run this wizard: step shows pass"))
-    mcp = read_toml(env.home / ".codex" / "config.toml")
+    mcp = None if "CODEX_HOME" in env.environ else read_toml(env.home / ".codex" / "config.toml")
     srv = bool(((mcp or {}).get("mcp_servers") or {}).get("orchd")) if mcp else None  # presence only; env/args dropped
     present = mcp is not None
     del mcp
     st, d = ((PASS, "[mcp_servers.orchd] present in ~/.codex/config.toml") if srv
+             else (UNKNOWN, "CODEX_HOME is set, so Codex does not read ~/.codex/config.toml; not checked") if "CODEX_HOME" in env.environ
              else (UNKNOWN, "~/.codex/config.toml unreadable") if not present
              else (MISSING, "no [mcp_servers.orchd] in ~/.codex/config.toml (needed for the Codex/Astra Orch; the Claude Orch gets its MCP config from `orchd orch`)"))
     steps.append(Step("mcp-orchd-codex", "generic", "orchd MCP registered in Codex", who, st, d, "~/.codex/config.toml mcp_servers.orchd",
@@ -374,7 +490,10 @@ def nat_steps(env):
     for acct, (alias, keyfile) in NAT_ACCOUNTS.items():
         key = env.home / ".ssh" / keyfile
         parts, st = [], PASS
-        if gh is None or acct not in gh[1] + gh[2]:
+        if gh is not None and gh[0] == "blocked":
+            parts.append(f"gh login for {acct} not checked: {gh[1]}")
+            st = UNKNOWN
+        elif gh is None or acct not in gh[1] + gh[2]:
             parts.append(f"gh account {acct} not logged in")
             st = MISSING
         elif acct in gh[2]:
@@ -387,7 +506,7 @@ def nat_steps(env):
             parts.append(f"{key} missing")
             st = MISSING
         elif not pub_key_ok(env, key):
-            parts.append(f"{key}.pub missing or not a valid public key (private file not read)")
+            parts.append(f"{key}.pub missing, a symlink, or not a valid public key (private file not read)")
             st = UNKNOWN if st == PASS else st
         if alias:
             if hosts is None:
@@ -403,7 +522,7 @@ def nat_steps(env):
         cmds.append(f"# register {q(str(key) + '.pub')} on GitHub while logged in as {acct} (Nat, in the browser)")
         out.append(Step(f"gh-{acct}", "nat", f"GitHub account {acct}: gh login + SSH key + alias", who, st,
                         "; ".join(parts) or "gh login verified, key pair and alias present (GitHub accepting the key is UNKNOWN: no network check run)",
-                        "`gh auth status` account names, ~/.ssh file existence + `ssh-keygen -l` on .pub, ~/.ssh/config Host lines", cmds,
+                        "`gh auth status` account names, ~/.ssh file existence + public-key check of .pub, ~/.ssh/config Host lines", cmds,
                         f"`ssh -T {alias or 'git@github.com'}` replies `Hi {acct}!`"))
     out.append(Step("git-identity-per-repo", "nat", "per-repo git author email (KC repos use the KC address)", who, UNKNOWN,
                     "repo-local user.email depends on which repo belongs to which identity; not derivable by the wizard", "n/a",
