@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -136,6 +137,7 @@ class VerifyTest(unittest.TestCase):
         self.assertEqual((result["exit"], result["hash_ok"], result["dirty"]), (0, True, False))
         self.assertEqual((result["sha"], result["head_after"], result["verifier"]), (lock["sha"], lock["sha"], "V"))
         self.assertTrue(result["restored"])
+        self.assertIs(result["cleanup"], True)
         self.assertEqual(self.branch(self.wv), "orchd/V")
         self.assertEqual((git(self.wa, "rev-parse", "HEAD"), git(self.wa, "status", "--porcelain")), (a_head, ""))
         st = verify.status(self.con, "A")
@@ -206,6 +208,113 @@ class VerifyTest(unittest.TestCase):
         result = verify.run(self.con, "V", timeout=0.3)
         self.assertEqual((result["exit"], result["passed"]), (None, False))
         self.assertIn("timed out", result["tail"])
+
+    # --- the command's processes: cleaned up before dirty/head/restore -----------------------------------
+
+    def late_writer(self, then, delay=1):
+        """A background child that outlives the shell and writes late.txt into the verifier tree `delay` s later.
+
+        The shell waits until the child has written its pid, so the child is really running when the shell
+        moves on; its output goes to /dev/null, so nothing holds orchd's capture open."""
+        pidfile = self.tmp / "writer.pid"
+        command = (f"sh -c 'echo $$ > {pidfile}; sleep {delay}; echo leaked > late.txt' >/dev/null 2>&1 & "
+                   f"while [ ! -s {pidfile} ]; do sleep 0.01; done; {then}")
+        return command, pidfile
+
+    def assert_writer_gone_and_nothing_landed(self, pidfile, delay=1):
+        pid = int(pidfile.read_text())
+        deadline = time.monotonic() + delay + 2  # well past the writer's delay
+        while time.monotonic() < deadline:
+            self.assertFalse((self.wv / "late.txt").exists(), "a child wrote into the tree after verify returned")
+            time.sleep(0.05)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+        self.assertEqual(git(self.wv, "status", "--porcelain", "--untracked-files=all"), "")
+        self.assertEqual(self.branch(self.wv), "orchd/V")
+
+    def test_timeout_kills_background_children_before_the_restore(self):
+        command, pidfile = self.late_writer("sleep 30")
+        self.lock(command=command)
+        started = time.monotonic()
+        result = verify.run(self.con, "V", timeout=0.3)
+        self.assertLess(time.monotonic() - started, 5)
+        self.assert_writer_gone_and_nothing_landed(pidfile)
+        self.assertEqual((result["exit"], result["passed"], result["cleanup"], result["dirty"], result["restored"]),
+                         (None, False, True, False, True))
+
+    def test_background_writer_of_a_passing_command_is_killed_before_the_tree_is_judged(self):
+        command, pidfile = self.late_writer("exit 0")
+        lock = self.lock(command=command)
+        result = verify.run(self.con, "V")
+        self.assert_writer_gone_and_nothing_landed(pidfile)
+        self.assertEqual((result["exit"], result["cleanup"], result["dirty"], result["restored"]), (0, True, False, True))
+        self.assertTrue(result["passed"])  # the write never lands, so the pass describes the tree that stays
+        self.assertEqual(verify.status(self.con, "A")["state"], "pass")
+        self.assertEqual(verify.status(self.con, "A")["lock_sha"], lock["sha"])
+
+    def test_cli_timeout_leaves_no_late_write_in_the_verifier_tree(self):
+        command, pidfile = self.late_writer("sleep 30", delay=2)  # the review's repro: writes 2 s in, timeout 1 s
+        self.lock(command=command)
+        env = dict(os.environ, ORCHD_HOME=str(self.home))
+        done = subprocess.run([sys.executable, str(CLI), "verify", "V", "--timeout", "1"],
+                              capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assert_writer_gone_and_nothing_landed(pidfile, delay=2)
+        self.assertEqual(json.loads(done.stdout)["cleanup"], True)
+
+    def test_unconfirmed_cleanup_is_a_fail_and_the_tree_stays_at_the_locked_sha(self):
+        # No test process can be made unkillable, so pretend the group never empties.
+        lock = self.lock(command="true")
+        with mock.patch.object(verify.os, "killpg", lambda pgid, sig: None), \
+                mock.patch.object(verify, "CLEANUP_WAIT", 0.2):
+            result = verify.run(self.con, "V")
+        self.assertEqual((result["exit"], result["cleanup"], result["passed"], result["restored"]), (0, False, False, False))
+        self.assertIsNone(result["dirty"])  # not judged while a process might still write
+        self.assertIn("not confirmed", result["restore_error"])
+        self.assertEqual(git(self.wv, "rev-parse", "HEAD"), lock["sha"])
+        self.assertEqual(verify.status(self.con, "A")["state"], "fail")
+
+    def test_an_exception_after_the_checkout_restores_a_clean_tree_and_is_recorded(self):
+        self.lock()
+        real, calls = verify._dirty, []
+
+        def dirty(cwd):
+            calls.append(cwd)
+            if len(calls) == 2:  # 1: the pre-check; 2: judging the tree after the command
+                raise subprocess.CalledProcessError(128, ["git", "status"])
+            return real(cwd)
+        with mock.patch.object(verify, "_dirty", dirty), self.assertRaises(subprocess.CalledProcessError):
+            verify.run(self.con, "V")
+        self.assertEqual(self.branch(self.wv), "orchd/V")
+        row = json.loads(self.con.execute("SELECT evidence FROM messages WHERE kind=?", (verify.RESULT,)).fetchone()[0])
+        self.assertIn("CalledProcessError", row["error"])
+        self.assertEqual((row["passed"], row["restored"]), (False, True))
+        self.assertEqual(verify.status(self.con, "A")["state"], "fail")
+
+    def test_an_exception_with_a_dirty_tree_keeps_the_files_and_does_not_restore(self):
+        lock = self.lock(command="echo mine > output.txt")
+        real, calls = verify._dirty, []
+
+        def dirty(cwd):
+            calls.append(cwd)
+            if len(calls) == 2:
+                raise RuntimeError("status broke")
+            return real(cwd)
+        with mock.patch.object(verify, "_dirty", dirty), self.assertRaisesRegex(RuntimeError, "status broke"):
+            verify.run(self.con, "V")
+        self.assertEqual((self.wv / "output.txt").read_text(), "mine\n")
+        self.assertEqual(git(self.wv, "rev-parse", "HEAD"), lock["sha"])  # no forced checkout
+        row = json.loads(self.con.execute("SELECT evidence FROM messages WHERE kind=?", (verify.RESULT,)).fetchone()[0])
+        self.assertEqual((row["passed"], row["restored"]), (False, False))
+
+    def test_a_failed_restore_is_recorded_and_returned(self):
+        # git refuses to switch while the worktree's index is locked; status still works.
+        self.lock(command='touch "$(git rev-parse --git-path index.lock)"')
+        result = verify.run(self.con, "V")
+        self.assertEqual((result["cleanup"], result["dirty"], result["restored"]), (True, False, False))
+        self.assertIn("index.lock", result["restore_error"])
+        row = json.loads(self.con.execute("SELECT evidence FROM messages WHERE kind=?", (verify.RESULT,)).fetchone()[0])
+        self.assertEqual((row["restored"], row["restore_error"]), (False, result["restore_error"]))
 
     def test_new_author_commit_makes_a_pass_stale_until_relocked_and_rerun(self):
         self.lock()

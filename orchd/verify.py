@@ -9,15 +9,22 @@ The task counts as verified only while the author's branch tip still equals the 
 Records are plain `messages` rows (kind verify_lock / verification), like answer_queued; no schema change.
 Trust: every worker runs as the same local user and can write this DB, so the record is tamper-evident,
 not tamperproof. The Orch cross-checks it against the verifier's own report.
+
+The locked command runs as its own process group; whatever is left of that group is killed and confirmed gone
+before the tree is judged or restored. A child that leaves the group (setsid, setpgid, a daemon) is not caught.
 """
 import json
 import os
+import signal
 import subprocess
+import tempfile
+import time
 
 from . import store
 
 LOCK, RESULT = "verify_lock", "verification"
 TAIL = 4000
+CLEANUP_WAIT = 5.0  # seconds to see the command's process group empty after SIGKILL
 SYMLINK, GITLINK = "120000", "160000"
 
 
@@ -130,36 +137,102 @@ def run(con, verifier_id, timeout=None):
                           capture_output=True, text=True).stdout.strip() or _head(worktree)
     sha = locked["sha"]
     _git(worktree, "checkout", "-q", "--detach", sha)
-    head = _head(worktree)
-    entries = _entries(worktree, head)
-    try:
-        hash_ok = head == sha and check_paths(list(locked["paths"]), entries) == locked["paths"]
-    except ValueError:
-        hash_ok = False
-    try:
-        done = subprocess.run(locked["command"], shell=True, cwd=worktree, stdout=subprocess.PIPE,
-                              stderr=subprocess.STDOUT, text=True, errors="replace", timeout=timeout)
-        code, output = done.returncode, done.stdout
-    except subprocess.TimeoutExpired as expired:
-        out = expired.stdout or ""
-        code, output = None, (out.decode(errors="replace") if isinstance(out, bytes) else out) + "\n[orchd] timed out"
-    dirty = bool(_dirty(worktree))
-    head_after = _head(worktree)
-    restored = False
-    if not dirty:  # leave a dirty tree where it is, so nothing the command wrote is thrown away
-        restored = subprocess.run(["git", "checkout", "-q", back], cwd=worktree, capture_output=True).returncode == 0
     record = dict(verifier=verifier_id, verifier_session=v["session_id"], author=author_id, lock_id=locked["id"],
-                  sha=head, command=locked["command"], exit=code, tail=output[-TAIL:], hash_ok=hash_ok,
-                  dirty=dirty, head_after=head_after)
-    record["passed"] = _passed(record, locked)
-    store.add_message(con, author_id, RESULT,
-                      f"{'pass' if record['passed'] else 'fail'} by {verifier_id} at {head[:12]} (exit {code})",
-                      json.dumps(record))
-    return dict(record, restored=restored)
+                  sha=None, command=locked["command"], exit=None, tail="", hash_ok=False, dirty=None,
+                  head_after=None, cleanup=None, restored=False, restore_error=None)
+    restorable = True  # until a command starts whose processes are not confirmed gone
+    try:
+        head = record["sha"] = _head(worktree)
+        try:
+            record["hash_ok"] = head == sha and check_paths(list(locked["paths"]), _entries(worktree, head)) == locked["paths"]
+        except ValueError:
+            pass
+        restorable = False
+        code, output, cleanup = _execute(locked["command"], worktree, timeout)
+        record.update(exit=code, tail=output[-TAIL:], cleanup=cleanup)
+        restorable = cleanup
+        if cleanup:  # nothing of the command is left to write, so the tree can be judged
+            record["dirty"] = bool(_dirty(worktree))
+            record["head_after"] = _head(worktree)
+    except BaseException as error:
+        record["error"] = f"{type(error).__name__}: {error}"
+        raise
+    finally:
+        if restorable:
+            record["restored"], record["restore_error"] = _restore(worktree, back)
+        else:
+            record["restore_error"] = "not attempted: cleanup of the command's processes not confirmed"
+        record["passed"] = _passed(record, locked)
+        store.add_message(con, author_id, RESULT,
+                          f"{'pass' if record['passed'] else 'fail'} by {verifier_id} at "
+                          f"{(record['sha'] or '?')[:12]} (exit {record['exit']})", json.dumps(record))
+    return record
+
+
+def _execute(command, cwd, timeout):
+    """Run command in a new session, then kill what is left of its process group. Returns (exit, output, cleanup).
+
+    The group id is the shell's pid, reserved until orchd reaps the shell, so SIGKILL is sent only before that
+    reap and can't reach an unrelated process; afterwards the group is only probed with signal 0. cleanup is True
+    once the group is empty. Output goes to a file: a background child holding a pipe would stall the read."""
+    with tempfile.TemporaryFile() as out:
+        proc = subprocess.Popen(command, shell=True, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+        exited = False
+        try:
+            exited = _wait_unreaped(proc.pid, timeout)
+        finally:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass  # only the unreaped shell is left; _group_gone decides
+            proc.wait()
+        cleanup = _group_gone(proc.pid)
+        out.seek(0)
+        output = out.read().decode(errors="replace")
+    if not exited:
+        return None, output + "\n[orchd] timed out", cleanup
+    return proc.returncode, output, cleanup
+
+
+def _wait_unreaped(pid, timeout):
+    """Wait for the shell to exit without reaping it (WNOWAIT keeps its pid, the group id, reserved)."""
+    deadline = None if timeout is None else time.monotonic() + timeout
+    while not os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG):
+        if deadline is not None and time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+    return True
+
+
+def _group_gone(pgid):
+    deadline = time.monotonic() + CLEANUP_WAIT
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            pass  # a killed child not yet reaped by init, or a process orchd can't signal: not gone either way
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.02)
+
+
+def _restore(worktree, back):
+    """Switch back without -f, so git refuses rather than overwrite. A dirty tree stays where it is."""
+    try:
+        if _dirty(worktree):
+            return False, None
+    except (subprocess.CalledProcessError, OSError) as error:
+        return False, f"could not check the tree, left as is: {error}"
+    got = subprocess.run(["git", "checkout", "-q", back], cwd=worktree, capture_output=True, text=True)
+    return (True, None) if got.returncode == 0 else (False, got.stderr.strip() or f"git checkout exit {got.returncode}")
 
 
 def _passed(r, locked):
-    return (r["exit"] == 0 and r["hash_ok"] is True and not r["dirty"] and r["sha"] == locked["sha"]
+    return (r["exit"] == 0 and r["hash_ok"] is True and r.get("cleanup") is True and r["dirty"] is False
+            and not r.get("error") and r["sha"] == locked["sha"]
             and r["head_after"] == locked["sha"] and r["lock_id"] == locked["id"] and r["verifier"] != r["author"])
 
 
