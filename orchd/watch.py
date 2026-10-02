@@ -11,8 +11,15 @@ ICONS = {"dispatch": "▶", "ack": "✓", "progress": "…", "question": "?", "a
          "close": "✔", "usage": "Σ"}
 
 QUERY = """SELECT m.id, m.task_id, m.kind, m.body, m.evidence, m.created_at,
-                  t.repo, t.title, t.model, t.model_reason, t.orch_thread, o.kind AS orch_kind, o.model AS orch_model
-           FROM messages m JOIN tasks t ON t.id = m.task_id LEFT JOIN orchs o ON o.id = t.orch_thread
+                  t.repo, t.title, t.model, t.model_reason,
+                  COALESCE(m.recipient_orch,
+                    CASE WHEN m.kind='adopt_notice' AND json_valid(m.evidence)
+                         THEN json_extract(m.evidence, '$.old_orch') END,
+                    t.orch_thread) AS orch_thread, o.kind AS orch_kind, o.model AS orch_model
+           FROM messages m JOIN tasks t ON t.id = m.task_id LEFT JOIN orchs o ON o.id =
+                COALESCE(m.recipient_orch,
+                    CASE WHEN m.kind='adopt_notice' AND json_valid(m.evidence)
+                         THEN json_extract(m.evidence, '$.old_orch') END, t.orch_thread)
            WHERE m.id > ? ORDER BY m.id"""
 
 

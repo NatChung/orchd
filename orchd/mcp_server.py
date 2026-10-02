@@ -35,10 +35,13 @@ TOOLS = [
          "found_by": {"type": "string", "enum": list(core.FOUND_BY),
                       "description": "Who found the problem; only with rework_of"}}}},
     {"name": "inbox",
-     "description": "Read unread acks, reports and questions for tasks you dispatched. Call it when an [orchd] message arrives.",
+     "description": "Read unread acks, progress, reports and questions for tasks you dispatched; each message carries the task's "
+                    "stored full model id in `model` (\"unknown\" for tasks dispatched before models were stored). "
+                    "Call it when an [orchd] message arrives.",
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "list_open",
      "description": "List every task that is not closed, across all Orch sessions, with worker liveness. "
+                    "model is the task's stored full model id (\"unknown\" if none was stored). "
                     "worker_alive null: unknown, or a Codex worker between turns (it asked or reported and can "
                     "still be answered); false: its process ended without a report. "
                     "owner_health is independent: alive/dead from a successful Claude job probe, unknown "
