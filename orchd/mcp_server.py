@@ -89,7 +89,7 @@ TOOLS = [
                     "never changes (use retry for that) and no new task or owner is created. Refused for a closed or "
                     "unknown task. It uses the answer delivery path: a Claude worker is sent it at once under the task "
                     "lock; a Codex worker mid-turn queues it in the same FIFO as answers (status queued; flush with "
-                    "answer flush=true after its next progress/ask/report). Returns status delivered|queued|failed "
+                    "answer flush=true after its next progress/ask/report; if the task is in question status the worker has already asked and will not wake you again, so flush later yourself, or when list_open worker_alive turns null, same as for answer). Returns status delivered|queued|failed "
                     "with delivered and pending counts, and errors if it could not be sent (nothing is lost if "
                     "queued). The worker's earlier report and events are kept; it acks, may send progress, and ends "
                     "with a new report, which wakes you as usual.",

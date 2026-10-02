@@ -1,9 +1,15 @@
 """Issue #5 (followup): add an instruction to an open task; same worker, worktree, session; delivery rides on answer."""
+import contextlib
 import io
 import json
+import os
+import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from orchd import core, mcp_server, store
 from tests.test_orchd import FakeRuntime
@@ -95,7 +101,7 @@ class FollowupTest(unittest.TestCase):
         self.assertIn("socket gone", event["error"])
         self.assertEqual(self.rows(t["id"], "answer"), [])  # not claimed as delivered
 
-    def test_claude_busy_lock_queues_with_error(self):
+    def test_claude_busy_lock_is_not_accepted(self):
         t = self.dispatch()
         orig = store.task_delivery
 
@@ -103,13 +109,11 @@ class FollowupTest(unittest.TestCase):
             raise TimeoutError("lock")
         store.task_delivery = busy
         try:
-            out = core.followup(self.con, self.rt, t["id"], "later")
+            with self.assertRaises(TimeoutError):
+                core.followup(self.con, self.rt, t["id"], "later")
         finally:
             store.task_delivery = orig
-        self.assertEqual((out["status"], out["pending"]), ("queued", 1))
-        self.assertIn("busy", out["error"])
-        (event,) = self.events(t["id"])
-        self.assertEqual(event["status"], "queued")
+        self.assertEqual((self.events(t["id"]), store.pending_answers(self.con, t["id"]), self.rt.sent), ([], [], []))
 
     def test_busy_codex_queues_fifo_then_flushes_once_without_respawn(self):
         t = self.dispatch("sol")
@@ -151,6 +155,171 @@ class FollowupTest(unittest.TestCase):
         ok, missing = [json.loads(l)["result"] for l in out.getvalue().splitlines()]
         self.assertEqual(json.loads(ok["content"][0]["text"])["status"], "delivered")
         self.assertTrue(missing["isError"])
+
+
+REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+
+
+class FollowupAcceptanceTest(unittest.TestCase):
+    """PR #32 review 94c5cd97: the acceptance record is written under the task lock, before transport, and the
+    receipt never claims less (or more) than what happened."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Path(self.tmp.name) / "t.db"
+        self.con = store.connect(self.db)
+        self.rt = FakeRuntime()
+        self.rt.sleep = lambda s: None
+
+    def tearDown(self):
+        self.con.close()
+        self.tmp.cleanup()
+
+    def done_task(self, model="sonnet"):
+        t = core.dispatch(self.con, self.rt, orch_thread="thread-A", repo="demo", title="T", instructions="do it",
+                          done_when="pass", model=model, model_reason="r", task_type="code")
+        self.rt.sent.clear()
+        core.report(self.con, self.rt, t["id"], "done", "prior result", "prior evidence")
+        return store.get_task(self.con, t["id"])
+
+    def events(self, t):
+        return [json.loads(r[0]) for r in self.con.execute(
+            "SELECT body FROM messages WHERE task_id=? AND kind='followup' ORDER BY id", (t["id"],))]
+
+    @contextlib.contextmanager
+    def holder(self, t):
+        """Another process holding the task's real flock; `close` stage completes a close while it holds it."""
+        code = (
+            "import sys\n"
+            "from orchd import core,store\n"
+            "from tests.test_orchd import FakeRuntime\n"
+            "c=store.connect(sys.argv[1])\n"
+            "with store.task_delivery(c,[sys.argv[2]]):\n"
+            " print('locked',flush=True)\n"
+            " while True:\n"
+            "  action=sys.stdin.readline().strip()\n"
+            "  if action=='close': core._close_locked(c,FakeRuntime(),sys.argv[2],None,None)\n"
+            "  print('ready',flush=True)\n"
+            "  if action in ('','release'): break\n"
+            "c.close()\n")
+        p = subprocess.Popen([sys.executable, "-c", code, str(self.db), t["id"]], cwd=REPO_ROOT,
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(p.stdout.readline().strip(), "locked")
+            yield p
+        finally:
+            p.communicate("release\nrelease\n", timeout=10)
+            self.assertEqual(p.returncode, 0)
+
+    def stage(self, p, action):
+        p.stdin.write(action + "\n")
+        p.stdin.flush()
+        self.assertEqual(p.stdout.readline().strip(), "ready")
+
+    def test_transport_error_mentioning_closed_still_records_a_failed_event(self):
+        t = self.done_task()
+
+        def boom(*a):
+            raise OSError("connection closed")
+        self.rt.send_uds = boom
+        with self.assertRaisesRegex(OSError, "connection closed"):
+            core.followup(self.con, self.rt, t["id"], "keep this instruction")
+        (event,) = self.events(t)
+        self.assertEqual(event["status"], "failed")
+        self.assertIn("connection closed", event["error"])
+
+    def release(self, p):
+        self.stage(p, "release")
+        p.wait(10)
+
+    def test_lock_held_by_close_in_progress_is_not_accepted_then_close_finishes(self):
+        for model in ("sonnet", "sol"):
+            with self.subTest(model=model):
+                t = self.done_task(model)
+                real = store.task_delivery
+                with self.holder(t) as p:
+                    self.stage(p, "hold")  # close has the lock (worker stopped) but status is not closed yet
+                    with patch.object(store, "task_delivery", lambda c, ids, timeout=65: real(c, ids, timeout=0.05)):
+                        with self.assertRaises(TimeoutError):
+                            core.followup(self.con, self.rt, t["id"], "wait for me")
+                    self.assertEqual(store.get_task(self.con, t["id"])["status"], "done")
+                    self.assertEqual((self.rt.sent, self.rt.resumed, self.events(t),
+                                      store.pending_answers(self.con, t["id"])), ([], [], [], []))
+                    self.stage_close_after_hold(p)
+                self.assertEqual(store.get_task(self.con, t["id"])["status"], "closed")
+                self.assertEqual((self.events(t), store.pending_answers(self.con, t["id"])), ([], []))  # nothing stranded
+
+    def stage_close_after_hold(self, p):
+        """The holder is already past its 'hold' stage; finish the close it had started, then it exits."""
+        p.stdin.write("close\n")
+        p.stdin.flush()
+        self.assertEqual(p.stdout.readline().strip(), "ready")
+
+    def test_close_completing_while_followup_waits_for_lock_is_refused(self):
+        for model in ("sonnet", "sol"):
+            with self.subTest(model=model):
+                t = self.done_task(model)
+                real_get, calls = store.get_task, []
+                with self.holder(t) as p:
+                    def stale_get(c, task_id):  # first reads see `done`; close lands, lock is released, then we lock
+                        row = real_get(c, task_id)
+                        calls.append(1)
+                        if len(calls) == (2 if model == "sol" else 1):
+                            self.stage(p, "close")
+                            self.release(p)
+                        return row
+                    with patch.object(store, "get_task", stale_get):
+                        with self.assertRaisesRegex(ValueError, "closed"):
+                            core.followup(self.con, self.rt, t["id"], "late")
+                self.assertEqual(real_get(self.con, t["id"])["status"], "closed")
+                self.assertEqual((self.rt.sent, self.rt.resumed, self.events(t),
+                                  store.pending_answers(self.con, t["id"])), ([], [], [], []))
+
+    def test_codex_lock_busy_after_acceptance_returns_accepted_queued_receipt_and_flush_runs_it_once(self):
+        t = self.done_task("sol")
+        real, calls = store.task_delivery, []
+
+        def second_busy(c, ids, timeout=65):
+            calls.append(1)
+            if len(calls) == 2:  # acceptance took the lock; the delivery attempt finds it taken
+                raise TimeoutError("busy")
+            return real(c, ids, timeout=timeout)
+        with patch.object(store, "task_delivery", second_busy):
+            result = core.followup(self.con, self.rt, t["id"], "accepted and pending")
+        self.assertEqual((result["status"], result["delivered"], result["pending"]), ("queued", 0, 1))
+        self.assertIn("busy", result["error"])
+        (event,) = self.events(t)
+        self.assertEqual((event["status"], event["pending"]), ("queued", 1))
+        self.assertEqual(core.answer(self.con, self.rt, t["id"], flush=True),
+                         dict(status="delivered", delivered=1, pending=0))
+        self.assertEqual(len(self.rt.resumed), 1)
+        self.assertTrue(self.rt.resumed[0][1].endswith("accepted and pending"))
+
+    def test_acceptance_write_failure_sends_nothing(self):
+        t = self.done_task()
+        self.con.execute("CREATE TRIGGER fail_event BEFORE INSERT ON messages WHEN NEW.kind='followup' "
+                         "BEGIN SELECT RAISE(ABORT,'injected accept failure'); END")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "injected accept failure"):
+            core.followup(self.con, self.rt, t["id"], "not accepted")
+        self.assertEqual((self.rt.sent, store.get_task(self.con, t["id"])["status"]), ([], "done"))
+        self.assertEqual(self.events(t), [])
+
+    def test_record_update_failure_after_delivery_keeps_accepted_event_and_delivered_receipt(self):
+        t = self.done_task()
+        self.con.execute("CREATE TRIGGER fail_update BEFORE UPDATE ON messages WHEN NEW.kind='followup' "
+                         "BEGIN SELECT RAISE(ABORT,'injected record failure'); END")
+        result = core.followup(self.con, self.rt, t["id"], "delivered but record lags")
+        self.assertEqual((result["status"], result["delivered"], result["pending"]), ("delivered", 1, 0))
+        self.assertIn("injected record failure", result["record_error"])
+        self.assertEqual(len(self.rt.sent), 1)
+        self.assertEqual(store.get_task(self.con, t["id"])["status"], "acked")
+        (event,) = self.events(t)
+        self.assertEqual((event["status"], event["message"]), ("accepted", "delivered but record lags"))
+
+    def test_mcp_followup_description_has_question_flush_exception(self):
+        tool = next(x for x in mcp_server.TOOLS if x["name"] == "followup")
+        self.assertIn("question", tool["description"])
+        self.assertIn("flush", tool["description"])
 
 
 if __name__ == "__main__":

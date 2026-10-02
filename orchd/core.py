@@ -254,8 +254,32 @@ def _deliver_to_claude(con, rt, task, text):
     return dict(status="delivered", delivered=len(bodies), pending=0)
 
 
+def _queue_answer(con, task_id, text, accept):
+    """Store `text` as a queued answer. With `accept` (followup) the closed re-check, the acceptance record and the
+    queue row happen together under the task's delivery lock (TimeoutError if it stays busy: nothing accepted,
+    nothing queued) inside a short write transaction, never across a network wait. The lock is released before any
+    delivery attempt, which takes it again; it is never nested."""
+    if accept is None:
+        store.add_message(con, task_id, store.QUEUED, text)
+        return
+    with store.task_delivery(con, [task_id]), store.immediate(con):
+        task = store.get_task(con, task_id)
+        if task["status"] == "closed":
+            raise ValueError(f"task {task_id} is closed")
+        accept(task)
+        store.add_message(con, task_id, store.QUEUED, text)
+
+
 def answer(con, rt, task_id, text=None, flush=False):
-    """Deliver an answer, or queue it while a Codex worker is mid-turn.
+    return _answer(con, rt, task_id, text, flush)
+
+
+def _answer(con, rt, task_id, text=None, flush=False, accept=None):
+    """`answer`, plus the private `accept(task)` hook used only by followup: called under the task lock after its
+    closed re-check and before anything is queued or sent. With a hook, a task lock that cannot be taken raises
+    TimeoutError and accepts/queues/sends nothing (the caller may retry later). Without one, behavior is `answer`'s.
+
+    Deliver an answer, or queue it while a Codex worker is mid-turn.
 
     Returns {status: delivered|queued|failed, delivered: n, pending: n}. A Codex worker cannot take a message
     mid-turn, so its answers wait in FIFO order until a later `answer` (or `flush=True`) finds it between
@@ -273,12 +297,16 @@ def answer(con, rt, task_id, text=None, flush=False):
                 task = store.get_task(con, task_id)
                 if task["status"] == "closed":
                     raise ValueError(f"task {task_id} is closed")
+                if accept is not None:  # followup: record acceptance under this lock, after the re-check, before any send
+                    accept(task)
                 if worker_kind(task["model"]) == "claude":
                     return _deliver_to_claude(con, rt, task, text)
                 if text is not None:  # a retry switched it to Codex meanwhile: queue it for that worker's next turn
                     store.add_message(con, task_id, store.QUEUED, text)
                 return dict(status="queued", delivered=0, pending=len(store.pending_answers(con, task_id)))
         except TimeoutError:  # a retry or close holds the task: keep the answer for the next answer or flush
+            if accept is not None:  # followup: acceptance needs the lock; busy means not accepted
+                raise
             if text is not None:
                 store.add_message(con, task_id, store.QUEUED, text)
             return dict(status="queued", delivered=0, pending=len(store.pending_answers(con, task_id)),
@@ -286,7 +314,7 @@ def answer(con, rt, task_id, text=None, flush=False):
     if not task["session_id"] or not task["worktree"]:
         raise ValueError(f"task {task_id} has no codex thread")
     if text is not None:  # stored before any attempt, so a busy turn or a failed resume loses nothing
-        store.add_message(con, task_id, store.QUEUED, text)
+        _queue_answer(con, task_id, text, accept)
     for _ in range(120):  # `orchd ask` wakes the Orch before the worker's turn has finished exiting
         if not (task["job_id"] and rt.pid_alive(task["job_id"])):
             break
@@ -314,6 +342,12 @@ def answer(con, rt, task_id, text=None, flush=False):
             for row in pending:
                 store.add_message(con, task_id, "answer", row["body"])
             store.update_task(con, task_id, job_id=job, status="acked")
+    except TimeoutError:  # only the delivery lock can time out here
+        if accept is None:
+            raise
+        # followup: already accepted and queued under its own short lock; a later flush delivers it
+        return dict(status="queued", delivered=0, pending=len(store.pending_answers(con, task_id)),
+                    error="task busy (retry or close in progress); flush again once it finishes")
     except _ToClaude:  # rolled back nothing (no write yet); deliver the queue to the Claude worker instead
         with store.task_delivery(con, [task_id]):
             task = store.get_task(con, task_id)
@@ -337,25 +371,48 @@ FOLLOWUP_HEAD = ("[followup] New instruction for this same task, not an answer t
 def followup(con, rt, task_id, message):
     """Add an instruction to an open task: same worker, worktree and session, no model change.
 
-    Rides on `answer` for delivery (Codex FIFO queue and resume, Claude send under the task lock), so a busy Codex
-    turn queues it and a busy task lock queues it with an error. Refused for a missing or closed task. One
-    `followup` event row is written once the request is accepted, with the delivery result; a delivery that raises
-    is recorded as failed and re-raised, so the Orch always sees it."""
+    Rides on `answer` for delivery (Codex FIFO queue and resume, Claude send under the task lock); a busy Codex
+    turn queues it. Refused for a missing or closed task, with no event. Acceptance is recorded as one `followup`
+    event row (status accepted) written under the task's delivery lock, after its closed re-check and before
+    anything is queued or sent; if that write fails nothing is sent. If the lock cannot be taken (a close, retry or
+    adopt holds it) TimeoutError is raised and nothing is accepted, queued or sent: retry later. The row is then
+    updated with the delivery result. A delivery that raises marks it failed and re-raises; a failed update after
+    a successful delivery does not raise (the instruction went out): the receipt carries `record_error` and the
+    row stays `accepted`. A Codex task whose lock turns busy after acceptance returns the queued receipt, since a
+    later flush runs it. Delivery is not exactly-once: a send and its receipt are separate steps. A close that
+    finishes after acceptance leaves any queued instruction undelivered, same as a queued answer."""
     task = store.get_task(con, task_id)  # KeyError for a missing task
     if task["status"] == "closed":
         raise ValueError(f"task {task_id} is closed; open a new task instead")
     if not isinstance(message, str) or not message.strip():
         raise ValueError("followup needs a non-empty message")
     event = dict(message=message, from_status=task["status"], model=task["model"], session_id=task["session_id"])
+    accepted = {}
+
+    def accept(locked_task):
+        if accepted:  # a timeout fallback after the lock section already accepted it
+            return
+        event.update(from_status=locked_task["status"], model=locked_task["model"],
+                     session_id=locked_task["session_id"], status="accepted")
+        accepted["id"] = store.add_message(con, task_id, "followup", json.dumps(event, ensure_ascii=False))
+
+    def record():
+        con.execute("UPDATE messages SET body=? WHERE id=?", (json.dumps(event, ensure_ascii=False), accepted["id"]))
     try:
-        result = answer(con, rt, task_id, f"{FOLLOWUP_HEAD}\n\n{message}")
+        result = _answer(con, rt, task_id, f"{FOLLOWUP_HEAD}\n\n{message}", accept=accept)
     except Exception as error:
-        event.update(status="failed", error=f"{type(error).__name__}: {error}"[:500])
-        if "closed" not in str(error):  # a close that raced us is a refusal, not a followup event
-            store.add_message(con, task_id, "followup", json.dumps(event, ensure_ascii=False))
+        if accepted:  # no exception text decides this: an event exists only if acceptance ran
+            event.update(status="failed", error=f"{type(error).__name__}: {error}"[:500])
+            try:
+                record()
+            except Exception:  # the original error is the one the Orch must see
+                pass
         raise
     event.update(result)
-    store.add_message(con, task_id, "followup", json.dumps(event, ensure_ascii=False))
+    try:
+        record()
+    except Exception as error:
+        result = dict(result, record_error=f"{type(error).__name__}: {error}"[:300])
     return result
 
 
