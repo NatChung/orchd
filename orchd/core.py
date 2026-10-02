@@ -411,9 +411,12 @@ def _commit_resume(con, rt, task, pending, job):
     try:
         with store.immediate(con):
             changed = con.execute(
-                "UPDATE tasks SET job_id=?, status='acked', updated_at=? WHERE id=? AND status<>'closed' AND model=? "
-                "AND session_id IS ? AND job_id IS ?",
-                (job, time.time(), task_id, task["model"], task["session_id"], task["job_id"])).rowcount
+                # status only moves to acked if nothing wrote it since the read: the resumed worker may already
+                # have run ack/progress/report, and that newer status stays
+                "UPDATE tasks SET job_id=?, status=CASE WHEN status=? THEN 'acked' ELSE status END, updated_at=? "
+                "WHERE id=? AND status<>'closed' AND model=? AND session_id IS ? AND job_id IS ?",
+                (job, task["status"], time.time(), task_id, task["model"], task["session_id"],
+                 task["job_id"])).rowcount
             if changed != 1:
                 raise _Superseded("the task was closed or its worker changed during the resume")
             unread = con.execute(f"SELECT COUNT(*) FROM messages WHERE id IN ({','.join('?' * len(sent))}) "
@@ -432,11 +435,11 @@ def _commit_resume(con, rt, task, pending, job):
                             (job, task_id, task["job_id"]))
             except Exception:
                 pass
-        state = (f"MAY STILL BE RUNNING ({not_stopped}); do not flush until it has exited" if not_stopped
-                 else "was stopped")
+        state = f"MAY STILL BE RUNNING ({not_stopped})" if not_stopped else "was stopped"
         return dict(status="failed", delivered=0, pending=len(store.pending_answers(con, task_id)), uncertain=True,
                     error=f"receipt not written ({detail}); resumed worker {job} had started on the queued answers "
-                          f"and {state}; they stay queued"[:500])
+                          f"and {state}; they already reached it and still read as pending, so a later flush sends "
+                          f"them again: check its log or wait for its report before flushing"[:600])
     return None
 
 

@@ -79,8 +79,9 @@ TOOLS = [
                     "wait, or once list_open shows worker_alive null. failed: the turn could not start; the answers "
                     "stay queued, retry with "
                     "flush=true instead of resending the text. failed with uncertain=true: a turn did start but its "
-                    "receipt could not be written, so it was stopped and the answers stay queued; if the error says "
-                    "MAY STILL BE RUNNING, flush only after that worker has exited. flush=true with no text also just shows pending.",
+                    "receipt could not be written, so it was stopped (or the error says MAY STILL BE RUNNING). The "
+                    "answers already reached that worker but still read as pending, so a later flush sends them "
+                    "again: check its log or wait for its report first. flush=true with no text also just shows pending.",
      "inputSchema": {"type": "object", "required": ["task_id"], "properties": {
          "task_id": {"type": "string"}, "text": {"type": "string", "description": "The answer; omit only with flush"},
          "flush": {"type": "boolean", "description": "Send queued answers to an idle Codex worker"}}}},

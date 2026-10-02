@@ -493,6 +493,25 @@ class FollowupReceiptBoundaryTest(unittest.TestCase):
                 task = store.get_task(self.con, t["id"])
                 self.assertEqual((task["job_id"], task["status"], task["session_id"]), ("4343", "acked", "thread-W"))
 
+    def test_resumed_worker_report_before_the_receipt_commit_keeps_its_status_and_report(self):
+        t = self.done_task("sol")
+        store.update_task(self.con, t["id"], status="acked")  # the earlier report was read; worker idle
+        real = self.rt.resume_codex_worker
+
+        def resume(*args):  # the resumed worker reports from its own process before our receipt commits
+            job = real(*args)
+            # report's own writes (its Orch wake waits for the task lock this flush holds, so it is left out)
+            self.peer("store.add_message(c,sys.argv[2],'report','done: second pass','new evidence')\n"
+                      "store.update_task(c,sys.argv[2],status='done')", t["id"])
+            return job
+        with patch.object(self.rt, "resume_codex_worker", resume):
+            self.assertEqual(core.followup(self.con, self.rt, t["id"], "more")["status"], "delivered")
+        task = store.get_task(self.con, t["id"])
+        self.assertEqual((task["status"], task["job_id"]), ("done", "4343"))
+        self.assertEqual([tuple(r) for r in self.con.execute(
+            "SELECT body,evidence FROM messages WHERE task_id=? AND kind='report' ORDER BY id", (t["id"],))],
+            [("done: prior result", "prior evidence"), ("done: second pass", "new evidence")])
+
     def test_resume_commit_failure_stops_that_worker_and_keeps_mixed_queue_fifo(self):
         for call in ("followup", "answer"):
             with self.subTest(call=call):
