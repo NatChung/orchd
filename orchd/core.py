@@ -1,4 +1,6 @@
 """Task operations shared by the Orch MCP tools and the worker CLI."""
+import contextlib
+import fcntl
 import json
 import os
 import shlex
@@ -8,7 +10,8 @@ from pathlib import Path
 
 from . import store, worker_health
 from .orch_health import owner_health
-from .runtime import DEFAULT_ORCH_MODEL, DEFAULT_WORKER_MODEL, MODELS, claude_job_alive, worker_kind
+from .runtime import (DEFAULT_ORCH_MODEL, DEFAULT_WORKER_MODEL, MODELS, claude_job_alive, error_detail,
+                      worker_kind)
 
 ORCHD = str(Path(__file__).resolve().parents[1] / "bin" / "orchd")
 
@@ -360,29 +363,71 @@ def _record_usage(con, rt, task):
         store.add_message(con, task["id"], "usage", json.dumps(dict(model=task["model"], **usage)))
 
 
-def close(con, rt, task_id, outcome=None, rating=None):
-    """Stop the worker; remove the worktree only when nothing local would be lost."""
-    task = store.get_task(con, task_id)
-    if task["status"] == "closed":
+CLOSE_LOCK_WAIT = 120  # seconds a close waits for the task's delivery lock before giving up
+
+
+def close(con, rt, task_id, outcome=None, rating=None, lock_wait=CLOSE_LOCK_WAIT):
+    """Stop the worker; remove the worktree only when nothing local would be lost.
+    The task is closed only after its worker is confirmed stopped and its worktree removed or deliberately kept.
+    Anything short of that raises, leaves status, worktree and events as they were and notes why, so close can
+    simply be run again. Concurrent closes of one task run one at a time and write a single close event."""
+    if store.get_task(con, task_id)["status"] == "closed":
         return dict(task_id=task_id, closed=True, worktree="already closed")
     if outcome is not None:
         _choice("outcome", outcome, OUTCOMES)
     if rating is not None and (isinstance(rating, bool) or not isinstance(rating, int) or not 1 <= rating <= 3):
         raise ValueError("rating must be an integer 1-3")
-    store.add_message(con, task_id, "close", json.dumps(dict(outcome=outcome, rating=rating)))
-    store.update_task(con, task_id, outcome=outcome, rating=rating)
-    if task["job_id"]:
-        (rt.stop_codex if worker_kind(task["model"]) == "codex" else rt.stop_worker)(task["job_id"])
-    kept = None
-    if task["worktree"]:
-        removable, reason = rt.worktree_state(task["worktree"], task["base"])
-        if removable:
-            rt.remove_worktree(task["repo_path"], task["worktree"])
-        else:
-            kept = reason
-    _record_usage(con, rt, task)
-    store.update_task(con, task_id, status="closed",
-                      note=(f"worktree kept: {kept}" if kept else task["note"]))
+    locked = False
+    try:
+        with store.task_delivery(con, [task_id], timeout=lock_wait):
+            locked = True
+            return _close_locked(con, rt, task_id, outcome, rating)
+    except TimeoutError:
+        if locked:
+            raise
+        raise RuntimeError(f"close of {task_id} waited {lock_wait:g}s for the task's delivery lock (another close, "
+                           "retry or adopt holds it); nothing changed, run close again") from None
+
+
+def _close_locked(con, rt, task_id, outcome, rating):
+    """close's work under the task's delivery lock. The lock is not re-entrant: nothing here may take it again
+    (no _wake, no adopt)."""
+    task = store.get_task(con, task_id)
+    if task["status"] == "closed":  # another close finished while we waited for the lock
+        return dict(task_id=task_id, closed=True, worktree="already closed")
+    fields = {k: v for k, v in (("outcome", outcome), ("rating", rating)) if v is not None}
+    if fields:
+        store.update_task(con, task_id, **fields)
+    kept, step = None, f"worker {task['job_id']} not confirmed stopped"
+    try:
+        if task["job_id"]:
+            rt.stop_task_worker(worker_kind(task["model"]), task["job_id"],
+                                (task["worktree"], task["session_id"]))
+        step = "worktree check or removal failed"
+        if task["worktree"]:
+            removable, reason = rt.worktree_state(task["worktree"], task["base"])
+            kept = rt.remove_worktree(task["repo_path"], task["worktree"], task["base"]) if removable else reason
+    except Exception as e:  # not closed: status stays as it was, so close can simply be run again
+        detail = error_detail(e)
+        store.update_task(con, task_id, note=f"close pending, {step}, worktree kept (run close again): {detail}")
+        raise RuntimeError(f"close of {task_id} not finished, {step}"
+                           + (f", worktree {task['worktree']} left in place" if task["worktree"] else "")
+                           + f": {detail}") from None
+    con.execute("BEGIN IMMEDIATE")  # usage + close event + terminal status land together or not at all
+    try:
+        task = store.get_task(con, task_id)
+        if task["status"] == "closed":  # closed meanwhile by a caller outside this lock (an older orchd)
+            con.execute("ROLLBACK")
+            return dict(task_id=task_id, closed=True, worktree="already closed")
+        stale = (task["note"] or "").startswith("close pending")
+        _record_usage(con, rt, task)
+        store.add_message(con, task_id, "close", json.dumps(dict(outcome=task["outcome"], rating=task["rating"])))
+        store.update_task(con, task_id, status="closed",
+                          note=(f"worktree kept: {kept}" if kept else None if stale else task["note"]))
+        con.execute("COMMIT")
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
     return dict(task_id=task_id, closed=True,
                 worktree=f"kept at {task['worktree']} ({kept})" if kept else "removed")
 
