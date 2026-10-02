@@ -78,7 +78,10 @@ TOOLS = [
                     "and is only finishing its exit, so no further wake will come: retry flush=true after a short "
                     "wait, or once list_open shows worker_alive null. failed: the turn could not start; the answers "
                     "stay queued, retry with "
-                    "flush=true instead of resending the text. flush=true with no text also just shows pending.",
+                    "flush=true instead of resending the text. failed with uncertain=true: a turn did start but its "
+                    "receipt could not be written, so it was stopped (or the error says MAY STILL BE RUNNING). The "
+                    "answers already reached that worker but still read as pending, so a later flush sends them "
+                    "again: check its log or wait for its report first. flush=true with no text also just shows pending.",
      "inputSchema": {"type": "object", "required": ["task_id"], "properties": {
          "task_id": {"type": "string"}, "text": {"type": "string", "description": "The answer; omit only with flush"},
          "flush": {"type": "boolean", "description": "Send queued answers to an idle Codex worker"}}}},
@@ -102,6 +105,20 @@ TOOLS = [
          "task_id": {"type": "string"},
          "model": {"type": "string", "enum": list(MODELS)},
          "reason": {"type": "string", "description": "Why this worker is being replaced and why this model"}}}},
+    {"name": "followup",
+     "description": "Add an instruction to an open task: the same worker, worktree, branch and session continue; the model "
+                    "never changes (use retry for that) and no new task or owner is created. Refused for a closed or "
+                    "unknown task. It uses the answer delivery path: a Claude worker is sent it at once under the task "
+                    "lock; a Codex worker mid-turn queues it in the same FIFO as answers (status queued; flush with "
+                    "answer flush=true after its next progress/ask/report; if the task is in question status the worker has already asked and will not wake you again, so flush later yourself, or when list_open worker_alive turns null, same as for answer). Returns status delivered|queued|failed "
+                    "with delivered and pending counts, and errors if it could not be sent (nothing is lost if "
+                    "queued). A delivered result with record_error was sent; only orchd's bookkeeping failed, so do "
+                    "not resend it. If the task lock stays busy (close, retry or adopt running) it raises and nothing "
+                    "is accepted: call again later. The worker's earlier report and events are kept; it acks, may send progress, and ends "
+                    "with a new report, which wakes you as usual.",
+     "inputSchema": {"type": "object", "required": ["task_id", "message"], "properties": {
+         "task_id": {"type": "string"},
+         "message": {"type": "string", "description": "The next instruction, with any new scope or done_when"}}}},
 ]
 
 
@@ -134,6 +151,8 @@ def call(name, args, thread, con, rt):
         t = core.retry(con, rt, args["task_id"], args.get("model"), args.get("reason"))
         return {"task_id": t["id"], "status": t["status"], "model": t["model"], "branch": t["branch"],
                 "worktree": t["worktree"]}
+    if name == "followup":
+        return core.followup(con, rt, args["task_id"], args.get("message"))
     raise ValueError(f"unknown tool {name}")
 
 
