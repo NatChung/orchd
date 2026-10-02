@@ -19,7 +19,7 @@ class RetryRuntime(FakeRuntime):
     def __init__(self):
         super().__init__()
         self.missing, self.slept, self.started, self.stop_ignored = set(), [], [], set()
-        self.codex_live = set()
+        self.codex_live, self.codex_args, self.codex_unreadable = set(), {}, set()
         self.next_job = 0
         self.live("job1")
 
@@ -47,19 +47,43 @@ class RetryRuntime(FakeRuntime):
         self.next_job += 1
         self.started.append(("codex", worktree, log, model))
         self.codex_prompt, self.model = prompt, model
-        self.codex_live.add(str(5000 + self.next_job))
-        return str(5000 + self.next_job), f"thread-{self.next_job}"
+        pid, thread = str(5000 + self.next_job), f"thread-{self.next_job}"
+        self.codex_live.add(pid)
+        self.codex_args[pid] = f"codex exec -C {worktree} {prompt[:20]}"  # what `ps -o args=` shows for it
+        return pid, thread
 
     def stop_worker(self, job):
         self.stopped.append(job)
         if job not in self.stop_ignored and job in self.jobs:
             self.alive_pids.discard(self.jobs.pop(job).get("pid"))
 
-    def codex_running(self, pid):
-        return pid in self.codex_live
+    def stop_task_worker(self, kind, job, marks=(), wait=10.0):
+        """Main's confirmed stop (PR #14, Runtime.stop_task_worker) over this fake's process table: a Codex pid is
+        ours only while it is live and its args name one of `marks`; an unconfirmed stop raises RuntimeError."""
+        if kind == "codex":
+            marks = [m for m in marks if m]
+            if job in self.codex_unreadable:
+                raise RuntimeError(f"codex worker {job} not confirmed stopped: ps exit 2")
 
-    def stop_task_worker(self, kind, job, marks=()):  # close's confirmed stop (PR #14): the job really goes away
-        (self.stop_codex if kind == "codex" else self.stop_worker)(job)
+            def ours():
+                return job in self.codex_live and any(m in self.codex_args.get(job, "") for m in marks)
+            if not ours():
+                return None
+            self.stop_codex(job)
+            for _ in range(max(1, int(wait / 0.2))):
+                self.sleep(0.2)
+                if not ours():
+                    return None
+            raise RuntimeError(f"codex worker {job} still running {wait:g}s after SIGTERM; not confirmed stopped")
+        self.stop_worker(job)
+        for _ in range(max(1, int(wait / 0.5))):
+            jobs = self.live_jobs()
+            listed = jobs.get(job) if jobs is not None else None
+            if jobs is not None and (listed is None or (listed.get("pid") is None and listed.get("status") is None)
+                                     or (listed.get("pid") and not self.pid_alive(listed["pid"]))):
+                return None
+            self.sleep(0.5)
+        raise RuntimeError(f"claude worker {job} not confirmed stopped")
 
     def stop_codex(self, pid):
         self.stopped.append(("codex", pid))
@@ -201,6 +225,33 @@ class RetryTest(unittest.TestCase):
         self.rt.codex_live.discard(u["job_id"])
         core.retry(self.con, self.rt, u["id"], "sol", "fresh context")
         self.assertNotIn(("codex", u["job_id"]), self.rt.stopped)
+
+    def test_codex_pid_reused_by_another_codex_is_left_alone(self):
+        t = self.dispatch("sol")
+        self.rt.codex_args[t["job_id"]] = "codex exec -C /elsewhere/other-task do that"  # not this task's turn
+        r = core.retry(self.con, self.rt, t["id"], "sol", "fresh context")
+        self.assertNotIn(("codex", t["job_id"]), self.rt.stopped)
+        self.assertIn(t["job_id"], self.rt.codex_live)  # the other process keeps running
+        self.assertEqual((r["status"], len(self.rt.started)), ("running", 1))
+
+    def test_own_codex_turn_named_by_its_thread_is_stopped(self):
+        t = self.dispatch("sol")
+        self.rt.codex_args[t["job_id"]] = f"codex exec resume {t['session_id']} the answer"  # a resumed turn
+        core.retry(self.con, self.rt, t["id"], "sol", "fresh context")
+        self.assertEqual(self.rt.stopped, [("codex", t["job_id"])])
+        self.assertNotIn(t["job_id"], self.rt.codex_live)
+
+    def test_codex_turn_that_cannot_be_probed_refuses_the_retry(self):
+        t = self.dispatch("sol")
+        self.rt.codex_unreadable.add(t["job_id"])
+        with self.assertRaisesRegex(ValueError, "did not stop.*ps exit 2"):
+            core.retry(self.con, self.rt, t["id"], "opus", "escalate")
+        self.assertEqual((self.rt.stopped, self.rt.started), ([], []))
+        after = store.get_task(self.con, t["id"])
+        self.assertEqual((after["job_id"], after["model"]), (t["job_id"], t["model"]))
+        (failed,) = self.events(t["id"], "retry_failed")
+        self.assertEqual(failed["stage"], "stop")
+        self.assertIn("not confirmed stopped", failed["error"])
 
     def test_failed_spawn_keeps_worktree_and_can_be_retried(self):
         t = self.dispatch()
@@ -436,9 +487,10 @@ class RetryReviewRegressionTest(unittest.TestCase):
     def test_listed_job_counts_as_gone_only_without_a_live_process(self):
         t = self.dispatch("sonnet")
         job = self.rt.jobs[t["job_id"]]
-        self.rt.alive_pids.discard(job["pid"])  # listed, pid dead: gone without a stop
+        self.rt.alive_pids.discard(job["pid"])  # listed, pid dead: gone, so the retry goes on
         core.retry(self.con, self.rt, t["id"], "opus", "x")
-        self.assertEqual(self.rt.stopped, [])
+        # main's stop_task_worker sends `claude stop` to the task's own job before checking; nothing else is touched
+        self.assertEqual((self.rt.stopped, len(self.rt.started)), ([t["job_id"]], 1))
         u = self.dispatch("sonnet")
         self.rt.jobs[u["job_id"]] = {"state": "working", "status": "busy"}  # status without pid: still running
         self.rt.stop_ignored.add(u["job_id"])
@@ -540,16 +592,94 @@ class RetryReviewRegressionTest(unittest.TestCase):
         self.assertIn("queued answer", self.rt.codex_prompt)
 
 
-class CodexRunningTest(unittest.TestCase):
-    def test_reused_or_dead_pid_is_not_a_running_codex(self):
-        proc = subprocess.Popen(["sleep", "30"])
+class RealCodexStopTest(unittest.TestCase):
+    """Real processes through Runtime.stop_task_worker: a binary named `codex`, started in its own session like
+    Runtime.spawn, stands in for a Codex turn. Only a process whose args name this task's worktree or thread is
+    ours; one that merely reused the old turn's pid must survive the retry."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.codex = root / "bin" / "codex"
+        self.codex.parent.mkdir()
+        src = root / "sleep.c"
+        src.write_text("#include <unistd.h>\n#include <stdlib.h>\nint main(int c, char **v) {"
+                       " sleep(atoi(v[1])); return 0; }\n")
         try:
-            self.assertFalse(Runtime().codex_running(str(proc.pid)))  # alive, but not codex
+            subprocess.run(["cc", "-o", str(self.codex), str(src)], check=True, capture_output=True)
+        except (OSError, subprocess.CalledProcessError) as e:
+            self.skipTest(f"no C compiler for a process named codex: {e}")
+        self.wt = root / "wt-task"
+        self.wt.mkdir()
+        self.procs = []
+        self.con = store.connect(root / "t.db")
+        test = self
+
+        class Rt(Runtime):
+            def socket_path(self, task_id):
+                return str(root / task_id / "w.sock")
+
+            def sleep(self, seconds):
+                time.sleep(min(seconds, 0.05))
+
+            def codex_usage(self, thread):
+                return None
+
+            def start_codex_worker(self, worktree, log, prompt, model):  # a new turn: its args name the worktree
+                test.new = test.start("-C", worktree)
+                return str(test.new.pid), "thread-new"
+        self.rt = Rt()
+
+    def tearDown(self):
+        for proc in self.procs:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+        self.tmp.cleanup()
+
+    def start(self, *args):
+        proc = subprocess.Popen([str(self.codex), "300", *args], start_new_session=True)
+        self.procs.append(proc)
+        time.sleep(0.1)
+        return proc
+
+    def task(self, pid):
+        store.create_task(self.con, id="t1", repo="demo", repo_path=str(self.wt), title="T", instructions="i",
+                          done_when="d", orch_thread="thread-A", codex_bin="/fake/codex", model=MODELS["sol"],
+                          base="x", branch="orchd/t1", worktree=str(self.wt), job_id=str(pid),
+                          session_id="thread-old", status="blocked")
+
+    def test_unrelated_codex_on_the_old_turn_pid_survives_the_retry(self):
+        other = self.start("exec", "-C", "/some/other/worktree")  # another task, the Codex Orch or Nat's shell
+        self.task(other.pid)
+        r = core.retry(self.con, self.rt, "t1", "sol", "fresh context")
+        time.sleep(0.3)
+        self.assertIsNone(other.poll(), "retry killed a codex process that is not this task's worker")
+        self.assertEqual((r["status"], r["job_id"]), ("running", str(self.new.pid)))
+
+    def test_own_codex_turn_is_stopped_and_confirmed_before_the_new_one(self):
+        for args in (("exec", "-C", None), ("exec", "resume", "thread-old")):  # first turn, resumed turn
+            with self.subTest(args=args[1]):
+                own = self.start(*[a or str(self.wt) for a in args])
+                self.con.execute("DELETE FROM tasks")
+                self.task(own.pid)
+                r = core.retry(self.con, self.rt, "t1", "sol", "fresh context")
+                self.assertFalse(self.rt.pid_alive(own.pid))  # stopped (and reaped) before the retry returned
+                self.assertEqual(r["status"], "running")
+
+    def test_new_turn_is_stopped_by_its_own_marks_when_the_commit_fails(self):
+        self.task(99999999)  # the old turn is long gone
+        real = store.mark_read
+        store.mark_read = lambda *a: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked"))
+        try:
+            with self.assertRaises(sqlite3.OperationalError):
+                core.retry(self.con, self.rt, "t1", "sol", "x")
         finally:
-            proc.kill()
-            proc.wait()
-        self.assertFalse(Runtime().codex_running(str(proc.pid)))
-        self.assertFalse(Runtime().codex_running(None))
+            store.mark_read = real
+        self.assertFalse(self.rt.pid_alive(self.new.pid))
+        (failed,) = [json.loads(r["body"]) for r in self.con.execute(
+            "SELECT body FROM messages WHERE task_id='t1' AND kind='retry_failed'")]
+        self.assertEqual((failed["new_job_id"], failed["new_stopped"]), (str(self.new.pid), True))
 
 
 class RetryKeepsWorktreeTest(unittest.TestCase):

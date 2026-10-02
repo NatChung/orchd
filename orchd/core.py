@@ -480,44 +480,21 @@ def _retry_failed(con, task_id, stage, error, **fields):
                                                               ensure_ascii=False))
 
 
-def _claude_job_gone(rt, job):
-    """Gone only when the daemon's list proves it: the job is unlisted, or listed without pid and status (both are
-    listed only while the process lives), or its pid is dead. `state` is the task outcome, not liveness: a
-    `failed` or `done` job can still run. A failed list query proves nothing, so it counts as still running."""
-    jobs = rt.live_jobs()
-    if jobs is None:
-        return False
-    listed = jobs.get(job)
-    if listed is None:
-        return True
-    pid, status = listed.get("pid"), listed.get("status")
-    if pid is None and status is None:
-        return True
-    return bool(pid) and not rt.pid_alive(pid)
-
-
-def _stop_confirmed(rt, kind, job):
-    """Stop exactly this job or pid once, then confirm it is gone; never touch any other job or pid."""
+def _stop_confirmed(rt, kind, job, marks):
+    """Stop exactly this task's job or pid through close's helper and confirm it is gone. A Codex pid counts as
+    ours only while its args name this task's worktree or thread, so a reused pid is never killed. A stop that
+    cannot be confirmed (still running, or its state unreadable) returns the reason, never a success."""
     if not job:
-        return True
-    if kind == "codex":
-        gone = lambda: not rt.codex_running(job)  # noqa: E731
-        stop = rt.stop_codex
-    else:
-        gone = lambda: _claude_job_gone(rt, job)  # noqa: E731
-        stop = rt.stop_worker
-    if gone():
-        return True
-    stop(job)
-    for _ in range(RETRY_STOP_WAIT):
-        if gone():
-            return True
-        rt.sleep(0.5)
-    return False
+        return None
+    try:
+        rt.stop_task_worker(kind, job, marks, wait=RETRY_STOP_WAIT * 0.5)
+    except RuntimeError as e:
+        return str(e) or "not confirmed stopped"
+    return None
 
 
-def _worker_quiescent(rt, task):
-    return _stop_confirmed(rt, worker_kind(task["model"]), task["job_id"])
+def _stop_old_worker(rt, task):
+    return _stop_confirmed(rt, worker_kind(task["model"]), task["job_id"], (task["worktree"], task["session_id"]))
 
 
 def _record_session_usage(con, rt, task, source):
@@ -568,10 +545,10 @@ class _Superseded(Exception):
     pass
 
 
-def _abandon_new_worker(con, rt, task_id, kind, new, stage, error, fields):
+def _abandon_new_worker(con, rt, task_id, kind, worktree, new, stage, error, fields):
     """The new worker started but retry cannot hand it the task: stop it, then record exactly what is left so the
     next retry or close finds it. If even that write fails, the raised error names the job so it is never lost."""
-    stopped = _stop_confirmed(rt, kind, new["job_id"])
+    stopped = _stop_confirmed(rt, kind, new["job_id"], (worktree, new["session_id"])) is None
     detail = f"{type(error).__name__}: {error}"
     state = "stopped" if stopped else "MAY STILL BE RUNNING"
     try:
@@ -612,9 +589,11 @@ def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT):
         from_model = task["model"]
         old = dict(old_model=from_model, old_job_id=task["job_id"], old_session_id=task["session_id"])
         fields = dict(to_model=to_model, reason=reason, **old)
-        if not _worker_quiescent(rt, task):
-            _retry_failed(con, task_id, "stop", f"worker {task['job_id']} is still running", **fields)
-            raise ValueError(f"task {task_id}'s worker {task['job_id']} did not stop; no new worker was started")
+        not_stopped = _stop_old_worker(rt, task)
+        if not_stopped:
+            _retry_failed(con, task_id, "stop", not_stopped, **fields)
+            raise ValueError(f"task {task_id}'s worker {task['job_id']} did not stop; no new worker was started: "
+                             f"{not_stopped}")
         _record_session_usage(con, rt, task, "retry")
         attempt = con.execute("SELECT COUNT(*) FROM messages WHERE task_id=? AND kind IN ('retry','retry_failed')",
                               (task_id,)).fetchone()[0] + 1
@@ -660,7 +639,7 @@ def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT):
                 _retry_failed(con, task_id, stage, text, **fields)
                 store.update_task(con, task_id, status="failed", note=f"retry failed: {text}"[:1000])
                 raise
-            _abandon_new_worker(con, rt, task_id, kind, new, stage, error, fields)
+            _abandon_new_worker(con, rt, task_id, kind, worktree, new, stage, error, fields)
             raise
     return store.get_task(con, task_id)
 
