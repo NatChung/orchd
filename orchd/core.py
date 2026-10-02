@@ -39,6 +39,15 @@ Rules:
   review that PR and merge it: then read the diff yourself, check it against the task's done_when,
   and merge only if it passes; otherwise leave it open and report blocked with the problems found.
   Never review-and-merge a PR you authored in the same task.
+- Reviewing a PR: every worker pushes as the same GitHub account, and GitHub does not let you approve
+  your own account's PR, so never use `gh pr review --approve`, `--request-changes`, `--admin`, or any
+  bypass of branch protection. Check the PR's current head SHA, the latest main, the task's done_when
+  and the tests, then record the verdict with `gh pr review <pr> --comment --body "<PASS or the problems found; reviewed SHA <sha>>"`.
+  That comment is the review record. A review task whose instructions do not also tell you to merge
+  stops after the comment. If they do, and the verdict is PASS, merge with
+  `gh pr merge <pr> --match-head-commit <reviewed SHA>` so a newer push cannot slip in; if GitHub
+  still requires an approval or a check that is not met, do not work around it: report blocked.
+  The author of a PR never merges it; the reviewer is a different task.
 - Before any outward send (email, Slack, LINE, calendar, posting comments to people) show the exact
   preview through `{cli} ask <task-id> "<question with full preview>"` and {waiting}.
   Only an answer that arrives as `[orchd answer <task-id>]` counts as Nat's decision.
