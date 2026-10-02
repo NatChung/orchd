@@ -3,7 +3,8 @@
 
 Read-only. It checks the machine, prints the steps that are still open, says who runs each command and which
 receipt proves it worked. It never installs, logs in, trusts, writes config, copies tokens or runs the commands it
-prints. Everything is computed from the current HOME, so nothing is tied to one machine's paths.
+prints. Paths are computed from the current HOME (or --home), so nothing is tied to one machine's paths; the one
+exception is the orchd checkout, which is always the checkout this file lives in.
 
   setup-wizard.py [--profile generic|nat|all] [--home DIR] [--projects DIR] [--json] [--interactive] [--strict]
 
@@ -111,6 +112,15 @@ class Env:
         if found:
             why.append(f"{', '.join(found)} set in the environment overrides where {provider} reads its state")
         return "; ".join(why) or None
+
+    def path_override(self, name):
+        """Why an orchd path variable (ORCHD_ORCH_HOME, ORCHD_HOME) cannot be used, or None. Set while --home is not the
+        caller's HOME, it names the caller's state, and orchd on the target reads its own environment: neither the
+        caller's path nor the target default is credited. Name only, never the value. Same HOME: honoured as set."""
+        if name in self.environ and not self.home_is_process_home():
+            return (f"{name} set in the environment of the user running the wizard; --home {self.home} is not that user's "
+                    "HOME, so it points at the caller's state, not the target's; not checked")
+        return None
 
     @property
     def orch_home(self):
@@ -410,32 +420,43 @@ def generic_steps(env):
     # orchd checkout and Orch home
     steps.append(Step("orchd-checkout", "generic", "orchd checkout present", who,
                       PASS if (env.checkout / "bin" / "orchd").exists() else MISSING,
-                      f"{env.checkout}/bin/orchd", "file existence",
+                      f"{env.checkout}/bin/orchd", "file existence; path is the checkout this wizard runs from, not --home/--projects",
                       [f"git clone git@github.com:NatChung/orchd.git {q(env.projects / 'orchd')}"],
                       "`bin/orchd list` prints without error (empty DB is fine)"))
-    home = env.orch_home
-    exists = (home / "AGENTS.md").exists()
-    steps.append(Step("orch-home", "generic", "Orch home present", who, PASS if exists else MISSING,
-                      f"{home}" + ("" if exists else " has no AGENTS.md"), "file existence",
-                      [f"git clone git@github.com:NatChung/orch.git {q(home)}"], f"{home}/AGENTS.md exists"))
-    for label, fn, how in (("Claude", claude_trusted, [f"cd {q(home)} && claude   # accept the trust prompt once, then exit"]),
-                           ("Codex", codex_trusted, [f"# Codex Desktop: open {home} as a project and choose Trust (writes ~/.codex/config.toml; Nat does it in the UI)"])):
-        st, d = fn(env, home) if exists else (UNKNOWN, "Orch home absent, trust cannot be checked")
-        src = "~/.claude.json projects[<path>].hasTrustDialogAccepted" if label == "Claude" else "~/.codex/config.toml projects.<path>.trust_level"
-        steps.append(Step(f"trust-orch-{label.lower()}", "generic", f"Orch home trusted in {label}", who, st, d, src, how,
-                          "re-run this wizard: step shows pass"))
-    cfg = home / ".codex" / "config.toml"
-    foreign = foreign_homes(env, cfg)
-    if foreign is None:
-        st, d = UNKNOWN, f"{cfg} not readable or not valid TOML"
-    elif foreign:
-        st, d = MISSING, f"{cfg} hardcodes another machine's paths: {', '.join(foreign)}"
+    # A caller's ORCHD_ORCH_HOME under a foreign --home names the caller's Orch, not the target's: no verdict.
+    blocked = env.path_override("ORCHD_ORCH_HOME")
+    if blocked:
+        for sid, title, src in (("orch-home", "Orch home present", "ORCHD_ORCH_HOME set (name only; value not used)"),
+                                ("trust-orch-claude", "Orch home trusted in Claude", "~/.claude.json projects[<path>].hasTrustDialogAccepted"),
+                                ("trust-orch-codex", "Orch home trusted in Codex", "~/.codex/config.toml projects.<path>.trust_level"),
+                                ("orch-config-paths", "Orch .codex/config.toml paths match this HOME", "TOML keys and strings scanned for /Users/<x> or /home/<x>")):
+            steps.append(Step(sid, "generic", title, who, UNKNOWN, blocked, src,
+                              ["# unset ORCHD_ORCH_HOME and re-run, or run this wizard as the target user on the target machine"],
+                              "re-run this wizard: step shows pass"))
     else:
-        st, d = PASS, f"no foreign home paths in {cfg}"
-    steps.append(Step("orch-config-paths", "generic", "Orch .codex/config.toml paths match this HOME", who, st, d,
-                      "TOML keys and strings scanned for /Users/<x> or /home/<x>",
-                      [f"# edit {q(cfg)} so every /Users/<old> becomes {q(env.home)} (it is a tracked file in the orch repo: commit on a branch, do not edit blindly)"],
-                      "re-run this wizard: step shows pass"))
+        home = env.orch_home
+        exists = (home / "AGENTS.md").exists()
+        steps.append(Step("orch-home", "generic", "Orch home present", who, PASS if exists else MISSING,
+                          f"{home}" + ("" if exists else " has no AGENTS.md"), "file existence",
+                          [f"git clone git@github.com:NatChung/orch.git {q(home)}"], f"{home}/AGENTS.md exists"))
+        for label, fn, how in (("Claude", claude_trusted, [f"cd {q(home)} && claude   # accept the trust prompt once, then exit"]),
+                               ("Codex", codex_trusted, [f"# Codex Desktop: open {home} as a project and choose Trust (writes ~/.codex/config.toml; Nat does it in the UI)"])):
+            st, d = fn(env, home) if exists else (UNKNOWN, "Orch home absent, trust cannot be checked")
+            src = "~/.claude.json projects[<path>].hasTrustDialogAccepted" if label == "Claude" else "~/.codex/config.toml projects.<path>.trust_level"
+            steps.append(Step(f"trust-orch-{label.lower()}", "generic", f"Orch home trusted in {label}", who, st, d, src, how,
+                              "re-run this wizard: step shows pass"))
+        cfg = home / ".codex" / "config.toml"
+        foreign = foreign_homes(env, cfg)
+        if foreign is None:
+            st, d = UNKNOWN, f"{cfg} not readable or not valid TOML"
+        elif foreign:
+            st, d = MISSING, f"{cfg} hardcodes another machine's paths: {', '.join(foreign)}"
+        else:
+            st, d = PASS, f"no foreign home paths in {cfg}"
+        steps.append(Step("orch-config-paths", "generic", "Orch .codex/config.toml paths match this HOME", who, st, d,
+                          "TOML keys and strings scanned for /Users/<x> or /home/<x>",
+                          [f"# edit {q(cfg)} so every /Users/<old> becomes {q(env.home)} (it is a tracked file in the orch repo: commit on a branch, do not edit blindly)"],
+                          "re-run this wizard: step shows pass"))
     mcp = None if "CODEX_HOME" in env.environ else read_toml(env.home / ".codex" / "config.toml")
     srv = bool(((mcp or {}).get("mcp_servers") or {}).get("orchd")) if mcp else None  # presence only; env/args dropped
     present = mcp is not None
@@ -460,7 +481,13 @@ def generic_steps(env):
                           f"no git repos under {env.projects}; nothing to check yet", "directory listing", [], ""))
 
     # State dir and socket dir: checked without creating anything.
-    for sid, title, path in (("orchd-home", "orchd state dir writable", env.orchd_home), ("tmp-sockets", "/tmp usable for worker sockets", Path("/tmp"))):
+    blocked = env.path_override("ORCHD_HOME")
+    if blocked:
+        steps.append(Step("orchd-home", "generic", "orchd state dir writable", who, UNKNOWN, blocked,
+                          "ORCHD_HOME set (name only; value not used)",
+                          ["# unset ORCHD_HOME and re-run, or run this wizard as the target user on the target machine"], ""))
+    for sid, title, path in ((() if blocked else (("orchd-home", "orchd state dir writable", env.orchd_home),))
+                             + (("tmp-sockets", "/tmp usable for worker sockets", Path("/tmp")),)):
         probe = path
         while not probe.exists() and probe != probe.parent:
             probe = probe.parent
@@ -474,10 +501,11 @@ def generic_steps(env):
     steps.append(Step("doctor", "generic", "run the read-only `orchd doctor`", who,
                       UNKNOWN,
                       "orchd/doctor.py present in this checkout; the wizard does not run it or read its result" if doctor.exists()
-                      else "orchd doctor is not in this checkout (PR #22 unmerged); skip this step, do not treat as pass",
+                      else "orchd/doctor.py is not in this checkout (older checkout); skip this step, do not treat as pass",
                       "file existence only",
                       [f"{q(env.checkout / 'bin' / 'orchd')} doctor"] if doctor.exists() else [],
-                      "doctor exits 0 with no `missing`; any `unknown` or crash is a failure of this step, not a pass"))
+                      "doctor exits 0 (`required checks: all pass`); exit 1 (a required check failed), exit 2 (a required "
+                      "check unknown) or a crash is a failure of this step, not a pass"))
     return steps
 
 
@@ -554,7 +582,7 @@ def build_plan(env, profile="all"):
 RECEIPTS = """\
 Pilot receipts (the pilot is run by Nat on the target machine, or by a worker Nat authorised there; issue #3 stays
 open until these exist):
-  1. {orchd} doctor                 -> exit 0, no missing/unknown (once PR #22 is merged)
+  1. {orchd} doctor                 -> exit 0 (exit 1 = required fail, exit 2 = required unknown; neither is a pass)
   2. dispatch a throwaway task to a scratch repo, with ORCHD_HOME set to a temp dir
   3. worker: orchd ack, orchd progress, orchd report --status done   -> each shows in `orchd list` / `orchd watch`
   4. an independent reviewer (not the author) reads the diff and writes a review receipt

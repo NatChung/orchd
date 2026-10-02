@@ -14,7 +14,9 @@ python3 scripts/setup-wizard.py --strict           # exit 1 unless every step is
 ```
 
 It checks and prints. It never installs, logs in, trusts, writes config, copies tokens, exports the old keychain, or
-runs the commands it prints. All paths come from the current `HOME` (override with `--home` / `--projects`).
+runs the commands it prints. Paths come from the current `HOME` (override with `--home` / `--projects`), with one
+exception: the `orchd checkout present` step always checks the checkout the wizard file itself lives in
+(`scripts/../bin/orchd`), whatever `--home` / `--projects` say. Its suggested `git clone` target is under `--projects`.
 Statuses: `pass`, `missing`, `unknown` (could not verify; never counted as pass), `manual`.
 
 Commands it runs are a fixed read-only allowlist (exact argv, enforced in code and pinned by a test): `--version`
@@ -54,14 +56,23 @@ nat-email / nat-slack / nat-line connector directories, and codegraph / rtk / gc
 - `--home` pointing anywhere but the HOME of the user running the wizard: gh, Claude and Codex keep logins in that
   user's keyring, so their login steps are `unknown` and are not run. `git config --global` is run with
   `HOME=<--home>` so it reads the target; other commands keep the caller's environment and never write into `--home`.
+- Not zero-write for the caller: `gh --version` and `codex --version` (run in the default mode and with `--home`) may
+  write their own startup state under the caller's `HOME` or temp dir (for example a device id file, or a temp arg0
+  file). The wizard adds no install, login, trust or config write of its own, and nothing goes into `--home`.
 - Environment overrides make the matching provider `unknown` (names reported, values never shown): git
   `GIT_CONFIG*`, `XDG_CONFIG_HOME`; gh `GH_CONFIG_DIR`, `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GH_HOST`;
   Claude `CLAUDE_CONFIG_DIR`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`; Codex
   `CODEX_HOME`, `OPENAI_API_KEY`. `CLAUDE_CONFIG_DIR` / `CODEX_HOME` also make the trust and MCP file checks `unknown`.
+- orchd's own path variables `ORCHD_ORCH_HOME` (Orch home) and `ORCHD_HOME` (state dir): when `--home` is the HOME of
+  the user running the wizard they are honoured, just as orchd would. With a foreign `--home` they describe the caller's
+  machine, so the steps that depend on them are `unknown` (name reported, value never shown): `ORCHD_ORCH_HOME` →
+  `orch-home`, `trust-orch-claude`, `trust-orch-codex`, `orch-config-paths`; `ORCHD_HOME` → `orchd-home`. The target's
+  default paths are not checked in their place either, since orchd on the target reads its own environment.
 - Orch `.codex/config.toml` is parsed as TOML; a home dir ends at the next `/` or the end of the string, so
   `/Users/Nat Space` is foreign to HOME `/Users/Nat`. Unparseable TOML is `unknown`. A shell-like string such as
   `cd /Users/x && y` is flagged whole (errs to `missing`, never to `pass`).
-- `orchd doctor` (PR #22) is not run or parsed. If absent from the checkout the step says so; it is never a pass.
+- `orchd doctor` (`orchd/doctor.py`, merged) is not run or parsed by the wizard; that step is always `unknown` and
+  Nat runs doctor directly (receipt row 2). In an older checkout without `orchd/doctor.py` the step says so.
 
 Logins use each CLI's own browser flow; nobody pastes a token. Generate new SSH keys on the mini and register the
 public key. Do not copy private keys or export the old keychain.
@@ -71,7 +82,7 @@ public key. Do not copy private keys or export the old keychain.
 | # | Who / where | Command | Receipt |
 |---|---|---|---|
 | 1 | Nat, mini | `python3 scripts/setup-wizard.py --profile all --strict` | exit 0, or each remaining non-pass step has a written reason |
-| 2 | Nat, mini | `bin/orchd doctor` (after PR #22 merges) | exit 0, no `missing`/`unknown`, output pasted in the issue |
+| 2 | Nat, mini | `bin/orchd doctor` | exit 0 (`required checks: all pass`); exit 1 = a required check failed, exit 2 = a required check unknown, neither is a pass; output pasted in the issue |
 | 3 | Nat, mini | `ORCHD_HOME=$(mktemp -d)`, dispatch a task to a scratch repo | task id, worker running in `orchd list` |
 | 4 | worker | `orchd ack`, `orchd progress`, `orchd report --status done` | all three visible in `orchd watch` |
 | 5 | independent reviewer | read the pilot diff, write a review receipt | reviewer is not the pilot author |

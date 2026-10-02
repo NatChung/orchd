@@ -719,5 +719,90 @@ class CodexStatusShapeTest(unittest.TestCase):
             self.assertEqual(self.status(0, text, f"u{i}"), sw.UNKNOWN, text)
         self.assertEqual(self.status(1, "Logged in using ChatGPT", "rc1"), sw.UNKNOWN)
 
+
+class OrchdPathOverrideTest(unittest.TestCase):
+    """Round 3: the caller's ORCHD_ORCH_HOME / ORCHD_HOME under a foreign --home must not credit the caller's state to
+    the target. Caller side is fully set up (orch with AGENTS.md and config, writable state, target trusting the caller
+    orch) so every negative case would pass if the override leaked."""
+
+    ORCH_STEPS = ("orch-home", "trust-orch-claude", "trust-orch-codex", "orch-config-paths")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.caller, self.target = root / "caller", root / "target"
+        for d in (self.caller / "orch" / ".codex", self.caller / "state", self.target / "projects"):
+            d.mkdir(parents=True)
+        (self.caller / "orch" / "AGENTS.md").write_text("x")
+        (self.caller / "orch" / ".codex" / "config.toml").write_text(f'[mcp_servers.orchd]\ncommand = "{self.caller}/x"\n')
+        trust = {str(self.caller / "orch"): {"hasTrustDialogAccepted": True}}
+        (self.target / ".claude.json").write_text(json.dumps({"projects": trust}))
+        (self.target / ".codex").mkdir()
+        (self.target / ".codex" / "config.toml").write_text(f'[projects."{self.caller / "orch"}"]\ntrust_level = "trusted"\n')
+        self.ro = self.target / ".local"
+        self.ro.mkdir()
+        self.ro.chmod(0o500)  # target state parent not writable: a real probe of the target says missing
+        self.addCleanup(self.ro.chmod, 0o700)
+
+    def foreign(self, **overrides):
+        env = sw.Env(home=self.target, projects=self.target / "projects", runner=Fake(), which=lambda n: None,
+                     environ={"HOME": str(self.caller), **{k: str(v) for k, v in overrides.items()}})
+        return by_id(sw.build_plan(env, "generic"))
+
+    def assert_unknown_names_only(self, steps, sids, name):
+        for sid in sids:
+            st = steps[sid]
+            self.assertEqual(st.status, sw.UNKNOWN, sid)
+            self.assertIn(name, st.detail, sid)
+            for text in (st.detail, st.source, st.receipt, *st.commands):
+                self.assertNotIn(str(self.caller), text, sid)
+
+    def test_foreign_home_orch_home_override_alone(self):
+        steps = self.foreign(ORCHD_ORCH_HOME=self.caller / "orch")
+        self.assert_unknown_names_only(steps, self.ORCH_STEPS, "ORCHD_ORCH_HOME")
+        self.assertEqual(steps["orchd-home"].status, sw.MISSING)  # unaffected: still probes the target default
+
+    def test_foreign_home_orchd_home_override_alone(self):
+        steps = self.foreign(ORCHD_HOME=self.caller / "state")
+        self.assert_unknown_names_only(steps, ("orchd-home",), "ORCHD_HOME")
+        self.assertEqual(steps["orch-home"].status, sw.MISSING)  # target default has no Orch home
+        self.assertIn(str(self.target / "projects" / "orch"), steps["orch-home"].detail)
+        self.assertEqual(steps["tmp-sockets"].status, sw.PASS)
+
+    def test_foreign_home_both_overrides(self):
+        steps = self.foreign(ORCHD_ORCH_HOME=self.caller / "orch", ORCHD_HOME=self.caller / "state")
+        self.assert_unknown_names_only(steps, self.ORCH_STEPS, "ORCHD_ORCH_HOME")
+        self.assert_unknown_names_only(steps, ("orchd-home",), "ORCHD_HOME")
+        self.assertNotIn(str(self.caller), sw.render(list(steps.values()), sw.Env(home=self.target, projects=self.target)))
+
+    def test_foreign_home_without_overrides_checks_target_defaults(self):
+        steps = self.foreign()
+        self.assertEqual(steps["orch-home"].status, sw.MISSING)
+        self.assertEqual(steps["orchd-home"].status, sw.MISSING)
+
+    def same(self, **overrides):
+        env = sw.Env(home=self.target, projects=self.target / "projects", runner=Fake(), which=lambda n: None,
+                     environ={"HOME": str(self.target), **{k: str(v) for k, v in overrides.items()}})
+        return by_id(sw.build_plan(env, "generic"))
+
+    def test_same_home_orch_home_override_is_honoured(self):
+        steps = self.same(ORCHD_ORCH_HOME=self.caller / "orch")
+        self.assertEqual(steps["orch-home"].status, sw.PASS)
+        self.assertEqual(steps["trust-orch-claude"].status, sw.PASS)
+        self.assertEqual(steps["trust-orch-codex"].status, sw.PASS)
+        self.assertIn(str(self.caller / "orch" / ".codex" / "config.toml"), steps["orch-config-paths"].detail)  # scans the override
+        self.assertEqual(steps["orchd-home"].status, sw.MISSING)
+
+    def test_same_home_orchd_home_override_is_honoured(self):
+        steps = self.same(ORCHD_HOME=self.caller / "state")
+        self.assertEqual(steps["orchd-home"].status, sw.PASS)
+        self.assertEqual(steps["orch-home"].status, sw.MISSING)
+
+    def test_same_home_both_overrides_are_honoured(self):
+        steps = self.same(ORCHD_ORCH_HOME=self.caller / "orch", ORCHD_HOME=self.caller / "state")
+        self.assertEqual(steps["orch-home"].status, sw.PASS)
+        self.assertEqual(steps["orchd-home"].status, sw.PASS)
+
 if __name__ == "__main__":
     unittest.main()
