@@ -8,6 +8,7 @@
   orchd report ID --status done|blocked --summary S [--evidence E]
   orchd progress ID "text"                    worker: interim update to the Orch; the task keeps running
   orchd ask ID "question with full preview"   worker: ask Orch/Nat and wait for an answer
+  orchd verify ID [--timeout S]               verifier worker: rerun the verified task's locked command at its locked SHA
   orchd list                                  open tasks, worker/Orch health, unread notification failures
   orchd watch [--since HH:MM]                 live timeline of Orch <-> worker messages
   orchd summary [--since HH:MM]               per Orch: workers, models, questions, parallelism, tokens
@@ -50,6 +51,9 @@ def main(argv=None):
     ask = sub.add_parser("ask")
     ask.add_argument("task_id")
     ask.add_argument("question")
+    ver = sub.add_parser("verify")
+    ver.add_argument("task_id")
+    ver.add_argument("--timeout", type=float)
     sub.add_parser("list")
     for name in ("watch", "summary"):
         sub.add_parser(name).add_argument("--since", help="HH:MM today (default: last 30 minutes for watch, all for summary)")
@@ -127,6 +131,15 @@ def main(argv=None):
         woke = core.ask(con, rt, args.task_id, args.question)
         print(f"asked on {args.task_id}; wait for an [orchd answer {args.task_id}] message"
               + ("" if woke else " (stored; waking Orch failed)"))
+    elif args.cmd == "verify":
+        from orchd import verify
+        try:
+            result = verify.run(con, args.task_id, timeout=args.timeout)
+        except (ValueError, KeyError) as error:
+            print(f"verify refused: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(result, ensure_ascii=False, indent=1))
+        return 0 if result["passed"] else 1
     elif args.cmd == "list":
         print(json.dumps(core.list_open(con, rt), ensure_ascii=False, indent=1))
     elif args.cmd == "adopt":
