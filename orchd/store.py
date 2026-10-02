@@ -54,9 +54,10 @@ CREATE TABLE IF NOT EXISTS orchs(
 # Columns added after v1. Nullable so old rows and old code keep working against the same DB.
 TASK_COLUMNS = ("model TEXT", "model_reason TEXT", "task_type TEXT", "rework_of TEXT",
                 "found_by TEXT", "outcome TEXT", "rating INTEGER")
+MESSAGE_COLUMNS = ("recipient_orch TEXT", "notice_error TEXT", "notice_recipient TEXT")
 
 # Message kinds the Orch reads in its inbox; the rest (dispatch, answer, close, usage) are the event log.
-ORCH_KINDS = ("ack", "progress", "report", "question")
+ORCH_KINDS = ("ack", "progress", "report", "question", "adopt")
 
 # starting -> running -> acked -> done|blocked|question -> closed; failed if launch breaks.
 OPEN = ("starting", "running", "acked", "done", "blocked", "question", "failed")
@@ -79,6 +80,13 @@ def connect(path=None):
             try:
                 con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
             except sqlite3.OperationalError:  # another process added it first
+                pass
+    have = {r["name"] for r in con.execute("PRAGMA table_info(messages)")}
+    for column in MESSAGE_COLUMNS:
+        if column.split()[0] not in have:
+            try:
+                con.execute(f"ALTER TABLE messages ADD COLUMN {column}")
+            except sqlite3.OperationalError:
                 pass
     return con
 
@@ -113,6 +121,14 @@ def task_delivery(con, task_ids, timeout=65):
     finally:
         for handle in reversed(handles):
             handle.close()
+
+
+class AdoptionMoves(list):
+    """Move tuples plus the registry snapshots validated against the runtime probe."""
+    def __init__(self, target, owners):
+        super().__init__()
+        self.target = dict(target)
+        self.owners = {owner: dict(row) if row is not None else None for owner, row in owners.items()}
 
 
 def new_task_id():
@@ -188,7 +204,7 @@ exception class name (including queue subprocess errors), otherwise 'unknown'.
         f"SELECT COUNT(*) AS unread, COUNT(wake_error) AS failed FROM messages WHERE {where}",
         (task_id, *ORCH_KINDS)).fetchone()
     latest = con.execute(
-        "SELECT id,kind,created_at,substr(wake_error,1,instr(wake_error,':')-1) AS error_type "
+        "SELECT id,kind,created_at,recipient_orch,substr(wake_error,1,instr(wake_error,':')-1) AS error_type "
         f"FROM messages WHERE {where} AND wake_error IS NOT NULL ORDER BY id DESC LIMIT 1",
         (task_id, *ORCH_KINDS)).fetchone()
     failure = None
@@ -198,8 +214,70 @@ exception class name (including queue subprocess errors), otherwise 'unknown'.
         safe = isinstance(error_class, type) and issubclass(error_class, Exception)
         failure = dict(message_id=latest["id"], kind=latest["kind"], created_at=latest["created_at"],
                        error_type=name if safe else "unknown")
-    return dict(unread_count=counts["unread"], unread_wake_failed_count=counts["failed"],
-                latest_unread_wake_failure=failure)
+        if latest["recipient_orch"] is not None:
+            failure["recipient_orch"] = latest["recipient_orch"]
+    result = dict(unread_count=counts["unread"], unread_wake_failed_count=counts["failed"],
+                  latest_unread_wake_failure=failure)
+    # Non-inbox old-owner notices have their own delivery history. They never become unread private
+    # inbox bodies for the task's new group. Failed notice INSERTs are recorded on the adopt event.
+    notices = con.execute(
+        "SELECT id,kind,created_at,COALESCE(notice_recipient,recipient_orch, "
+        "CASE WHEN kind='adopt_notice' AND json_valid(evidence) "
+        "THEN json_extract(evidence, '$.old_orch') END) AS recipient_orch, "
+        "substr(COALESCE(notice_error,wake_error),1,instr(COALESCE(notice_error,wake_error),':')-1) AS error_type "
+        "FROM messages WHERE task_id=? AND ((kind='adopt_notice' AND wake_error IS NOT NULL) "
+        "OR notice_error IS NOT NULL) ORDER BY id DESC", (task_id,)).fetchall()
+    if notices:
+        notice = notices[0]
+        name = notice["error_type"]
+        cls = getattr(builtins, name, None) or getattr(subprocess, name, None) or getattr(sqlite3, name, None)
+        safe = isinstance(cls, type) and issubclass(cls, Exception)
+        result.update(notice_wake_failed_count=len(notices), latest_notice_wake_failure=dict(
+            message_id=notice["id"], kind=notice["kind"], created_at=notice["created_at"],
+            recipient_orch=notice["recipient_orch"], error_type=name if safe else "unknown"))
+    return result
+
+
+def latest_message(con, task_id, kind):
+    return con.execute("SELECT * FROM messages WHERE task_id=? AND kind=? ORDER BY id DESC LIMIT 1",
+                       (task_id, kind)).fetchone()
+
+
+def move_task_orch(con, moves, to_orch):
+    """Move open tasks to another Orch and log one adopt event each, all in one transaction.
+
+    moves: [(task_id, expected_from_orch, body, evidence)]. Only tasks.orch_thread changes: messages
+    (and their read_at), worktree, branch, job and worker process stay as they were. Any failure, or a task
+    that closed or changed owner since the caller looked, rolls the whole batch back. Returns the adopt
+    message ids in order.
+    """
+    marks = ",".join("?" * len(OPEN))
+    with task_delivery(con, [m[0] for m in moves]), immediate(con):
+        target = get_orch(con, to_orch)
+        if target is None:
+            raise ValueError(f"unknown orch {to_orch}; the new owner must be registered")
+        if target["stopped_at"] is not None:
+            raise ValueError(f"orch {to_orch} is stopped")
+        if target["kind"] not in ("claude", "codex"):
+            raise ValueError(f"orch {to_orch} has an unsupported kind")
+        if isinstance(moves, AdoptionMoves):
+            if dict(target) != moves.target:
+                raise ValueError("target registry changed while adopting; nothing was moved")
+            for owner, expected in moves.owners.items():
+                row = get_orch(con, owner)
+                if (dict(row) if row is not None else None) != expected:
+                    raise ValueError("old owner registry changed while adopting; nothing was moved")
+        ids = []
+        now = time.time()
+        for task_id, from_orch, body, evidence in moves:
+            cur = con.execute(
+                f"UPDATE tasks SET orch_thread=?, updated_at=? WHERE id=? AND orch_thread=? AND status IN ({marks})",
+                (to_orch, now, task_id, from_orch, *OPEN))
+            if cur.rowcount != 1:
+                raise ValueError(f"task {task_id} changed owner or closed while adopting; nothing was moved")
+            ids.append(add_message(con, task_id, "adopt", body, evidence))
+            con.execute("UPDATE messages SET recipient_orch=? WHERE id=?", (to_orch, ids[-1]))
+        return ids
 
 
 def mark_read(con, ids):
