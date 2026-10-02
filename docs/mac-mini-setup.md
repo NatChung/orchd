@@ -17,6 +17,11 @@ It checks and prints. It never installs, logs in, trusts, writes config, copies 
 runs the commands it prints. All paths come from the current `HOME` (override with `--home` / `--projects`).
 Statuses: `pass`, `missing`, `unknown` (could not verify; never counted as pass), `manual`.
 
+Commands it runs are a fixed read-only allowlist (exact argv, enforced in code and pinned by a test): `--version`
+and `claude --help`, `claude auth status`, `codex login status`, `gh auth status`, `git config --global --get
+user.name|user.email`, and `ssh-keygen -l -f <key>.pub`. Anything else is refused. `--strict` also applies to
+`--interactive` (quitting early with open steps exits 1).
+
 Each open step shows who runs it (Nat, at the target machine's own terminal), the exact command, the source it was
 checked from, and the receipt that proves it worked.
 
@@ -35,6 +40,12 @@ nat-email / nat-slack / nat-line connector directories, and codegraph / rtk / gc
 - Whether GitHub accepts an SSH key: needs a network call, which the wizard does not make. Nat runs `ssh -T <alias>`.
 - Connector token presence: location differs per connector and secrets are never read. Status is `unknown`.
 - Per-repo git author email: depends on which identity owns the repo.
+- Login state passes only on affirmative output (`gh auth status` exit 0 with logged-in accounts; `claude auth status`
+  `loggedIn: true`; `codex login status` saying logged in). A non-zero `gh` exit (e.g. one invalid token) is `unknown`.
+  Credential files and `apiKey`-style config values are never read as proof or shown; of `~/.claude.json` and
+  `~/.codex/config.toml` only trust flags and `mcp_servers.orchd` presence are kept.
+- SSH keys: private key files are never opened; a key counts only if its `.pub` passes `ssh-keygen -l`. Whether the
+  private half matches it is not checked.
 - Login state falls back to `unknown` when `claude auth status` / `codex login status` fail or are unsupported.
 - `orchd doctor` (PR #22) is not run or parsed. If absent from the checkout the step says so; it is never a pass.
 

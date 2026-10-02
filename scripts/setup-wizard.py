@@ -32,6 +32,13 @@ NAT_ACCOUNTS = {
 }
 NAT_CONNECTORS = ("email-tools", "slack-tools", "line-tools")
 NAT_CLIS = ("codegraph", "rtk", "gcloud", "fastlane")
+PY_VERSION_CHECK = "import sys;print(sys.version_info >= (3, 11))"
+READ_ONLY_ARGV = {
+    ("git", "--version"), ("python3", "--version"), ("claude", "--version"), ("codex", "--version"), ("gh", "--version"),
+    ("python3", "-c", PY_VERSION_CHECK), ("claude", "--help"),
+    ("claude", "auth", "status"), ("codex", "login", "status"), ("gh", "auth", "status"),
+    ("git", "config", "--global", "--get", "user.name"), ("git", "config", "--global", "--get", "user.email"),
+}
 MIN_NOTE = "orchd needs `claude --bg` and the hidden `--messaging-socket-path` flag (Claude Code 2.1.284 was tested)"
 
 
@@ -43,7 +50,19 @@ class Env:
     which: object = shutil.which
     environ: dict = field(default_factory=lambda: dict(os.environ))
 
+    def allowed(self, argv):
+        """Fixed read-only argv allowlist. Anything else (logins, config writes, key reads) is refused."""
+        a = tuple(argv)
+        if a in READ_ONLY_ARGV:
+            return True
+        if len(a) == 4 and a[:3] == ("ssh-keygen", "-l", "-f"):
+            pub = Path(a[3])  # fingerprint of a PUBLIC key file only; the private key is never opened
+            return pub.suffix == ".pub" and pub.parent == self.home / ".ssh"
+        return False
+
     def run(self, argv, timeout=20):
+        if not self.allowed(argv):
+            raise ValueError(f"refusing non-allowlisted command: {argv!r}")
         if self.runner:
             return self.runner(argv)
         try:
@@ -100,10 +119,13 @@ def read_toml(path):
 
 
 def claude_trusted(env, path):
+    # ~/.claude.json can also hold an apiKey. Keep only the one trust boolean; every other key is dropped at once
+    # and never used for a verdict or shown.
     data = read_json(env.home / ".claude.json")
     if data is None:
         return UNKNOWN, f"{env.home}/.claude.json unreadable or missing (nothing trusted yet, or file not parseable)"
-    ok = bool((data.get("projects") or {}).get(str(path), {}).get("hasTrustDialogAccepted"))
+    ok = bool(((data.get("projects") or {}).get(str(path)) or {}).get("hasTrustDialogAccepted") is True)
+    del data
     return (PASS, "trusted") if ok else (MISSING, "not trusted")
 
 
@@ -112,6 +134,7 @@ def codex_trusted(env, path):
     if data is None:
         return UNKNOWN, f"{env.home}/.codex/config.toml unreadable or missing"
     level = ((data.get("projects") or {}).get(str(path)) or {}).get("trust_level")
+    del data
     return (PASS, "trusted") if level == "trusted" else (MISSING, "not trusted")
 
 
@@ -126,14 +149,36 @@ def tool_step(env, name, profile, who, title, commands, receipt, version_args=("
                 "PATH lookup + version", commands, receipt)
 
 
-def gh_accounts(env):
-    """Account names only. Output of `gh auth status` is never kept, so masked or real tokens cannot leak."""
+def gh_state(env):
+    """(rc, logged_in, failed) from `gh auth status`; None if gh is missing. Only account names are kept, so masked or
+    real tokens cannot leak. `Failed to log in ... account X` lines (invalid token) are not logged-in accounts, and a
+    non-zero exit means gh could not confirm every account, so callers must not report pass."""
     if not env.which("gh"):
         return None
     rc, out = env.run(["gh", "auth", "status"])
-    if rc not in (0, 1):
-        return None
-    return sorted(set(re.findall(r"account (\S+)", out)))
+    ok = sorted(set(re.findall(r"Logged in to \S+ account (\S+)", out)))
+    bad = sorted(set(re.findall(r"Failed to log in to \S+ account (\S+)", out)))
+    return rc, ok, bad
+
+
+def gh_login_ok(state, acct=None):
+    """True only when gh exits 0 (every stored token verified) and the account is listed as logged in."""
+    if state is None or state[0] != 0:
+        return False
+    return bool(state[1]) if acct is None else acct in state[1]
+
+
+def pub_key_ok(env, key):
+    """The private key file must exist (stat only) and its .pub must parse as a public key. The private file is
+    never opened, so a file of garbage cannot pass by existing and a real key is never read."""
+    pub = Path(str(key) + ".pub")
+    if not key.is_file() or not pub.is_file():
+        return False
+    try:
+        rc, _ = env.run(["ssh-keygen", "-l", "-f", str(pub)])
+    except ValueError:
+        return False
+    return rc == 0
 
 
 def ssh_hosts(env):
@@ -153,9 +198,10 @@ def foreign_homes(env, path):
         text = Path(path).read_text()
     except OSError:
         return None
-    mine = str(env.home)
-    found = set(re.findall(r"/(?:Users|home)/[^/\s\"']+", text))
-    return sorted(p for p in found if not (mine == p or mine.startswith(p + "/")))
+    # Blank out this machine's own HOME first (it may contain spaces), then look for other users' home dirs.
+    text = re.sub(re.escape(str(env.home)) + r"(?=[/\"'\s]|$)", "<HOME>", text)
+    found = {m.strip() for m in re.findall(r"/(?:Users|home)/[^/\"'\n]+", text)}
+    return sorted(found)
 
 
 # -- generic steps ----------------------------------------------------------------------------------------------
@@ -168,7 +214,7 @@ def generic_steps(env):
     ]
     p3 = steps[-1]
     if p3.status == PASS:
-        rc, out = env.run(["python3", "-c", "import sys;print(sys.version_info >= (3, 11))"])
+        rc, out = env.run(["python3", "-c", PY_VERSION_CHECK])
         if out.strip() != "True":
             p3.status, p3.detail = MISSING, p3.detail + "; needs 3.11+ (tomllib)"
     claude = tool_step(env, "claude", "generic", who, "Claude Code installed", ["# install per https://claude.com/claude-code"],
@@ -186,26 +232,36 @@ def generic_steps(env):
 
     # Logins: the web flow makes the provider show a one-time code / URL to Nat. No token is typed or pasted.
     if env.which("claude"):
-        rc, _ = env.run(["claude", "auth", "status"])
-        st, d = (PASS, "`claude auth status` succeeded") if rc == 0 else (UNKNOWN, "`claude auth status` failed or is unsupported by this version; login state unverified")
+        rc, out = env.run(["claude", "auth", "status"])
+        try:
+            logged_in = json.loads(out).get("loggedIn") is True
+        except (ValueError, AttributeError):
+            logged_in = False
+        st, d = ((PASS, "`claude auth status` exit 0 and reports loggedIn: true") if rc == 0 and logged_in
+                 else (UNKNOWN, "`claude auth status` did not report loggedIn: true (failed, unsupported, or logged out); login state unverified"))
     else:
         st, d = MISSING, "claude not installed"
-    steps.append(Step("login-claude", "generic", "Claude Code logged in", who, st, d, "`claude auth status` exit code only",
+    steps.append(Step("login-claude", "generic", "Claude Code logged in", who, st, d, "`claude auth status` exit code + loggedIn flag (output discarded)",
                       ["claude   # then /login and follow the browser flow"], "re-run this wizard: step shows pass"))
     if env.which("codex"):
-        rc, _ = env.run(["codex", "login", "status"])
-        st, d = (PASS, "`codex login status` succeeded") if rc == 0 else (UNKNOWN, "`codex login status` failed; login state unverified")
+        rc, out = env.run(["codex", "login", "status"])
+        low = out.lower()
+        st, d = ((PASS, "`codex login status` exit 0 and says logged in") if rc == 0 and "logged in" in low and "not logged in" not in low
+                 else (UNKNOWN, "`codex login status` did not say logged in (failed or logged out); login state unverified"))
     else:
         st, d = MISSING, "codex not installed"
-    steps.append(Step("login-codex", "generic", "Codex logged in", who, st, d, "`codex login status` exit code only",
+    steps.append(Step("login-codex", "generic", "Codex logged in", who, st, d, "`codex login status` exit code + wording (output discarded)",
                       ["codex login   # browser flow, do not paste tokens"], "re-run this wizard: step shows pass"))
-    accounts = gh_accounts(env)
-    if accounts is None:
-        st, d = (MISSING, "gh not installed") if not env.which("gh") else (UNKNOWN, "`gh auth status` could not be read")
-    elif accounts:
-        st, d = PASS, f"gh accounts logged in: {', '.join(accounts)}"
-    else:
+    gh = gh_state(env)
+    if gh is None:
+        st, d = MISSING, "gh not installed"
+    elif gh_login_ok(gh):
+        st, d = PASS, f"gh exit 0, accounts logged in: {', '.join(gh[1])}"
+    elif gh[0] == 1 and not gh[1] and not gh[2]:
         st, d = MISSING, "no gh account logged in"
+    else:
+        st, d = UNKNOWN, (f"`gh auth status` exit {gh[0]}: gh could not confirm every stored login"
+                          + (f"; invalid: {', '.join(gh[2])}" if gh[2] else "") + (f"; listed: {', '.join(gh[1])}" if gh[1] else ""))
     steps.append(Step("login-gh", "generic", "GitHub CLI logged in (at least one account)", who, st, d,
                       "`gh auth status` (account names only)",
                       ["gh auth login --web   # run directly in a terminal; not via the `!` prefix, it needs the interactive device code"],
@@ -214,7 +270,7 @@ def generic_steps(env):
     # Git author identity
     ident = []
     for key in ("user.name", "user.email"):
-        rc, out = env.run(["git", "config", "--global", key])
+        rc, out = env.run(["git", "config", "--global", "--get", key])
         ident.append(bool(rc == 0 and out.strip()))
     steps.append(Step("git-identity", "generic", "git global author identity set", who, PASS if all(ident) else MISSING,
                       "user.name and user.email set" if all(ident) else "global user.name or user.email missing",
@@ -224,11 +280,13 @@ def generic_steps(env):
 
     # SSH
     ssh_dir = env.home / ".ssh"
-    keys = sorted(p.name for p in ssh_dir.glob("id_*") if not p.name.endswith(".pub")) if ssh_dir.is_dir() else []
-    st = PASS if keys else MISSING
+    names = sorted(p.name for p in ssh_dir.glob("id_*") if not p.name.endswith(".pub")) if ssh_dir.is_dir() else []
+    good = [n for n in names if pub_key_ok(env, ssh_dir / n)]
+    st = PASS if good else UNKNOWN if names else MISSING
     steps.append(Step("ssh-keys", "generic", "an SSH key exists for GitHub push", who, st,
-                      f"private key files: {', '.join(keys) or 'none'} (file names only, contents never read)",
-                      f"{ssh_dir} directory listing",
+                      f"key files: {', '.join(names) or 'none'}; public key valid for: {', '.join(good) or 'none'} "
+                      "(private key contents are never read; validity comes from `ssh-keygen -l` on the .pub file)",
+                      f"{ssh_dir} directory listing + `ssh-keygen -l -f <key>.pub`",
                       [f"ssh-keygen -t ed25519 -f {q(ssh_dir / 'id_ed25519')}   # generate a NEW key on this machine; never copy private keys from the old one",
                        f"cat {q(ssh_dir / 'id_ed25519.pub')}   # add this PUBLIC key at https://github.com/settings/keys"],
                       "`ssh -T git@github.com` replies `Hi <account>!` (Nat runs it; this wizard does no network call)"))
@@ -261,12 +319,14 @@ def generic_steps(env):
         st, d = PASS, f"no foreign home paths in {cfg}"
     steps.append(Step("orch-config-paths", "generic", "Orch .codex/config.toml paths match this HOME", who, st, d,
                       "text scan of the file for /Users/<x> or /home/<x>",
-                      [f"# edit {q(cfg)} so every /Users/<old> becomes {env.home} (it is a tracked file in the orch repo: commit on a branch, do not edit blindly)"],
+                      [f"# edit {q(cfg)} so every /Users/<old> becomes {q(env.home)} (it is a tracked file in the orch repo: commit on a branch, do not edit blindly)"],
                       "re-run this wizard: step shows pass"))
     mcp = read_toml(env.home / ".codex" / "config.toml")
-    srv = ((mcp or {}).get("mcp_servers") or {}).get("orchd") if mcp else None
+    srv = bool(((mcp or {}).get("mcp_servers") or {}).get("orchd")) if mcp else None  # presence only; env/args dropped
+    present = mcp is not None
+    del mcp
     st, d = ((PASS, "[mcp_servers.orchd] present in ~/.codex/config.toml") if srv
-             else (UNKNOWN, "~/.codex/config.toml unreadable") if mcp is None
+             else (UNKNOWN, "~/.codex/config.toml unreadable") if not present
              else (MISSING, "no [mcp_servers.orchd] in ~/.codex/config.toml (needed for the Codex/Astra Orch; the Claude Orch gets its MCP config from `orchd orch`)"))
     steps.append(Step("mcp-orchd-codex", "generic", "orchd MCP registered in Codex", who, st, d, "~/.codex/config.toml mcp_servers.orchd",
                       [f"codex mcp add orchd -- python3 {q(env.checkout / 'bin' / 'orchd')} mcp   # check `codex mcp add --help` for the exact form first"],
@@ -309,17 +369,26 @@ def generic_steps(env):
 def nat_steps(env):
     who = "Nat, at the target machine's own terminal"
     out = []
-    accounts = set(gh_accounts(env) or [])
+    gh = gh_state(env)
     hosts = ssh_hosts(env)
     for acct, (alias, keyfile) in NAT_ACCOUNTS.items():
         key = env.home / ".ssh" / keyfile
         parts, st = [], PASS
-        if acct not in accounts:
+        if gh is None or acct not in gh[1] + gh[2]:
             parts.append(f"gh account {acct} not logged in")
             st = MISSING
-        if not key.exists():
+        elif acct in gh[2]:
+            parts.append(f"gh account {acct} has an invalid token")
+            st = MISSING
+        elif gh[0] != 0:
+            parts.append(f"`gh auth status` exit {gh[0]}: login for {acct} not confirmed")
+            st = UNKNOWN
+        if not key.is_file():
             parts.append(f"{key} missing")
             st = MISSING
+        elif not pub_key_ok(env, key):
+            parts.append(f"{key}.pub missing or not a valid public key (private file not read)")
+            st = UNKNOWN if st == PASS else st
         if alias:
             if hosts is None:
                 parts.append("~/.ssh/config unreadable")
@@ -330,11 +399,11 @@ def nat_steps(env):
         cmds = [f"gh auth login --web   # choose account {acct} in the browser",
                 f"ssh-keygen -t ed25519 -f {q(key)} -C {acct}   # new key on this machine; do not copy the old private key"]
         if alias:
-            cmds.append(f"# add to {q(env.home / '.ssh' / 'config')}:  Host {alias} / HostName github.com / User git / IdentityFile {key} / IdentitiesOnly yes")
+            cmds.append(f"# add to {q(env.home / '.ssh' / 'config')}:  Host {alias} / HostName github.com / User git / IdentityFile {q(key)} / IdentitiesOnly yes")
         cmds.append(f"# register {q(str(key) + '.pub')} on GitHub while logged in as {acct} (Nat, in the browser)")
         out.append(Step(f"gh-{acct}", "nat", f"GitHub account {acct}: gh login + SSH key + alias", who, st,
-                        "; ".join(parts) or "gh login, key file and alias all present (GitHub accepting the key is UNKNOWN: no network check run)",
-                        "`gh auth status` account names, ~/.ssh file existence, ~/.ssh/config Host lines", cmds,
+                        "; ".join(parts) or "gh login verified, key pair and alias present (GitHub accepting the key is UNKNOWN: no network check run)",
+                        "`gh auth status` account names, ~/.ssh file existence + `ssh-keygen -l` on .pub, ~/.ssh/config Host lines", cmds,
                         f"`ssh -T {alias or 'git@github.com'}` replies `Hi {acct}!`"))
     out.append(Step("git-identity-per-repo", "nat", "per-repo git author email (KC repos use the KC address)", who, UNKNOWN,
                     "repo-local user.email depends on which repo belongs to which identity; not derivable by the wizard", "n/a",
@@ -400,7 +469,8 @@ def render(steps, env):
 
 
 def interactive(env, profile, input_fn=input, out=print):
-    """Show open steps one at a time; Enter re-checks. Never executes anything."""
+    """Show open steps one at a time; Enter re-checks. Never executes anything. Returns the final plan so --strict
+    can judge it, including when the user quits early."""
     for step in build_plan(env, profile):
         if step.status == PASS:
             continue
@@ -410,9 +480,12 @@ def interactive(env, profile, input_fn=input, out=print):
                 out(f"  $ {c}")
             if step.receipt:
                 out(f"  receipt: {step.receipt}")
-            ans = input_fn("  Do it yourself, then Enter to re-check, 's' to skip, 'q' to quit: ").strip().lower()
+            try:
+                ans = input_fn("  Do it yourself, then Enter to re-check, 's' to skip, 'q' to quit: ").strip().lower()
+            except EOFError:
+                ans = "q"
             if ans == "q":
-                return
+                return build_plan(env, profile)
             if ans == "s":
                 break
             fresh = next((s for s in build_plan(env, profile) if s.id == step.id), None)
@@ -420,7 +493,9 @@ def interactive(env, profile, input_fn=input, out=print):
                 out("  now pass")
                 break
             step = fresh or step
-    out(render(build_plan(env, profile), env))
+    final = build_plan(env, profile)
+    out(render(final, env))
+    return final
 
 
 def main(argv=None, env=None, input_fn=input):
@@ -435,8 +510,8 @@ def main(argv=None, env=None, input_fn=input):
     home = args.home or Path.home()
     env = env or Env(home=home, projects=args.projects or home / "projects")
     if args.interactive:
-        interactive(env, args.profile, input_fn)
-        return 0
+        steps = interactive(env, args.profile, input_fn)
+        return 1 if args.strict and any(s.status != PASS for s in steps) else 0
     steps = build_plan(env, args.profile)
     print(json.dumps([s.to_dict() for s in steps], indent=2, ensure_ascii=False) if args.json else render(steps, env))
     return 1 if args.strict and any(s.status != PASS for s in steps) else 0
