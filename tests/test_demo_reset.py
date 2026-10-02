@@ -5,6 +5,7 @@ import os
 import socket
 import subprocess
 import shutil
+import sqlite3
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -357,6 +358,179 @@ class DemoResetTest(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertTrue((wt / "late.txt").exists())
         self.assertIn(f"orchd/{tid}", self.branches())
+
+    # --- re-review boundaries: ledger barrier and resource identity ---
+
+    def test_apply_on_idle_db_leaves_no_sidecars(self):
+        self.make_task()
+        self.con.close()
+        before = sorted(p.name for p in self.home.iterdir())
+        code, out = self.run_reset("--apply")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(sorted(p.name for p in self.home.iterdir()), before)
+        self.assertEqual(list(self.projects.joinpath(".orchd-worktrees").glob(".demo-reset-*")), [])
+
+    def test_active_task_committed_after_snapshot_is_seen_under_the_lock(self):
+        # no WAL at snapshot time; a writer then creates one and commits a running demo task
+        _, wt, sdir = self.make_task()
+        self.con.close()
+        self.assertFalse((self.home / "orchd.db-wal").exists())
+        load_tasks = demo_reset.load_tasks
+        def dispatch_after_snapshot(home, repos):
+            tasks = load_tasks(home, repos)
+            writer = store.connect(self.home / "orchd.db")
+            self.addCleanup(writer.close)
+            store.create_task(writer, id="deadbeef", repo=REPO, repo_path=str(self.repo), title="t",
+                              instructions="i", done_when="d", orch_thread="o", codex_bin="c", status="running")
+            return tasks
+        with patch.object(demo_reset, "load_tasks", dispatch_after_snapshot):
+            code, out = self.run_reset("--apply")
+        self.assertEqual(code, 2, out)
+        self.assertIn("deadbeef (running)", out)
+        self.assertTrue(wt.exists())
+        self.assertTrue(sdir.exists())
+        self.assertIn(f"orchd/00000001", self.branches())
+
+    def test_writers_are_held_off_while_apply_acts(self):
+        self.make_task()
+        plan_task = demo_reset.Reset.plan_task
+        blocked = []
+        def try_write(plan, task):
+            writer = sqlite3.connect(self.home / "orchd.db", timeout=0)
+            try:
+                writer.execute("UPDATE tasks SET status='running' WHERE id=?", (task["id"],))
+                writer.commit()
+            except sqlite3.OperationalError as e:
+                blocked.append(str(e))
+            finally:
+                writer.close()
+            plan_task(plan, task)
+        with patch.object(demo_reset.Reset, "plan_task", try_write):
+            code, out = self.run_reset("--apply")
+        self.assertEqual(blocked, ["database is locked"], out)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.con.execute("SELECT status FROM tasks").fetchone()[0], "closed")
+
+    def test_busy_db_refuses_to_run(self):
+        _, wt, _ = self.make_task()
+        self.con.execute("BEGIN IMMEDIATE")
+        self.addCleanup(lambda: self.con.in_transaction and self.con.execute("ROLLBACK"))
+        with patch.object(demo_reset, "LOCK_WAIT_S", 0):
+            code, out = self.run_reset("--apply")
+        self.assertEqual(code, 2, out)
+        self.assertIn("write lock", out)
+        self.assertTrue(wt.exists())
+
+    def test_lock_budget_stops_starting_new_chains(self):
+        _, wt, sdir = self.make_task()
+        with patch.object(demo_reset, "LOCK_BUDGET_S", -1):
+            code, out = self.run_reset("--apply")
+        self.assertEqual(code, 1, out)
+        self.assertIn("not attempted: the DB write lock was held", out)
+        self.assertTrue(wt.exists())
+        self.assertTrue(sdir.exists())
+
+    def _after_plan(self, fn):
+        plan_task = demo_reset.Reset.plan_task
+        done = []
+        def wrapped(plan, task):
+            plan_task(plan, task)
+            if not done:  # once, after the first task is planned
+                done.append(fn())
+        return patch.object(demo_reset.Reset, "plan_task", wrapped)
+
+    def test_remote_replaced_after_plan_is_kept(self):
+        for kind in ("symlink", "directory"):
+            with self.subTest(kind):
+                tid, wt, _ = self.make_task()
+                foreign = self.tmp / f"foreign-{kind}.git"
+                sh("git", "clone", "--bare", str(self.remote), str(foreign))
+                original = self.tmp / f"original-{kind}.git"
+                def swap():
+                    self.remote.rename(original)
+                    if kind == "symlink":
+                        self.remote.symlink_to(foreign, target_is_directory=True)
+                    else:
+                        foreign.rename(self.remote)
+                with self._after_plan(swap):
+                    code, out = self.run_reset("--apply")
+                self.assertEqual(code, 1, out)
+                self.assertIn("remote", out)
+                self.assertIn(f"refs/heads/orchd/{tid}", sh("git", "ls-remote", str(self.remote)))
+                self.assertIn(f"refs/heads/orchd/{tid}", sh("git", "ls-remote", str(original)))
+                self.assertTrue(wt.exists())
+                self.assertIn(f"orchd/{tid}", self.branches())
+                if self.remote.is_symlink():
+                    self.remote.unlink()
+                else:
+                    shutil.rmtree(self.remote)
+                original.rename(self.remote)
+
+    def test_worktree_replaced_after_plan_is_kept(self):
+        tid, wt, _ = self.make_task()
+        moved = self.tmp / "owned-moved"
+        def swap():
+            sh("git", "worktree", "move", str(wt), str(moved), cwd=self.repo)
+            sh("git", "worktree", "add", "-b", "foreign", str(wt), "main", cwd=self.repo)
+        with self._after_plan(swap):
+            code, out = self.run_reset("--apply")
+        self.assertEqual(code, 1, out)
+        self.assertTrue(moved.exists())
+        self.assertEqual(sh("git", "rev-parse", "--abbrev-ref", "HEAD", cwd=wt), "foreign")
+        self.assertIn(f"orchd/{tid}", self.branches())
+
+    def test_worktree_swapped_at_move_time_is_moved_back(self):
+        # the swap lands after every check, right before `git worktree move`: the quarantine catches it
+        tid, wt, _ = self.make_task()
+        moved = self.tmp / "owned-moved"
+        mkdtemp = demo_reset.tempfile.mkdtemp
+        def swap_then_mkdtemp(*a, **kw):
+            if kw.get("dir") != wt.parent:  # only the quarantine, not the DB snapshot's temp dir
+                return mkdtemp(*a, **kw)
+            sh("git", "worktree", "move", str(wt), str(moved), cwd=self.repo)
+            sh("git", "worktree", "add", "-b", "foreign", str(wt), "main", cwd=self.repo)
+            (wt / "foreign.txt").write_text("keep\n")
+            sh("git", "add", ".", cwd=wt)
+            sh("git", "commit", "-m", "foreign", cwd=wt)
+            return mkdtemp(*a, **kw)
+        with patch.object(demo_reset.tempfile, "mkdtemp", swap_then_mkdtemp):
+            code, out = self.run_reset("--apply")
+        self.assertEqual(code, 1, out)
+        self.assertIn("moved back", out)
+        self.assertEqual((wt / "foreign.txt").read_text(), "keep\n")
+        self.assertEqual(sh("git", "rev-parse", "--abbrev-ref", "HEAD", cwd=wt), "foreign")
+        self.assertTrue(moved.exists())
+        self.assertIn(f"orchd/{tid}", self.branches())
+        self.assertEqual(list(wt.parent.glob(".demo-reset-*")), [])
+
+    def test_dirty_at_remove_time_is_moved_back_to_its_path(self):
+        tid, wt, _ = self.make_task()
+        with self._after_plan(lambda: (wt / "late-untracked.txt").write_text("keep\n")):
+            code, out = self.run_reset("--apply")
+        self.assertEqual(code, 1, out)
+        self.assertIn("moved back", out)
+        self.assertEqual((wt / "late-untracked.txt").read_text(), "keep\n")
+        self.assertIn(f"orchd/{tid}", self.branches())
+        self.assertEqual(list(wt.parent.glob(".demo-reset-*")), [])
+
+    def test_symlinked_projects_or_remotes_root_is_refused(self):
+        for root in ("projects", "remotes"):
+            with self.subTest(root):
+                tid, wt, _ = self.make_task()
+                path = getattr(self, root)
+                physical = self.tmp / f"physical-{root}"
+                path.rename(physical)
+                path.symlink_to(physical, target_is_directory=True)
+                try:
+                    code, out = self.run_reset("--apply")
+                finally:
+                    path.unlink()
+                    physical.rename(path)
+                self.assertEqual(code, 1, out)
+                self.assertIn("passes through a symlink", out)
+                self.assertTrue(wt.exists())
+                self.assertIn(f"orchd/{tid}", self.branches())
+                self.assertIn(f"refs/heads/orchd/{tid}", self.remote_branches())
 
 
 if __name__ == "__main__":
