@@ -252,6 +252,13 @@ class VerifyTest(unittest.TestCase):
         self.assertEqual(verify.status(self.con, "A")["state"], "pass")
         self.assertEqual(verify.status(self.con, "A")["lock_sha"], lock["sha"])
 
+    def test_background_writer_of_a_failing_command_is_killed_too(self):
+        command, pidfile = self.late_writer("exit 5")
+        self.lock(command=command)
+        result = verify.run(self.con, "V")
+        self.assert_writer_gone_and_nothing_landed(pidfile)
+        self.assertEqual((result["exit"], result["passed"], result["cleanup"], result["dirty"]), (5, False, True, False))
+
     def test_cli_timeout_leaves_no_late_write_in_the_verifier_tree(self):
         command, pidfile = self.late_writer("sleep 30", delay=2)  # the review's repro: writes 2 s in, timeout 1 s
         self.lock(command=command)
