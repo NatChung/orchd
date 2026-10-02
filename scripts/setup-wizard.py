@@ -19,9 +19,13 @@ import shutil
 import stat
 import subprocess
 import sys
-import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+
+try:  # Python 3.11+. Without it TOML cannot be judged: those checks report unknown, never a regex guess
+    import tomllib
+except ImportError:  # depends on interpreter (system python3 is 3.9 on macOS)
+    tomllib = None
 
 PASS, MISSING, UNKNOWN, MANUAL = "pass", "missing", "unknown", "manual"
 
@@ -162,7 +166,12 @@ def read_json(path):
         return None
 
 
+NO_TOMLLIB = "this Python has no tomllib (3.11+); TOML is not guessed with regex"
+
+
 def read_toml(path):
+    if tomllib is None:
+        return None
     try:
         return tomllib.loads(Path(path).read_text())
     except (OSError, ValueError):
@@ -185,6 +194,8 @@ def claude_trusted(env, path):
 def codex_trusted(env, path):
     if "CODEX_HOME" in env.environ:
         return UNKNOWN, "CODEX_HOME is set, so Codex does not read ~/.codex/config.toml; trust not checked"
+    if tomllib is None:
+        return UNKNOWN, f"{NO_TOMLLIB}; Codex trust not checked"
     data = read_toml(env.home / ".codex" / "config.toml")
     if data is None:
         return UNKNOWN, f"{env.home}/.codex/config.toml unreadable or missing"
@@ -446,8 +457,10 @@ def generic_steps(env):
             steps.append(Step(f"trust-orch-{label.lower()}", "generic", f"Orch home trusted in {label}", who, st, d, src, how,
                               "re-run this wizard: step shows pass"))
         cfg = home / ".codex" / "config.toml"
-        foreign = foreign_homes(env, cfg)
-        if foreign is None:
+        foreign = None if tomllib is None else foreign_homes(env, cfg)
+        if tomllib is None:
+            st, d = UNKNOWN, f"{NO_TOMLLIB}; {cfg} not checked"
+        elif foreign is None:
             st, d = UNKNOWN, f"{cfg} not readable or not valid TOML"
         elif foreign:
             st, d = MISSING, f"{cfg} hardcodes another machine's paths: {', '.join(foreign)}"
@@ -462,6 +475,7 @@ def generic_steps(env):
     present = mcp is not None
     del mcp
     st, d = ((PASS, "[mcp_servers.orchd] present in ~/.codex/config.toml") if srv
+             else (UNKNOWN, f"{NO_TOMLLIB}; ~/.codex/config.toml not checked") if tomllib is None
              else (UNKNOWN, "CODEX_HOME is set, so Codex does not read ~/.codex/config.toml; not checked") if "CODEX_HOME" in env.environ
              else (UNKNOWN, "~/.codex/config.toml unreadable") if not present
              else (MISSING, "no [mcp_servers.orchd] in ~/.codex/config.toml (needed for the Codex/Astra Orch; the Claude Orch gets its MCP config from `orchd orch`)"))

@@ -13,6 +13,8 @@ SPEC = importlib.util.spec_from_file_location("setup_wizard", Path(__file__).res
 sw = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(sw)
 
+needs_toml = unittest.skipIf(sw.tomllib is None, "no tomllib on this Python; wizard reports TOML checks unknown")
+
 SECRET = "gho_SECRETTOKEN1234567890"
 
 
@@ -88,6 +90,7 @@ class WizardTest(unittest.TestCase):
             self.assertTrue(steps[sid].detail)
         self.assertTrue(steps["tool-claude"].commands)
 
+    @needs_toml
     def test_trust_missing_vs_pass_for_orch_and_each_repo(self):
         env = make_env(self.tmp.name, Fake(tools={"claude", "codex", "git", "python3", "gh"}))
         orch = env.orch_home
@@ -131,6 +134,7 @@ class WizardTest(unittest.TestCase):
         if not (env.checkout / "orchd" / "doctor.py").exists():
             self.assertIn("not in this checkout", step.detail)
 
+    @needs_toml
     def test_other_machine_paths_in_orch_config_are_flagged(self):
         env = make_env(self.tmp.name, Fake())
         (env.orch_home / ".codex").mkdir(parents=True)
@@ -366,6 +370,7 @@ class WizardTest(unittest.TestCase):
         write_key(env, "id_ed25519")
         self.assertEqual(by_id(sw.build_plan(env, "generic"))["ssh-keys"].status, sw.PASS)
 
+    @needs_toml
     def test_home_with_space_own_paths_are_not_foreign(self):
         env = make_env(self.tmp.name, Fake(), home_name="Nat Space")
         (env.orch_home / ".codex").mkdir(parents=True)
@@ -380,6 +385,7 @@ class WizardTest(unittest.TestCase):
         self.assertIn("/Users/olduser", step.detail)
         self.assertNotIn("Nat Space", step.detail.split("hardcodes")[1])
 
+    @needs_toml
     def test_home_like_users_nat_space_directly(self):
         env = make_env(self.tmp.name, Fake())
         env.home = Path("/Users/Nat Space")
@@ -677,11 +683,13 @@ class HomeBoundaryTest(unittest.TestCase):
         self.cfg.write_text(text)
         return sw.foreign_homes(env, self.cfg)
 
+    @needs_toml
     def test_reviewer_repro_quoted_command_with_space(self):
         text = "[mcp_servers.orchd]\ncommand='/Users/Nat Space/projects/orchd/bin/orchd'\n"
         self.assertEqual(self.scan("/Users/Nat", text), ["/Users/Nat Space"])
         self.assertEqual(self.scan("/Users/Nat Space", text), [])
 
+    @needs_toml
     def test_prefix_overlap_and_linux_homes_with_spaces(self):
         self.assertEqual(self.scan("/Users/Nat", '"/Users/Natalie/x" = 1\n'), ["/Users/Natalie"])
         self.assertEqual(self.scan("/Users/Nat", '"/Users/Nat/x" = 1\nk = "/Users/Nat"\n'), [])
@@ -787,6 +795,7 @@ class OrchdPathOverrideTest(unittest.TestCase):
                      environ={"HOME": str(self.target), **{k: str(v) for k, v in overrides.items()}})
         return by_id(sw.build_plan(env, "generic"))
 
+    @needs_toml
     def test_same_home_orch_home_override_is_honoured(self):
         steps = self.same(ORCHD_ORCH_HOME=self.caller / "orch")
         self.assertEqual(steps["orch-home"].status, sw.PASS)
@@ -807,3 +816,50 @@ class OrchdPathOverrideTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NoTomllibTest(unittest.TestCase):
+    """Python 3.9/3.10 has no tomllib. TOML-backed checks must say unknown (never pass/missing, never crash) and the
+    non-TOML checks must still run. Forced here so it is judged on every interpreter."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        real = sw.tomllib
+        sw.tomllib = None
+        self.addCleanup(setattr, sw, "tomllib", real)
+
+    def test_toml_checks_unknown_even_when_file_would_say_pass_or_missing(self):
+        env = make_env(self.tmp.name, Fake(tools={"git", "python3"}))
+        (env.orch_home / ".codex").mkdir(parents=True)
+        (env.orch_home / "AGENTS.md").write_text("x")
+        (env.orch_home / ".codex" / "config.toml").write_text(f'"/Users/olduser/x" = "write"\n[projects."{env.orch_home}"]\ntrust_level = "trusted"\n')
+        (env.home / ".codex").mkdir()
+        (env.home / ".codex" / "config.toml").write_text(f'[projects."{env.orch_home}"]\ntrust_level = "trusted"\n[mcp_servers.orchd]\ncommand = "x"\n')
+        steps = by_id(sw.build_plan(env, "generic"))
+        for sid in ("trust-orch-codex", "orch-config-paths", "mcp-orchd-codex"):
+            self.assertEqual(steps[sid].status, sw.UNKNOWN, sid)
+            self.assertIn("tomllib", steps[sid].detail, sid)
+        self.assertEqual(steps["tool-git"].status, sw.PASS)  # non-TOML checks still run
+        self.assertIn(steps["orch-home"].status, (sw.PASS, sw.MISSING))
+
+    def test_read_toml_returns_none_without_parsing(self):
+        p = Path(self.tmp.name) / "c.toml"
+        p.write_text("a = 1\n")
+        self.assertIsNone(sw.read_toml(p))
+
+    def test_json_checks_unaffected(self):
+        env = make_env(self.tmp.name, Fake(tools={"claude"}))
+        (env.home / ".claude.json").write_text(json.dumps({"projects": {str(env.orch_home): {"hasTrustDialogAccepted": True}}}))
+        self.assertEqual(sw.claude_trusted(env, env.orch_home)[0], sw.PASS)
+
+
+class ImportWithoutTomllibTest(unittest.TestCase):
+    def test_module_imports_and_runs_help_when_tomllib_is_blocked(self):
+        import subprocess, sys
+        script = Path(__file__).resolve().parents[1] / "scripts" / "setup-wizard.py"
+        code = ("import sys; sys.modules['tomllib'] = None; import runpy; sys.argv = [%r, '--help']; "
+                "runpy.run_path(%r, run_name='__main__')" % (str(script), str(script)))
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        self.assertIn("usage:", r.stdout)
+        self.assertNotIn("ImportError", r.stderr)
