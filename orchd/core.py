@@ -151,9 +151,15 @@ def _short(text, limit=160):
     return cut + "…"
 
 
+def task_model(task):
+    """The task's stored full model id; "unknown" for tasks dispatched before models were stored (null/empty)."""
+    model = task["model"]
+    return model.strip() if isinstance(model, str) and model.strip() else "unknown"
+
+
 def wake_text(task, line):
     """Notification text; carries the task's stored model so the Orch can tell Claude from Codex workers."""
-    model = (task["model"] or "").strip() or "unknown"  # tasks dispatched before models were stored have none
+    model = task_model(task)
     return f"[orchd] {task['repo']}/{task['id']} ({model}) {line} — 請呼叫 orchd 的 inbox 工具讀取。"
 
 
@@ -205,32 +211,68 @@ def inbox(con, orch_thread):
     rows = store.unread_for_thread(con, orch_thread)
     store.mark_read(con, [r["id"] for r in rows])
     return [dict(task_id=r["task_id"], repo=r["repo"], title=r["title"], kind=r["kind"],
-                 body=r["body"], evidence=r["evidence"], task_status=r["status"]) for r in rows]
+                 body=r["body"], evidence=r["evidence"], task_status=r["status"],
+                 model=task_model(r)) for r in rows]
 
 
-def answer(con, rt, task_id, text):
+class _ResumeFailed(Exception):
+    pass
+
+
+def answer(con, rt, task_id, text=None, flush=False):
+    """Deliver an answer, or queue it while a Codex worker is mid-turn.
+
+    Returns {status: delivered|queued|failed, delivered: n, pending: n}. A Codex worker cannot take a message
+    mid-turn, so its answers wait in FIFO order until a later `answer` (or `flush=True`) finds it between
+    turns; they then go out together as one new turn. Nothing else sends them (see docs/decisions.md)."""
     task = store.get_task(con, task_id)
     if task["status"] == "closed":
         raise ValueError(f"task {task_id} is closed")
-    message = f"[orchd answer {task_id}]\n{text}"
-    if worker_kind(task["model"]) == "codex":
-        if not task["session_id"] or not task["worktree"]:
-            raise ValueError(f"task {task_id} has no codex thread")
-        for _ in range(120):  # `orchd ask` wakes the Orch before the worker's turn has finished exiting
-            if not (task["job_id"] and rt.pid_alive(task["job_id"])):
-                break
-            rt.sleep(0.5)
-        else:
-            raise ValueError(f"task {task_id}'s codex worker is still in a turn; answer after it asks or reports")
-        job = rt.resume_codex_worker(task["worktree"], rt.codex_log(task_id), task["session_id"], message,
-                                     task["model"])
-        store.update_task(con, task_id, job_id=job)
-    else:
+    if text is None and not flush:
+        raise ValueError("answer needs text, or flush=true to send queued answers")
+    if worker_kind(task["model"]) != "codex":
+        if text is None:
+            return dict(status="delivered", delivered=0, pending=0)
         if not task["socket"] or not task["session_id"]:
             raise ValueError(f"task {task_id} has no running worker")
-        rt.send_uds(task["socket"], task["session_id"], message)
-    store.add_message(con, task_id, "answer", text)
-    store.update_task(con, task_id, status="acked")
+        rt.send_uds(task["socket"], task["session_id"], f"[orchd answer {task_id}]\n{text}")
+        store.add_message(con, task_id, "answer", text)
+        store.update_task(con, task_id, status="acked")
+        return dict(status="delivered", delivered=1, pending=0)
+    if not task["session_id"] or not task["worktree"]:
+        raise ValueError(f"task {task_id} has no codex thread")
+    if text is not None:  # stored before any attempt, so a busy turn or a failed resume loses nothing
+        store.add_message(con, task_id, store.QUEUED, text)
+    for _ in range(120):  # `orchd ask` wakes the Orch before the worker's turn has finished exiting
+        if not (task["job_id"] and rt.pid_alive(task["job_id"])):
+            break
+        rt.sleep(0.5)
+        task = store.get_task(con, task_id)
+    try:
+        with store.immediate(con):
+            task = store.get_task(con, task_id)  # re-read under the lock: another call may have resumed or closed
+            if task["status"] == "closed":
+                raise ValueError(f"task {task_id} is closed; its queued answers stay undelivered")
+            pending = store.pending_answers(con, task_id)
+            if not pending:  # nothing waits, even if a concurrent flush sent this call's text
+                return dict(status="delivered", delivered=0, pending=0)
+            if task["job_id"] and rt.pid_alive(task["job_id"]):
+                return dict(status="queued", delivered=0, pending=len(pending))
+            message = "\n\n".join(f"[orchd answer {task_id}]\n{row['body']}" for row in pending)
+            try:
+                job = rt.resume_codex_worker(task["worktree"], rt.codex_log(task_id), task["session_id"], message,
+                                             task["model"])
+            except Exception as error:
+                raise _ResumeFailed(error) from error
+            store.mark_read(con, [row["id"] for row in pending])
+            for row in pending:
+                store.add_message(con, task_id, "answer", row["body"])
+            store.update_task(con, task_id, job_id=job, status="acked")
+    except _ResumeFailed as failed:  # rolled back: every answer is still queued for the next flush
+        error = failed.__cause__
+        return dict(status="failed", delivered=0, pending=len(store.pending_answers(con, task_id)),
+                    error=f"{type(error).__name__}: {error}"[:500])
+    return dict(status="delivered", delivered=len(pending), pending=0)
 
 
 def list_open(con, rt):
@@ -246,7 +288,7 @@ def list_open(con, rt):
         else:
             alive = claude_job_alive(jobs, t["job_id"])
         out.append(dict(task_id=t["id"], repo=t["repo"], title=t["title"], status=t["status"],
-                        worker_alive=alive, worktree=t["worktree"], branch=t["branch"],
+                        model=task_model(t), worker_alive=alive, worktree=t["worktree"], branch=t["branch"],
                         orch_thread=t["orch_thread"], note=t["note"],
                         owner_health=owner_health(store.get_orch(con, t["orch_thread"]), jobs),
                         notification_delivery=store.notification_delivery(con, t["id"]),
