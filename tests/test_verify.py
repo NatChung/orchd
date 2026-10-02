@@ -249,6 +249,19 @@ class VerifyTest(unittest.TestCase):
         self.assertEqual((by_task["A"]["state"], by_task["A"]["verifier"]), ("pass", "V"))
         self.assertEqual((by_task["V"]["state"], by_task["V"]["role"]), ("pass", "verifier"))
 
+    def test_inbox_keeps_every_message_when_a_verification_lookup_breaks(self):
+        rt = FakeRuntime()
+        self.lock()
+        core.report(self.con, rt, "A", "done", "impl", "")
+        core.progress(self.con, rt, "V", "verifier note")
+        self.con.execute("UPDATE tasks SET repo_path=?, worktree=? WHERE id='A'",
+                         (str(self.tmp / "gone-repo"), str(self.tmp / "gone-wt")))
+        self.con.execute("UPDATE tasks SET verifies='deleted' WHERE id='V'")
+        by_task = {m["task_id"]: m["verification"] for m in core.inbox(self.con, "thread-A")}
+        self.assertEqual(by_task["A"]["state"], "stale")  # current SHA unknown is not a pass
+        self.assertEqual(by_task["V"], dict(state="error", error="KeyError"))
+        self.assertEqual(core.inbox(self.con, "thread-A"), [])
+
     def test_dispatch_stores_the_spec_and_validates_verifies(self):
         rt = FakeRuntime()
         kw = dict(orch_thread="thread-A", repo="demo", title="t", instructions="i", done_when="d",

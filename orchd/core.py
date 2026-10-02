@@ -228,13 +228,16 @@ def ask(con, rt, task_id, question):
 
 def inbox(con, orch_thread):
     rows = store.unread_for_thread(con, orch_thread)
-    store.mark_read(con, [r["id"] for r in rows])
     checked = {}
-    for r in rows:  # only tasks with a lock or a verifies link shell out to git
+    for r in rows:  # only tasks with a lock or a verifies link shell out to git; before mark_read, never losing rows
         if r["task_id"] not in checked:
-            task = store.get_task(con, r["task_id"])
-            checked[r["task_id"]] = (verification.status(con, task["id"]) if verification.has_any(con, task)
-                                     else dict(state="none"))
+            try:
+                task = store.get_task(con, r["task_id"])
+                checked[r["task_id"]] = (verification.status(con, task["id"]) if verification.has_any(con, task)
+                                         else dict(state="none"))
+            except Exception as error:
+                checked[r["task_id"]] = dict(state="error", error=type(error).__name__)
+    store.mark_read(con, [r["id"] for r in rows])
     return [dict(task_id=r["task_id"], repo=r["repo"], title=r["title"], kind=r["kind"],
                  body=r["body"], evidence=r["evidence"], task_status=r["status"],
                  model=task_model(r), verification=checked[r["task_id"]]) for r in rows]

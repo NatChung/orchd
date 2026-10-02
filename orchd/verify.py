@@ -11,6 +11,7 @@ Trust: every worker runs as the same local user and can write this DB, so the re
 not tamperproof. The Orch cross-checks it against the verifier's own report.
 """
 import json
+import os
 import subprocess
 
 from . import store
@@ -166,7 +167,7 @@ def _current_sha(task):
     """The author's branch tip; the shared branch ref outlives the worktree."""
     candidates = [(task["repo_path"], f"refs/heads/{task['branch']}")] if task["branch"] else []
     for cwd, rev in candidates + [(task["worktree"], "HEAD")]:
-        if cwd:
+        if cwd and os.path.isdir(cwd):
             got = subprocess.run(["git", "rev-parse", "--verify", "-q", rev], cwd=cwd, capture_output=True, text=True)
             if got.returncode == 0:
                 return got.stdout.strip()
