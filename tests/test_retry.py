@@ -58,6 +58,9 @@ class RetryRuntime(FakeRuntime):
     def codex_running(self, pid):
         return pid in self.codex_live
 
+    def stop_task_worker(self, kind, job, marks=()):  # close's confirmed stop (PR #14): the job really goes away
+        (self.stop_codex if kind == "codex" else self.stop_worker)(job)
+
     def stop_codex(self, pid):
         self.stopped.append(("codex", pid))
         if pid not in self.stop_ignored:
