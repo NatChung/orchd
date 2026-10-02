@@ -1,7 +1,10 @@
 import io
 import json
+import sqlite3
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -18,6 +21,13 @@ class RetryRuntime(FakeRuntime):
         self.missing, self.slept, self.started, self.stop_ignored = set(), [], [], set()
         self.codex_live = set()
         self.next_job = 0
+        self.live("job1")
+
+    def live(self, job):
+        """A running Claude job as `claude agents --json` lists it: pid and status only while the process lives."""
+        pid = str(7000 + len(self.jobs) + self.next_job)
+        self.jobs[job] = {"pid": pid, "status": "busy", "state": "working"}
+        self.alive_pids.add(pid)
 
     def exists(self, path):
         return path not in self.missing
@@ -29,7 +39,7 @@ class RetryRuntime(FakeRuntime):
         self.next_job += 1
         job, session = f"job{self.next_job}", f"session{self.next_job}"
         self.started.append(("claude", worktree, sock, model))
-        self.jobs[job] = {}
+        self.live(job)
         self.brief, self.model = brief, model
         return job, session
 
@@ -37,12 +47,13 @@ class RetryRuntime(FakeRuntime):
         self.next_job += 1
         self.started.append(("codex", worktree, log, model))
         self.codex_prompt, self.model = prompt, model
+        self.codex_live.add(str(5000 + self.next_job))
         return str(5000 + self.next_job), f"thread-{self.next_job}"
 
     def stop_worker(self, job):
         self.stopped.append(job)
-        if job not in self.stop_ignored:
-            self.jobs.pop(job, None)
+        if job not in self.stop_ignored and job in self.jobs:
+            self.alive_pids.discard(self.jobs.pop(job).get("pid"))
 
     def codex_running(self, pid):
         return pid in self.codex_live
@@ -184,6 +195,7 @@ class RetryTest(unittest.TestCase):
         self.assertEqual(self.rt.stopped, [("codex", t["job_id"])])
         self.assertIn("999", self.rt.codex_live)
         u = self.dispatch("sol")  # between turns there is nothing to stop
+        self.rt.codex_live.discard(u["job_id"])
         core.retry(self.con, self.rt, u["id"], "sol", "fresh context")
         self.assertNotIn(("codex", u["job_id"]), self.rt.stopped)
 
@@ -261,6 +273,235 @@ class RetryTest(unittest.TestCase):
         self.assertEqual(json.loads(ok["content"][0]["text"])["model"], "gpt-6.1-sol")
         self.assertTrue(refused["isError"])
         self.assertIn("reason", refused["content"][0]["text"])
+
+
+class RetryReviewRegressionTest(unittest.TestCase):
+    """The six blockers from the PR #30 review, each red before this change."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Path(self.tmp.name) / "t.db"
+        self.con = store.connect(self.db)
+        self.rt = RetryRuntime()
+        self.rt.pid_alive = lambda pid: pid in self.rt.codex_live or pid in self.rt.alive_pids
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def dispatch(self, model):
+        t = core.dispatch(self.con, self.rt, orch_thread="thread-A", repo="demo", title="T", instructions="do it",
+                          done_when="tests pass", model=model, model_reason="r", task_type="code")
+        self.rt.started.clear()
+        return t
+
+    def rows(self, task_id, kind):
+        return self.con.execute("SELECT id, body, read_at FROM messages WHERE task_id=? AND kind=? ORDER BY id",
+                                (task_id, kind)).fetchall()
+
+    def queue_two(self, t):
+        self.assertEqual(core.answer(self.con, self.rt, t["id"], "first: yes")["status"], "queued")
+        self.assertEqual(core.answer(self.con, self.rt, t["id"], "second: send it")["pending"], 2)
+
+    def live_workers(self):
+        return sorted(self.rt.codex_live | {j for j in self.rt.jobs})
+
+    # 1. queued answers survive a cross-vendor retry: FIFO in the new prompt, one receipt each, nothing duplicated
+    def test_queued_codex_answers_go_fifo_to_new_claude_worker_with_receipts(self):
+        t = self.dispatch("sol")  # its turn is still running, so answers queue
+        self.queue_two(t)
+        core.retry(self.con, self.rt, t["id"], "sonnet", "escalate")
+        text = self.rt.sent[-1][2]
+        self.assertLess(text.index("first: yes"), text.index("second: send it"))
+        self.assertIn(f"[orchd answer {t['id']}]\nfirst: yes", text)
+        self.assertTrue(all(r["read_at"] for r in self.rows(t["id"], store.QUEUED)))
+        self.assertEqual([r["body"] for r in self.rows(t["id"], "answer")], ["first: yes", "second: send it"])
+        sent = len(self.rt.sent)
+        self.assertEqual(core.answer(self.con, self.rt, t["id"], flush=True), dict(status="delivered", delivered=0,
+                                                                                    pending=0))
+        self.assertEqual((len(self.rt.sent), self.rt.resumed), (sent, []))  # no second copy anywhere
+        (event,) = [json.loads(r["body"]) for r in self.rows(t["id"], "retry")]
+        self.assertEqual(event["answers_delivered"], 2)
+
+    def test_queued_answers_go_to_new_codex_thread_not_a_later_resume(self):
+        t = self.dispatch("sol")
+        self.queue_two(t)
+        r = core.retry(self.con, self.rt, t["id"], "sol", "fresh context")
+        self.assertLess(self.rt.codex_prompt.index("first: yes"), self.rt.codex_prompt.index("second: send it"))
+        self.rt.codex_live.discard(r["job_id"])  # the new turn ends
+        self.assertEqual(core.answer(self.con, self.rt, t["id"], flush=True)["delivered"], 0)
+        self.assertEqual(self.rt.resumed, [])
+
+    def test_failed_retry_keeps_answers_queued_and_a_claude_flush_delivers_them_once(self):
+        t = self.dispatch("sol")
+        self.queue_two(t)
+        self.rt.send_uds = lambda *a: (_ for _ in ()).throw(OSError("refused"))
+        with self.assertRaises(OSError):
+            core.retry(self.con, self.rt, t["id"], "sonnet", "escalate")
+        self.assertEqual([r["read_at"] for r in self.rows(t["id"], store.QUEUED)], [None, None])
+        self.assertEqual(self.rows(t["id"], "answer"), [])
+        del self.rt.send_uds
+        r = core.retry(self.con, self.rt, t["id"], "sonnet", "again")
+        self.assertIn("second: send it", self.rt.sent[-1][2])
+        out = core.answer(self.con, self.rt, t["id"], "third")
+        self.assertEqual(out, dict(status="delivered", delivered=1, pending=0))
+        self.assertEqual([x["body"] for x in self.rows(t["id"], "answer")], ["first: yes", "second: send it", "third"])
+        self.assertEqual(self.rt.sent[-1], (r["socket"], r["session_id"], f"[orchd answer {t['id']}]\nthird"))
+
+    def test_claude_answer_sends_leftover_queue_first(self):
+        t = self.dispatch("sonnet")
+        store.add_message(self.con, t["id"], store.QUEUED, "left from codex")
+        self.assertEqual(core.answer(self.con, self.rt, t["id"], flush=True)["delivered"], 1)
+        self.assertIn("left from codex", self.rt.sent[-1][2])
+        self.assertEqual(store.pending_answers(self.con, t["id"]), [])
+
+    # 2. the new worker started but the DB write failed: it is stopped and recorded, never untracked
+    def test_commit_failure_stops_new_worker_and_records_it(self):
+        t = self.dispatch("sol")
+        self.queue_two(t)
+        self.rt.codex_live.discard(t["job_id"])
+        real = store.mark_read
+        store.mark_read = lambda *a: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked"))
+        try:
+            with self.assertRaises(sqlite3.OperationalError):
+                core.retry(self.con, self.rt, t["id"], "sol", "x")
+        finally:
+            store.mark_read = real
+        after = store.get_task(self.con, t["id"])
+        self.assertEqual((after["status"], after["job_id"], after["session_id"]), ("failed", "5002", "thread-2"))
+        self.assertIn(("codex", "5002"), self.rt.stopped)
+        self.assertNotIn("5002", self.rt.codex_live)
+        (failed,) = [json.loads(r["body"]) for r in self.rows(t["id"], "retry_failed")]
+        self.assertEqual((failed["stage"], failed["new_job_id"], failed["new_stopped"]), ("commit", "5002", True))
+        self.assertEqual(len(store.pending_answers(self.con, t["id"])), 2)  # the killed thread's copy is gone
+        r = core.retry(self.con, self.rt, t["id"], "sol", "again")
+        self.assertEqual((r["status"], len(store.pending_answers(self.con, t["id"]))), ("running", 0))
+
+    def test_new_worker_that_will_not_stop_is_recorded_as_possibly_running(self):
+        t = self.dispatch("sonnet")
+        self.rt.send_uds = lambda *a: (_ for _ in ()).throw(OSError("refused"))
+        self.rt.stop_ignored.add("job2")
+        with self.assertRaises(OSError):
+            core.retry(self.con, self.rt, t["id"], "opus", "x")
+        after = store.get_task(self.con, t["id"])
+        self.assertEqual((after["job_id"], after["model"], after["status"]), ("job2", MODELS["opus"], "failed"))
+        self.assertIn("job2 MAY STILL BE RUNNING", after["note"])
+        with self.assertRaisesRegex(ValueError, "did not stop"):  # the next retry targets it, not the old job
+            core.retry(self.con, self.rt, t["id"], "opus", "again")
+
+    def test_unrecordable_failure_names_the_new_job_in_the_error(self):
+        t = self.dispatch("sol")
+        self.rt.codex_live.discard(t["job_id"])
+        real = store.immediate
+        store.immediate = lambda con: (_ for _ in ()).throw(sqlite3.OperationalError("disk I/O error"))
+        try:
+            with self.assertRaisesRegex(RuntimeError, "new worker 5002 \\(codex\\) stopped"):
+                core.retry(self.con, self.rt, t["id"], "sol", "x")
+        finally:
+            store.immediate = real
+        self.assertIn(("codex", "5002"), self.rt.stopped)
+
+    # 3. quiescence follows the process fields, not the job's outcome state
+    def test_failed_or_done_state_with_live_pid_is_stopped_first(self):
+        for state in ("failed", "done"):
+            with self.subTest(state=state):
+                t = self.dispatch("sonnet")
+                self.rt.jobs[t["job_id"]]["state"] = state
+                self.rt.stopped.clear()
+                self.rt.stop_ignored.add(t["job_id"])
+                with self.assertRaisesRegex(ValueError, "did not stop"):
+                    core.retry(self.con, self.rt, t["id"], "opus", "x")
+                self.assertEqual((self.rt.stopped, self.rt.started), ([t["job_id"]], []))
+                self.rt.stop_ignored.clear()
+                core.retry(self.con, self.rt, t["id"], "opus", "x")
+                self.assertEqual(len(self.rt.started), 1)
+
+    def test_listed_job_counts_as_gone_only_without_a_live_process(self):
+        t = self.dispatch("sonnet")
+        job = self.rt.jobs[t["job_id"]]
+        self.rt.alive_pids.discard(job["pid"])  # listed, pid dead: gone without a stop
+        core.retry(self.con, self.rt, t["id"], "opus", "x")
+        self.assertEqual(self.rt.stopped, [])
+        u = self.dispatch("sonnet")
+        self.rt.jobs[u["job_id"]] = {"state": "working", "status": "busy"}  # status without pid: still running
+        self.rt.stop_ignored.add(u["job_id"])
+        with self.assertRaises(ValueError):
+            core.retry(self.con, self.rt, u["id"], "opus", "x")
+
+    # 4-6. other MCP processes: separate connections on separate threads, contending on the task lock
+    def slow(self, name, hold=0.3, during=None):
+        real = getattr(self.rt, name)
+
+        def slow_start(*a):
+            out = real(*a)
+            if during:
+                during()
+            time.sleep(hold)
+            return out
+        setattr(self.rt, name, slow_start)
+
+    def in_thread(self, fn, results):
+        def run():
+            con = store.connect(self.db)
+            try:
+                results.append(fn(con))
+            except Exception as e:  # noqa: BLE001
+                results.append(e)
+            finally:
+                con.close()
+        th = threading.Thread(target=run)
+        th.start()
+        return th
+
+    def test_two_concurrent_retries_leave_exactly_one_tracked_worker(self):
+        t = self.dispatch("sonnet")
+        self.slow("start_worker")
+        results = []
+        threads = [self.in_thread(lambda c: core.retry(c, self.rt, t["id"], "opus", "parallel"), results)
+                   for _ in range(2)]
+        for th in threads:
+            th.join()
+        self.assertFalse([r for r in results if isinstance(r, Exception)], results)
+        socks = [s[2] for s in self.rt.started]
+        self.assertEqual(len(set(socks)), 2)
+        final = store.get_task(self.con, t["id"])
+        self.assertEqual(sorted(self.rt.jobs), [final["job_id"]])  # the first new worker was stopped by the second
+        retries = [json.loads(r["body"]) for r in self.rows(t["id"], "retry")]
+        self.assertEqual(retries[1]["old_job_id"], retries[0]["new_job_id"])
+
+    def test_close_without_the_lock_during_spawn_never_leaves_a_running_task(self):
+        t = self.dispatch("sonnet")  # today's close does not take the task lock; the commit guard catches it
+        results = []
+        self.slow("start_worker", during=lambda: results.append(core.close(store.connect(self.db), self.rt, t["id"])))
+        with self.assertRaisesRegex(Exception, "closed"):
+            core.retry(self.con, self.rt, t["id"], "opus", "x")
+        final = store.get_task(self.con, t["id"])
+        self.assertEqual((final["status"], results[0]["closed"]), ("closed", True))
+        self.assertEqual(self.rt.jobs, {})  # the new worker was stopped too
+        (failed,) = [json.loads(r["body"]) for r in self.rows(t["id"], "retry_failed")]
+        self.assertEqual((failed["stage"], failed["new_stopped"]), ("commit", True))
+
+    def test_lifecycle_step_holding_the_task_lock_blocks_retry_without_side_effects(self):
+        t = self.dispatch("sonnet")  # how close (PR #14) and adopt (PR #27) hold it: same file, same helper
+        other = store.connect(self.db)
+        with store.task_delivery(other, [t["id"]]):
+            with self.assertRaises(TimeoutError):
+                core.retry(self.con, self.rt, t["id"], "opus", "x", lock_wait=0.2)
+        self.assertEqual((self.rt.stopped, self.rt.started), ([], []))
+        self.assertEqual(store.get_task(self.con, t["id"])["job_id"], "job1")
+
+    def test_flush_from_another_process_waits_and_never_resumes_the_old_thread(self):
+        t = self.dispatch("sol")
+        store.add_message(self.con, t["id"], store.QUEUED, "queued answer")
+        results, threads = [], []
+        self.slow("start_codex_worker", hold=0.5, during=lambda: threads.append(self.in_thread(
+            lambda c: core.answer(c, self.rt, t["id"], flush=True), results)))
+        core.retry(self.con, self.rt, t["id"], "sol", "x")
+        threads[0].join()
+        self.assertEqual(results, [dict(status="delivered", delivered=0, pending=0)])
+        self.assertEqual(self.rt.resumed, [])
+        final = store.get_task(self.con, t["id"])
+        self.assertEqual(sorted(self.rt.codex_live), [final["job_id"]])
+        self.assertIn("queued answer", self.rt.codex_prompt)
 
 
 class CodexRunningTest(unittest.TestCase):

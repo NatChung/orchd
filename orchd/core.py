@@ -2,6 +2,7 @@
 import json
 import os
 import shlex
+import time
 import uuid
 from pathlib import Path
 
@@ -219,26 +220,53 @@ class _ResumeFailed(Exception):
     pass
 
 
+class _ToClaude(Exception):
+    pass
+
+
+def _deliver_to_claude(con, rt, task, text):
+    """Caller holds the task lock. Queued answers left from a Codex worker go first, oldest first, then `text`,
+    all in one message; the receipt (read_at + one `answer` row each) is written only after the send succeeded."""
+    task_id = task["id"]
+    pending = store.pending_answers(con, task_id)
+    bodies = [row["body"] for row in pending] + ([text] if text is not None else [])
+    if not bodies:
+        return dict(status="delivered", delivered=0, pending=0)
+    if not task["socket"] or not task["session_id"]:
+        raise ValueError(f"task {task_id} has no running worker"
+                         + (f"; {len(pending)} queued answer(s) stay pending" if pending else ""))
+    rt.send_uds(task["socket"], task["session_id"], "\n\n".join(f"[orchd answer {task_id}]\n{b}" for b in bodies))
+    with store.immediate(con):
+        store.mark_read(con, [row["id"] for row in pending])
+        for body in bodies:
+            store.add_message(con, task_id, "answer", body)
+        store.update_task(con, task_id, status="acked")
+    return dict(status="delivered", delivered=len(bodies), pending=0)
+
+
 def answer(con, rt, task_id, text=None, flush=False):
     """Deliver an answer, or queue it while a Codex worker is mid-turn.
 
     Returns {status: delivered|queued|failed, delivered: n, pending: n}. A Codex worker cannot take a message
     mid-turn, so its answers wait in FIFO order until a later `answer` (or `flush=True`) finds it between
-    turns; they then go out together as one new turn. Nothing else sends them (see docs/decisions.md)."""
+    turns; they then go out together as one new turn. Nothing else sends them (see docs/decisions.md).
+    Delivery runs under the task lock shared with retry and close, and re-reads the task there, so it reaches
+    whichever worker the task has at that moment (a retry may have replaced a Codex worker with a Claude one)."""
     task = store.get_task(con, task_id)
     if task["status"] == "closed":
         raise ValueError(f"task {task_id} is closed")
     if text is None and not flush:
         raise ValueError("answer needs text, or flush=true to send queued answers")
     if worker_kind(task["model"]) != "codex":
-        if text is None:
-            return dict(status="delivered", delivered=0, pending=0)
-        if not task["socket"] or not task["session_id"]:
-            raise ValueError(f"task {task_id} has no running worker")
-        rt.send_uds(task["socket"], task["session_id"], f"[orchd answer {task_id}]\n{text}")
-        store.add_message(con, task_id, "answer", text)
-        store.update_task(con, task_id, status="acked")
-        return dict(status="delivered", delivered=1, pending=0)
+        with store.task_delivery(con, [task_id]):
+            task = store.get_task(con, task_id)
+            if task["status"] == "closed":
+                raise ValueError(f"task {task_id} is closed")
+            if worker_kind(task["model"]) == "claude":
+                return _deliver_to_claude(con, rt, task, text)
+            if text is not None:  # a retry switched it to Codex meanwhile: queue it for that worker's next turn
+                store.add_message(con, task_id, store.QUEUED, text)
+            return dict(status="queued", delivered=0, pending=len(store.pending_answers(con, task_id)))
     if not task["session_id"] or not task["worktree"]:
         raise ValueError(f"task {task_id} has no codex thread")
     if text is not None:  # stored before any attempt, so a busy turn or a failed resume loses nothing
@@ -249,10 +277,12 @@ def answer(con, rt, task_id, text=None, flush=False):
         rt.sleep(0.5)
         task = store.get_task(con, task_id)
     try:
-        with store.immediate(con):
+        with store.task_delivery(con, [task_id]), store.immediate(con):
             task = store.get_task(con, task_id)  # re-read under the lock: another call may have resumed or closed
             if task["status"] == "closed":
                 raise ValueError(f"task {task_id} is closed; its queued answers stay undelivered")
+            if worker_kind(task["model"]) == "claude":  # a retry replaced the Codex worker with a Claude one
+                raise _ToClaude()
             pending = store.pending_answers(con, task_id)
             if not pending:  # nothing waits, even if a concurrent flush sent this call's text
                 return dict(status="delivered", delivered=0, pending=0)
@@ -268,6 +298,14 @@ def answer(con, rt, task_id, text=None, flush=False):
             for row in pending:
                 store.add_message(con, task_id, "answer", row["body"])
             store.update_task(con, task_id, job_id=job, status="acked")
+    except _ToClaude:  # rolled back nothing (no write yet); deliver the queue to the Claude worker instead
+        with store.task_delivery(con, [task_id]):
+            task = store.get_task(con, task_id)
+            if task["status"] == "closed":
+                raise ValueError(f"task {task_id} is closed; its queued answers stay undelivered") from None
+            if worker_kind(task["model"]) == "claude":
+                return _deliver_to_claude(con, rt, task, None)
+        return dict(status="queued", delivered=0, pending=len(store.pending_answers(con, task_id)))
     except _ResumeFailed as failed:  # rolled back: every answer is still queued for the next flush
         error = failed.__cause__
         return dict(status="failed", delivered=0, pending=len(store.pending_answers(con, task_id)),
@@ -376,6 +414,7 @@ def stop_orch(con, rt, orch_id):
 
 
 RETRY_STOP_WAIT = 20  # polls of 0.5s: bounded so an MCP call never hangs on a worker that will not stop
+RETRY_LOCK_WAIT = 65  # seconds a retry waits for the task's close, answer flush or other retry to finish
 
 
 def _retry_failed(con, task_id, stage, error, **fields):
@@ -383,16 +422,31 @@ def _retry_failed(con, task_id, stage, error, **fields):
                                                               ensure_ascii=False))
 
 
-def _worker_quiescent(rt, task):
-    """Stop exactly this task's worker once, then confirm it is gone; never touch any other job or pid."""
-    job = task["job_id"]
+def _claude_job_gone(rt, job):
+    """Gone only when the daemon's list proves it: the job is unlisted, or listed without pid and status (both are
+    listed only while the process lives), or its pid is dead. `state` is the task outcome, not liveness: a
+    `failed` or `done` job can still run. A failed list query proves nothing, so it counts as still running."""
+    jobs = rt.live_jobs()
+    if jobs is None:
+        return False
+    listed = jobs.get(job)
+    if listed is None:
+        return True
+    pid, status = listed.get("pid"), listed.get("status")
+    if pid is None and status is None:
+        return True
+    return bool(pid) and not rt.pid_alive(pid)
+
+
+def _stop_confirmed(rt, kind, job):
+    """Stop exactly this job or pid once, then confirm it is gone; never touch any other job or pid."""
     if not job:
         return True
-    if worker_kind(task["model"]) == "codex":
+    if kind == "codex":
         gone = lambda: not rt.codex_running(job)  # noqa: E731
         stop = rt.stop_codex
-    else:  # None means the job probe failed, which does not prove the worker stopped
-        gone = lambda: claude_job_alive(rt.live_jobs(), job) is False  # noqa: E731
+    else:
+        gone = lambda: _claude_job_gone(rt, job)  # noqa: E731
         stop = rt.stop_worker
     if gone():
         return True
@@ -402,6 +456,10 @@ def _worker_quiescent(rt, task):
             return True
         rt.sleep(0.5)
     return False
+
+
+def _worker_quiescent(rt, task):
+    return _stop_confirmed(rt, worker_kind(task["model"]), task["job_id"])
 
 
 def _record_session_usage(con, rt, task, source):
@@ -424,13 +482,17 @@ def _record_session_usage(con, rt, task, source):
             dict(model=task["model"], session_id=session, job_id=task["job_id"], source=source, **usage)))
 
 
-def retry_message(con, task, from_model, to_model, reason):
+def retry_message(con, task, from_model, to_model, reason, pending=()):
     latest = {kind: con.execute("SELECT body, evidence FROM messages WHERE task_id=? AND kind=? "
                                 "ORDER BY id DESC LIMIT 1", (task["id"], kind)).fetchone()
               for kind in ("progress", "report")}
     lines = [f"Latest {kind}: {row['body']}" + (f"\nEvidence: {row['evidence']}" if row["evidence"] else "")
              for kind, row in latest.items() if row]
     history = "\n".join(lines) or "The previous worker sent no progress or report."
+    answers = ""
+    if pending:  # same framing as a flush, oldest first: each is an answer the previous worker never received
+        answers = ("\n\nAnswers the previous worker never received, oldest first:\n\n"
+                   + "\n\n".join(f"[orchd answer {task['id']}]\n{row['body']}" for row in pending))
     return task_message(task) + f"""
 
 [orchd retry {task['id']}]
@@ -439,57 +501,106 @@ Reason: {reason}
 {history}
 The previous worker may have left uncommitted, untracked, stashed or committed work in this worktree and branch.
 Keep all of it: inspect it with git status, git log and git stash list first, and never reset, clean, drop or
-overwrite it. Continue the same task with the instructions and done_when above.
+overwrite it. Continue the same task with the instructions and done_when above.{answers}
 
 Start with: {worker_cli()} ack {task['id']}"""
 
 
-def retry(con, rt, task_id, model, reason):
-    """Replace a task's worker on the same worktree and branch with any model, recording from -> to and why."""
-    task = store.get_task(con, task_id)
+class _Superseded(Exception):
+    pass
+
+
+def _abandon_new_worker(con, rt, task_id, kind, new, stage, error, fields):
+    """The new worker started but retry cannot hand it the task: stop it, then record exactly what is left so the
+    next retry or close finds it. If even that write fails, the raised error names the job so it is never lost."""
+    stopped = _stop_confirmed(rt, kind, new["job_id"])
+    detail = f"{type(error).__name__}: {error}"
+    state = "stopped" if stopped else "MAY STILL BE RUNNING"
+    try:
+        with store.immediate(con):
+            _retry_failed(con, task_id, stage, detail, new_job_id=new["job_id"], new_session_id=new["session_id"],
+                          new_stopped=stopped, **fields)
+            if store.get_task(con, task_id)["status"] != "closed":  # never reopen a task a close finished
+                store.update_task(con, task_id, status="failed", **new,
+                                  note=f"retry failed at {stage}: new worker {new['job_id']} {state}: {detail}"[:1000])
+    except Exception as write_error:
+        raise RuntimeError(f"retry of {task_id} failed at {stage} ({detail}); new worker {new['job_id']} ({kind}) "
+                           f"{state}, and recording it failed too: {type(write_error).__name__}: {write_error}") \
+            from error
+
+
+def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT):
+    """Replace a task's worker on the same worktree and branch with any model, recording from -> to and why.
+
+    Runs under the task's cross-process lock (store.task_delivery, shared with answer flush, close and adopt), so
+    the task is re-read and checked, the old worker stopped, the new one spawned and the result committed with
+    no other lifecycle step in between. The SQLite write lock is only held for the final commit."""
     if not isinstance(reason, str) or not reason.strip():
         raise ValueError("retry needs a non-empty reason")
     _choice("model", model, tuple(MODELS))
-    if task["status"] == "closed":
-        raise ValueError(f"task {task_id} is closed")
-    if task["status"] == "starting":
-        raise ValueError(f"task {task_id} is still starting its first worker")
-    worktree = task["worktree"]
-    if not worktree or not rt.exists(worktree):
-        raise ValueError(f"task {task_id} has no worktree to continue in ({worktree or 'none recorded'})")
-    to_model, kind = MODELS[model], worker_kind(MODELS[model])
-    if kind == "claude" and not rt.claude_trusted(task["repo_path"]):
-        raise ValueError(f"Claude has not trusted {task['repo_path']}. Ask Nat to run `claude` there once and "
-                         "accept the trust prompt, then retry again.")
-    from_model = task["model"]
-    old = dict(old_model=from_model, old_job_id=task["job_id"], old_session_id=task["session_id"])
-    if not _worker_quiescent(rt, task):
-        _retry_failed(con, task_id, "stop", f"worker {task['job_id']} is still running", to_model=to_model,
-                      reason=reason, **old)
-        raise ValueError(f"task {task_id}'s worker {task['job_id']} did not stop; no new worker was started")
-    _record_session_usage(con, rt, task, "retry")
-    attempt = con.execute("SELECT COUNT(*) FROM messages WHERE task_id=? AND kind IN ('retry','retry_failed')",
-                          (task_id,)).fetchone()[0] + 1
-    directory = Path(rt.socket_path(task_id)).parent  # a fresh socket and log per attempt: the old ones are stale
-    prompt = retry_message(con, task, from_model, to_model, reason)
-    try:
-        if kind == "codex":
-            job, session = rt.start_codex_worker(worktree, str(directory / f"codex-r{attempt}.jsonl"),
-                                                 worker_brief(worker_cli(), kind) + "\n\n" + prompt, to_model)
-            store.update_task(con, task_id, model=to_model, job_id=job, session_id=session, socket=None,
-                              status="running")
-        else:
-            sock = str(directory / f"w-r{attempt}.sock")
-            job, session = rt.start_worker(worktree, sock, worker_brief(worker_cli()), to_model)
-            store.update_task(con, task_id, model=to_model, job_id=job, session_id=session, socket=sock,
-                              status="running")  # stored before sending so a later close or retry stops it
-            rt.send_uds(sock, session, prompt)
-    except Exception as error:  # keep the worktree, branch and data; the task can be retried again
-        text = f"{type(error).__name__}: {error}"
-        _retry_failed(con, task_id, "spawn", text, to_model=to_model, reason=reason, **old)
-        store.update_task(con, task_id, status="failed", note=f"retry failed: {text}"[:1000])
-        raise
-    store.add_message(con, task_id, "retry", json.dumps(
-        dict(from_model=from_model, to_model=to_model, reason=reason, new_job_id=job, new_session_id=session,
-             **old), ensure_ascii=False))
+    with store.task_delivery(con, [task_id], lock_wait):
+        task = store.get_task(con, task_id)
+        if task["status"] == "closed":
+            raise ValueError(f"task {task_id} is closed")
+        if task["status"] == "starting":
+            raise ValueError(f"task {task_id} is still starting its first worker")
+        worktree = task["worktree"]
+        if not worktree or not rt.exists(worktree):
+            raise ValueError(f"task {task_id} has no worktree to continue in ({worktree or 'none recorded'})")
+        to_model, kind = MODELS[model], worker_kind(MODELS[model])
+        if kind == "claude" and not rt.claude_trusted(task["repo_path"]):
+            raise ValueError(f"Claude has not trusted {task['repo_path']}. Ask Nat to run `claude` there once and "
+                             "accept the trust prompt, then retry again.")
+        from_model = task["model"]
+        old = dict(old_model=from_model, old_job_id=task["job_id"], old_session_id=task["session_id"])
+        fields = dict(to_model=to_model, reason=reason, **old)
+        if not _worker_quiescent(rt, task):
+            _retry_failed(con, task_id, "stop", f"worker {task['job_id']} is still running", **fields)
+            raise ValueError(f"task {task_id}'s worker {task['job_id']} did not stop; no new worker was started")
+        _record_session_usage(con, rt, task, "retry")
+        attempt = con.execute("SELECT COUNT(*) FROM messages WHERE task_id=? AND kind IN ('retry','retry_failed')",
+                              (task_id,)).fetchone()[0] + 1
+        # A fresh socket and log per attempt: the old ones are stale, and a failed write can repeat the count.
+        directory, tag = Path(rt.socket_path(task_id)).parent, f"r{attempt}-{uuid.uuid4().hex[:6]}"
+        pending = store.pending_answers(con, task_id)  # FIFO; they become the new worker's, with a receipt below
+        prompt = retry_message(con, task, from_model, to_model, reason, pending)
+        new = dict(model=to_model, job_id=None, session_id=None, socket=None)
+        stage = "spawn"
+        try:
+            if kind == "codex":  # the first turn's prompt is delivered once its thread has started
+                new["job_id"], new["session_id"] = rt.start_codex_worker(
+                    worktree, str(directory / f"codex-{tag}.jsonl"),
+                    worker_brief(worker_cli(), kind) + "\n\n" + prompt, to_model)
+            else:
+                new["socket"] = str(directory / f"w-{tag}.sock")
+                new["job_id"], new["session_id"] = rt.start_worker(worktree, new["socket"], worker_brief(worker_cli()),
+                                                                   to_model)
+                stage = "send"
+                rt.send_uds(new["socket"], new["session_id"], prompt)
+            stage = "commit"
+            with store.immediate(con):
+                if not rt.exists(worktree):
+                    raise _Superseded(f"worktree {worktree} was removed")
+                # Guards against a lifecycle step that did not take the task lock (an older orchd's close).
+                changed = con.execute(
+                    "UPDATE tasks SET model=?, job_id=?, session_id=?, socket=?, status='running', updated_at=? "
+                    "WHERE id=? AND status<>'closed' AND job_id IS ?",
+                    (*new.values(), time.time(), task_id, task["job_id"])).rowcount
+                if changed != 1:
+                    raise _Superseded("the task was closed or its worker changed while retrying")
+                store.mark_read(con, [row["id"] for row in pending])  # the same receipt an answer flush writes
+                for row in pending:
+                    store.add_message(con, task_id, "answer", row["body"])
+                store.add_message(con, task_id, "retry", json.dumps(
+                    dict(from_model=from_model, to_model=to_model, reason=reason, new_job_id=new["job_id"],
+                         new_session_id=new["session_id"], answers_delivered=len(pending), **old),
+                    ensure_ascii=False))
+        except Exception as error:  # keep the worktree, branch, data and queued answers; retry can run again
+            if new["job_id"] is None:
+                text = f"{type(error).__name__}: {error}"
+                _retry_failed(con, task_id, stage, text, **fields)
+                store.update_task(con, task_id, status="failed", note=f"retry failed: {text}"[:1000])
+                raise
+            _abandon_new_worker(con, rt, task_id, kind, new, stage, error, fields)
+            raise
     return store.get_task(con, task_id)
