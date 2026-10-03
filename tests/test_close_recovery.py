@@ -1,5 +1,6 @@
 """close with initialized submodules, failed removal and retry. Real git in a temp dir; ORCHD_HOME never touched."""
 import hashlib
+import json
 import os
 import shutil
 import sqlite3
@@ -102,12 +103,17 @@ class CloseSubmoduleTest(unittest.TestCase):
         return result
 
     def test_clean_submodule_worktree_is_closed_but_kept_because_git_cannot_remove_it_safely(self):
-        result = core.close(self.con, self.rt, "abcd1234", outcome="merged")
+        result = core.close(self.con, self.rt, "abcd1234", outcome="merged", rating=3)
         self.assertIn("kept at", result["worktree"])
-        self.assertIn("submodule", result["worktree"])
+        self.assertIn("initialized submodule vendor", result["worktree"])
         self.assertTrue(Path(self.wt).exists())
-        self.assertEqual(store.get_task(self.con, "abcd1234")["status"], "closed")
+        task = store.get_task(self.con, "abcd1234")
+        self.assertEqual((task["status"], task["outcome"], task["rating"]), ("closed", "merged", 3))
+        self.assertIn("initialized submodule vendor", task["note"])
+        self.assertEqual(json.loads(self.close_events()[0]["body"]), dict(outcome="merged", rating=3))
+        core.close(self.con, self.rt, "abcd1234", outcome="abandoned", rating=1)
         self.assertEqual(len(self.close_events()), 1)
+        self.assertEqual(store.get_task(self.con, "abcd1234")["outcome"], "merged")
 
     def test_untracked_file_in_submodule_is_kept(self):
         Path(self.sub, "u.txt").write_text("keep me")
@@ -158,6 +164,19 @@ class CloseSubmoduleTest(unittest.TestCase):
         wt = self.plain_task()
         self.assertEqual(core.close(self.con, self.rt, "efgh5678")["worktree"], "removed")
         self.assertFalse(Path(wt).exists())
+
+    def test_worktree_without_submodules_is_removed_and_records_outcome(self):
+        wt = self.plain_task()
+        git("rm", "-q", "vendor", ".gitmodules", cwd=wt)
+        git("commit", "-q", "-m", "remove submodule from fixture", cwd=wt)
+        git("push", "-q", "-u", "origin", "HEAD", cwd=wt)
+        self.assertEqual(self.rt.submodule_paths(wt), [])
+        result = core.close(self.con, self.rt, "efgh5678", outcome="merged", rating=2)
+        self.assertEqual(result["worktree"], "removed")
+        self.assertFalse(Path(wt).exists())
+        task = store.get_task(self.con, "efgh5678")
+        self.assertEqual((task["status"], task["outcome"], task["rating"]), ("closed", "merged", 2))
+        self.assertEqual(json.loads(self.close_events()[0]["body"]), dict(outcome="merged", rating=2))
 
     def test_hidden_untracked_setting_does_not_hide_parent_untracked_file(self):
         self.hide_untracked()
@@ -219,10 +238,12 @@ class CloseSubmoduleTest(unittest.TestCase):
         store.update_task = flaky
         self.addCleanup(setattr, store, "update_task", real)
         with self.assertRaises(sqlite3.OperationalError):
-            core.close(self.con, self.rt, "abcd1234", outcome="merged")
+            core.close(self.con, self.rt, "abcd1234", outcome="merged", rating=3)
         self.assertEqual(self.close_events(), [])
         self.assertEqual(store.get_task(self.con, "abcd1234")["status"], "done")
-        core.close(self.con, self.rt, "abcd1234")
+        self.assertEqual(store.get_task(self.con, "abcd1234")["outcome"], None)
+        self.assertEqual(store.get_task(self.con, "abcd1234")["rating"], None)
+        core.close(self.con, self.rt, "abcd1234", outcome="merged", rating=3)
         self.assertEqual(len(self.close_events()), 1)
         self.assertEqual(store.get_task(self.con, "abcd1234")["status"], "closed")
         self.assertEqual(store.get_task(self.con, "abcd1234")["outcome"], "merged")
@@ -243,11 +264,12 @@ class CloseSubmoduleTest(unittest.TestCase):
     # -- the task's worker must be confirmed stopped before anything is removed or closed ------------------------
     def assert_close_pending(self, task_id, wt, text):
         with self.assertRaisesRegex(RuntimeError, text):
-            core.close(self.con, self.rt, task_id, outcome="merged")
+            core.close(self.con, self.rt, task_id, outcome="merged", rating=3)
         task = store.get_task(self.con, task_id)
         self.assertTrue(Path(wt).exists())
         self.assertEqual(task["status"], "done")
         self.assertTrue(task["note"].startswith("close pending"), task["note"])
+        self.assertEqual((task["outcome"], task["rating"]), (None, None))
         self.assertEqual(self.close_events(), [])
 
     def test_failed_stop_of_a_still_running_claude_worker_keeps_worktree_and_task_open(self):
@@ -261,7 +283,7 @@ class CloseSubmoduleTest(unittest.TestCase):
         self.assert_close_pending("efgh5678", wt, "job-live.*synthetic stop failure")
         self.assertEqual(Path(wt, "work.txt").read_text(), "in progress")
         self.rt.jobs = {}  # the worker is gone now: retry closes it, once
-        self.assertEqual(core.close(self.con, self.rt, "efgh5678")["worktree"], "removed")
+        self.assertEqual(core.close(self.con, self.rt, "efgh5678", outcome="merged", rating=3)["worktree"], "removed")
         self.assertEqual(len(self.close_events()), 1)
         self.assertEqual(store.get_task(self.con, "efgh5678")["outcome"], "merged")
 
@@ -450,20 +472,28 @@ class CloseRetryTest(unittest.TestCase):
             core.close(self.con, self.rt, "t1", outcome="merged", rating=2)
         task = store.get_task(self.con, "t1")
         self.assertEqual(task["status"], "done")
+        self.assertEqual((task["outcome"], task["rating"]), (None, None))
+        self.assertTrue(task["note"].startswith("close pending"))
         self.assertIn("fatal: boom", task["note"])
         self.assertEqual(self.events("close"), [])
         self.assertEqual([t["id"] for t in store.open_tasks(self.con)], ["t1"])
 
-    def test_retry_emits_one_close_event_and_keeps_outcome(self):
+    def test_retry_emits_one_close_event_and_only_then_updates_outcome(self):
+        store.update_task(self.con, "t1", outcome="abandoned", rating=1)
         for _ in range(2):
             with self.assertRaises(RuntimeError):
                 core.close(self.con, self.rt, "t1", outcome="merged", rating=2)
+            task = store.get_task(self.con, "t1")
+            self.assertEqual((task["outcome"], task["rating"]), ("abandoned", 1))
+            self.assertTrue(task["note"].startswith("close pending"))
+            self.assertEqual(self.events("close"), [])
         self.rt.error = None
-        self.assertEqual(core.close(self.con, self.rt, "t1")["worktree"], "removed")
+        self.assertEqual(core.close(self.con, self.rt, "t1", outcome="merged", rating=2)["worktree"], "removed")
         task = store.get_task(self.con, "t1")
         self.assertEqual((task["status"], task["outcome"], task["rating"]), ("closed", "merged", 2))
         self.assertIsNone(task["note"])
         self.assertEqual(len(self.events("close")), 1)
+        self.assertEqual(json.loads(self.events("close")[0]["body"]), dict(outcome="merged", rating=2))
         self.assertEqual(core.close(self.con, self.rt, "t1")["worktree"], "already closed")
         self.assertEqual(len(self.events("close")), 1)
 
@@ -472,6 +502,16 @@ class CloseRetryTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "not a git repository"):
             core.close(self.con, self.rt, "t1")
         self.assertEqual(store.get_task(self.con, "t1")["status"], "done")
+
+    def test_success_without_outcome_or_rating_preserves_existing_values(self):
+        store.update_task(self.con, "t1", outcome="abandoned", rating=1)
+        with self.assertRaises(RuntimeError):
+            core.close(self.con, self.rt, "t1", outcome="merged", rating=2)
+        self.rt.error = None
+        core.close(self.con, self.rt, "t1")
+        task = store.get_task(self.con, "t1")
+        self.assertEqual((task["outcome"], task["rating"]), ("abandoned", 1))
+        self.assertEqual(json.loads(self.events("close")[0]["body"]), dict(outcome="abandoned", rating=1))
 
     def test_credentials_in_urls_are_redacted(self):
         self.rt.error = RuntimeError("fatal: unable to access 'https://user:ghp_secret@github.com/x.git/'")

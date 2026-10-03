@@ -559,7 +559,8 @@ def close(con, rt, task_id, outcome=None, rating=None, lock_wait=CLOSE_LOCK_WAIT
     """Stop the worker; remove the worktree only when nothing local would be lost.
     The task is closed only after its worker is confirmed stopped and its worktree removed or deliberately kept.
     Anything short of that raises, leaves status, worktree and events as they were and notes why, so close can
-    simply be run again. Concurrent closes of one task run one at a time and write a single close event."""
+    simply be run again. Outcome and rating are written only with the successful close event.
+    Concurrent closes of one task run one at a time and write a single close event."""
     if store.get_task(con, task_id)["status"] == "closed":
         return dict(task_id=task_id, closed=True, worktree="already closed")
     if outcome is not None:
@@ -585,8 +586,6 @@ def _close_locked(con, rt, task_id, outcome, rating):
     if task["status"] == "closed":  # another close finished while we waited for the lock
         return dict(task_id=task_id, closed=True, worktree="already closed")
     fields = {k: v for k, v in (("outcome", outcome), ("rating", rating)) if v is not None}
-    if fields:
-        store.update_task(con, task_id, **fields)
     kept, step = None, f"worker {task['job_id']} not confirmed stopped"
     try:
         if task["job_id"]:
@@ -610,8 +609,9 @@ def _close_locked(con, rt, task_id, outcome, rating):
             return dict(task_id=task_id, closed=True, worktree="already closed")
         stale = (task["note"] or "").startswith("close pending")
         _record_usage(con, rt, task)
-        store.add_message(con, task_id, "close", json.dumps(dict(outcome=task["outcome"], rating=task["rating"])))
-        store.update_task(con, task_id, status="closed",
+        store.add_message(con, task_id, "close", json.dumps(dict(
+            outcome=fields.get("outcome", task["outcome"]), rating=fields.get("rating", task["rating"]))))
+        store.update_task(con, task_id, status="closed", **fields,
                           note=(f"worktree kept: {kept}" if kept else None if stale else task["note"]))
         con.execute("COMMIT")
     except BaseException:
