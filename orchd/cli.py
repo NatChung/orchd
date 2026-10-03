@@ -4,6 +4,7 @@
   orchd orch [--model opus|sonnet] [--no-attach]   start a Claude Orch, then attach to it
   orchd orch-stop ID                          stop a Claude Orch
   orchd init [--from OLD_ORCH_HOME] [--no-trust]   create ~/orch/home and ~/orch/interface, trust them in Codex
+  orchd upgrade                               reinstall the uv-installed orchd at its source's newest commit
   orchd interface [--new]                     bind ~/orch/interface to a live Claude Orch (starts one if none)
   orchd entry-bind ORCH_ID [--entry NAME] [--force]   bind the Desktop entry to one Claude Orch (operator only)
   orchd entry-status [--entry NAME]           read-only entry binding, Orch health, questions and delivery counts
@@ -45,6 +46,7 @@ def main(argv=None):
     init = sub.add_parser("init")
     init.add_argument("--from", dest="source", help="copy what an old Orch home kept (e.g. ~/projects/orch); never overwrites")
     init.add_argument("--no-trust", action="store_true", help="do not write Codex trust or check Claude trust")
+    sub.add_parser("upgrade")
     iface = sub.add_parser("interface")
     iface.add_argument("--new", action="store_true", help="the bound Orch is offline: start a new one and rebind")
     bind = sub.add_parser("entry-bind")
@@ -92,6 +94,11 @@ def main(argv=None):
               else doctor.render(checks))
         return doctor.exit_code(checks)
 
+    if args.cmd == "upgrade":  # program only; never touches the DB or ~/orch
+        from orchd import upgrade
+        code, lines = upgrade.upgrade()
+        print("\n".join(lines), file=sys.stdout if code == 0 else sys.stderr)
+        return code
     if args.cmd == "init":  # files and trust only; never touches the DB
         from orchd import bootstrap
         try:
