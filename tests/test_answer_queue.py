@@ -3,6 +3,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from orchd import core, mcp_server, store
@@ -29,6 +30,81 @@ class AnswerQueueTest(unittest.TestCase):
     def answers(self, task_id):
         return [r["body"] for r in self.con.execute(
             "SELECT body FROM messages WHERE task_id=? AND kind='answer' ORDER BY id", (task_id,))]
+
+    def assert_visible_pending(self, task_id, n, closed=False):
+        # A fresh worker notification lets inbox expose the current task count.
+        core.progress(self.con, self.rt, task_id, "safe notification")
+        before = [(r["id"], r["body"], r["read_at"]) for r in store.pending_answers(self.con, task_id)]
+        with patch.object(store, "pending_answers", side_effect=AssertionError("must not load queued bodies")):
+            for _ in range(2):
+                tasks = {t["task_id"]: t for t in core.list_open(self.con, self.rt)}
+                if closed:
+                    self.assertNotIn(task_id, tasks)
+                else:
+                    self.assertEqual(tasks[task_id]["pending"], n)
+                self.assertNotIn("PRIVATE_QUEUE_BODY", json.dumps(tasks))
+            messages = core.inbox(self.con, "thread-A")
+            self.assertTrue(messages)
+            self.assertTrue(all(m["pending"] == n for m in messages if m["task_id"] == task_id))
+            self.assertNotIn("PRIVATE_QUEUE_BODY", json.dumps(messages))
+        self.assertEqual([(r["id"], r["body"], r["read_at"]) for r in store.pending_answers(self.con, task_id)], before)
+        self.assertEqual(store.pending_answer_count(self.con, task_id), n)
+
+    def test_pending_visibility_mixed_fifo_restart_flush_and_legacy(self):
+        t = self.dispatch()
+        # Old task/message rows need no new schema or stored field.
+        store.update_task(self.con, t["id"], model=None)
+        self.assert_visible_pending(t["id"], 0)
+        store.update_task(self.con, t["id"], model="gpt-6.1-sol")
+        self.rt.alive_pids = {"4242"}
+        core.answer(self.con, self.rt, t["id"], "PRIVATE_QUEUE_BODY answer")
+        core.followup(self.con, self.rt, t["id"], "PRIVATE_QUEUE_BODY followup")
+        self.assert_visible_pending(t["id"], 2)
+        self.con.close()
+        self.con = store.connect(self.db)
+        self.assert_visible_pending(t["id"], 2)
+        self.rt.alive_pids = set()
+        real = self.rt.resume_codex_worker
+
+        def resume(*args):
+            # Sending is not a committed receipt yet; an independent reader still sees both.
+            other = store.connect(self.db)
+            try:
+                self.assertEqual(store.pending_answer_count(other, t["id"]), 2)
+                self.assertEqual(core.list_open(other, self.rt)[0]["pending"], 2)
+            finally:
+                other.close()
+            return real(*args)
+
+        self.rt.resume_codex_worker = resume
+        self.assertEqual(core.answer(self.con, self.rt, t["id"], flush=True)["delivered"], 2)
+        self.assert_visible_pending(t["id"], 0)
+        sent = self.rt.resumed[-1][1]
+        self.assertLess(sent.index("PRIVATE_QUEUE_BODY answer"), sent.index("PRIVATE_QUEUE_BODY followup"))
+
+    def test_pending_visibility_lock_conflict_receipt_failure_and_close(self):
+        t = self.dispatch()
+        self.rt.alive_pids = {"4242"}
+        core.answer(self.con, self.rt, t["id"], "PRIVATE_QUEUE_BODY")
+        self.rt.alive_pids = set()
+        with patch.object(store, "task_delivery", side_effect=TimeoutError("concurrent flush")):
+            with self.assertRaises(TimeoutError):
+                core.answer(self.con, self.rt, t["id"], flush=True)
+        self.assert_visible_pending(t["id"], 1)
+        self.con.execute("CREATE TRIGGER fail_receipt BEFORE UPDATE ON tasks WHEN NEW.job_id='4343' "
+                         "BEGIN SELECT RAISE(ABORT,'receipt failure'); END")
+        with patch.object(core, "_stop_confirmed", return_value=None):
+            self.assertEqual(core.answer(self.con, self.rt, t["id"], flush=True)["status"], "failed")
+        self.assert_visible_pending(t["id"], 1)
+        self.con.execute("DROP TRIGGER fail_receipt")
+        core.close(self.con, self.rt, t["id"])
+        self.assert_visible_pending(t["id"], 1, closed=True)
+
+    def test_pending_tool_descriptions_explain_read_only_count(self):
+        descriptions = {t["name"]: t["description"] for t in mcp_server.TOOLS}
+        for name in ("inbox", "list_open"):
+            self.assertIn("pending", descriptions[name])
+            self.assertIn("followups", descriptions[name])
 
     def test_busy_answers_queue_in_order_and_go_out_once_in_one_turn(self):
         t = self.dispatch()

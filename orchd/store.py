@@ -306,3 +306,9 @@ def immediate(con):
 def pending_answers(con, task_id):
     return con.execute("SELECT * FROM messages WHERE task_id=? AND kind=? AND read_at IS NULL ORDER BY id",
                        (task_id, QUEUED)).fetchall()
+
+
+def pending_answer_count(con, task_id):
+    """Undelivered FIFO entries (answers and followups), including closed tasks; never read their bodies."""
+    return con.execute("SELECT COUNT(*) FROM messages WHERE task_id=? AND kind=? AND read_at IS NULL",
+                       (task_id, QUEUED)).fetchone()[0]

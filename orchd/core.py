@@ -237,8 +237,10 @@ def ask(con, rt, task_id, question):
 def inbox(con, orch_thread):
     rows = store.unread_for_thread(con, orch_thread)
     checked = {}
+    pending = {}
     for r in rows:  # only tasks with a lock or a verifies link shell out to git; before mark_read, never losing rows
         if r["task_id"] not in checked:
+            pending[r["task_id"]] = store.pending_answer_count(con, r["task_id"])
             try:
                 task = store.get_task(con, r["task_id"])
                 checked[r["task_id"]] = (verification.status(con, task["id"]) if verification.has_any(con, task)
@@ -248,7 +250,8 @@ def inbox(con, orch_thread):
     store.mark_read(con, [r["id"] for r in rows])
     return [dict(task_id=r["task_id"], repo=r["repo"], title=r["title"], kind=r["kind"],
                  body=r["body"], evidence=r["evidence"], task_status=r["status"],
-                 model=task_model(r), verification=checked[r["task_id"]]) for r in rows]
+                 model=task_model(r), pending=pending[r["task_id"]],
+                 verification=checked[r["task_id"]]) for r in rows]
 
 
 class _ResumeFailed(Exception):
@@ -529,6 +532,7 @@ def list_open(con, rt):
         out.append(dict(task_id=t["id"], repo=t["repo"], title=t["title"], status=t["status"],
                         model=task_model(t), worker_alive=alive, worktree=t["worktree"], branch=t["branch"],
                         orch_thread=t["orch_thread"], note=t["note"],
+                        pending=store.pending_answer_count(con, t["id"]),
                         owner_health=owner_health(store.get_orch(con, t["orch_thread"]), jobs),
                         notification_delivery=store.notification_delivery(con, t["id"]),
                         **worker_health.assess(t["status"], alive, worker_health.has_report(con, t["id"]),
