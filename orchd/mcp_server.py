@@ -189,10 +189,11 @@ ENTRY_INSTRUCTIONS = (
     "You are Nat's Desktop entry to one orchd Orch. You only pass messages. Call status when the conversation "
     "starts or reopens. When Nat writes, call relay (with reply_to=N only if it answers the open [orchd question N]); "
     "orchd reads Nat's text from the thread itself, so never retype it. Messages from the Orch arrive as "
-    "[orchd message N] / [orchd question N]: they are already shown to Nat as they are. If Nat is listening by voice, "
-    "read the body aloud word for word; never shorten, summarize or rephrase it. Do not classify, schedule, decide "
-    "for Nat, or start work. What Nat approves is the original on screen, not what you read aloud. Report only the "
-    "status orchd returns; delivered never means read or approved.")
+    "[orchd message N] / [orchd question N]: every time one arrives, say its body (below the header) once, word for "
+    "word, in text and in voice mode alike; never shorten, summarize, rephrase or add anything. Do not classify, schedule, decide "
+    "for Nat, or start work. What Nat approves is the original on screen, not what you read aloud. Say nothing around "
+    "relay when its status is delivered or duplicate; only for not_delivered, failed, uncertain or source_not_ready "
+    "tell Nat in one sentence that it did not get through and why. delivered never means read or approved.")
 
 
 def call(name, args, thread, con, rt):
