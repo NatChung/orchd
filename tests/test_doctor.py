@@ -109,10 +109,17 @@ class RequiredChecks(DoctorCase):
             self.assertEqual(by["claude CLI"].status, doctor.UNKNOWN)
 
     def test_unknown_required_alone_exits_2_and_is_listed(self):
-        d, by = self.run_doctor({("claude", "--help"): (0, HELP_BG)})
+        d, by = self.run_doctor({("claude", "--help"): RuntimeError("help crashed")})
         self.assertEqual(by["claude --messaging-socket-path"].status, doctor.UNKNOWN)
+        self.assertEqual(by["claude --messaging-socket-path"].severity, doctor.REQUIRED)
         self.assertEqual(doctor.exit_code(d.checks), 2)
         self.assertIn("claude --messaging-socket-path", doctor.render(d.checks).split("Unknown")[-1])
+
+    def test_hidden_socket_flag_is_unknown_but_does_not_block(self):
+        d, by = self.run_doctor({("claude", "--help"): (0, HELP_BG)})
+        self.assertEqual((by["claude --messaging-socket-path"].status, by["claude --messaging-socket-path"].severity),
+                         (doctor.UNKNOWN, doctor.OPTIONAL))
+        self.assertEqual(doctor.exit_code(d.checks), 0)
 
     def test_fail_beats_unknown_in_exit_code(self):
         d, _ = self.run_doctor({("claude", "--help"): (0, "Usage: claude\n")})
@@ -131,6 +138,18 @@ class RequiredChecks(DoctorCase):
         self.assertEqual(by["claude login"].status, doctor.FAIL)
         _, by = self.run_doctor({("claude", "auth", "status"): (0, "weird text")})
         self.assertEqual(by["claude login"].status, doctor.UNKNOWN)
+
+    def test_fresh_install_before_init_is_not_a_failure(self):
+        import shutil
+        shutil.rmtree(self.orch)
+        d, by = self.run_doctor()
+        self.assertEqual(by["orch home"].status, doctor.WARN)
+        self.assertIn("orchd init", by["orch home"].fix)
+        self.assertEqual(doctor.exit_code(d.checks), 0)
+        self.assertIn("required checks: all pass", doctor.render(d.checks))
+        self.orch.write_text("not a folder")
+        _, by = self.run_doctor()
+        self.assertEqual(by["orch home"].status, doctor.FAIL)
 
     def test_orch_home_missing_and_untrusted(self):
         (self.orch / "AGENTS.md").unlink()

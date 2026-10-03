@@ -135,8 +135,9 @@ class Doctor:
                          "" if "--bg" in out else "Upgrade Claude Code.")
                 if "--messaging-socket-path" in out:
                     self.add("claude --messaging-socket-path", REQUIRED, PASS, "listed in --help")
-                else:  # hidden flag, and the CLI silently accepts unknown flags: cannot be confirmed offline
-                    self.add("claude --messaging-socket-path", REQUIRED, UNKNOWN,
+                else:  # hidden flag, and the CLI silently accepts unknown flags: cannot be confirmed offline.
+                    # Optional so a healthy machine is not reported as unknown forever; `orchd orch` proves it.
+                    self.add("claude --messaging-socket-path", OPTIONAL, UNKNOWN,
                              "hidden flag; not verifiable without starting a session. "
                              "Confirmed only by the pilot task (`orchd orch`).")
         self._cli("codex", self.codex, OPTIONAL, "Only needed for Codex workers / Astra: install Codex CLI.")
@@ -209,9 +210,13 @@ class Doctor:
 
     def check_orch_home(self):
         home = self.orch_home
-        if not home.is_dir():
-            self.add("orch home", REQUIRED, FAIL, f"{home} is not a directory" if home.exists() else f"{home} missing",
+        if not home.exists():  # a fresh install before `orchd init`: the next step, not a failure
+            self.add("orch home", OPTIONAL, WARN, f"{home} not set up yet",
                      "Run `orchd init` (creates the Orch home and the Desktop interface).")
+            return
+        if not home.is_dir():
+            self.add("orch home", REQUIRED, FAIL, f"{home} is not a directory",
+                     "Move it away, then run `orchd init`.")
             return
         try:
             (home / "AGENTS.md").read_text(encoding="utf-8")
