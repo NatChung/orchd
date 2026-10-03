@@ -413,7 +413,7 @@ class Runtime:
 
     def live_jobs(self):
         try:
-            return {a.get("id"): a for a in self.agents()}
+            return {a["id"]: a for a in self.agents() if isinstance(a.get("id"), str) and a["id"]}
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
             return None
 

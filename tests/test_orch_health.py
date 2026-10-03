@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from orchd import core, mcp_server, store
 from orchd.orch_health import owner_health
+from orchd.runtime import Runtime
 from tests.test_orchd import FakeRuntime
 
 
@@ -108,6 +109,30 @@ class OrchHealthTest(unittest.TestCase):
             with self.subTest(jobs=jobs):
                 self.assertEqual(owner_health(owner, jobs),
                                  {"state": "unknown", "reason": "runtime_invalid"})
+
+    def test_runtime_ignores_rows_without_background_job_ids(self):
+        owner = self.owner()
+        background = {"id": owner["job_id"], "kind": "background", "status": "idle"}
+        for invalid_id in (None, "", 42, False, [], {}):
+            interactive = {"kind": "interactive", "pid": 23365, "status": "idle"}
+            if invalid_id is not None:
+                interactive["id"] = invalid_id
+            for rows, expected in (
+                ([interactive, background], {"state": "alive", "reason": "job_present"}),
+                ([interactive], {"state": "dead", "reason": "job_absent"}),
+            ):
+                with self.subTest(invalid_id=invalid_id, rows=rows), \
+                        patch.object(Runtime, "run", return_value=subprocess.CompletedProcess(
+                            [], 0, json.dumps(rows), "")):
+                    self.assertEqual(owner_health(owner, Runtime().live_jobs()), expected)
+
+    def test_runtime_malformed_agents_output_stays_unavailable(self):
+        owner = self.owner()
+        for output in ('{}', 'null', '"unknown"', 'not json'):
+            with self.subTest(output=output), patch.object(
+                    Runtime, "run", return_value=subprocess.CompletedProcess([], 0, output, "")):
+                self.assertEqual(owner_health(owner, Runtime().live_jobs()),
+                                 {"state": "unknown", "reason": "runtime_unavailable"})
 
     def test_listed_failed_owner_job_is_dead_but_other_listed_states_are_not(self):
         owner = self.owner()
