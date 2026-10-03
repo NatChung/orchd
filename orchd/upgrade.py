@@ -91,6 +91,6 @@ def upgrade(prefix=None, run=default_run, which=shutil.which, checkout=None):
     lines.append(f"orchd {(before or 'unknown')[:7]} -> {(after or 'unknown')[:7]}" if before != after
                  else f"orchd reinstalled at {(after or 'unknown')[:7]}")
     lines.append("Only the program changed (~/orch, the database and ~/.config/orchd are untouched). Running Orchs and "
-                 "Desktop MCP servers keep the old code: start a new Orch with `orchd interface --new` and open a new "
+                 "Desktop MCP servers keep the old code: start a new Orch with `orchd binding --new` and open a new "
                  "Desktop conversation.")
     return 0, lines

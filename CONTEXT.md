@@ -14,7 +14,7 @@ _Avoid_：團隊、workspace
 
 **入口（Entry）**：
 在 Codex Desktop 讓 Nat 交辦與回答追問的 session；只把原文轉給綁定的那一個 Claude Orch、再把 Orch 的原文帶回來，
-不是 Orch、不派工、不開組。資料夾叫 interface（`~/orch/interface`），由 `orchd init` 建立、`orchd interface` 綁定 Orch。見 ADR-0003。
+不是 Orch、不派工、不開組。資料夾叫 interface（`~/orch/interface`），由 `orchd init` 建立、`orchd binding` 綁定 Orch。見 ADR-0003。
 _Avoid_：前台 Orch、代理人
 
 **Worker**：

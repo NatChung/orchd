@@ -5,9 +5,9 @@
   orchd orch-stop ID                          stop a Claude Orch
   orchd init [--from OLD_ORCH_HOME] [--no-trust]   create ~/orch/home and ~/orch/interface, trust them in Codex
   orchd upgrade                               reinstall the uv-installed orchd at its source's newest commit
-  orchd interface [--new]                     bind ~/orch/interface to a live Claude Orch (starts one if none)
-  orchd entry-bind ORCH_ID [--entry NAME] [--force]   bind the Desktop entry to one Claude Orch (operator only)
-  orchd entry-status [--entry NAME]           read-only entry binding, Orch health, questions and delivery counts
+  orchd binding [--new | --to ORCH_ID | --status] [--entry NAME]
+                                              bind ~/orch/interface to a live Claude Orch (starts one if none);
+                                              --new starts a new one, --to binds a given one, --status only reads
   orchd ack ID                                worker: acknowledge a task
   orchd report ID --status done|blocked --summary S [--evidence E]
   orchd progress ID "text"                    worker: interim update to the Orch; the task keeps running
@@ -47,13 +47,12 @@ def main(argv=None):
     init.add_argument("--from", dest="source", help="copy what an old Orch home kept (e.g. ~/projects/orch); never overwrites")
     init.add_argument("--no-trust", action="store_true", help="do not write Codex trust or check Claude trust")
     sub.add_parser("upgrade")
-    iface = sub.add_parser("interface")
-    iface.add_argument("--new", action="store_true", help="the bound Orch is offline: start a new one and rebind")
-    bind = sub.add_parser("entry-bind")
-    bind.add_argument("orch_id")
-    bind.add_argument("--entry", default="desktop")
-    bind.add_argument("--force", action="store_true", help="rebind an entry already bound to another Orch")
-    sub.add_parser("entry-status").add_argument("--entry", default="desktop")
+    binding = sub.add_parser("binding")
+    binding.add_argument("--entry", default="desktop")
+    how = binding.add_mutually_exclusive_group()
+    how.add_argument("--new", action="store_true", help="start a new Claude Orch and bind the interface to it")
+    how.add_argument("--to", metavar="ORCH_ID", help="bind the interface to this live Claude Orch")
+    how.add_argument("--status", action="store_true", help="read-only: binding, Orch health, questions, delivery")
     sub.add_parser("ack").add_argument("task_id")
     rep = sub.add_parser("report")
     rep.add_argument("task_id")
@@ -158,21 +157,17 @@ def main(argv=None):
     elif args.cmd == "orch-stop":
         core.stop_orch(con, rt, args.orch_id)
         print(f"stopped {args.orch_id}")
-    elif args.cmd == "interface":
+    elif args.cmd == "binding":
         from orchd import entry
         try:
-            result = entry.interface(con, rt, lambda: core.start_orch(con, rt, "opus"), args.new)
+            if args.status:
+                result = entry.snapshot(con, rt, args.entry)
+            elif args.to:
+                result = entry.bind(con, rt, args.to, args.entry, force=True)
+            else:
+                result = entry.binding(con, rt, lambda: core.start_orch(con, rt, "opus"), args.new, args.entry)
         except ValueError as error:
-            print(f"interface: {error}", file=sys.stderr)
-            return 1
-        print(json.dumps(result, ensure_ascii=False, indent=1))
-    elif args.cmd in ("entry-bind", "entry-status"):
-        from orchd import entry
-        try:
-            result = (entry.bind(con, rt, args.orch_id, args.entry, args.force) if args.cmd == "entry-bind"
-                      else entry.snapshot(con, rt, args.entry))
-        except ValueError as error:
-            print(f"{args.cmd} refused: {error}", file=sys.stderr)
+            print(f"binding: {error}", file=sys.stderr)
             return 1
         print(json.dumps(result, ensure_ascii=False, indent=1))
     elif args.cmd == "ack":

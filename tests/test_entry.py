@@ -291,7 +291,7 @@ class EntryTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Claude Orch"):
             entry.bind(self.con, self.rt, "codex-thread")
         other = core.start_orch(self.con, self.rt, "opus")["id"]
-        with self.assertRaisesRegex(ValueError, "needs --force"):
+        with self.assertRaisesRegex(ValueError, "needs force"):
             entry.bind(self.con, self.rt, other)
         self.rt.jobs = {}
         with self.assertRaisesRegex(ValueError, "offline"):
@@ -456,7 +456,7 @@ class InterfaceTest(unittest.TestCase):
         return core.start_orch(self.con, self.rt, "opus")
 
     def interface(self, new=False):
-        return entry.interface(self.con, self.rt, self.start, new)
+        return entry.binding(self.con, self.rt, self.start, new)
 
     def test_first_run_starts_and_binds_one_orch_then_reuses_it(self):
         first = self.interface()
@@ -475,7 +475,7 @@ class InterfaceTest(unittest.TestCase):
         orch = self.interface()["orch_id"]
         entry.ask_nat(self.con, self.rt, orch, "open?")
         self.rt.jobs = {}
-        with self.assertRaisesRegex(ValueError, "offline.*1 open question.*--new"):
+        with self.assertRaisesRegex(ValueError, "offline.*1 open question.*orchd binding --new"):
             self.interface()
         self.assertEqual(self.starts, 1)
         self.rt.jobs = {"orchjob": {}}
@@ -516,6 +516,37 @@ class EarlyDraftSchemaTest(unittest.TestCase):
             self.assertEqual(entry.relay(con, rt, "desktop", "desk-1")["status"], "duplicate")
             self.assertEqual(entry.inbox(con, orch)["messages"][0]["body"], BODY)
             con.close()
+
+
+class BindingCliTest(unittest.TestCase):
+    """Issue #67: `orchd binding` replaces interface / entry-bind / entry-status."""
+
+    def test_modes(self):
+        import contextlib, io
+        from orchd import cli
+        with tempfile.TemporaryDirectory() as tmp:
+            rt = EntryRuntime()
+            con = store.connect(Path(tmp) / "orchd.db")
+            orch = core.start_orch(con, rt, "opus")["id"]
+            def run(*argv):
+                out, err = io.StringIO(), io.StringIO()
+                with patch.dict(os.environ, {"ORCHD_HOME": tmp}), patch.object(cli, "Runtime", lambda: rt), \
+                        contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    return cli.main(list(argv)), out.getvalue(), err.getvalue()
+            code, _, err = run("binding", "--status")
+            self.assertEqual(code, 1)
+            self.assertIn("orchd binding", err)
+            code, out, _ = run("binding", "--to", orch)
+            self.assertEqual((code, json.loads(out)["orch_id"]), (0, orch))
+            code, out, _ = run("binding", "--status")
+            self.assertEqual((code, json.loads(out)["orch_id"]), (0, orch))
+            con2 = store.connect(Path(tmp) / "orchd.db")
+            self.assertEqual(entry.get_entry(con2, "desktop")["orch_id"], orch)
+            for old in ("interface", "entry-bind", "entry-status"):
+                with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    cli.main([old])
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                cli.main(["binding", "--new", "--status"])
 
 
 class RolloutSourceTest(unittest.TestCase):

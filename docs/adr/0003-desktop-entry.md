@@ -10,7 +10,7 @@ ADR-0002 讓每個 Desktop session 自成一組，也曾以「多一層身分或
 
 - 入口資料夾是 `~/orch/interface`（`orchd init` 建立）。入口用 `orchd mcp --role entry` 啟動：只列出、只接受 `relay`／`status`，參數只有 id，不登記成 Orch。
   其他 Desktop session（沒有這個 role）照 ADR-0002 自成一組，不受影響。
-- 綁定由 Nat 手動做（`orchd entry-bind ORCH_ID`），只接受在線的 Claude Orch；換綁要 `--force`。
+- 綁定由 Nat 手動做（`orchd binding`，或 `orchd binding --to ORCH_ID` 指定），只接受在線的 Claude Orch；不會自動換綁。
   綁定與待答問題存在 SQLite，入口重開（新 thread 也一樣）接回原 Orch。
 - 原文不經模型重打：Nat → Orch 由 orchd 讀入口 thread 的 rollout；Orch → Nat 用 `codex queue`。
   這兩條都經 probe 量到逐位元組一致；Luna 重打 5 KB 會改寫成 10–13 KB（#37 handoff，`79ace31`）。

@@ -193,3 +193,7 @@ Claude Orch 的現行選項仍為 `opus` 與 `sonnet`，預設 `opus`，不受 w
 - 產生的設定、Claude Orch 的 `mcp.json`、worker 收到的指令都改用 `paths.orchd_executable()`（`ORCHD_EXECUTABLE` → checkout 的 `bin/orchd` → 目前 Python 旁的 entry point → PATH），不再寫死 `/usr/bin/python3 + bin/orchd`。
 - gh 包裝器打包在 `orchd/worker_bin/gh`，啟動 worker 前複製到 `ORCHD_HOME/worker-bin` 並設成可執行（wheel 不一定保留執行權限）。
 - Nat 的個人值移出程式與範本：gh 帳號對應改讀 `~/.config/orchd/gh-accounts.json`（沒有就照原本登入狀態、不警告）；Orch 家額外的讀取路徑與關掉的 connector 改讀 `~/.config/orchd/init.toml`。
+
+## 綁定指令合併（2026-10-04，#67）
+
+`orchd interface`、`orchd entry-bind`、`orchd entry-status` 合併成 `orchd binding`（`--new`／`--to ORCH_ID`／`--status`），舊名稱不保留。理由：`interface` 跟資料夾 `~/orch/interface` 同名，看不出是在綁定；同類的指令越多越難懂。資料夾與 MCP 的 `--role entry` 不改名。

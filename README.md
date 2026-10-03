@@ -33,7 +33,7 @@ orchd upgrade
 
 - 從 uv 的安裝紀錄讀出當初的來源（含 SSH 別名），重新安裝最新的 commit，並顯示 `舊 commit -> 新 commit`；已是最新就不重裝。
 - 當初裝的是某個 branch（`@<branch>`）時，會改回預設 branch 並說明。
-- 只換程式，不動 `~/orch`、資料庫與 `~/.config/orchd`。已經在跑的 Orch 和 Desktop 的 MCP 還是舊程式：用 `orchd interface --new` 換新的 Orch，Desktop 開新對話。
+- 只換程式，不動 `~/orch`、資料庫與 `~/.config/orchd`。已經在跑的 Orch 和 Desktop 的 MCP 還是舊程式：用 `orchd binding --new` 換新的 Orch，Desktop 開新對話。
 - 還沒有 `orchd upgrade` 的舊版本，先手動裝一次（整行一起貼）：`uv tool install --force --refresh git+ssh://git@github.com/NatChung/orchd`（有用 SSH 別名就用別名）。`uv tool upgrade orchd` 會沿用快取、抓不到新 commit，不要用。
 - 先試某個 branch：`uv tool install --force --refresh git+ssh://…/orchd@<branch>`，測完 `orchd upgrade` 就會回到預設 branch。
 - 從 repo checkout 跑的 `bin/orchd`：`orchd upgrade` 會提醒你在 repo 裡 `git pull`。
@@ -67,7 +67,7 @@ uv tool uninstall orchd
 ```sh
 orchd init                          # 第一次：建 ~/orch/home、~/orch/interface，並在 Codex trust
 orchd init --from ~/projects/orch   # 從舊 Orch 家搬檔案（不覆蓋、不刪來源）
-orchd interface                     # 綁定在線的 Claude Orch，沒有就開一個
+orchd binding                       # 綁定在線的 Claude Orch，沒有就開一個
 ```
 
 `orchd init` 建出：
@@ -80,8 +80,8 @@ orchd interface                     # 綁定在線的 Claude Orch，沒有就開
 
 - 範本在 `orchd/templates/`；已存在且被改過的檔案不會被覆蓋。`ORCHD_ROOT`、`ORCHD_ORCH_HOME`、`ORCHD_INTERFACE_HOME` 可改位置。
 - Codex trust 由 init 寫入 `~/.codex/config.toml`（先備份）。Claude trust 只檢查：沒 trust 時 init 會告訴你在 `~/orch/home` 開一次 `claude` 接受。
-- `orchd interface` 是綁定：沿用已綁定且在線的 Orch，沒有就開一個 Claude Opus Orch 並綁上；綁定會保存，重開 Desktop 不用重跑。
-- 綁定的 Orch 離線時，`orchd interface` 不會自己換；確定要換用 `orchd interface --new`。
+- `orchd binding`：沿用已綁定且在線的 Orch，沒有就開一個 Claude Opus Orch 並綁上；綁定會保存，重開 Desktop 不用重跑。
+- 綁定的 Orch 離線時不會自己換；確定要換用 `orchd binding --new`，要綁到某個已在跑的 Orch 用 `orchd binding --to ORCH_ID`，只想看狀態用 `orchd binding --status`。
 
 之後在 Codex Desktop 打開 `~/orch/interface`，權限選 **`interface`**（init 寫好的權限設定；不要選完整存取權），開新對話直接講話：
 
@@ -96,10 +96,11 @@ orchd interface                     # 綁定在線的 Claude Orch，沒有就開
 | 指令 | 用途 |
 | --- | --- |
 | `orchd init [--from OLD] [--no-trust]` | 建 `~/orch/home` 與 `~/orch/interface`，在 Codex trust |
-| `orchd interface [--new]` | 把 interface 綁定在線的 Claude Orch（沒有就開一個） |
+| `orchd binding` | 把 interface 綁定在線的 Claude Orch（沒有就開一個） |
+| `orchd binding --new` | 開一個新的 Claude Orch 並綁上 |
+| `orchd binding --to ORCH_ID` | 綁到指定、在線的 Claude Orch |
+| `orchd binding --status` | 唯讀：綁定、Orch 健康、問題與交付狀態 |
 | `orchd upgrade` | 安裝版更新到最新 commit（只換程式） |
-| `orchd entry-status [--entry NAME]` | 唯讀：interface 綁定、Orch 健康、問題與交付狀態 |
-| `orchd entry-bind ORCH_ID [--entry NAME] [--force]` | 手動把 interface 綁到指定 Claude Orch |
 | `orchd orch [--model opus\|sonnet] [--no-attach]` | 開 Claude Orch |
 | `orchd orch-stop ID` | 停 Claude Orch |
 | `orchd orchs` | 唯讀 Orch 清單 |

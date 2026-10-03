@@ -8,7 +8,7 @@ Orch 用 `send_to_nat`／`ask_nat` 回覆 → orchd 以 `codex queue` 原樣送�
 
 ```sh
 orchd init         # 建 ~/orch/home 與 ~/orch/interface、在 Codex trust 這兩個資料夾
-orchd interface    # 沿用已綁定且在線的 Claude Orch；沒有就開一個 Opus Orch 並綁上
+orchd binding      # 沿用已綁定且在線的 Claude Orch；沒有就開一個 Opus Orch 並綁上
 ```
 
 `orchd init` 寫入 interface 的 `.codex/config.toml`（範本在 `orchd/templates/interface/`）與給入口模型的 `AGENTS.md`：
@@ -17,8 +17,8 @@ orchd interface    # 沿用已綁定且在線的 Claude Orch；沒有就開一�
 已存在且內容不同的檔案不會被覆蓋。
 
 1. 在 Desktop 打開 `~/orch/interface`，權限選 **`interface`**（init 寫好的權限設定），不要用完整存取權。
-2. 綁定的 Orch 離線時 `orchd interface` 不會自己替換；確定要換用 `orchd interface --new`（舊 Orch 的未答問題留在舊 Orch）。
-   手動綁定仍可用 `orchd entry-bind <orch_id>`，`orchd entry-status` 唯讀查看。
+2. 綁定的 Orch 離線時 `orchd binding` 不會自己替換；確定要換用 `orchd binding --new`（舊 Orch 的未答問題留在舊 Orch）。
+   綁到指定的 Orch 用 `orchd binding --to <orch_id>`，`orchd binding --status` 唯讀查看。
 
 入口模型用 `gpt-6.1-sol`（理由見下方「入口模型」）。未 live 驗證：Native Desktop 是否套用這份權限、
 全域 `~/.codex/config.toml` 的 MCP 與工具在 interface 是否仍出現、語音模式實際用哪個模型、

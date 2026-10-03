@@ -36,7 +36,7 @@ def digest(text):
 def get_entry(con, entry_id):
     row = con.execute("SELECT * FROM entries WHERE id=?", (entry_id,)).fetchone()
     if row is None:
-        raise ValueError(f"entry {entry_id} is not bound to an Orch; Nat binds it with `orchd entry-bind ORCH_ID`")
+        raise ValueError(f"entry {entry_id} is not bound to an Orch; Nat binds it with `orchd binding`")
     return row
 
 
@@ -68,7 +68,7 @@ def bind(con, rt, orch_id, entry_id=DEFAULT_ENTRY, force=False):
     with store.immediate(con):
         row = con.execute("SELECT * FROM entries WHERE id=?", (entry_id,)).fetchone()
         if row is not None and row["orch_id"] != orch_id and not force:
-            raise ValueError(f"entry {entry_id} is bound to {row['orch_id']}; rebinding it needs --force")
+            raise ValueError(f"entry {entry_id} is bound to {row['orch_id']}; rebinding it needs force (`orchd binding --to`)")
         if row is None:
             con.execute("INSERT INTO entries(id,orch_id,bound_at) VALUES(?,?,?)", (entry_id, orch_id, now))
         elif row["orch_id"] != orch_id:
@@ -404,7 +404,7 @@ def relay(con, rt, entry_id, thread, turn_id=None, reply_to=None):
                           "message); it is retried on the next relay or status")
     elif status == "uncertain":
         result["note"] = ("the Orch may have been notified but the receipt was not saved; it is not resent "
-                          "automatically, check entry-status")
+                          "automatically, check `orchd binding --status`")
     elif note:
         result["note"] = note
     return result
@@ -552,7 +552,7 @@ def snapshot(con, rt, entry_id=DEFAULT_ENTRY):
                 counts=[dict(r) for r in counts])
 
 
-# -- interface: the Desktop entry folder (`orchd init` creates it, `orchd interface` binds it) ----------------
+# -- binding: the Desktop entry folder (`orchd init` creates it, `orchd binding` binds it) --------------------
 
 def codex_trusted(home):
     """True/False from ~/.codex/config.toml, None when it cannot be read. Never writes it."""
@@ -571,7 +571,7 @@ def codex_trusted(home):
     return isinstance(entry, dict) and entry.get("trust_level") == "trusted"
 
 
-def interface(con, rt, start_orch, new=False, entry_id=DEFAULT_ENTRY):
+def binding(con, rt, start_orch, new=False, entry_id=DEFAULT_ENTRY):
     """Operator: make sure the interface is bound to a live Claude Orch.
 
     Reuses the bound Orch unless it is confirmed dead (Q3). A dead one is never replaced silently (Q1): that needs
@@ -590,7 +590,7 @@ def interface(con, rt, start_orch, new=False, entry_id=DEFAULT_ENTRY):
             entry = get_entry(con, entry_id)
             open_questions = len(queued_questions(con, entry)) + (1 if current_question(con, entry) else 0)
             raise ValueError(f"the interface's Orch {row['orch_id']} is offline ({health['reason']}); {open_questions} "
-                             "open question(s) stay with it. Run `orchd interface --new` to start a new Orch and "
+                             "open question(s) stay with it. Run `orchd binding --new` to start a new Orch and "
                              "bind the interface to it")
         orch_id, started = start_orch()["id"], True
         bind(con, rt, orch_id, entry_id, force=True)

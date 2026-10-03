@@ -48,7 +48,7 @@ class UpgradeTest(unittest.TestCase):
         self.assertEqual(self.calls[-1], ["/opt/uv", "tool", "install", "--force", "--refresh",
                                           "git+ssh://git@github-NatChung/NatChung/orchd"])
         self.assertIn("orchd aaaaaaa -> bbbbbbb", lines)
-        self.assertIn("orchd interface --new", lines[-1])
+        self.assertIn("orchd binding --new", lines[-1])
 
     def test_already_newest_does_not_reinstall(self):
         self.head = OLD
