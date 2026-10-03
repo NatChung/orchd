@@ -300,7 +300,16 @@ class Runtime:
         return str(directory / "o.sock")
 
     def start_orch(self, orch_id, model, orch_home):
-        orch_home = Path(orch_home)
+        orch_home = Path(orch_home).resolve()
+        # Claude Code 2.1.288 stores pasted/dragged images in this per-session
+        # temp tree, not ~/.claude/image-cache. Expose only this home's cwd key.
+        image_key = re.sub(r"[^a-zA-Z0-9]", "-", str(orch_home))
+        if len(image_key) > 200:
+            raise RuntimeError("Orch home exceeds Claude's image-directory key limit (200 characters)")
+        images = Path("/tmp") / f"claude-{os.getuid()}" / image_key
+        images.mkdir(mode=0o700, parents=True, exist_ok=True)
+        images.chmod(0o700)
+        images = images.resolve()
         sock = self.orch_socket_path(orch_id)
         mcp = Path(sock).parent / "mcp.json"
         mcp.write_text(json.dumps({"mcpServers": {"orchd": {
@@ -309,9 +318,14 @@ class Runtime:
             agents = (orch_home / "AGENTS.md").read_text()
         except OSError:
             agents = ""
-        prompt = f"You are an orchd Orch. Your orch id is {orch_id}. Instructions from AGENTS.md follow:\n{agents}"
+        prompt = (f"You are an orchd Orch. Your orch id is {orch_id}. "
+                  f"Orch home sessions' cached input images are readable under {images}/<session-id>/images/. "
+                  "Only files under groups/ in your Orch home may be edited. "
+                  f"Instructions from AGENTS.md follow:\n{agents}")
         settings = {"crossSessionInbound": "accept",
-                    "permissions": {"allow": ["Read", "Edit", "Write", "mcp__orchd"]}}
+                    "worktree": {"bgIsolation": "none"},
+                    "permissions": {"additionalDirectories": [str(images)],
+                                    "allow": ["Read", f"Edit(/{orch_home}/groups/**)", "mcp__orchd"]}}
         job, session = self.start_claude(orch_home, sock, model, [
             "--restricted", "--permission-mode", "dontAsk", "--strict-mcp-config", "--mcp-config", str(mcp),
             "--settings", json.dumps(settings), "--append-system-prompt", prompt])
