@@ -44,6 +44,7 @@ class DemoResetTest(unittest.TestCase):
         sh("git", "add", ".", cwd=self.repo)
         sh("git", "commit", "-m", "seed", cwd=self.repo)
         sh("git", "push", "-u", "origin", "main", cwd=self.repo)
+        self.seed = sh("git", "rev-parse", "main", cwd=self.repo)
         self.con = store.connect(self.home / "orchd.db")
         self.addCleanup(self.con.close)
         self.n = 0
@@ -73,7 +74,7 @@ class DemoResetTest(unittest.TestCase):
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
             code = demo_reset.main(["--home", str(self.home), "--projects", str(self.projects), "--remotes",
-                                    str(self.remotes), "--sock-root", str(self.socks), *extra])
+                                    str(self.remotes), "--sock-root", str(self.socks), "--seed", f"{REPO}={self.seed}", *extra])
         return code, out.getvalue() + err.getvalue()
 
     def snapshot(self):
@@ -107,10 +108,100 @@ class DemoResetTest(unittest.TestCase):
         self.assertEqual(sh("git", "worktree", "list", "--porcelain", cwd=self.repo).count("worktree "), 1)
         self.assertEqual((self.repo / "a.txt").read_text(), "seed\n")
 
+    def test_no_allowlist_never_stops_orchs(self):
+        self.make_task()
+        with patch.object(demo_reset, "stop_orchs", wraps=demo_reset.stop_orchs), patch.object(
+                demo_reset.subprocess, "run", wraps=subprocess.run) as run:
+            code, out = self.run_reset("--apply")
+        self.assertEqual(code, 0, out)
+        self.assertFalse(any("orch-stop" in call.args[0] for call in run.call_args_list))
+        self.assertIn("0 extra worktree(s)", out)
+
+    def test_only_allowlisted_orchs_are_stopped(self):
+        real_run = subprocess.run
+        stopped = []
+        def run(cmd, **kwargs):
+            if "orch-stop" in cmd:
+                stopped.append((cmd[-1], kwargs["env"]["ORCHD_HOME"]))
+                return subprocess.CompletedProcess(cmd, 0)
+            return real_run(cmd, **kwargs)
+        with patch.object(demo_reset.subprocess, "run", side_effect=run):
+            code, out = self.run_reset("--apply", "--stop-orch", "abcd1234", "--stop-orch", "deadbeef",
+                                       "--stop-orch", "abcd1234")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(stopped, [("abcd1234", str(self.home)), ("deadbeef", str(self.home))])
+
+    def test_allowlisted_orch_dry_run_does_not_stop(self):
+        with patch.object(demo_reset.subprocess, "run", wraps=subprocess.run) as run:
+            code, out = self.run_reset("--stop-orch", "abcd1234")
+        self.assertEqual(code, 0, out)
+        self.assertIn("would stop Orch abcd1234", out)
+        self.assertFalse(any("orch-stop" in call.args[0] for call in run.call_args_list))
+
+    def test_failed_orch_stop_refuses_removal(self):
+        _, wt, _ = self.make_task()
+        real_run = subprocess.run
+        def run(cmd, **kwargs):
+            if "orch-stop" in cmd:
+                raise subprocess.CalledProcessError(1, cmd)
+            return real_run(cmd, **kwargs)
+        with patch.object(demo_reset.subprocess, "run", side_effect=run):
+            code, out = self.run_reset("--apply", "--stop-orch", "abcd1234")
+        self.assertEqual(code, 2, out)
+        self.assertIn("cannot stop allowlisted Orch", out)
+        self.assertTrue(wt.exists())
+
+    def test_invalid_allowlist_is_rejected_before_any_stop(self):
+        with patch.object(demo_reset.subprocess, "run", wraps=subprocess.run) as run:
+            code, out = self.run_reset("--apply", "--stop-orch", "abcd1234", "--stop-orch", "invalid")
+        self.assertEqual(code, 2, out)
+        self.assertFalse(any("orch-stop" in call.args[0] for call in run.call_args_list))
+
+    def test_missing_seed_refuses(self):
+        out = io.StringIO()
+        with redirect_stderr(out):
+            code = demo_reset.main(["--home", str(self.home), "--projects", str(self.projects),
+                                    "--remotes", str(self.remotes), "--repo", REPO, "--apply"])
+        self.assertEqual(code, 2, out.getvalue())
+        self.assertIn("missing --seed", out.getvalue())
+
+    def test_changed_seed_refuses_before_stopping_or_removal(self):
+        _, wt, sdir = self.make_task()
+        (self.repo / "fixed.txt").write_text("merged demo fix\n")
+        sh("git", "add", ".", cwd=self.repo)
+        sh("git", "commit", "-m", "demo fix", cwd=self.repo)
+        before = self.snapshot()
+        with patch.object(demo_reset, "stop_orchs") as stop:
+            code, out = self.run_reset("--apply", "--stop-orch", "abcd1234")
+        self.assertEqual(code, 2, out)
+        self.assertIn("differs from original seed", out)
+        stop.assert_not_called()
+        self.assertEqual(self.snapshot(), before)
+        self.assertTrue(wt.exists())
+        self.assertTrue(sdir.exists())
+
+    def test_changed_remote_seed_refuses(self):
+        _, wt, _ = self.make_task()
+        sh("git", "push", "origin", "HEAD:main", cwd=wt)
+        code, out = self.run_reset("--apply")
+        self.assertEqual(code, 2, out)
+        self.assertIn("remote main", out)
+        self.assertTrue(wt.exists())
+
+    def test_seed_change_after_plan_refuses(self):
+        _, wt, _ = self.make_task()
+        with self._after_plan(lambda: sh("git", "update-ref", "refs/heads/main",
+                                        sh("git", "rev-parse", "HEAD", cwd=wt), cwd=self.repo)):
+            code, out = self.run_reset("--apply")
+        self.assertEqual(code, 2, out)
+        self.assertTrue(wt.exists())
+
     def test_open_task_refuses_everything(self):
         _, wt, _ = self.make_task()
         self.make_task(status="running")
-        code, out = self.run_reset("--apply")
+        with patch.object(demo_reset, "stop_orchs") as stop:
+            code, out = self.run_reset("--apply", "--stop-orch", "abcd1234")
+        stop.assert_not_called()
         self.assertEqual(code, 2)
         self.assertIn("still open", out)
         self.assertTrue(wt.exists())

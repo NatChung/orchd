@@ -34,8 +34,13 @@ mid-step a worktree can be left at .orchd-worktrees/.demo-reset-*/<name>, still 
 Branch deletes are compare-and-delete on the expected SHA.
 
 Exit codes: 0 clean, 1 something was refused, 2 refused to run at all (open demo task, busy DB, bad input).
-Not done: stopping leftover Claude Orchs (`orchd orch-stop`), and unattributed `orchd/*` branches
-(listed as skipped, since nothing proves they belong to this demo).
+Pass --seed REPO=SHA for each existing demo repo, using the original full seed commit SHA saved
+before the demo. Both local and bare-remote main must still equal it; reset never rewrites main.
+Pass --stop-orch ID once per demo Orch to stop: this explicit allowlist is the only source of IDs.
+No allowlist means no Orch is stopped. Dry-run only lists stops. Stops run before the DB write lock
+(the CLI writes to the DB), followed by the authoritative open-task and seed checks under the lock.
+Unattributed `orchd/*` branches are listed as skipped, since nothing proves demo ownership.
+Example: --repo demo-shop-api --seed demo-shop-api=<original-full-SHA> --stop-orch <demo-ID> --apply.
 """
 import argparse
 import contextlib
@@ -551,7 +556,7 @@ def leftover_report(projects, repos):
             continue
         branches = git(path, "for-each-ref", "--format=%(refname:short)", "refs/heads").stdout.split()
         wts = [l for l in git(path, "worktree", "list", "--porcelain").stdout.splitlines() if l.startswith("worktree ")]
-        lines.append(f"{repo}: {len(branches)} branch(es) {branches}, {len(wts)} worktree(s)")
+        lines.append(f"{repo}: {len(branches)} branch(es) {branches}, {max(0, len(wts) - 1)} extra worktree(s) (main checkout excluded)")
     return lines
 
 
@@ -560,6 +565,52 @@ def refuse_open(tasks):
     if open_:
         raise Fatal("demo task(s) still open: " + ", ".join(f"{t['id']} ({t['status']})" for t in open_)
                     + " -- close them first")
+
+
+def validate_seeds(args, repos):
+    seeds = {}
+    for entry in args.seed:
+        name, sep, sha = entry.partition("=")
+        if not sep or name not in repos or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", sha):
+            raise Fatal(f"invalid --seed {entry!r}: expected selected REPO=full original seed SHA")
+        if name in seeds:
+            raise Fatal(f"duplicate seed for {name}")
+        seeds[name] = sha
+    for name in repos:
+        path = Path(args.projects) / name
+        # Unsafe/missing repositories retain the existing per-resource refusal behavior.
+        if not root_is_clean(args.projects) or is_link(path) or not (path / ".git").is_dir():
+            continue
+        if name not in seeds:
+            raise Fatal(f"{name}: missing --seed {name}=<original full seed SHA>; cannot prove seeded main")
+        paths = [(path, ".git", "local")]
+        remote = Path(args.remotes) / f"{name}.git"
+        if root_is_clean(args.remotes) and not is_link(remote) and remote.is_dir():
+            paths.append((remote, ".", "remote"))
+        for target, gitdir, label in paths:
+            held = Held(target)
+            try:
+                actual = held.ref(gitdir, "refs/heads/main")
+                if actual != seeds[name]:
+                    raise Fatal(f"{name}: {label} main {actual!r} differs from original seed {seeds[name]}; refusing reset")
+            finally:
+                held.close()
+
+
+def stop_orchs(args):
+    for oid in dict.fromkeys(args.stop_orch):
+        if not TASK_ID.fullmatch(oid):
+            raise Fatal(f"invalid --stop-orch ID {oid!r}: expected 8 hex chars")
+    for oid in dict.fromkeys(args.stop_orch):
+        if not args.apply:
+            print(f"  would stop Orch {oid} (explicit allowlist)")
+            continue
+        try:
+            subprocess.run([str(Path(__file__).resolve().parents[1] / "bin/orchd"), "orch-stop", oid],
+                           env={**os.environ, "ORCHD_HOME": str(args.home)}, check=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as e:
+            raise Fatal(f"cannot stop allowlisted Orch {oid}: {e}")
+        print(f"  done: stop Orch {oid}")
 
 
 def build_plan(args, repos, tasks):
@@ -606,6 +657,10 @@ def main(argv=None):
     ap.add_argument("--remotes", default=str(Path.home() / ".local/share/orchd-demo/remotes"))
     ap.add_argument("--sock-root", default="/tmp")
     ap.add_argument("--repo", action="append", help=f"demo repo name, must start with demo-shop- (default {DEMO_REPOS})")
+    ap.add_argument("--seed", action="append", default=[], metavar="REPO=SHA",
+                    help="original full seed commit SHA; required for each existing demo repo")
+    ap.add_argument("--stop-orch", action="append", default=[], metavar="ID",
+                    help="opt in to stopping this demo Orch only (repeat for each ID)")
     args = ap.parse_args(argv)
     repos = tuple(args.repo or DEMO_REPOS)
     plan = None
@@ -615,6 +670,8 @@ def main(argv=None):
                 raise Fatal(f"{r!r} is not a demo-shop-* repo")
         tasks = load_tasks(args.home, repos)
         refuse_open(tasks)  # an open task in the snapshot stops here, before the live DB is opened
+        validate_seeds(args, repos)
+        stop_orchs(args)
         if not args.apply:
             plan = build_plan(args, repos, tasks)
             execute(plan, apply=False)
@@ -627,6 +684,7 @@ def main(argv=None):
                     raise Fatal(f"cannot read the locked DB: {e}")
                 refuse_open(tasks)
                 plan = build_plan(args, repos, tasks)
+                validate_seeds(args, repos)
                 execute(plan, apply=True, deadline=deadline)
     except Fatal as e:
         print(f"refused: {e}", file=sys.stderr)
