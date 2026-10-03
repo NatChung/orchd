@@ -3,17 +3,26 @@
 The caller's id is `ORCHD_ORCH_ID` from the environment when set (a Claude Orch started by
 `orchd orch`; Claude Code sends no thread id). Otherwise it is `params._meta.threadId`, which both
 codex exec and the Desktop app send on every tools/call (verified 2026-09-29); such a Codex thread is
-registered as a codex Orch on its first call.
+registered as a codex Orch on its first call other than the read-only `list_orchs`.
 """
 import json
 import os
 import sys
 import traceback
 
-from . import core, store, verify as verification
+from . import core, inventory, store, verify as verification
 from .runtime import DEFAULT_WORKER_MODEL, WORKER_MODELS, Runtime
 
 TOOLS = [
+    {"name": "list_orchs",
+     "annotations": {"readOnlyHint": True},
+     "description": "Read-only registry inventory, including Orchs with no open tasks. Returns orch_id, kind, "
+                    "created_at, stopped_at, health (alive/dead/unknown), health_reason and open_task_count; "
+                    "counts covers registered Orchs only. stopped_at is bookkeeping, not liveness. "
+                    "Codex health is unknown. unidentified_claude_sessions lists live background sessions "
+                    "excluding registered Orchs and known workers; their role is unknown, null if unavailable. "
+                    "Does not register the caller, stop sessions or clean up records.",
+     "inputSchema": {"type": "object", "properties": {}}},
     {"name": "dispatch",
      "description": "Start one worker (Claude or Codex, by model) for one task in a fresh worktree of a repo under ~/projects. "
                     "Returns immediately; the worker reports later and you are woken with an [orchd] message. "
@@ -142,6 +151,8 @@ def call(name, args, thread, con, rt):
         if not thread:
             raise ValueError("inbox needs the caller's thread id")
         return core.inbox(con, thread)
+    if name == "list_orchs":
+        return inventory.list_orchs(con, rt)
     if name == "list_open":
         return core.list_open(con, rt)
     if name == "answer":
@@ -176,7 +187,7 @@ def handle(msg, con, rt):
         thread = os.environ.get("ORCHD_ORCH_ID")
         if not thread:
             thread = meta.get("threadId") or (meta.get("x-codex-turn-metadata") or {}).get("thread_id")
-            if thread:
+            if thread and params.get("name") != "list_orchs":
                 store.register_orch(con, thread, "codex")
         try:
             data = call(params.get("name"), params.get("arguments") or {}, thread, con, rt)

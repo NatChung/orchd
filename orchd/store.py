@@ -167,6 +167,21 @@ def get_orch(con, orch_id):
     return con.execute("SELECT * FROM orchs WHERE id=?", (orch_id,)).fetchone()
 
 
+def list_orchs(con):
+    """Registry inventory including owners with zero open tasks; no writes."""
+    marks = ",".join("?" * len(OPEN))
+    return con.execute(
+        "SELECT o.id,o.kind,o.created_at,o.stopped_at,o.job_id,COUNT(t.id) AS open_task_count "
+        "FROM orchs o LEFT JOIN tasks t ON t.orch_thread=o.id "
+        f"AND t.status IN ({marks}) GROUP BY o.id ORDER BY o.created_at,o.id", OPEN).fetchall()
+
+
+def known_job_ids(con):
+    """Registered Orchs and historical workers must not be called unidentified sessions."""
+    return {r[0] for r in con.execute(
+        "SELECT job_id FROM orchs UNION SELECT job_id FROM tasks") if r[0]}
+
+
 def register_orch(con, id, kind, model=None, socket=None, session_id=None, job_id=None):
     con.execute("INSERT OR IGNORE INTO orchs(id,kind,model,socket,session_id,job_id,created_at) "
                 "VALUES(?,?,?,?,?,?,?)", (id, kind, model, socket, session_id, job_id, time.time()))
