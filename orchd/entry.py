@@ -216,15 +216,10 @@ def _tag(name, text):
     return found.group(1) if found else None
 
 
-def voice_input(text):
-    """None for typed text. Desktop voice mode hands the interface a <realtime_delegation> block: the voice
-    model's request in <input>, plus a transcript that repeats earlier rounds. Returns {"handoff": True} for the
-    end-of-session transcript flush (not Nat asking for anything), else {"text": what the Orch should get}: the
-    request and only the user lines after the last assistant line, so earlier rounds are not asked again."""
-    if not text.lstrip().startswith("<realtime_delegation>"):
-        return None
-    if (_tag("source", text) or "").strip() == "transcript_tail_flush":
-        return {"handoff": True}
+def _voice_parts(text):
+    """(source, request, heard) of a <realtime_delegation> block; heard is the user lines after the last
+    assistant line, i.e. what Nat said in this round."""
+    source = (_tag("source", text) or "").strip()
     request = (_tag("input", text) or "").strip()
     said, role = [], None
     for line in (_tag("transcript_delta", text) or "").splitlines():
@@ -235,13 +230,41 @@ def voice_input(text):
             said.append(line[len("user:"):].strip())
         elif role == "user" and said:
             said[-1] += "\n" + line
-    heard = "\n".join(s for s in said if s)
+    return source, request, "\n".join(s for s in said if s)
+
+
+def _after(text, earlier):
+    """What `text` adds to `earlier` when it only grows it (voice mode re-sends the growing sentence)."""
+    if earlier and text.startswith(earlier):
+        return text[len(earlier):].lstrip(" ,，。.、!！?？")
+    return text
+
+
+def voice_input(text, earlier=None):
+    """None for typed text. Desktop voice mode hands the interface a <realtime_delegation> block: the voice
+    model's request in <input>, plus a transcript that repeats earlier rounds. Returns {"handoff": True} for the
+    end-of-session transcript flush (not Nat asking for anything); {"repeat": True} when, against `earlier` (the
+    raw block already relayed in the same turn, as the voice model re-sends a sentence while Nat is still
+    talking), nothing new was said; else {"text": what the Orch should get, "continues": bool}."""
+    if not text.lstrip().startswith("<realtime_delegation>"):
+        return None
+    source, request, heard = _voice_parts(text)
+    if source == "transcript_tail_flush":
+        return {"handoff": True}
+    continues = False
+    if earlier:
+        _, old_request, old_heard = _voice_parts(earlier)
+        new_request, new_heard = _after(request, old_request), _after(heard, old_heard)
+        continues = (new_request, new_heard) != (request, heard)
+        if continues and not new_request and not new_heard:
+            return {"repeat": True}
+        request, heard = new_request, new_heard
     if not request and not heard:
-        return {"text": text}
-    parts = [VOICE_LABEL, request or heard]
+        return {"text": text, "continues": False}
+    parts = [VOICE_LABEL + ("（接續上一則）" if continues else ""), request or heard]
     if request and heard and heard != request:
         parts.append(f"（語音逐字稿：{heard}）")
-    return {"text": "\n".join(parts)}
+    return {"text": "\n".join(parts), "continues": continues}
 
 
 def _source(rt, thread, turn_id):
@@ -291,25 +314,37 @@ def relay(con, rt, entry_id, thread, turn_id=None, reply_to=None):
                          "not Nat's; nothing was relayed")
     if reply_to is not None and not isinstance(reply_to, int):
         raise ValueError("reply_to must be a question id number")
-    voice = voice_input(source["text"])
-    if voice and voice.get("handoff"):  # kept as a record, never delivered or read by the Orch
+    earlier = None
+    if source.get("turn_id"):  # the voice model re-sends a growing sentence within one turn
+        row = con.execute("SELECT source_raw FROM entry_messages WHERE source_thread=? AND source_turn=? "
+                          "AND source_raw IS NOT NULL AND kind IN ('message','reply') ORDER BY id DESC LIMIT 1",
+                          (thread, source["turn_id"])).fetchone()
+        earlier = row["source_raw"] if row else None
+    voice = voice_input(source["text"], earlier)
+    if voice and (voice.get("handoff") or voice.get("repeat")):  # kept as a record, never delivered or read
+        kind = "handoff" if voice.get("handoff") else "voice_repeat"
         try:
             with store.immediate(con):
-                message_id = _insert(con, get_entry(con, entry_id), "in", "handoff", source["text"],
+                message_id = _insert(con, get_entry(con, entry_id), "in", kind, source["text"],
                                      delivery="skipped", read_at=time.time(), source_raw=source["text"],
-                                     source_thread=thread, source_item_id=source["item_id"])
+                                     source_turn=source.get("turn_id"), source_thread=thread,
+                                     source_item_id=source["item_id"])
         except sqlite3.IntegrityError:
             return dict(status="duplicate", resumed=resumed)
-        return dict(message_id=message_id, kind="handoff", status="skipped_handoff", resumed=resumed,
-                    note="Desktop's end-of-voice-session handoff, not a request from Nat; not passed to the Orch. "
-                         "Say nothing.")
+        if kind == "handoff":
+            return dict(message_id=message_id, kind=kind, status="skipped_handoff", resumed=resumed,
+                        note="Desktop's end-of-voice-session handoff, not a request from Nat; not passed to the "
+                             "Orch. Say nothing.")
+        return dict(message_id=message_id, kind=kind, status="duplicate", resumed=resumed,
+                    note="the voice model re-sent what was already relayed in this turn; nothing new to pass on")
     body = voice["text"] if voice else source["text"]
     note = None
     try:
         with store.immediate(con):
             entry = get_entry(con, entry_id)
             fields = dict(source_thread=thread, source_item_id=source["item_id"],
-                          source_raw=source["text"] if voice else None)
+                          source_raw=source["text"] if voice else None,
+                          source_turn=source.get("turn_id") if voice else None)
             if reply_to is not None:
                 question = _row(con, reply_to)
                 if question is None or question["entry_id"] != entry_id or question["kind"] != "question":

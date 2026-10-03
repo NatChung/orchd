@@ -385,6 +385,30 @@ class VoiceTest(unittest.TestCase):
         self.assertEqual(self.relay()["status"], "duplicate")
         self.assertEqual(self.rt.sent, [])
 
+    def voice(self, said, turn, item):
+        self.rt.nat_says("desk-1", f"<realtime_delegation>\n  <input>{said}</input>\n"
+                                   f"  <transcript_delta>user: {said}</transcript_delta>\n</realtime_delegation>",
+                         turn=turn, item=item)
+        return self.relay(turn_id=turn)
+
+    def test_growing_sentence_in_one_turn_forwards_only_what_is_new(self):
+        # Nat's machine, 2026-10-04: entry messages 12 and 14 came from one turn; 14 repeated 12's request.
+        self.assertEqual(self.voice("OK,記得回我一個測試訊息", "t1", "a")["status"], "delivered")
+        second = self.voice("OK,記得回我一個測試訊息有聽到嗎OK,確認回我一個測試訊息嗯", "t1", "b")
+        self.assertEqual(second["status"], "delivered")
+        bodies = [m["body"] for m in entry.inbox(self.con, self.orch)["messages"]]
+        self.assertEqual(bodies[1], "[語音輸入，可能有辨識錯字]（接續上一則）\n有聽到嗎OK,確認回我一個測試訊息嗯")
+        same = self.voice("OK,記得回我一個測試訊息有聽到嗎OK,確認回我一個測試訊息嗯", "t1", "c")
+        self.assertEqual((same["status"], same["kind"]), ("duplicate", "voice_repeat"))
+        self.assertEqual(len(self.rt.sent), 2)  # the re-send never woke the Orch
+        self.assertEqual(entry.inbox(self.con, self.orch)["messages"], [])
+
+    def test_same_words_in_a_later_turn_are_not_cut(self):
+        self.voice("寄信", "t1", "a")
+        self.voice("寄信給 Ann", "t2", "b")
+        bodies = [m["body"] for m in entry.inbox(self.con, self.orch)["messages"]]
+        self.assertEqual(bodies, ["[語音輸入，可能有辨識錯字]\n寄信", "[語音輸入，可能有辨識錯字]\n寄信給 Ann"])
+
     def test_voice_answer_still_links_to_the_question(self):
         self.relay_thread_seen()
         q = entry.ask_nat(self.con, self.rt, self.orch, "寄嗎？")

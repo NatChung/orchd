@@ -61,6 +61,10 @@ Desktop 開語音時，聽與說的是即時語音模型，再交給 interface�
   跟 `<input>` 相同就不重複）。包裝原文存在 `source_raw`，sha256 算的是轉出去的內文。
 - **語音結束的交接**（`<source>transcript_tail_flush</source>`）：不是 Nat 的新要求，存成 `kind=handoff`、`delivery=skipped`，
   不通知 Orch，`relay` 回 `skipped_handoff`。之前它會被當成 Nat 的話轉給 Orch，裡面重複的逐字稿可能讓 Orch 再做一次。
+- **講話中途重送**：Nat 還在講時，語音模型會在同一個 turn 裡連續送出越來越長的同一句話。同一個 turn 裡已經轉過的開頭會去掉，
+  只轉新增的部分，標「（接續上一則）」；完全沒有新內容就存成 `kind=voice_repeat`、不通知 Orch。只比對同一個 turn，
+  所以之後另一輪說「寄信給 Ann」不會因為前一輪說過「寄信」而被截掉。turn 記在 `source_turn`。
+- 語音模型自己回應、沒交給 interface 的話（例如一句確認），Orch 不會收到；這是語音模型的判斷，orchd 看不到。
 - **辨識錯字**：例如 Orch 被聽成「O區」「O2CH」。Orch 的指示是看不懂或不確定時先問，不要猜。
 - **唸給 Nat 的版本**是即時語音模型改寫過的，例如不會把 `o96e76b5` 整串唸出來。只供收聽，批准以畫面上 orchd 送來的原文為準。
 
