@@ -14,7 +14,6 @@ from pathlib import Path
 from . import paths
 
 TEMPLATES = Path(__file__).resolve().parent / "templates"
-ORCHD_BIN = Path(__file__).resolve().parents[1] / "bin" / "orchd"
 # Never copied by --from: version control, OS litter, Claude worktrees, and the files init generates.
 MIGRATE_SKIP = {".git", ".gitignore", ".DS_Store", ".claude", ".codex", "AGENTS.md"}
 
@@ -28,15 +27,38 @@ def _approvals(server, names):
     return "".join(f'\n[mcp_servers.{server}.tools.{name}]\napproval_mode = "approve"\n' for name in names)
 
 
+def personal(home, env):
+    """~/.config/orchd/init.toml: [home] read = [paths], disabled_apps = [app ids]. Missing file: nothing extra."""
+    path = paths.config_dir(home, env) / "init.toml"
+    if not path.is_file():
+        return [], []
+    if tomllib is None:
+        raise ValueError(f"{path} needs Python 3.11+ (tomllib) to read")
+    section = tomllib.loads(path.read_text()).get("home") or {}
+    reads, apps = section.get("read") or [], section.get("disabled_apps") or []
+    if not all(isinstance(x, str) and x for x in [*reads, *apps]):
+        raise ValueError(f"{path}: [home] read and disabled_apps must be lists of non-empty strings")
+    expand = lambda p: str(Path(home) / p[2:]) if p.startswith("~/") else p
+    return [expand(p) for p in reads], apps
+
+
+def _toml_string(text):
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def render(relative, values):
     return string.Template((TEMPLATES / relative).read_text()).substitute(values)
 
 
-def planned_files(home, env, orchd_bin=ORCHD_BIN):
+def planned_files(home, env, orchd_bin=None):
     """{target path: text} for every file init manages."""
     from . import mcp_server  # imported lazily: it pulls in the runtime
     orch, interface = paths.orch_home(home, env), paths.interface_home(home, env)
-    values = dict(HOME=str(Path(home)), ORCH_HOME=str(orch), INTERFACE_HOME=str(interface), ORCHD_BIN=str(orchd_bin))
+    reads, apps = personal(home, env)
+    values = dict(HOME=str(Path(home)), ORCH_HOME=str(orch), INTERFACE_HOME=str(interface),
+                  ORCHD=str(orchd_bin or paths.orchd_executable(env)),
+                  EXTRA_READ="".join(f"{_toml_string(p)} = \"read\"\n" for p in reads),
+                  DISABLED_APPS="".join(f"\n[apps.{_toml_string(a)}]\nenabled = false\n" for a in apps))
     files = {}
     for base, target in (("home", orch), ("interface", interface)):
         for source in sorted((TEMPLATES / base).rglob("*")):
@@ -135,7 +157,7 @@ def migrate(source, target, stubs=None):
     return dict(source=str(source), copied=copied, replaced_init_stub=replaced, kept_existing=kept)
 
 
-def init(rt, home=None, env=None, trust=True, source=None, orchd_bin=ORCHD_BIN):
+def init(rt, home=None, env=None, trust=True, source=None, orchd_bin=None):
     home = Path(home or Path.home())
     env = os.environ if env is None else env
     orch, interface = paths.orch_home(home, env), paths.interface_home(home, env)

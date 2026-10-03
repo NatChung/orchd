@@ -186,3 +186,10 @@ Claude Orch 的現行選項仍為 `opus` 與 `sonnet`，預設 `opus`，不受 w
 - 搬遷：`orchd init --from ~/projects/orch` 複製舊 Orch 家裡 init 不產生的檔案，不覆蓋、不刪來源；git 紀錄不保留。
 - 資料庫不動，仍在 `~/.local/share/orchd/orchd.db`，刻意放在 Orch 能碰的資料夾外。
 - 已在跑的 Orch（Claude 或在舊 Orch 家開的 Codex Desktop session）沿用舊路徑，重開後才用新的。
+
+## 安裝成套件（2026-10-04，#53）
+
+- `pyproject.toml`（setuptools、Python 3.11+、`orchd = orchd.cli:main`），用 `uv tool install git+ssh://…` 安裝；`bin/orchd` 只剩薄包裝，checkout 照樣能跑。
+- 產生的設定、Claude Orch 的 `mcp.json`、worker 收到的指令都改用 `paths.orchd_executable()`（`ORCHD_EXECUTABLE` → checkout 的 `bin/orchd` → 目前 Python 旁的 entry point → PATH），不再寫死 `/usr/bin/python3 + bin/orchd`。
+- gh 包裝器打包在 `orchd/worker_bin/gh`，啟動 worker 前複製到 `ORCHD_HOME/worker-bin` 並設成可執行（wheel 不一定保留執行權限）。
+- Nat 的個人值移出程式與範本：gh 帳號對應改讀 `~/.config/orchd/gh-accounts.json`（沒有就照原本登入狀態、不警告）；Orch 家額外的讀取路徑與關掉的 connector 改讀 `~/.config/orchd/init.toml`。

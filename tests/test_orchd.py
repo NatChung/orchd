@@ -1,12 +1,13 @@
 import io
 import json
 import os
+import shlex
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
-from orchd import core, mcp_server, store
+from orchd import core, mcp_server, paths, store
 from orchd.runtime import Runtime
 
 
@@ -129,7 +130,7 @@ class CoreTest(unittest.TestCase):
         finally:
             os.environ.pop("ORCHD_HOME")
         self.assertIn("ORCHD_HOME='/tmp/iso home' ", self.rt.brief)
-        self.assertIn(f"ORCHD_HOME='/tmp/iso home' {core.ORCHD} ack {t['id']}", self.rt.sent[0][2])
+        self.assertIn(f"ORCHD_HOME='/tmp/iso home' {shlex.quote(paths.orchd_executable())} ack {t['id']}", self.rt.sent[0][2])
 
     def test_dispatch_without_thread_is_refused(self):
         with self.assertRaises(ValueError):
@@ -532,7 +533,9 @@ class LaunchEnvTest(unittest.TestCase):
         rt.agents = lambda: [{"id": "j1", "sessionId": "s1"}]
         rt.exists = lambda path: True
         keep = dict(os.environ)
-        os.environ.update(CLAUDECODE="1", CLAUDE_CODE_SESSION_ID="parent", ORCHD_ORCH_ID="o1", ORCHD_HOME="/x")
+        state = tempfile.TemporaryDirectory()
+        self.addCleanup(state.cleanup)
+        os.environ.update(CLAUDECODE="1", CLAUDE_CODE_SESSION_ID="parent", ORCHD_ORCH_ID="o1", ORCHD_HOME=state.name)
         try:
             rt.start_worker("/wt", "/tmp/s", "brief", "claude-sonnet-5-5")
         finally:
@@ -542,7 +545,7 @@ class LaunchEnvTest(unittest.TestCase):
         self.assertNotIn("CLAUDECODE", env)
         self.assertNotIn("CLAUDE_CODE_SESSION_ID", env)
         self.assertNotIn("ORCHD_ORCH_ID", env)
-        self.assertEqual(env["ORCHD_HOME"], "/x")
+        self.assertEqual(env["ORCHD_HOME"], state.name)
 
 
 class MigrationTest(unittest.TestCase):

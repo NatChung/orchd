@@ -67,6 +67,26 @@ class DoctorCase(unittest.TestCase):
         return d, {c.name: c for c in d.checks}
 
 
+class OrchdCommandCheck(DoctorCase):
+    def test_reports_install_checkout_or_missing(self):
+        _, by = self.run_doctor(which=lambda n: None if n == "orchd" else n)
+        self.assertEqual(by["orchd on PATH"].status, doctor.WARN)
+        self.assertIn("uv tool install", by["orchd on PATH"].fix)
+        checkout = Path(self.tmp.name) / "co"
+        (checkout / "bin").mkdir(parents=True)
+        (checkout / "orchd").mkdir()
+        (checkout / "orchd" / "cli.py").write_text("")
+        (checkout / "bin" / "orchd").write_text("")
+        _, by = self.run_doctor(which=lambda n: str(checkout / "bin" / "orchd") if n == "orchd" else n)
+        self.assertEqual(by["orchd on PATH"].status, doctor.PASS)
+        self.assertIn("checkout", by["orchd on PATH"].detail)
+        tool = Path(self.tmp.name) / "tools" / "bin" / "orchd"
+        tool.parent.mkdir(parents=True)
+        tool.write_text("")
+        _, by = self.run_doctor(which=lambda n: str(tool) if n == "orchd" else n)
+        self.assertIn("installed", by["orchd on PATH"].detail)
+
+
 class RequiredChecks(DoctorCase):
     def test_healthy_machine_has_no_required_failure(self):
         d, by = self.run_doctor()

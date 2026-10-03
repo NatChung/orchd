@@ -10,7 +10,7 @@ from unittest.mock import patch
 from orchd.runtime import Runtime, worker_env
 from orchd.core import worker_brief
 
-WRAPPER = Path(__file__).resolve().parents[1] / "bin" / "worker-bin"
+WRAPPER = Path(__file__).resolve().parents[1] / "orchd" / "worker_bin"
 
 
 class GhWrapperTest(unittest.TestCase):
@@ -42,7 +42,11 @@ else:
         gh.chmod(0o755)
         self.active = self.root / "active"
         self.active.write_text('ariontechs')
-        self.env = dict(os.environ, PATH=f'{WRAPPER}:{self.fake}:' + os.environ['PATH'],
+        self.home = self.root / 'home'
+        (self.home / '.config' / 'orchd').mkdir(parents=True)
+        (self.home / '.config' / 'orchd' / 'gh-accounts.json').write_text('{"NatChung": "NatChung", "*": "ariontechs"}')
+        self.env = dict(os.environ, PATH=f'{WRAPPER}:{self.fake}:' + os.environ['PATH'], HOME=str(self.home),
+                        ORCHD_HOME=str(self.root / 'state'),
                         CALLS=str(self.root / 'calls'), INPUT=str(self.root / 'input'), ACTIVE=str(self.active))
         for key in ('GH_TOKEN', 'GH_REPO', 'ORCHD_GH_ACCOUNTS'):
             self.env.pop(key, None)
@@ -88,6 +92,16 @@ else:
             if warning:
                 self.assertEqual(len(result.stderr.splitlines()), 1)
                 self.assertIn(warning, result.stderr)
+
+    def test_no_mapping_configured_runs_gh_unchanged_and_silent(self):
+        (self.home / '.config' / 'orchd' / 'gh-accounts.json').unlink()
+        result = self.run_gh('repo', 'view')
+        self.assertIsNone(json.loads(result.stdout)['token'])
+        self.assertEqual(result.stderr, '')
+        request = 'protocol=https\nhost=github.com\npath=NatChung/repo.git\n\n'
+        result = self.run_gh('auth', 'git-credential', 'get', input=request)
+        self.assertIn('password=original', result.stdout)
+        self.assertEqual(result.stderr, '')
 
     def test_no_recursion_with_duplicate_and_symlink_path_entries(self):
         alias = self.root / 'alias'
@@ -139,12 +153,15 @@ else:
         with patch.dict(os.environ, self.env, clear=True):
             rt.start_worker('/wt', '/tmp/s', 'brief', 'claude-sonnet-5-5')
             settings = json.loads(seen['cmd'][seen['cmd'].index('--settings') + 1])
-            self.assertEqual(settings['env']['PATH'].split(os.pathsep)[0], str(WRAPPER))
+            installed = self.root / 'state' / 'worker-bin'
+            self.assertEqual(settings['env']['PATH'].split(os.pathsep)[0], str(installed))
+            self.assertTrue(os.access(installed / 'gh', os.X_OK))
+            self.assertEqual((installed / 'gh').read_bytes(), (WRAPPER / 'gh').read_bytes())
             self.assertEqual(settings['crossSessionInbound'], 'accept')
             with patch('orchd.runtime.subprocess.Popen') as popen:
                 rt.spawn(['codex', 'exec'], str(self.repo), str(self.root / 'log'))
                 env = popen.call_args.kwargs['env']
-                self.assertEqual(env['PATH'].split(os.pathsep)[0], str(WRAPPER))
+                self.assertEqual(env['PATH'].split(os.pathsep)[0], str(installed))
                 self.assertEqual(env['GIT_CONFIG_COUNT'], '3')
         self.assertIn('Read-only gh commands need no account switch and no ask', worker_brief('orchd'))
         self.assertIn('Before any outward send', worker_brief('orchd'))

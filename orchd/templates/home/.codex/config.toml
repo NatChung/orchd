@@ -1,6 +1,6 @@
 # Orch 的鎖：只能讀寫 Orch 家（$ORCH_HOME），不碰任何專案 repo。由 `orchd init` 產生。
-# 派工工具：orchd MCP（$ORCHD_BIN）。
-# 下面 mattpocock-skills 的路徑含版本號、connector id 是 Nat 機器上的值：plugin 更新後要跟著改。
+# 派工工具：orchd MCP（$ORCHD）。
+# 個人要額外開放讀取的路徑與要關掉的 app，寫在 ~/.config/orchd/init.toml（見 README），不寫在這個範本。
 default_permissions = "orch"
 approval_policy = "never"
 
@@ -15,21 +15,14 @@ multi_agent = false
 "$HOME/.local/bin" = "read"
 "$HOME/.codex/packages/standalone" = "read"
 "/opt/homebrew" = "read"
-"$HOME/AGENTS.md" = "read"
-"$HOME/.codex/RTK.md" = "read"
-"$HOME/.codex/guidance" = "read"
-"$HOME/.codex/plugins/cache/mattpocock/mattpocock-skills/1.2.3/skills" = "read"
-"$ORCH_HOME" = "write"
+$EXTRA_READ"$ORCH_HOME" = "write"
 "$ORCH_HOME/.codex" = "read"
 
 [permissions.orch.network]
 enabled = false
-
-[apps.connector_2128aebfecb84f64a069897515042a44]
-enabled = false
-
+$DISABLED_APPS
 [mcp_servers.orchd]
-command = "/usr/bin/python3"
-args = ["$ORCHD_BIN", "mcp"]
+command = "$ORCHD"
+args = ["mcp"]
 startup_timeout_sec = 30
 tool_timeout_sec = 180

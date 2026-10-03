@@ -484,6 +484,17 @@ class Doctor:
             self.add(f"nat: {tool} code", PROFILE, PASS if p.is_dir() else WARN,
                      "present" if p.is_dir() else f"{p} missing (code only; credentials checked above)")
 
+    def check_orchd_command(self):
+        """Optional: `orchd` on PATH, and whether it is an install (uv tool / pipx) or a checkout's bin/orchd."""
+        found = self.which("orchd")
+        if not found:
+            self.add("orchd on PATH", OPTIONAL, WARN, "orchd is not on PATH",
+                     "uv tool install git+ssh://git@github.com/NatChung/orchd && uv tool update-shell")
+            return
+        real = Path(found).resolve()
+        checkout = real.name == "orchd" and real.parent.name == "bin" and (real.parent.parent / "orchd" / "cli.py").is_file()
+        self.add("orchd on PATH", OPTIONAL, PASS, f"{found} ({'checkout ' + str(real.parent.parent) if checkout else 'installed'})")
+
     def run_all(self):
         self.check_cli_and_flags()
         self.check_auth()
@@ -491,6 +502,7 @@ class Doctor:
         self.check_repos_trust()
         self.check_data_dir()
         self.check_socket_dir()
+        self.check_orchd_command()
         usable = self.check_gh()
         self.check_externals()
         if self.profile == "nat":

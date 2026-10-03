@@ -13,7 +13,6 @@ from .orch_health import owner_health
 from .runtime import (DEFAULT_ORCH_MODEL, DEFAULT_WORKER_MODEL, ORCH_MODELS, WORKER_MODELS,
                       claude_job_alive, error_detail, worker_kind)
 
-ORCHD = str(Path(__file__).resolve().parents[1] / "bin" / "orchd")
 
 
 def worker_brief(cli, kind="claude"):
@@ -42,8 +41,8 @@ Rules:
 - Worker PATH includes a gh wrapper that chooses the account from --repo/-R, GH_REPO, or origin
   (git credentials use the remote path). Read-only gh commands need no account switch and no ask.
   Do not use gh auth switch: it changes global state. Existing GH_TOKEN is preserved.
-  ORCHD_GH_ACCOUNTS may point to a JSON owner-to-account map (case-insensitive owners, "*" default);
-  defaults are NatChung -> NatChung and other owners -> ariontechs. Missing mappings/tokens warn and
+  The map is the JSON file named by ORCHD_GH_ACCOUNTS, else ~/.config/orchd/gh-accounts.json
+  (case-insensitive owners, "*" default); with neither, gh runs unchanged. Missing mappings/tokens warn and
   keep gh's original behavior. Writes and outward actions still require the existing preview/approval.
 - Reviewing a PR: every worker pushes as the same GitHub account, and GitHub does not let you approve
   your own account's PR, so never use `gh pr review --approve`, `--request-changes`, `--admin`, or any
@@ -70,7 +69,8 @@ Rules:
 def worker_cli():
     """Workers are spawned by the Claude daemon and do not inherit our env, so carry a non-default home."""
     home = os.environ.get("ORCHD_HOME")
-    return f"ORCHD_HOME={shlex.quote(home)} {ORCHD}" if home else ORCHD
+    orchd = shlex.quote(paths.orchd_executable())
+    return f"ORCHD_HOME={shlex.quote(home)} {orchd}" if home else orchd
 
 
 def task_message(task):

@@ -37,7 +37,7 @@ computer_use = false
 enabled = false
 
 [mcp_servers.orchd_entry]
-command = "/usr/bin/python3"
-args = ["$ORCHD_BIN", "mcp", "--role", "entry"]
+command = "$ORCHD"
+args = ["mcp", "--role", "entry"]
 startup_timeout_sec = 30
 tool_timeout_sec = 120

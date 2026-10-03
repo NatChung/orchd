@@ -15,7 +15,8 @@ import time
 import uuid
 from pathlib import Path
 
-ORCHD_BIN = str(Path(__file__).resolve().parents[1] / "bin" / "orchd")
+from . import paths
+
 
 WORKER_MODELS = {"sol": "gpt-6.1-sol", "sonnet": "claude-sonnet-5-5"}
 # Claude Orch choices are independent of the worker policy; its current default stays unchanged.
@@ -71,11 +72,28 @@ def launch_env():
     return {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE") and k != "ORCHD_ORCH_ID"}
 
 
+def worker_bin_dir():
+    """The gh wrapper workers find first on PATH: copied from the package into ORCHD_HOME/worker-bin and made
+    executable, because an installed wheel does not reliably keep the file's executable bit."""
+    source = Path(__file__).resolve().parent / "worker_bin" / "gh"
+    directory = Path(os.environ.get("ORCHD_HOME", Path.home() / ".local/share/orchd")) / "worker-bin"
+    target = directory / "gh"
+    text = source.read_bytes()
+    if not target.is_file() or target.read_bytes() != text:
+        directory.mkdir(parents=True, exist_ok=True)
+        staged = directory / f".gh.{os.getpid()}"
+        staged.write_bytes(text)
+        staged.chmod(0o755)
+        os.replace(staged, target)  # atomic: a worker running gh right now never sees a half-written file
+    elif not os.access(target, os.X_OK):
+        target.chmod(0o755)
+    return str(directory)
+
+
 def worker_env():
     """Session-only gh routing; Claude also receives this via settings (daemon launch)."""
     env = launch_env()
-    wrapper = str(Path(__file__).resolve().parents[1] / "bin" / "worker-bin")
-    env["PATH"] = wrapper + os.pathsep + env.get("PATH", os.defpath)
+    env["PATH"] = worker_bin_dir() + os.pathsep + env.get("PATH", os.defpath)
     # Replace even absolute gh credential helpers for GitHub, without writing git config.
     count = int(env.get("GIT_CONFIG_COUNT", "0"))
     for key, value in [("credential.https://github.com.helper", ""),
@@ -313,7 +331,7 @@ class Runtime:
         sock = self.orch_socket_path(orch_id)
         mcp = Path(sock).parent / "mcp.json"
         mcp.write_text(json.dumps({"mcpServers": {"orchd": {
-            "command": "/usr/bin/python3", "args": [ORCHD_BIN, "mcp"], "env": mcp_env(orch_id)}}}))
+            "command": paths.orchd_executable(), "args": ["mcp"], "env": mcp_env(orch_id)}}}))
         try:
             agents = (orch_home / "AGENTS.md").read_text()
         except OSError:

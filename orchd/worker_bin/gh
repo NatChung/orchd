@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Route one gh invocation without changing shared authentication state.
 
-ORCHD_GH_ACCOUNTS: optional JSON file replacing defaults, e.g.
-{"NatChung": "NatChung", "*": "ariontechs"}. Owners are case-insensitive.
-Omit '*' to let unmapped owners use gh's original behavior with a warning.
+Accounts come from the JSON file named by ORCHD_GH_ACCOUNTS, else ~/.config/orchd/gh-accounts.json, e.g.
+{"NatChung": "NatChung", "*": "ariontechs"}. Owners are case-insensitive. Omit '*' to let unmapped owners use
+gh's original behavior with a warning. With neither file, gh runs unchanged and nothing is printed.
 """
 import json
 import os
@@ -19,12 +19,21 @@ def warn(message):
 
 
 def real_gh():
-    # Resolve symlinks as well: a second PATH entry pointing at us must be skipped.
+    # Skip every copy of this wrapper, not just this file: a symlink to us, or orchd's installed copy next to the
+    # packaged one, would otherwise call each other forever.
     me = Path(__file__).resolve()
+    own = me.read_bytes()
     for directory in os.environ.get("PATH", os.defpath).split(os.pathsep):
         candidate = shutil.which("gh", path=directory or ".")
-        if candidate and Path(candidate).resolve() != me:
-            return candidate
+        if not candidate:
+            continue
+        path = Path(candidate).resolve()
+        try:
+            if path == me or path.read_bytes() == own:
+                continue
+        except OSError:
+            pass
+        return candidate
     return None
 
 
@@ -74,27 +83,28 @@ def main():
         os.execv(real, [real, *args])
     credential = sys.stdin.buffer.read() if is_credential else None
     env = dict(os.environ)
-    try:
-        accounts = {"natchung": "NatChung", "*": "ariontechs"}
-        if env.get("ORCHD_GH_ACCOUNTS"):
-            data = json.loads(Path(env["ORCHD_GH_ACCOUNTS"]).read_text())
+    config = Path(env.get("ORCHD_CONFIG_DIR") or Path.home() / ".config" / "orchd")
+    source = env.get("ORCHD_GH_ACCOUNTS") or str(config / "gh-accounts.json")
+    if env.get("ORCHD_GH_ACCOUNTS") or Path(source).is_file():  # no mapping configured: gh runs unchanged
+        try:
+            data = json.loads(Path(source).read_text())
             if not isinstance(data, dict) or not all(isinstance(k, str) and isinstance(v, str) and v
                                                      for k, v in data.items()):
                 raise ValueError("expected an owner-to-account JSON object")
             accounts = {k.lower(): v for k, v in data.items()}
-        target = target_owner(args, credential)
-        account = accounts.get((target or "").lower(), accounts.get("*")) if target else None
-        if target and not account:
-            warn(f"no account mapping for owner {target}")
-        elif account:
-            token = subprocess.run([real, "auth", "token", "--hostname", "github.com", "-u", account],
-                                   capture_output=True, text=True)
-            if token.returncode == 0 and token.stdout.strip():
-                env["GH_TOKEN"] = token.stdout.strip()
-            else:
-                warn(f"token unavailable for account {account}")
-    except (OSError, ValueError) as error:
-        warn(f"account routing unavailable ({type(error).__name__})")
+            target = target_owner(args, credential)
+            account = accounts.get((target or "").lower(), accounts.get("*")) if target else None
+            if target and not account:
+                warn(f"no account mapping for owner {target}")
+            elif account:
+                token = subprocess.run([real, "auth", "token", "--hostname", "github.com", "-u", account],
+                                       capture_output=True, text=True)
+                if token.returncode == 0 and token.stdout.strip():
+                    env["GH_TOKEN"] = token.stdout.strip()
+                else:
+                    warn(f"token unavailable for account {account}")
+        except (OSError, ValueError) as error:
+            warn(f"account routing unavailable ({type(error).__name__})")
     if credential is not None:
         # Replay stdin exactly; a regular temporary file avoids pipe-size deadlocks and lets us exec.
         import tempfile

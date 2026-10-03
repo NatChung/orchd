@@ -98,7 +98,8 @@ class InitTest(unittest.TestCase):
         home_cfg = tomllib.loads((orch / ".codex" / "config.toml").read_text())
         fs = home_cfg["permissions"]["orch"]["filesystem"]
         self.assertEqual((fs[str(self.home)], fs[str(orch)]), ("deny", "write"))
-        self.assertEqual(home_cfg["mcp_servers"]["orchd"]["args"], ["/opt/orchd/bin/orchd", "mcp"])
+        self.assertEqual(home_cfg["mcp_servers"]["orchd"]["command"], "/opt/orchd/bin/orchd")
+        self.assertEqual(home_cfg["mcp_servers"]["orchd"]["args"], ["mcp"])
         self.assertEqual(set(home_cfg["mcp_servers"]["orchd"]["tools"]), {t["name"] for t in mcp_server.TOOLS})
         iface = tomllib.loads((interface / ".codex" / "config.toml").read_text())
         self.assertEqual(iface["model"], "gpt-6.1-sol")
@@ -109,9 +110,35 @@ class InitTest(unittest.TestCase):
         self.assertEqual(iface["web_search"], "disabled")  # web search ignores network.enabled (#55)
         for feature in ("shell_tool", "unified_exec", "image_generation", "view_image", "goals", "multi_agent"):
             self.assertIs(iface["features"][feature], False, feature)
-        self.assertEqual(iface["mcp_servers"]["orchd_entry"]["args"], ["/opt/orchd/bin/orchd", "mcp", "--role", "entry"])
+        self.assertEqual(iface["mcp_servers"]["orchd_entry"]["command"], "/opt/orchd/bin/orchd")
+        self.assertEqual(iface["mcp_servers"]["orchd_entry"]["args"], ["mcp", "--role", "entry"])
+        self.assertNotIn("/usr/bin/python3", (interface / ".codex" / "config.toml").read_text())
         self.assertEqual({k: v["approval_mode"] for k, v in iface["mcp_servers"]["orchd_entry"]["tools"].items()},
                          {"relay": "approve", "status": "approve"})
+
+    def test_generic_template_has_no_personal_values(self):
+        self.init(trust=False)
+        text = (self.home / "orch" / "home" / ".codex" / "config.toml").read_text()
+        for personal in ("mattpocock", "connector_", "RTK.md", "guidance", "NatChung", "ariontechs"):
+            self.assertNotIn(personal, text)
+        fs = tomllib.loads(text)["permissions"]["orch"]["filesystem"]
+        self.assertEqual(set(fs), {":minimal", str(self.home), f"{self.home}/.local/bin",
+                                   f"{self.home}/.codex/packages/standalone", "/opt/homebrew",
+                                   str(self.home / "orch" / "home"), str(self.home / "orch" / "home" / ".codex")})
+
+    def test_personal_init_toml_adds_reads_and_disabled_apps(self):
+        config = self.home / ".config" / "orchd"
+        config.mkdir(parents=True)
+        (config / "init.toml").write_text('[home]\nread = ["~/AGENTS.md", "/opt/extra dir"]\n'
+                                          'disabled_apps = ["connector_abc"]\n')
+        self.init(trust=False)
+        cfg = tomllib.loads((self.home / "orch" / "home" / ".codex" / "config.toml").read_text())
+        fs = cfg["permissions"]["orch"]["filesystem"]
+        self.assertEqual((fs[f"{self.home}/AGENTS.md"], fs["/opt/extra dir"]), ("read", "read"))
+        self.assertEqual(cfg["apps"], {"connector_abc": {"enabled": False}})
+        (config / "init.toml").write_text('[home]\nread = [""]\n')
+        with self.assertRaisesRegex(ValueError, "non-empty strings"):
+            self.init(trust=False)
 
     def test_non_default_state_dir_reaches_both_mcp_servers(self):
         self.env = {"ORCHD_HOME": "/tmp/orchd-state"}

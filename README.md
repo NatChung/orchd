@@ -8,6 +8,34 @@
 
 狀態存在 `~/.local/share/orchd/orchd.db`（`ORCHD_HOME` 可改）。
 
+## 安裝
+
+不用 clone repo：
+
+```sh
+uv tool install git+ssh://git@github.com/NatChung/orchd   # 裝好 orchd（需要 Python 3.11+，uv 會自己準備）
+uv tool update-shell                                      # 第一次：把 ~/.local/bin 加進 PATH，開新終端機生效
+orchd doctor                                              # 檢查 claude、codex、gh、git 等前置條件
+```
+
+- 升級：`uv tool upgrade orchd`；`pipx install git+ssh://…` 也可以。
+- repo 目前是 private：要有讀取權限，HTTPS 安裝需要 token，所以上面用 SSH。
+- MCP 不另外安裝：就是同一支程式的 `orchd mcp`，由 `orchd init`（和 `orchd orch`）寫進設定。設定裡記的是安裝後 `orchd` 的絕對路徑。
+- 在 repo 裡開發時直接跑 `bin/orchd`；這時產生的設定會指向這份 checkout。
+
+### 個人設定（不進 repo）
+
+放在 `~/.config/orchd/`（`ORCHD_CONFIG_DIR` 可改）：
+
+- `init.toml`：Orch 家的 Codex 權限額外要讀的路徑、要關掉的 app。
+
+  ```toml
+  [home]
+  read = ["~/AGENTS.md", "~/.codex/guidance"]
+  disabled_apps = ["connector_xxx"]
+  ```
+- `gh-accounts.json`：worker 的 gh 依 repo owner 選帳號，例如 `{"NatChung": "NatChung", "*": "ariontechs"}`。沒有這個檔時 gh 照原本的登入狀態執行。
+
 ## 開始用
 
 ```sh
