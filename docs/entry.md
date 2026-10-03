@@ -16,7 +16,7 @@ orchd interface    # 沿用已綁定且在線的 Claude Orch；沒有就開一�
 且 `relay`／`status` 預先核准（`approval_policy = "never"` 下沒核准的 MCP 工具會被直接擋掉）。
 已存在且內容不同的檔案不會被覆蓋。
 
-1. 在 Desktop 打開 `~/orch/interface`，權限選 **Custom (config.toml)**，不要用 Full access。
+1. 在 Desktop 打開 `~/orch/interface`，權限選 **`interface`**（init 寫好的權限設定），不要用完整存取權。
 2. 綁定的 Orch 離線時 `orchd interface` 不會自己替換；確定要換用 `orchd interface --new`（舊 Orch 的未答問題留在舊 Orch）。
    手動綁定仍可用 `orchd entry-bind <orch_id>`，`orchd entry-status` 唯讀查看。
 

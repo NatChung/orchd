@@ -10,18 +10,43 @@
 
 ## 安裝
 
-不用 clone repo：
+不用 clone repo（需要 Python 3.11+，uv 會自己準備）：
 
 ```sh
-uv tool install git+ssh://git@github.com/NatChung/orchd   # 裝好 orchd（需要 Python 3.11+，uv 會自己準備）
-uv tool update-shell                                      # 第一次：把 ~/.local/bin 加進 PATH，開新終端機生效
-orchd doctor                                              # 檢查 claude、codex、gh、git 等前置條件
+uv tool install git+ssh://git@github.com/NatChung/orchd
+orchd doctor
 ```
 
-- 升級：`uv tool upgrade orchd`；`pipx install git+ssh://…` 也可以。
-- repo 目前是 private：要有讀取權限，HTTPS 安裝需要 token，所以上面用 SSH。
-- MCP 不另外安裝：就是同一支程式的 `orchd mcp`，由 `orchd init`（和 `orchd orch`）寫進設定。設定裡記的是安裝後 `orchd` 的絕對路徑。
+- **多個 GitHub 帳號時**：`git@github.com` 用的是機器預設的 SSH key，沒權限會出現 `Repository not found`。改用 `~/.ssh/config` 裡有權限那個帳號的 Host 別名，例如 Nat 的機器：
+  `uv tool install git+ssh://git@github-NatChung/NatChung/orchd`
+- repo 目前是 private：要有讀取權限；HTTPS 安裝需要 token，所以用 SSH。
+- `orchd: command not found`：`~/.local/bin` 不在 PATH，跑一次 `uv tool update-shell` 再開新終端機。
+- `orchd doctor` 在 `orchd init` 之前會顯示「orch home not set up yet」，這是提醒下一步，不是失敗。
+- MCP 不另外安裝：就是同一支程式的 `orchd mcp`，由 `orchd init`（和 `orchd orch`）寫進設定，設定裡記的是安裝後 `orchd` 的絕對路徑。
 - 在 repo 裡開發時直接跑 `bin/orchd`；這時產生的設定會指向這份 checkout。
+
+### 升級
+
+`uv tool upgrade orchd` 會沿用快取、抓不到新的 commit，請用（整行一起貼，不要斷行）：
+
+```sh
+uv tool install --force --refresh git+ssh://git@github.com/NatChung/orchd
+```
+
+- 網址要跟安裝時一樣（有用 SSH 別名就用別名）。之後會改成 `orchd upgrade`（#62）。
+- 先試某個 branch：網址後面加 `@<branch>`，測完再裝回不帶 `@` 的版本。
+- 升級只換程式，不動 `~/orch`、資料庫與 `~/.config/orchd`。已經在跑的 Orch 和 Desktop 的 MCP 還是舊程式：用 `orchd interface --new` 換新的 Orch，Desktop 開新對話。
+
+### 完整移除後重裝
+
+```sh
+orchd orch-stop <orch_id>        # 先停掉在跑的 Orch（orchd orchs 看得到）
+uv tool uninstall orchd
+```
+
+再視需要刪除：`~/.local/share/orchd`（資料庫：任務歷史與統計，**刪了不能復原，先備份**）、`~/orch`、
+`~/.codex/config.toml` 裡 `~/orch/home`、`~/orch/interface` 兩筆 `[projects]` trust。`~/.config/orchd` 是個人設定，通常保留。
+重裝照上面「安裝」與下面「開始用」。
 
 ### 個人設定（不進 repo）
 
@@ -54,9 +79,14 @@ orchd interface                     # 綁定在線的 Claude Orch，沒有就開
 
 - 範本在 `orchd/templates/`；已存在且被改過的檔案不會被覆蓋。`ORCHD_ROOT`、`ORCHD_ORCH_HOME`、`ORCHD_INTERFACE_HOME` 可改位置。
 - Codex trust 由 init 寫入 `~/.codex/config.toml`（先備份）。Claude trust 只檢查：沒 trust 時 init 會告訴你在 `~/orch/home` 開一次 `claude` 接受。
+- `orchd interface` 是綁定：沿用已綁定且在線的 Orch，沒有就開一個 Claude Opus Orch 並綁上；綁定會保存，重開 Desktop 不用重跑。
 - 綁定的 Orch 離線時，`orchd interface` 不會自己換；確定要換用 `orchd interface --new`。
 
-之後在 Codex Desktop 打開 `~/orch/interface`，權限選 **Custom (config.toml)**，直接講話。
+之後在 Codex Desktop 打開 `~/orch/interface`，權限選 **`interface`**（init 寫好的權限設定；不要選完整存取權），開新對話直接講話：
+
+- 對話開始先說「呼叫 status」：它會說綁定哪個 Orch、是否在線，有沒回答的問題就唸出來。
+- 你說話後它轉給 Orch，只回一句短的「好，我想一下」；轉交失敗才會說原因。
+- Orch 的回覆會原文出現在對話裡，它再完整講一次（語音模式會唸出來）。要你批准的事以畫面上的原文為準。
 
 另外兩種 Orch 照舊：`orchd orch` 開 Claude Opus Orch（`--no-attach` 只開在背景）；Codex Desktop 在 `~/orch/home` 開的 session 也是一個 Orch，自成一組（[ADR-0002](docs/adr/0002-multiple-groups.md)）。
 

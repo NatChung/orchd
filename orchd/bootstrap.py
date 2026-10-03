@@ -173,5 +173,5 @@ def init(rt, home=None, env=None, trust=True, source=None, orchd_bin=None):
         result["claude_trust"] = ("trusted" if rt.claude_trusted(orch.resolve()) else
                                   f"not trusted: run `cd {orch} && claude`, accept the trust prompt, then exit")
     result["next"] = ("Run `orchd interface` to bind the interface to a Claude Orch, then open "
-                      f"{interface} in the Codex Desktop app (permissions: Custom (config.toml)).")
+                      f"{interface} in the Codex Desktop app (permissions: interface).")
     return result

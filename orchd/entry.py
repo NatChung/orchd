@@ -496,5 +496,5 @@ def interface(con, rt, start_orch, new=False, entry_id=DEFAULT_ENTRY):
     return dict(interface=str(home), orch_id=orch_id, orch_model=store.get_orch(con, orch_id)["model"],
                 started_new_orch=started, orch_health=reachability(con, rt, orch_id),
                 codex_trusted="unknown" if trusted is None else trusted,
-                next=(f"Open {home} in the Codex Desktop app (permissions: Custom (config.toml)) and start talking."
+                next=(f"Open {home} in the Codex Desktop app (permissions: interface) and start talking."
                       if trusted else f"Run `orchd init` to trust {home} in Codex, then open it in the Desktop app."))
