@@ -403,6 +403,18 @@ class VoiceTest(unittest.TestCase):
         self.assertEqual(len(self.rt.sent), 2)  # the re-send never woke the Orch
         self.assertEqual(entry.inbox(self.con, self.orch)["messages"], [])
 
+    def test_utterance_split_across_turns_is_not_repeated(self):
+        # Nat's machine, 2026-10-04 entry messages 18 and 20: two turns, the second transcript repeats the first.
+        self.voice("請獲取 回我一個測試訊息", "t1", "a")
+        self.rt.nat_says("desk-1", "<realtime_delegation>\n  <input>Orch</input>\n  <transcript_delta>"
+                                   "assistant:  好的,我來處理一下。\nuser: 請獲取 回我一個測試訊息\n"
+                                   "user: 跟之前不太一樣的Orch\nuser: Orch</transcript_delta>\n</realtime_delegation>",
+                         turn="t2", item="b")
+        self.relay(turn_id="t2")
+        bodies = [m["body"] for m in entry.inbox(self.con, self.orch)["messages"]]
+        self.assertEqual(bodies[1], "[語音輸入，可能有辨識錯字]\nOrch\n（語音逐字稿：跟之前不太一樣的Orch\nOrch）")
+        self.assertNotIn("請獲取", bodies[1])
+
     def test_same_words_in_a_later_turn_are_not_cut(self):
         self.voice("寄信", "t1", "a")
         self.voice("寄信給 Ann", "t2", "b")

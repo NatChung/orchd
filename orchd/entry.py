@@ -240,12 +240,17 @@ def _after(text, earlier):
     return text
 
 
-def voice_input(text, earlier=None):
+VOICE_RECENT = 600  # seconds: transcript lines relayed this recently are not relayed again
+
+
+def voice_input(text, earlier=None, already=()):
     """None for typed text. Desktop voice mode hands the interface a <realtime_delegation> block: the voice
     model's request in <input>, plus a transcript that repeats earlier rounds. Returns {"handoff": True} for the
     end-of-session transcript flush (not Nat asking for anything); {"repeat": True} when, against `earlier` (the
     raw block already relayed in the same turn, as the voice model re-sends a sentence while Nat is still
-    talking), nothing new was said; else {"text": what the Orch should get, "continues": bool}."""
+    talking), nothing new was said; else {"text": what the Orch should get, "continues": bool}. `already` holds
+    transcript lines relayed recently in this thread: the voice model can also split one utterance across turns
+    and repeat the earlier part in the next transcript, so those exact lines are dropped."""
     if not text.lstrip().startswith("<realtime_delegation>"):
         return None
     source, request, heard = _voice_parts(text)
@@ -259,6 +264,11 @@ def voice_input(text, earlier=None):
         if continues and not new_request and not new_heard:
             return {"repeat": True}
         request, heard = new_request, new_heard
+    if already and heard:
+        kept = [line for line in heard.split("\n") if line.strip() and line.strip() not in already]
+        if not kept and not request:
+            return {"repeat": True}
+        heard = "\n".join(kept)
     if not request and not heard:
         return {"text": text, "continues": False}
     parts = [VOICE_LABEL + ("（接續上一則）" if continues else ""), request or heard]
@@ -320,7 +330,11 @@ def relay(con, rt, entry_id, thread, turn_id=None, reply_to=None):
                           "AND source_raw IS NOT NULL AND kind IN ('message','reply') ORDER BY id DESC LIMIT 1",
                           (thread, source["turn_id"])).fetchone()
         earlier = row["source_raw"] if row else None
-    voice = voice_input(source["text"], earlier)
+    already = set()
+    for row in con.execute("SELECT source_raw FROM entry_messages WHERE source_thread=? AND source_raw IS NOT NULL "
+                           "AND kind IN ('message','reply') AND created_at>?", (thread, time.time() - VOICE_RECENT)):
+        already.update(line.strip() for line in _voice_parts(row["source_raw"])[2].split("\n") if line.strip())
+    voice = voice_input(source["text"], earlier, already)
     if voice and (voice.get("handoff") or voice.get("repeat")):  # kept as a record, never delivered or read
         kind = "handoff" if voice.get("handoff") else "voice_repeat"
         try:
