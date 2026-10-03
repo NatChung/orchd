@@ -6,16 +6,31 @@ default_permissions = "interface"
 approval_policy = "never"
 approvals_reviewer = "user"
 allow_login_shell = false
+# web search runs on OpenAI's side: network.enabled = false does not stop it (#55 live probe).
+web_search = "disabled"
 
+# Built-in tools the interface never needs (#55). Sub-agents cannot be switched off in this Codex version
+# (multi_agent=false and agents.max_depth=0 do not stop collab spawn); a spawned one inherits this profile.
 [features]
 network_proxy = false
 plugins = false
 multi_agent = false
+multi_agent_v2 = false
+shell_tool = false
+unified_exec = false
+image_generation = false
+view_image = false
+goals = false
+apps = false
+memories = false
+browser_use = false
+computer_use = false
 
 [permissions.interface.filesystem]
 ":minimal" = "read"
 "$HOME" = "deny"
 "$HOME/.codex/packages/standalone" = "read"
+"$HOME/.local/bin" = "read"
 "$INTERFACE_HOME" = "read"
 
 [permissions.interface.network]

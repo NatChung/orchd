@@ -106,6 +106,9 @@ class InitTest(unittest.TestCase):
         fs = iface["permissions"]["interface"]["filesystem"]
         self.assertEqual((fs[str(self.home)], fs[str(interface)]), ("deny", "read"))
         self.assertFalse(iface["permissions"]["interface"]["network"]["enabled"])
+        self.assertEqual(iface["web_search"], "disabled")  # web search ignores network.enabled (#55)
+        for feature in ("shell_tool", "unified_exec", "image_generation", "view_image", "goals", "multi_agent"):
+            self.assertIs(iface["features"][feature], False, feature)
         self.assertEqual(iface["mcp_servers"]["orchd_entry"]["args"], ["/opt/orchd/bin/orchd", "mcp", "--role", "entry"])
         self.assertEqual({k: v["approval_mode"] for k, v in iface["mcp_servers"]["orchd_entry"]["tools"].items()},
                          {"relay": "approve", "status": "approve"})

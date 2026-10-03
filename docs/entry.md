@@ -45,7 +45,11 @@ orchd 的 MCP server 在 Native 是否也不受這份權限限制（它要寫 `O
 - 沒拿到 turn id 時取該 thread 最新一則 user 訊息；`_meta` 有哪些 key 會寫到 MCP stderr（`orchd entry meta keys`），尚未確認 Desktop 是否帶 turn id。
 - 同一 turn 內 rollout 是否已寫入 Nat 的訊息未驗證；沒寫入時回 `source_not_ready`，不會拿舊訊息代替。
 - 同時開兩個入口對話時，Orch 的回覆送往最後呼叫的那一個。
-- Codex host 的非入口內建工具（CLI 量到 10 個）不受 MCP role 限制，Native 隔離未驗證。
+- Codex 內建工具（#55，2026-10-04 用 `codex exec` 在 `~/orch/interface` 實測）：未關閉時 web search、shell、產圖、goal
+  都能用，而且 web search 不受 `network.enabled = false` 限制。範本已用 `web_search = "disabled"` 與 `[features]`
+  關掉 web、shell、產圖、看圖、goal、apps、memories、browser／computer use；改檔與讀家目錄由權限擋住。
+  子代理關不掉（`multi_agent = false`、`agents.max_depth = 0` 都無效，`max_concurrent_threads_per_session` 最小是 1），
+  但子代理沿用同一個模型與權限設定。interface 也會載入全域的 `~/.codex/AGENTS.md` 與 skills 清單。
 - 未 live 驗證：Native 畫面能否完整呈現原文、MCP reload、Q1–Q3 端到端、worker → Opus → Desktop → Opus → worker 完整迴圈。
 
 ## 入口模型（2026-10-03 CLI 測試）

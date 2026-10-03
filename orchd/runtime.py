@@ -480,9 +480,11 @@ class Runtime:
 
         Read from the rollout's `item_completed` UserMessage events: the decoded text joined from its text parts,
         not stripped or normalized, so a stored copy is byte-exact. A user role is not proof the text came from Nat:
-        `codex queue` writes the same records. [] when the rollout is missing."""
+        `codex queue` writes the same records. [] when the rollout is missing. An archived thread's rollout moves to
+        the sibling archived_sessions/ (Desktop archives a conversation when it is closed), so look there too."""
         root = Path(os.environ.get("ORCHD_CODEX_SESSIONS", Path.home() / ".codex" / "sessions"))
-        files = sorted(root.glob(f"**/rollout-*-{thread}.jsonl"))
+        files = (sorted(root.glob(f"**/rollout-*-{thread}.jsonl"))
+                 or sorted((root.parent / "archived_sessions").glob(f"rollout-*-{thread}.jsonl")))
         if not files:
             return []
         found = []

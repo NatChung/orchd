@@ -422,7 +422,8 @@ class EarlyDraftSchemaTest(unittest.TestCase):
 
 class RolloutSourceTest(unittest.TestCase):
     def test_reads_user_messages_exactly_from_the_rollout(self):
-        with tempfile.TemporaryDirectory() as root:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = str(Path(tmp) / "sessions")
             path = Path(root) / "2026/10/03/rollout-2026-10-03T00-00-00-thread-X.jsonl"
             path.parent.mkdir(parents=True)
             lines = [
@@ -440,6 +441,11 @@ class RolloutSourceTest(unittest.TestCase):
                 got = Runtime().codex_user_messages("thread-X")
                 self.assertEqual(got, [{"turn_id": "t1", "item_id": "i1", "text": BODY}])
                 self.assertEqual(Runtime().codex_user_messages("thread-missing"), [])
+            archived = Path(root).parent / "archived_sessions"
+            archived.mkdir()
+            path.rename(archived / path.name)
+            with patch.dict(os.environ, {"ORCHD_CODEX_SESSIONS": root}):
+                self.assertEqual(Runtime().codex_user_messages("thread-X")[0]["text"], BODY)
 
 
 if __name__ == "__main__":
