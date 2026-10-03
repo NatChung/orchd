@@ -211,13 +211,14 @@ class Doctor:
         home = self.orch_home
         if not home.is_dir():
             self.add("orch home", REQUIRED, FAIL, f"{home} is not a directory" if home.exists() else f"{home} missing",
-                     f"Create {home} with an AGENTS.md (see CONTEXT.md: Orch 家).")
+                     "Run `orchd init` (creates the Orch home and the Desktop interface).")
             return
         try:
             (home / "AGENTS.md").read_text(encoding="utf-8")
             self.add("orch home", REQUIRED, PASS, f"{home} has AGENTS.md")
         except (FileNotFoundError, IsADirectoryError):
-            self.add("orch home", REQUIRED, FAIL, f"{home}/AGENTS.md missing or not a file", "Add the Orch's AGENTS.md.")
+            self.add("orch home", REQUIRED, FAIL, f"{home}/AGENTS.md missing or not a file",
+                     "Run `orchd init` (it adds the template AGENTS.md and keeps files you edited).")
         except OSError as exc:
             self.add("orch home", REQUIRED, UNKNOWN, f"cannot read {home}/AGENTS.md ({type(exc).__name__})")
         except UnicodeDecodeError:
