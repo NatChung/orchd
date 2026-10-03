@@ -1,0 +1,28 @@
+# Nat 的 Desktop interface：只轉交原文給綁定的 Orch。由 `orchd init` 產生。
+# 讀不到家目錄、沒有網路、不能寫檔；只掛 orchd 的入口 MCP（relay／status）。
+model = "gpt-6.1-sol"
+model_reasoning_effort = "low"
+default_permissions = "interface"
+approval_policy = "never"
+approvals_reviewer = "user"
+allow_login_shell = false
+
+[features]
+network_proxy = false
+plugins = false
+multi_agent = false
+
+[permissions.interface.filesystem]
+":minimal" = "read"
+"$HOME" = "deny"
+"$HOME/.codex/packages/standalone" = "read"
+"$INTERFACE_HOME" = "read"
+
+[permissions.interface.network]
+enabled = false
+
+[mcp_servers.orchd_entry]
+command = "/usr/bin/python3"
+args = ["$ORCHD_BIN", "mcp", "--role", "entry"]
+startup_timeout_sec = 30
+tool_timeout_sec = 120

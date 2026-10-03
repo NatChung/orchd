@@ -43,7 +43,7 @@ class DoctorCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name) / "home"
-        self.orch = self.home / "projects" / "orch"
+        self.orch = self.home / "orch" / "home"
         self.orch.mkdir(parents=True)
         (self.orch / "AGENTS.md").write_text("orch")
         (self.home / "projects" / "repoA" / ".git").mkdir(parents=True)

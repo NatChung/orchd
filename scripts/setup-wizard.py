@@ -128,7 +128,9 @@ class Env:
 
     @property
     def orch_home(self):
-        return Path(self.environ.get("ORCHD_ORCH_HOME") or self.home / "projects" / "orch")
+        # Same defaults as orchd/paths.py (this script does not import orchd).
+        root = self.environ.get("ORCHD_ROOT") or self.home / "orch"
+        return Path(self.environ.get("ORCHD_ORCH_HOME") or Path(root) / "home")
 
     @property
     def orchd_home(self):

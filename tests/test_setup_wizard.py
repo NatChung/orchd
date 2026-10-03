@@ -776,7 +776,7 @@ class OrchdPathOverrideTest(unittest.TestCase):
         steps = self.foreign(ORCHD_HOME=self.caller / "state")
         self.assert_unknown_names_only(steps, ("orchd-home",), "ORCHD_HOME")
         self.assertEqual(steps["orch-home"].status, sw.MISSING)  # target default has no Orch home
-        self.assertIn(str(self.target / "projects" / "orch"), steps["orch-home"].detail)
+        self.assertIn(str(self.target / "orch" / "home"), steps["orch-home"].detail)
         self.assertEqual(steps["tmp-sockets"].status, sw.PASS)
 
     def test_foreign_home_both_overrides(self):

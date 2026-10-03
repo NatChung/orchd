@@ -331,17 +331,19 @@ class EntryTest(unittest.TestCase):
         self.assertEqual({t["name"] for t in mcp_server.TOOLS} & {"relay", "status"}, set())
 
 
-class DeskTest(unittest.TestCase):
+class InterfaceTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         root = Path(self.tmp.name)
         self.con = store.connect(root / "t.db")
         self.rt = EntryRuntime()
-        self.home = root / "desk"
+        self.home = root / "interface"
+        (self.home / ".codex").mkdir(parents=True)
+        (self.home / ".codex" / "config.toml").write_text("# from orchd init\n")
         codex = root / "codex"
         codex.mkdir()
         self.codex_cfg = codex / "config.toml"
-        self.env = patch.dict(os.environ, {"ORCHD_DESK_HOME": str(self.home), "CODEX_HOME": str(codex)})
+        self.env = patch.dict(os.environ, {"ORCHD_INTERFACE_HOME": str(self.home), "CODEX_HOME": str(codex)})
         self.env.start()
         self.starts = 0
 
@@ -354,51 +356,42 @@ class DeskTest(unittest.TestCase):
         self.starts += 1
         return core.start_orch(self.con, self.rt, "opus")
 
-    def desk(self, new=False):
-        return entry.desk(self.con, self.rt, self.start, "/opt/orchd/bin/orchd", new)
+    def interface(self, new=False):
+        return entry.interface(self.con, self.rt, self.start, new)
 
-    def test_first_run_prepares_the_folder_starts_and_binds_one_orch_then_reuses_it(self):
-        first = self.desk()
+    def test_first_run_starts_and_binds_one_orch_then_reuses_it(self):
+        first = self.interface()
         self.assertTrue(first["started_new_orch"])
-        self.assertEqual(first["files"], {".codex/config.toml": "created", "AGENTS.md": "created"})
-        cfg = (self.home / ".codex" / "config.toml").read_text()
-        for line in ('model = "gpt-6.1-sol"', 'model_reasoning_effort = "low"', 'default_permissions = ":read-only"',
-                     'approval_policy = "never"', '"mcp", "--role", "entry"'):
-            self.assertIn(line, cfg)
-        self.assertIn("逐字唸出", (self.home / "AGENTS.md").read_text())
         self.assertEqual(entry.get_entry(self.con, "desktop")["orch_id"], first["orch_id"])
-        second = self.desk()
+        second = self.interface()
         self.assertEqual((second["orch_id"], second["started_new_orch"], self.starts), (first["orch_id"], False, 1))
-        self.assertEqual(set(second["files"].values()), {"unchanged"})
+
+    def test_refuses_before_init(self):
+        (self.home / ".codex" / "config.toml").unlink()
+        with self.assertRaisesRegex(ValueError, "orchd init"):
+            self.interface()
+        self.assertEqual(self.starts, 0)
 
     def test_offline_orch_is_not_replaced_without_new(self):
-        orch = self.desk()["orch_id"]
+        orch = self.interface()["orch_id"]
         entry.ask_nat(self.con, self.rt, orch, "open?")
         self.rt.jobs = {}
         with self.assertRaisesRegex(ValueError, "offline.*1 open question.*--new"):
-            self.desk()
+            self.interface()
         self.assertEqual(self.starts, 1)
         self.rt.jobs = {"orchjob": {}}
         store.stop_orch(self.con, orch)
-        replaced = self.desk(new=True)
+        replaced = self.interface(new=True)
         self.assertTrue(replaced["started_new_orch"])
         self.assertNotEqual(replaced["orch_id"], orch)
         self.assertEqual(entry.get_entry(self.con, "desktop")["orch_id"], replaced["orch_id"])
 
-    def test_hand_edited_files_are_kept(self):
-        (self.home / ".codex").mkdir(parents=True)
-        (self.home / ".codex" / "config.toml").write_text("model = \"mine\"\n")
-        result = self.desk()
-        self.assertTrue(result["files"][".codex/config.toml"].startswith("kept"))
-        self.assertEqual((self.home / ".codex" / "config.toml").read_text(), "model = \"mine\"\n")
-
     def test_reports_codex_trust_without_writing_it(self):
-        self.assertFalse(self.desk()["codex_trusted"])
+        self.assertFalse(self.interface()["codex_trusted"])
         self.codex_cfg.write_text(f'[projects."{self.home.resolve()}"]\ntrust_level = "trusted"\n')
-        result = self.desk()
+        result = self.interface()
         self.assertTrue(result["codex_trusted"])
         self.assertIn("start talking", result["next"])
-        self.assertEqual(self.codex_cfg.read_text(), f'[projects."{self.home.resolve()}"]\ntrust_level = "trusted"\n')
 
 
 class RolloutSourceTest(unittest.TestCase):

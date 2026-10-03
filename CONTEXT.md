@@ -14,7 +14,7 @@ _Avoid_：團隊、workspace
 
 **入口（Entry）**：
 在 Codex Desktop 讓 Nat 交辦與回答追問的 session；只把原文轉給綁定的那一個 Claude Orch、再把 Orch 的原文帶回來，
-不是 Orch、不派工、不開組。資料夾與指令叫 desk（`~/projects/desk`、`orchd desk`）。見 ADR-0003。
+不是 Orch、不派工、不開組。資料夾叫 interface（`~/orch/interface`），由 `orchd init` 建立、`orchd interface` 綁定 Orch。見 ADR-0003。
 _Avoid_：前台 Orch、代理人
 
 **Worker**：
@@ -36,7 +36,7 @@ worker 交回的結果與證據（commit、測試結果、未完成事項）。�
 Orch 對照任務的完成條件核對回報後所做的判定。
 
 **Orch 家**：
-`~/projects/orch`，Orch 唯一能讀寫的目錄，存放 Orch 的指示與筆記。
+`~/orch/home`（`orchd init` 建立），Orch 唯一能讀寫的目錄，存放 Orch 的指示與筆記。
 _Avoid_：把工具程式碼放進 Orch 家
 
 **未結任務**：

@@ -19,6 +19,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import paths
+
 try:  # Python 3.11+. Without it TOML cannot be judged: reported unknown, never guessed with regex
     import tomllib
 except ImportError:  # pragma: no cover - depends on interpreter
@@ -72,7 +74,7 @@ class Doctor:
         self.home = Path(home) if home else Path.home()
         self.env = os.environ if env is None else env
         self.projects = Path(projects or self.env.get("ORCHD_PROJECTS") or self.home / "projects")
-        self.orch_home = Path(orch_home or self.env.get("ORCHD_ORCH_HOME") or self.home / "projects" / "orch")
+        self.orch_home = Path(orch_home or paths.orch_home(self.home, self.env))
         self.data_dir = Path(data_dir or self.env.get("ORCHD_HOME") or self.home / ".local/share/orchd")
         self.tmp_root = tmp_root
         self.which = which

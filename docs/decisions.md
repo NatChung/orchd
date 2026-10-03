@@ -173,3 +173,16 @@ Claude Orch 的現行選項仍為 `opus` 與 `sonnet`，預設 `opus`，不受 w
 - `inbox` 每筆多 `verification`（驗證任務顯示它驗證的那個任務，`role: verifier`）。沒有鎖也不是驗證任務就直接 `{state: none}`，不跑 git。
 - 紀錄是 `messages` 的 `verify_lock`／`verification` 列（跟 `answer_queued` 一樣），不在 `ORCH_KINDS`，不改任務生命週期，也不動 `report`。
 - 沒做：真正兩個 worker 的實測、MCP server 重啟後新工具才會出現（不在本票）、自動派驗證 worker、從 PR 讀 head SHA（以本機 branch tip 為準）、worker brief 沒加 verify 說明（派工指示要寫明跑 `orchd verify <自己的 id>`）。
+
+
+## orchd init（2026-10-03，#50）
+
+- Orch 家改由 `orchd init` 建在 `~/orch/home`，Desktop 入口建在 `~/orch/interface`（原 desk）；不用 `.` 開頭，
+  因為 Desktop app 選資料夾時預設看不到隱藏資料夾。推翻第 14 條：Orch 家不再是獨立 repo NatChung/orch。
+- 範本放在 `orchd/templates/`；init 不覆蓋已存在且被改過的檔案。Codex Orch 的 MCP 核准清單改由 `TOOLS` 產生，
+  不再手寫（舊設定漏了 retry、followup、lock_verify、list_orchs）。
+- trust：init 在 `~/.codex/config.toml` 追加 `[projects."…"]`，先備份；Claude 只檢查不寫，理由同 v1（多個 Claude
+  程序會互蓋 `~/.claude.json`），由 Nat 在 `~/orch/home` 開一次 `claude` 接受。
+- 搬遷：`orchd init --from ~/projects/orch` 複製舊 Orch 家裡 init 不產生的檔案，不覆蓋、不刪來源；git 紀錄不保留。
+- 資料庫不動，仍在 `~/.local/share/orchd/orchd.db`，刻意放在 Orch 能碰的資料夾外。
+- 已在跑的 Orch（Claude 或在舊 Orch 家開的 Codex Desktop session）沿用舊路徑，重開後才用新的。

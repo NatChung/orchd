@@ -8,7 +8,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import store, verify as verification, worker_health
+from . import paths, store, verify as verification, worker_health
 from .orch_health import owner_health
 from .runtime import (DEFAULT_ORCH_MODEL, DEFAULT_WORKER_MODEL, ORCH_MODELS, WORKER_MODELS,
                       claude_job_alive, error_detail, worker_kind)
@@ -635,7 +635,7 @@ def view(con, rt, task_id):
 
 
 def orch_home():
-    return Path(os.environ.get("ORCHD_ORCH_HOME", Path.home() / "projects" / "orch"))
+    return paths.orch_home()
 
 
 def start_orch(con, rt, model_key=DEFAULT_ORCH_MODEL):

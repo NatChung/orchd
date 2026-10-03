@@ -4,35 +4,25 @@ Nat 在 Codex Desktop 打字 → orchd 從該 thread 的 rollout 讀原文 → �
 Orch 用 `send_to_nat`／`ask_nat` 回覆 → orchd 以 `codex queue` 原樣送進同一個 Desktop thread。設計理由見
 [ADR-0003](adr/0003-desktop-entry.md)。
 
-## 設定（Nat 操作，orchd 不改任何全域設定）
+## 設定
 
 ```sh
-orchd desk
+orchd init         # 建 ~/orch/home 與 ~/orch/interface、在 Codex trust 這兩個資料夾
+orchd interface    # 沿用已綁定且在線的 Claude Orch；沒有就開一個 Opus Orch 並綁上
 ```
 
-它會建 `~/projects/desk`（`ORCHD_DESK_HOME` 可改），寫入以下 `.codex/config.toml` 與給入口模型的 `AGENTS.md`，
-再沿用已綁定且在線的 Claude Orch，沒有就開一個 Opus Orch 並綁上。已存在且內容不同的檔案不會被覆蓋。
+`orchd init` 寫入 interface 的 `.codex/config.toml`（範本在 `orchd/templates/interface/`）與給入口模型的 `AGENTS.md`：
+`gpt-6.1-sol`、推理 low、自訂權限 `interface`（家目錄 deny、只讀 interface 資料夾、無網路）、只掛 orchd 的入口 MCP，
+且 `relay`／`status` 預先核准（`approval_policy = "never"` 下沒核准的 MCP 工具會被直接擋掉）。
+已存在且內容不同的檔案不會被覆蓋。
 
-```toml
-model = "gpt-6.1-sol"
-model_reasoning_effort = "low"
-default_permissions = ":read-only"
-approval_policy = "never"
-approvals_reviewer = "user"
-allow_login_shell = false
-
-[mcp_servers.orchd_entry]
-command = "/usr/bin/python3"
-args = ["<orchd>/bin/orchd", "mcp", "--role", "entry"]
-```
-
-1. 第一次在 Codex trust `~/projects/desk`（`orchd desk` 的結果會顯示是否已 trust）。
-2. 在 Desktop 打開這個資料夾，權限選 **Custom (config.toml)**，不要用 Full access。
-3. 綁定的 Orch 離線時 `orchd desk` 不會自己替換；確定要換用 `orchd desk --new`（舊 Orch 的未答問題留在舊 Orch）。
+1. 在 Desktop 打開 `~/orch/interface`，權限選 **Custom (config.toml)**，不要用 Full access。
+2. 綁定的 Orch 離線時 `orchd interface` 不會自己替換；確定要換用 `orchd interface --new`（舊 Orch 的未答問題留在舊 Orch）。
    手動綁定仍可用 `orchd entry-bind <orch_id>`，`orchd entry-status` 唯讀查看。
 
-入口模型用 `gpt-6.1-sol`（理由見下方「入口模型」）。Native Desktop 是否套用這些權限、語音模式實際用哪個模型，
-都還沒 live 驗證；全域 `~/.codex/config.toml` 的 MCP 與工具在 desk 是否仍出現也未驗證。
+入口模型用 `gpt-6.1-sol`（理由見下方「入口模型」）。未 live 驗證：Native Desktop 是否套用這份權限、
+全域 `~/.codex/config.toml` 的 MCP 與工具在 interface 是否仍出現、語音模式實際用哪個模型、
+orchd 的 MCP server 在 Native 是否也不受這份權限限制（它要寫 `ORCHD_HOME` 的資料庫、讀 `~/.codex/sessions`；CLI 實測不受限）。
 
 ## 工具
 

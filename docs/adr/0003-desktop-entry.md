@@ -8,7 +8,7 @@ ADR-0002 讓每個 Desktop session 自成一組，也曾以「多一層身分或
 #37 要 Nat 在 Codex Desktop 交辦與回答追問，同時讓理解、排程、派工都留在一個固定的 Claude Opus Orch，
 所以為**入口**接受這份成本：入口是新角色，不是 Orch，不開組。
 
-- 入口用 `orchd mcp --role entry` 啟動：只列出、只接受 `relay`／`status`，參數只有 id，不登記成 Orch。
+- 入口資料夾是 `~/orch/interface`（`orchd init` 建立）。入口用 `orchd mcp --role entry` 啟動：只列出、只接受 `relay`／`status`，參數只有 id，不登記成 Orch。
   其他 Desktop session（沒有這個 role）照 ADR-0002 自成一組，不受影響。
 - 綁定由 Nat 手動做（`orchd entry-bind ORCH_ID`），只接受在線的 Claude Orch；換綁要 `--force`。
   綁定與待答問題存在 SQLite，入口重開（新 thread 也一樣）接回原 Orch。

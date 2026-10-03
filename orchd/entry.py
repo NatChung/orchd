@@ -11,13 +11,12 @@ it becomes the current one. delivered means it reached the Orch's socket, the De
 result; it never means read by Nat, and never approval.
 """
 import hashlib
-import json
 import os
 import sqlite3
 import time
 from pathlib import Path
 
-from . import store
+from . import paths, store
 from .orch_health import owner_health
 
 DEFAULT_ENTRY = "desktop"
@@ -451,46 +450,7 @@ def snapshot(con, rt, entry_id=DEFAULT_ENTRY):
                 counts=[dict(r) for r in counts])
 
 
-# -- desk: the packaged entry folder (`orchd desk`) --------------------------------------------------------
-
-DESK_MODEL = "gpt-6.1-sol"  # restate test: Sol 43/43 at medium, 20/20 at low; Luna 22/40 (docs/entry.md)
-
-DESK_AGENTS = """# desk
-
-這裡是 Nat 的 desk：Nat 在這裡交辦、聽回報，後面是一個固定的 orchd Orch。你只負責傳話。
-
-- 對話一開始或重開時，先呼叫 orchd_entry 的 `status`。
-- Nat 說話後呼叫 `relay`；只有在回答目前開著的 `[orchd question N]` 時才帶 `reply_to=N`。
-  orchd 會自己從對話紀錄讀 Nat 的原文，你不要重打。
-- `[orchd message N]`／`[orchd question N]` 是 Orch 給 Nat 的話，已經原樣顯示在畫面上。
-  Nat 用語音聽時，逐字唸出內文；不縮短、不摘要、不改寫。
-- 不分類、不排程、不替 Nat 決定、不開始任何工作。Nat 批准的是畫面上的原文，不是你唸的版本。
-- 只回報 orchd 回傳的狀態；delivered 不代表 Nat 已讀或已同意。
-"""
-
-
-def desk_home():
-    return Path(os.environ.get("ORCHD_DESK_HOME", Path.home() / "projects" / "desk"))
-
-
-def desk_config(orchd_bin):
-    lines = [f'model = "{DESK_MODEL}"', 'model_reasoning_effort = "low"', 'default_permissions = ":read-only"',
-             'approval_policy = "never"', 'approvals_reviewer = "user"', "allow_login_shell = false", "",
-             "[mcp_servers.orchd_entry]", 'command = "/usr/bin/python3"',
-             f'args = [{json.dumps(str(orchd_bin))}, "mcp", "--role", "entry"]']
-    if os.environ.get("ORCHD_HOME"):
-        lines.append(f'env = {{ ORCHD_HOME = {json.dumps(os.environ["ORCHD_HOME"])} }}')
-    return "\n".join(lines) + "\n"
-
-
-def _write_managed(path, text):
-    """Create a file orchd owns; one that differs (hand-edited or older) is kept and reported, never overwritten."""
-    if path.exists():
-        return "unchanged" if path.read_text() == text else "kept (differs from orchd's version; delete it to regenerate)"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text)
-    return "created"
-
+# -- interface: the Desktop entry folder (`orchd init` creates it, `orchd interface` binds it) ----------------
 
 def codex_trusted(home):
     """True/False from ~/.codex/config.toml, None when it cannot be read. Never writes it."""
@@ -509,16 +469,16 @@ def codex_trusted(home):
     return isinstance(entry, dict) and entry.get("trust_level") == "trusted"
 
 
-def desk(con, rt, start_orch, orchd_bin, new=False, entry_id=DEFAULT_ENTRY):
-    """Operator: prepare the desk folder and make sure the entry is bound to a live Claude Orch.
+def interface(con, rt, start_orch, new=False, entry_id=DEFAULT_ENTRY):
+    """Operator: make sure the interface is bound to a live Claude Orch.
 
     Reuses the bound Orch unless it is confirmed dead (Q3). A dead one is never replaced silently (Q1): that needs
     new=True, which starts a new Orch and rebinds; the old Orch's open questions stay with it. With no binding yet,
-    it starts one Orch and binds it.
+    it starts one Orch and binds it. The folder itself comes from `orchd init`.
     """
-    home = desk_home()
-    files = {".codex/config.toml": _write_managed(home / ".codex" / "config.toml", desk_config(orchd_bin)),
-             "AGENTS.md": _write_managed(home / "AGENTS.md", DESK_AGENTS)}
+    home = paths.interface_home()
+    if not (home / ".codex" / "config.toml").exists():
+        raise ValueError(f"{home} is not set up; run `orchd init` first")
     row = con.execute("SELECT * FROM entries WHERE id=?", (entry_id,)).fetchone()
     health = reachability(con, rt, row["orch_id"]) if row is not None else None
     if row is not None and health["state"] != "dead" and not new:
@@ -527,15 +487,14 @@ def desk(con, rt, start_orch, orchd_bin, new=False, entry_id=DEFAULT_ENTRY):
         if row is not None and not new:
             entry = get_entry(con, entry_id)
             open_questions = len(queued_questions(con, entry)) + (1 if current_question(con, entry) else 0)
-            raise ValueError(f"desk's Orch {row['orch_id']} is offline ({health['reason']}); {open_questions} open "
-                             "question(s) stay with it. Run `orchd desk --new` to start a new Orch and bind the desk "
-                             "to it")
+            raise ValueError(f"the interface's Orch {row['orch_id']} is offline ({health['reason']}); {open_questions} "
+                             "open question(s) stay with it. Run `orchd interface --new` to start a new Orch and "
+                             "bind the interface to it")
         orch_id, started = start_orch()["id"], True
         bind(con, rt, orch_id, entry_id, force=True)
     trusted = codex_trusted(home)
-    return dict(desk=str(home), orch_id=orch_id, orch_model=store.get_orch(con, orch_id)["model"],
-                started_new_orch=started, orch_health=reachability(con, rt, orch_id), files=files,
+    return dict(interface=str(home), orch_id=orch_id, orch_model=store.get_orch(con, orch_id)["model"],
+                started_new_orch=started, orch_health=reachability(con, rt, orch_id),
                 codex_trusted="unknown" if trusted is None else trusted,
-                next=("Open the desk folder in the Desktop app (permissions: Custom (config.toml)) and start talking."
-                      if trusted else f"Trust {home} in Codex once, then open it in the Desktop app "
-                                       "(permissions: Custom (config.toml))."))
+                next=(f"Open {home} in the Codex Desktop app (permissions: Custom (config.toml)) and start talking."
+                      if trusted else f"Run `orchd init` to trust {home} in Codex, then open it in the Desktop app."))

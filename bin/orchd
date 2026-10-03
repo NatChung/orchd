@@ -4,7 +4,8 @@
   orchd mcp [--role orch|entry] [--entry NAME]   run the MCP server for an Orch session, or for the Desktop entry (stdio)
   orchd orch [--model opus|sonnet] [--no-attach]   start a Claude Orch, then attach to it
   orchd orch-stop ID                          stop a Claude Orch
-  orchd desk [--new]                          prepare ~/projects/desk and bind it to a live Claude Orch (starts one if none)
+  orchd init [--from OLD_ORCH_HOME] [--no-trust]   create ~/orch/home and ~/orch/interface, trust them in Codex
+  orchd interface [--new]                     bind ~/orch/interface to a live Claude Orch (starts one if none)
   orchd entry-bind ORCH_ID [--entry NAME] [--force]   bind the Desktop entry to one Claude Orch (operator only)
   orchd entry-status [--entry NAME]           read-only entry binding, Orch health, questions and delivery counts
   orchd ack ID                                worker: acknowledge a task
@@ -45,8 +46,11 @@ def main(argv=None):
                       choices=list(ORCH_MODELS))
     orch.add_argument("--no-attach", action="store_true")
     sub.add_parser("orch-stop").add_argument("orch_id")
-    desk = sub.add_parser("desk")
-    desk.add_argument("--new", action="store_true", help="the bound Orch is offline: start a new one and rebind")
+    init = sub.add_parser("init")
+    init.add_argument("--from", dest="source", help="copy what an old Orch home kept (e.g. ~/projects/orch); never overwrites")
+    init.add_argument("--no-trust", action="store_true", help="do not write Codex trust or check Claude trust")
+    iface = sub.add_parser("interface")
+    iface.add_argument("--new", action="store_true", help="the bound Orch is offline: start a new one and rebind")
     bind = sub.add_parser("entry-bind")
     bind.add_argument("orch_id")
     bind.add_argument("--entry", default="desktop")
@@ -92,6 +96,15 @@ def main(argv=None):
               else doctor.render(checks))
         return doctor.exit_code(checks)
 
+    if args.cmd == "init":  # files and trust only; never touches the DB
+        from orchd import bootstrap
+        try:
+            result = bootstrap.init(Runtime(), trust=not args.no_trust, source=args.source)
+        except ValueError as error:
+            print(f"init: {error}", file=sys.stderr)
+            return 1
+        print(json.dumps(result, ensure_ascii=False, indent=1))
+        return 0
     if args.cmd == "mcp":
         from orchd import mcp_server
         mcp_server.serve(role=args.role, entry_id=args.entry)
@@ -142,12 +155,12 @@ def main(argv=None):
     elif args.cmd == "orch-stop":
         core.stop_orch(con, rt, args.orch_id)
         print(f"stopped {args.orch_id}")
-    elif args.cmd == "desk":
+    elif args.cmd == "interface":
         from orchd import entry
         try:
-            result = entry.desk(con, rt, lambda: core.start_orch(con, rt, "opus"), Path(__file__).resolve(), args.new)
+            result = entry.interface(con, rt, lambda: core.start_orch(con, rt, "opus"), args.new)
         except ValueError as error:
-            print(f"desk: {error}", file=sys.stderr)
+            print(f"interface: {error}", file=sys.stderr)
             return 1
         print(json.dumps(result, ensure_ascii=False, indent=1))
     elif args.cmd in ("entry-bind", "entry-status"):
