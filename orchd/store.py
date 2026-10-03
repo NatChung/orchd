@@ -80,7 +80,6 @@ CREATE TABLE IF NOT EXISTS entry_messages(
     delivered_at REAL,
     read_at REAL
 );
-CREATE UNIQUE INDEX IF NOT EXISTS entry_messages_source ON entry_messages(source_thread, source_item_id);
 """
 
 # Columns added after v1. Nullable so old rows and old code keep working against the same DB.
@@ -88,6 +87,9 @@ TASK_COLUMNS = ("model TEXT", "model_reason TEXT", "task_type TEXT", "rework_of 
                 "found_by TEXT", "outcome TEXT", "rating INTEGER",
                 "verify TEXT", "manual_checks TEXT", "verifies TEXT")
 MESSAGE_COLUMNS = ("recipient_orch TEXT", "notice_error TEXT", "notice_recipient TEXT")
+# entry_messages columns a DB created from an early #37 draft lacks (nullable: ALTER cannot add NOT NULL).
+ENTRY_MESSAGE_COLUMNS = ("body_bytes INTEGER", "body_sha256 TEXT", "wire_text TEXT", "source_thread TEXT",
+                         "source_item_id TEXT")
 
 # Message kinds the Orch reads in its inbox; the rest (dispatch, answer, close, usage) are the event log.
 ORCH_KINDS = ("ack", "progress", "report", "question", "adopt")
@@ -114,13 +116,16 @@ def connect(path=None):
                 con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
             except sqlite3.OperationalError:  # another process added it first
                 pass
-    have = {r["name"] for r in con.execute("PRAGMA table_info(messages)")}
-    for column in MESSAGE_COLUMNS:
-        if column.split()[0] not in have:
-            try:
-                con.execute(f"ALTER TABLE messages ADD COLUMN {column}")
-            except sqlite3.OperationalError:
-                pass
+    for table, columns in (("messages", MESSAGE_COLUMNS), ("entry_messages", ENTRY_MESSAGE_COLUMNS)):
+        have = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
+        for column in columns:
+            if column.split()[0] not in have:
+                try:
+                    con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+                except sqlite3.OperationalError:  # another process added it first
+                    pass
+    # After the columns exist: on an early-draft DB this index would fail inside SCHEMA.
+    con.execute("CREATE UNIQUE INDEX IF NOT EXISTS entry_messages_source ON entry_messages(source_thread, source_item_id)")
     return con
 
 

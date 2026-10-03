@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -392,6 +393,31 @@ class InterfaceTest(unittest.TestCase):
         result = self.interface()
         self.assertTrue(result["codex_trusted"])
         self.assertIn("start talking", result["next"])
+
+
+class EarlyDraftSchemaTest(unittest.TestCase):
+    def test_db_with_the_early_draft_entry_table_opens_and_works(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "t.db"
+            old = sqlite3.connect(path)
+            old.executescript("""
+                CREATE TABLE entries(id TEXT PRIMARY KEY, orch_id TEXT NOT NULL, thread_id TEXT, bound_at REAL NOT NULL,
+                                     thread_seen_at REAL);
+                CREATE TABLE entry_messages(id INTEGER PRIMARY KEY AUTOINCREMENT, entry_id TEXT NOT NULL, orch_id TEXT NOT NULL,
+                    direction TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL, task_id TEXT, source_message_id INTEGER,
+                    reply_to INTEGER, question_state TEXT, delivery TEXT NOT NULL, delivery_error TEXT, recipient TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL, delivered_at REAL, read_at REAL);""")
+            old.close()
+            con = store.connect(path)
+            store.connect(path).close()  # a second open is a no-op
+            rt = EntryRuntime()
+            orch = core.start_orch(con, rt, "opus")["id"]
+            entry.bind(con, rt, orch)
+            rt.nat_says("desk-1", BODY)
+            self.assertEqual(entry.relay(con, rt, "desktop", "desk-1")["status"], "delivered")
+            self.assertEqual(entry.relay(con, rt, "desktop", "desk-1")["status"], "duplicate")
+            self.assertEqual(entry.inbox(con, orch)["messages"][0]["body"], BODY)
+            con.close()
 
 
 class RolloutSourceTest(unittest.TestCase):
