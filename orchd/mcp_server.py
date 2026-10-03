@@ -4,13 +4,17 @@ The caller's id is `ORCHD_ORCH_ID` from the environment when set (a Claude Orch 
 `orchd orch`; Claude Code sends no thread id). Otherwise it is `params._meta.threadId`, which both
 codex exec and the Desktop app send on every tools/call (verified 2026-09-29); such a Codex thread is
 registered as a codex Orch on its first call other than the read-only `list_orchs`.
+
+`orchd mcp --role entry` serves the Desktop entry (issue #37) instead: only ENTRY_TOOLS are listed or callable,
+their arguments are ids (never a body), and the caller is never registered as an Orch. This guards orchd's
+own tools only; the Codex host's other tools are limited by the entry project's config, not here.
 """
 import json
 import os
 import sys
 import traceback
 
-from . import core, inventory, store, verify as verification
+from . import core, entry, inventory, store, verify as verification
 from .runtime import DEFAULT_WORKER_MODEL, WORKER_MODELS, Runtime
 
 TOOLS = [
@@ -96,7 +100,10 @@ TOOLS = [
                     "again: check its log or wait for its report first. flush=true with no text also just shows pending.",
      "inputSchema": {"type": "object", "required": ["task_id"], "properties": {
          "task_id": {"type": "string"}, "text": {"type": "string", "description": "The answer; omit only with flush"},
-         "flush": {"type": "boolean", "description": "Send queued answers to an idle Codex worker"}}}},
+         "flush": {"type": "boolean", "description": "Send queued answers to an idle Codex worker"},
+         "entry_reply_id": {"type": "integer", "description":
+                            "Instead of text: send Nat's reply from entry_inbox verbatim from orchd's store. Refused "
+                            "if that reply answers a question of another task"}}}},
     {"name": "close",
      "description": "Close a task: stop its worker, remove its worktree if clean and pushed, otherwise keep it and say why.",
      "inputSchema": {"type": "object", "required": ["task_id"], "properties": {
@@ -135,6 +142,58 @@ TOOLS = [
          "message": {"type": "string", "description": "The next instruction, with any new scope or done_when"}}}},
 ]
 
+# Orch-side tools for the Desktop entry; refused unless the caller is the Orch the entry is bound to.
+TOOLS += [
+    {"name": "entry_inbox",
+     "description": "Read Nat's unread messages from the Desktop entry, verbatim from the entry thread's saved history, "
+                    "with body_bytes/body_sha256. A reply carries reply_to (your question id), task_id and "
+                    "worker_question_message_id: forward it to the worker with answer(task_id, entry_reply_id=<message_id>) "
+                    "so the text is not retyped. Also returns current_question and queued_questions. "
+                    "Call it when an [orchd entry] message arrives.",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "send_to_nat",
+     "description": "Send a message to Nat's Desktop entry thread; it is queued there byte for byte. Returns delivery "
+                    "pending|delivered|failed|uncertain: delivered means it reached the Desktop queue, not that Nat "
+                    "read or approved it. failed rows are retried on the entry's next call; uncertain ones are not.",
+     "inputSchema": {"type": "object", "required": ["text"], "properties": {"text": {"type": "string"}}}},
+    {"name": "ask_nat",
+     "description": "Ask Nat one question through the Desktop entry. Only one question is open at a time: if one is "
+                    "already open this one is queued (state queued) and sent after Nat answers the earlier ones, in "
+                    "order. Pass task_id when it is about a task; quote_worker_question=true appends that task's "
+                    "latest worker question verbatim from orchd's store (use it for outward-send previews instead "
+                    "of retyping them). Nat's answer arrives in entry_inbox as kind reply with reply_to=question_id.",
+     "inputSchema": {"type": "object", "properties": {
+         "text": {"type": "string", "description": "Your question; optional with quote_worker_question"},
+         "task_id": {"type": "string"},
+         "quote_worker_question": {"type": "boolean"}}}},
+]
+
+ENTRY_TOOLS = [
+    {"name": "relay",
+     "description": "Pass Nat's latest message in this thread to the bound Orch. orchd reads the text itself from this "
+                    "thread's saved history; never retype, shorten or summarize it. Pass reply_to only when Nat's "
+                    "message answers the open [orchd question N]. Returns ids, body_bytes, body_sha256 and status: "
+                    "delivered (reached the Orch, not yet read), not_delivered (the Orch is offline; kept), failed or "
+                    "uncertain (kept, retried on the next call), duplicate, or source_not_ready (call again).",
+     "inputSchema": {"type": "object", "additionalProperties": False, "properties": {
+         "reply_to": {"type": "integer", "description": "The open question's id, only if this message answers it"}}}},
+    {"name": "status",
+     "description": "Binding and Orch health, the open question in full, how many are queued, Nat messages not yet "
+                    "delivered, and Orch messages that have not reached this thread yet (with their full text). "
+                    "Call it when the conversation starts or reopens. Show wire_text exactly as returned.",
+     "annotations": {"readOnlyHint": False},
+     "inputSchema": {"type": "object", "additionalProperties": False, "properties": {}}},
+]
+
+ENTRY_INSTRUCTIONS = (
+    "You are Nat's Desktop entry to one orchd Orch. You only pass messages. Call status when the conversation "
+    "starts or reopens. When Nat writes, call relay (with reply_to=N only if it answers the open [orchd question N]); "
+    "orchd reads Nat's text from the thread itself, so never retype it. Messages from the Orch arrive as "
+    "[orchd message N] / [orchd question N]: they are already shown to Nat as they are. If Nat is listening by voice, "
+    "read the body aloud word for word; never shorten, summarize or rephrase it. Do not classify, schedule, decide "
+    "for Nat, or start work. What Nat approves is the original on screen, not what you read aloud. Report only the "
+    "status orchd returns; delivered never means read or approved.")
+
 
 def call(name, args, thread, con, rt):
     if name == "dispatch":
@@ -156,7 +215,19 @@ def call(name, args, thread, con, rt):
     if name == "list_open":
         return core.list_open(con, rt)
     if name == "answer":
-        return core.answer(con, rt, args["task_id"], args.get("text"), flush=bool(args.get("flush")))
+        text = args.get("text")
+        if args.get("entry_reply_id") is not None:
+            if text is not None:
+                raise ValueError("pass text or entry_reply_id, not both")
+            text = entry.reply_text(con, thread, args["entry_reply_id"], args["task_id"])
+        return core.answer(con, rt, args["task_id"], text, flush=bool(args.get("flush")))
+    if name == "entry_inbox":
+        return entry.inbox(con, thread)
+    if name == "send_to_nat":
+        return entry.send_to_nat(con, rt, thread, args.get("text"))
+    if name == "ask_nat":
+        return entry.ask_nat(con, rt, thread, args.get("text"), args.get("task_id"),
+                             bool(args.get("quote_worker_question")))
     if name == "lock_verify":
         return verification.lock(con, args["task_id"], args.get("paths"), args.get("command"), orch_thread=thread)
     if name == "close":
@@ -172,7 +243,21 @@ def call(name, args, thread, con, rt):
     raise ValueError(f"unknown tool {name}")
 
 
-def handle(msg, con, rt):
+def entry_call(name, args, meta, con, rt, entry_id):
+    tool = next((t for t in ENTRY_TOOLS if t["name"] == name), None)
+    if tool is None:
+        raise PermissionError(f"{name} is not available to the Desktop entry")
+    extra = set(args) - set(tool["inputSchema"]["properties"])
+    if extra:
+        raise PermissionError(f"unexpected argument(s) {', '.join(sorted(extra))}; the entry passes ids only")
+    turn = meta.get("x-codex-turn-metadata") or {}
+    thread = meta.get("threadId") or turn.get("thread_id")
+    if name == "relay":
+        return entry.relay(con, rt, entry_id, thread, turn_id=turn.get("turn_id"), reply_to=args.get("reply_to"))
+    return entry.status(con, rt, entry_id, thread)
+
+
+def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY):
     method, mid = msg.get("method"), msg.get("id")
     if mid is None:
         return None
@@ -180,17 +265,23 @@ def handle(msg, con, rt):
     if method == "initialize":
         result = {"protocolVersion": params.get("protocolVersion", "2025-06-18"),
                   "capabilities": {"tools": {}}, "serverInfo": {"name": "orchd", "version": "0.1"}}
+        if role == "entry":
+            result["instructions"] = ENTRY_INSTRUCTIONS
     elif method == "tools/list":
-        result = {"tools": TOOLS}
+        result = {"tools": ENTRY_TOOLS if role == "entry" else TOOLS}
     elif method == "tools/call":
         meta = params.get("_meta") or {}
-        thread = os.environ.get("ORCHD_ORCH_ID")
-        if not thread:
-            thread = meta.get("threadId") or (meta.get("x-codex-turn-metadata") or {}).get("thread_id")
-            if thread and params.get("name") != "list_orchs":
-                store.register_orch(con, thread, "codex")
         try:
-            data = call(params.get("name"), params.get("arguments") or {}, thread, con, rt)
+            if role == "entry":  # never an Orch: no ORCHD_ORCH_ID, no registration
+                print(f"orchd entry meta keys: {sorted(meta)}", file=sys.stderr)
+                data = entry_call(params.get("name"), params.get("arguments") or {}, meta, con, rt, entry_id)
+            else:
+                thread = os.environ.get("ORCHD_ORCH_ID")
+                if not thread:
+                    thread = meta.get("threadId") or (meta.get("x-codex-turn-metadata") or {}).get("thread_id")
+                    if thread and params.get("name") != "list_orchs":
+                        store.register_orch(con, thread, "codex")
+                data = call(params.get("name"), params.get("arguments") or {}, thread, con, rt)
             result = {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False, indent=1)}]}
         except Exception as error:
             traceback.print_exc(file=sys.stderr)
@@ -202,13 +293,13 @@ def handle(msg, con, rt):
     return {"jsonrpc": "2.0", "id": mid, "result": result}
 
 
-def serve(stdin=sys.stdin, stdout=sys.stdout, con=None, rt=None):
+def serve(stdin=sys.stdin, stdout=sys.stdout, con=None, rt=None, role="orch", entry_id=entry.DEFAULT_ENTRY):
     con = con or store.connect()
     rt = rt or Runtime()
     for line in stdin:
         if not line.strip():
             continue
-        reply = handle(json.loads(line), con, rt)
+        reply = handle(json.loads(line), con, rt, role, entry_id)
         if reply is not None:
             stdout.write(json.dumps(reply, ensure_ascii=False) + "\n")
             stdout.flush()

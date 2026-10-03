@@ -49,6 +49,38 @@ CREATE TABLE IF NOT EXISTS orchs(
     created_at REAL NOT NULL,
     stopped_at REAL
 );
+CREATE TABLE IF NOT EXISTS entries(
+    id TEXT PRIMARY KEY,
+    orch_id TEXT NOT NULL,
+    thread_id TEXT,
+    bound_at REAL NOT NULL,
+    thread_seen_at REAL
+);
+CREATE TABLE IF NOT EXISTS entry_messages(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entry_id TEXT NOT NULL REFERENCES entries(id),
+    orch_id TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    body TEXT NOT NULL,
+    body_bytes INTEGER NOT NULL,
+    body_sha256 TEXT NOT NULL,
+    wire_text TEXT,
+    source_thread TEXT,
+    source_item_id TEXT,
+    task_id TEXT,
+    source_message_id INTEGER,
+    reply_to INTEGER,
+    question_state TEXT,
+    delivery TEXT NOT NULL,
+    delivery_error TEXT,
+    recipient TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    delivered_at REAL,
+    read_at REAL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS entry_messages_source ON entry_messages(source_thread, source_item_id);
 """
 
 # Columns added after v1. Nullable so old rows and old code keep working against the same DB.

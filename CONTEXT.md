@@ -12,6 +12,11 @@ _Avoid_：協調者、主 session
 一個 Orch 與它派出的 workers。每開一個 Orch session 就是一組，可同時存在多組。
 _Avoid_：團隊、workspace
 
+**入口（Entry）**：
+在 Codex Desktop 讓 Nat 交辦與回答追問的 session；只把原文轉給綁定的那一個 Claude Orch、再把 Orch 的原文帶回來，
+不是 Orch、不派工、不開組。資料夾與指令叫 desk（`~/projects/desk`、`orchd desk`）。見 ADR-0003。
+_Avoid_：前台 Orch、代理人
+
 **Worker**：
 為單一任務啟動、在該任務的 worktree 內工作並回報的 Agent；任務結束即停止。
 _Avoid_：長駐 worker、專案 worker

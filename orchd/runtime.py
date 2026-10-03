@@ -475,6 +475,33 @@ class Runtime:
                 "cache_creation_input_tokens": total.get("cache_write_input_tokens") or 0,
                 "cache_read_input_tokens": cached, "messages": turns}
 
+    def codex_user_messages(self, thread):
+        """The thread's persisted user inputs, oldest first, as [{turn_id, item_id, text}].
+
+        Read from the rollout's `item_completed` UserMessage events: the decoded text joined from its text parts,
+        not stripped or normalized, so a stored copy is byte-exact. A user role is not proof the text came from Nat:
+        `codex queue` writes the same records. [] when the rollout is missing."""
+        root = Path(os.environ.get("ORCHD_CODEX_SESSIONS", Path.home() / ".codex" / "sessions"))
+        files = sorted(root.glob(f"**/rollout-*-{thread}.jsonl"))
+        if not files:
+            return []
+        found = []
+        for line in files[0].read_bytes().splitlines():
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue
+            payload = record.get("payload") if isinstance(record, dict) else None
+            if record.get("type") != "event_msg" or not isinstance(payload, dict) or payload.get("type") != "item_completed":
+                continue
+            item = payload.get("item") or {}
+            if item.get("type") != "UserMessage" or not isinstance(item.get("content"), list):
+                continue
+            text = "".join(c.get("text", "") for c in item["content"]
+                           if isinstance(c, dict) and c.get("type") in ("text", "Text", "input_text"))
+            found.append({"turn_id": payload.get("turn_id"), "item_id": item.get("id"), "text": text})
+        return found
+
     def open_codex_viewer(self, worktree, thread):
         self.run(["open", "-na", "Ghostty.app", "--args", f"--working-directory={worktree}", "-e",
                   self.codex, "resume", thread], timeout=30)

@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """orchd: Orch MCP server and the worker/operator command line.
 
-  orchd mcp                                   run the MCP server for an Orch session (stdio)
+  orchd mcp [--role orch|entry] [--entry NAME]   run the MCP server for an Orch session, or for the Desktop entry (stdio)
   orchd orch [--model opus|sonnet] [--no-attach]   start a Claude Orch, then attach to it
   orchd orch-stop ID                          stop a Claude Orch
+  orchd desk [--new]                          prepare ~/projects/desk and bind it to a live Claude Orch (starts one if none)
+  orchd entry-bind ORCH_ID [--entry NAME] [--force]   bind the Desktop entry to one Claude Orch (operator only)
+  orchd entry-status [--entry NAME]           read-only entry binding, Orch health, questions and delivery counts
   orchd ack ID                                worker: acknowledge a task
   orchd report ID --status done|blocked --summary S [--evidence E]
   orchd progress ID "text"                    worker: interim update to the Orch; the task keeps running
@@ -34,12 +37,21 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="orchd", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("mcp")
+    mcp = sub.add_parser("mcp")
+    mcp.add_argument("--role", choices=["orch", "entry"], default="orch")
+    mcp.add_argument("--entry", default="desktop", help="entry name (with --role entry)")
     orch = sub.add_parser("orch")
     orch.add_argument("--model", default=DEFAULT_ORCH_MODEL,
                       choices=list(ORCH_MODELS))
     orch.add_argument("--no-attach", action="store_true")
     sub.add_parser("orch-stop").add_argument("orch_id")
+    desk = sub.add_parser("desk")
+    desk.add_argument("--new", action="store_true", help="the bound Orch is offline: start a new one and rebind")
+    bind = sub.add_parser("entry-bind")
+    bind.add_argument("orch_id")
+    bind.add_argument("--entry", default="desktop")
+    bind.add_argument("--force", action="store_true", help="rebind an entry already bound to another Orch")
+    sub.add_parser("entry-status").add_argument("--entry", default="desktop")
     sub.add_parser("ack").add_argument("task_id")
     rep = sub.add_parser("report")
     rep.add_argument("task_id")
@@ -82,7 +94,7 @@ def main(argv=None):
 
     if args.cmd == "mcp":
         from orchd import mcp_server
-        mcp_server.serve()
+        mcp_server.serve(role=args.role, entry_id=args.entry)
         return 0
     if args.cmd == "stats":  # reads a temp copy of the DB: never opens, migrates or creates anything next to the real one
         from orchd import stats
@@ -130,6 +142,23 @@ def main(argv=None):
     elif args.cmd == "orch-stop":
         core.stop_orch(con, rt, args.orch_id)
         print(f"stopped {args.orch_id}")
+    elif args.cmd == "desk":
+        from orchd import entry
+        try:
+            result = entry.desk(con, rt, lambda: core.start_orch(con, rt, "opus"), Path(__file__).resolve(), args.new)
+        except ValueError as error:
+            print(f"desk: {error}", file=sys.stderr)
+            return 1
+        print(json.dumps(result, ensure_ascii=False, indent=1))
+    elif args.cmd in ("entry-bind", "entry-status"):
+        from orchd import entry
+        try:
+            result = (entry.bind(con, rt, args.orch_id, args.entry, args.force) if args.cmd == "entry-bind"
+                      else entry.snapshot(con, rt, args.entry))
+        except ValueError as error:
+            print(f"{args.cmd} refused: {error}", file=sys.stderr)
+            return 1
+        print(json.dumps(result, ensure_ascii=False, indent=1))
     elif args.cmd == "ack":
         core.ack(con, args.task_id)
         print(f"acked {args.task_id}")
