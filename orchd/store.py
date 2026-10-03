@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS entry_messages(
     body_bytes INTEGER NOT NULL,
     body_sha256 TEXT NOT NULL,
     wire_text TEXT,
+    source_raw TEXT,
     source_thread TEXT,
     source_item_id TEXT,
     task_id TEXT,
@@ -89,7 +90,7 @@ TASK_COLUMNS = ("model TEXT", "model_reason TEXT", "task_type TEXT", "rework_of 
 MESSAGE_COLUMNS = ("recipient_orch TEXT", "notice_error TEXT", "notice_recipient TEXT")
 # entry_messages columns a DB created from an early #37 draft lacks (nullable: ALTER cannot add NOT NULL).
 ENTRY_MESSAGE_COLUMNS = ("body_bytes INTEGER", "body_sha256 TEXT", "wire_text TEXT", "source_thread TEXT",
-                         "source_item_id TEXT")
+                         "source_item_id TEXT", "source_raw TEXT")
 
 # Message kinds the Orch reads in its inbox; the rest (dispatch, answer, close, usage) are the event log.
 ORCH_KINDS = ("ack", "progress", "report", "question", "adopt")

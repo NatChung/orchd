@@ -332,6 +332,68 @@ class EntryTest(unittest.TestCase):
         self.assertEqual({t["name"] for t in mcp_server.TOOLS} & {"relay", "status"}, set())
 
 
+VOICE_ROUND_2 = """<realtime_delegation>
+  <input>應該是O2CH吧</input>
+  <transcript_delta>assistant: 好的。
+user: 請O區回我一句測試訊息
+assistant: 我問一下。 O 區回覆:「收到,這裡是 O 區,測試訊息回覆完成。」
+user: 應該是O2CH吧</transcript_delta>
+</realtime_delegation>"""
+VOICE_FLUSH = """<realtime_delegation>
+  <source>transcript_tail_flush</source>
+  <input>The user just ended their realtime session. Here is the remaining handoff/transcript tail. You probably do not have to do anything; acknowledge the handoff unless the transcript itself asks for something.</input>
+  <transcript_delta>assistant: 了解,是 Orch。
+user: ORCH,O-Orchestrator 的意思啊
+user: 收到</transcript_delta>
+</realtime_delegation>"""
+
+
+class VoiceTest(unittest.TestCase):
+    """Issue #64: Desktop voice mode wraps Nat's words in <realtime_delegation>."""
+    setUp, tearDown = EntryTest.setUp, EntryTest.tearDown
+    relay, relay_thread_seen = EntryTest.relay, EntryTest.relay_thread_seen
+
+    def test_parser(self):
+        self.assertIsNone(entry.voice_input("plain typed text"))
+        self.assertEqual(entry.voice_input(VOICE_FLUSH), {"handoff": True})
+        self.assertEqual(entry.voice_input(VOICE_ROUND_2)["text"],
+                         "[語音輸入，可能有辨識錯字]\n應該是O2CH吧")  # earlier rounds dropped, same words not repeated
+        mixed = VOICE_ROUND_2.replace("<input>應該是O2CH吧</input>", "<input>Nat 說應該是 Orch</input>")
+        self.assertEqual(entry.voice_input(mixed)["text"],
+                         "[語音輸入，可能有辨識錯字]\nNat 說應該是 Orch\n（語音逐字稿：應該是O2CH吧）")
+        wrapped = VOICE_ROUND_2.replace("user: 應該是O2CH吧", "user: 第一行\n第二行")
+        self.assertIn("第一行\n第二行", entry.voice_input(wrapped)["text"])
+
+    def test_voice_message_forwards_this_round_and_keeps_the_raw_text(self):
+        self.rt.nat_says("desk-1", VOICE_ROUND_2)
+        result = self.relay()
+        self.assertEqual(result["status"], "delivered")
+        self.assertIn("voice message", self.rt.sent[-1][2])
+        (msg,) = entry.inbox(self.con, self.orch)["messages"]
+        self.assertEqual(msg["body"], "[語音輸入，可能有辨識錯字]\n應該是O2CH吧")
+        self.assertNotIn("請O區回我一句測試訊息", msg["body"])
+        raw = self.con.execute("SELECT source_raw FROM entry_messages WHERE id=?", (msg["message_id"],)).fetchone()[0]
+        self.assertEqual(raw, VOICE_ROUND_2)
+
+    def test_end_of_session_handoff_is_kept_but_never_reaches_the_orch(self):
+        self.rt.nat_says("desk-1", VOICE_FLUSH)
+        result = self.relay()
+        self.assertEqual(result["status"], "skipped_handoff")
+        self.assertEqual(self.rt.sent, [])
+        self.assertEqual(entry.inbox(self.con, self.orch)["messages"], [])
+        self.assertEqual(entry.status(self.con, self.rt, "desktop", "desk-1")["not_yet_delivered_to_orch"], [])
+        self.assertEqual(self.relay()["status"], "duplicate")
+        self.assertEqual(self.rt.sent, [])
+
+    def test_voice_answer_still_links_to_the_question(self):
+        self.relay_thread_seen()
+        q = entry.ask_nat(self.con, self.rt, self.orch, "寄嗎？")
+        self.rt.nat_says("desk-1", VOICE_ROUND_2.replace("應該是O2CH吧", "寄吧"))
+        reply = self.relay(reply_to=q["question_id"])
+        self.assertEqual((reply["kind"], reply["reply_to"]), ("reply", q["question_id"]))
+        self.assertEqual(entry.inbox(self.con, self.orch)["messages"][0]["body"], "[語音輸入，可能有辨識錯字]\n寄吧")
+
+
 class InterfaceTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

@@ -148,7 +148,9 @@ TOOLS += [
      "description": "Read Nat's unread messages from the Desktop entry, verbatim from the entry thread's saved history, "
                     "with body_bytes/body_sha256. A reply carries reply_to (your question id), task_id and "
                     "worker_question_message_id: forward it to the worker with answer(task_id, entry_reply_id=<message_id>) "
-                    "so the text is not retyped. Also returns current_question and queued_questions. "
+                    "so the text is not retyped. A message starting with [語音輸入…] came by voice: it may hold "
+                    "speech-recognition errors, so when it is unclear what Nat wants, ask with send_to_nat or ask_nat "
+                    "instead of guessing. Also returns current_question and queued_questions. "
                     "Call it when an [orchd entry] message arrives.",
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "send_to_nat",
@@ -174,7 +176,8 @@ ENTRY_TOOLS = [
                     "thread's saved history; never retype, shorten or summarize it. Pass reply_to only when Nat's "
                     "message answers the open [orchd question N]. Returns ids, body_bytes, body_sha256 and status: "
                     "delivered (reached the Orch, not yet read), not_delivered (the Orch is offline; kept), failed or "
-                    "uncertain (kept, retried on the next call), duplicate, or source_not_ready (call again).",
+                    "uncertain (kept, retried on the next call), duplicate, source_not_ready (call again), or "
+                    "skipped_handoff (Desktop's end-of-voice handoff, kept but not passed on: say nothing).",
      "inputSchema": {"type": "object", "additionalProperties": False, "properties": {
          "reply_to": {"type": "integer", "description": "The open question's id, only if this message answers it"}}}},
     {"name": "status",
@@ -188,7 +191,8 @@ ENTRY_TOOLS = [
 ENTRY_INSTRUCTIONS = (
     "You are Nat's Desktop entry to one orchd Orch. You only pass messages. Call status when the conversation "
     "starts or reopens (or when Nat asks) and always tell Nat in one sentence which Orch is bound and whether it is "
-    "online, then say any open question in full. When Nat writes, call relay (with reply_to=N only if it answers the open [orchd question N]); "
+    "online, then say any open question in full. The end-of-voice-session handoff (<source>transcript_tail_flush"
+    "</source>) is not a request from Nat: do not relay it and say nothing. When Nat writes, call relay (with reply_to=N only if it answers the open [orchd question N]); "
     "orchd reads Nat's text from the thread itself, so never retype it. Messages from the Orch arrive as "
     "[orchd message N] / [orchd question N]: every time one arrives, say its body (below the header) once, word for "
     "word, in text and in voice mode alike; never shorten, summarize, rephrase or add anything. Do not classify, schedule, decide "

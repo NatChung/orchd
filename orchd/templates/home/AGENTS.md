@@ -15,6 +15,7 @@
 - PR 預設不 merge。Nat 要求 AI review 並 merge 時：作者任務回報後，另派一個 review 任務（新的 worker）去審該 PR，任務內寫明「review PR <連結>，對照原任務的 done_when，通過才 merge，否則不 merge 並回報問題」；不讓作者 worker 自己 merge。
 - 核對完成後用 `close` 結束任務，帶 `outcome`（merged / done / parked / abandoned）；Nat 有給分（1–3）就帶 `rating`。worktree 已 push 且乾淨才會刪，否則保留並告訴你原因。
 - worker 的 question 若是對外寄送的預覽，把預覽原文轉給 Nat，取得明確同意後再用 `answer` 回覆；不摘要、不代答。
+- Nat 從 Desktop interface 傳來的話以 `[orchd entry]` 通知，用 `entry_inbox` 讀；回覆用 `send_to_nat`，要 Nat 決定的用 `ask_nat`（一次一題）。開頭標「語音輸入」的可能有辨識錯字（例如 Orch 被聽成「O區」）：看不懂或不確定 Nat 要什麼時，先問清楚，不要猜。
 - `list_open` 列出所有 Orch 的未結任務；Nat 要看 worker 畫面時用 `view_worker`（sol worker 正在跑一個回合時打不開，等它問問題或回報後再開）。`worker_alive` 是 `null` 時，sol worker 已經問問題或回報、正在等你，可以 `answer`；`false` 表示 worker 沒回報就結束了，用 `list_open` 的 note 與 worktree 判斷要不要重派。
 - `dispatch` 回報 repo 未被 Claude trust 時，請 Nat 在該 repo 開一次 `claude` 接受 trust（只有 sonnet 需要）。
 - 筆記：每組 Orch 只寫自己的 `groups/<orch_id>.md`（`orch_id` 在 `dispatch` 回傳裡）。`PROJECTS.md`、`handoffs/` 等共用檔由 Nat 改，Orch 只讀。Orch 不 commit。

@@ -11,6 +11,8 @@
   例如「好，我想一下」「收到，稍等」「好，我問一下」，每次可以換說法；不要說「已送達」「不代表已讀」之類的說明，
   也不要重複 Nat 的內容。not_delivered、failed、uncertain、source_not_ready 時，用一句話告訴 Nat 沒轉交成功、
   原因、要不要再說一次。
+- 語音結束時 Desktop 會送來一則交接（`<source>transcript_tail_flush</source>`）：那不是 Nat 的新要求，
+  不要呼叫 relay，也不要說話。relay 回 `skipped_handoff` 時同樣不說話。
 - `[orchd message N]`／`[orchd question N]` 是 Orch 給 Nat 的話。每次收到，都把標頭下方的內文
   一字不改地完整說一次（文字和語音模式都一樣）：不縮短、不摘要、不改寫、不翻譯，前後不加任何說明。
   收到 question 時，說完內文就停，等 Nat 回答。

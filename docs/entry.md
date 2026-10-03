@@ -52,6 +52,18 @@ orchd 的 MCP server 在 Native 是否也不受這份權限限制（它要寫 `O
   但子代理沿用同一個模型與權限設定。interface 也會載入全域的 `~/.codex/AGENTS.md` 與 skills 清單。
 - 未 live 驗證：Native 畫面能否完整呈現原文、MCP reload、Q1–Q3 端到端、worker → Opus → Desktop → Opus → worker 完整迴圈。
 
+## 語音模式（#64，2026-10-04 實測）
+
+Desktop 開語音時，聽與說的是即時語音模型，再交給 interface（Sol）處理。Sol 收到的使用者訊息是 `<realtime_delegation>`
+包裝：`<input>` 是語音模型整理的要求，`<transcript_delta>` 是逐字稿，而且會重複前幾輪。
+
+- **轉給 Orch 的內容**：`[語音輸入，可能有辨識錯字]` ＋ `<input>` ＋ 這一輪新說的話（最後一句 `assistant:` 之後的 `user:` 行，
+  跟 `<input>` 相同就不重複）。包裝原文存在 `source_raw`，sha256 算的是轉出去的內文。
+- **語音結束的交接**（`<source>transcript_tail_flush</source>`）：不是 Nat 的新要求，存成 `kind=handoff`、`delivery=skipped`，
+  不通知 Orch，`relay` 回 `skipped_handoff`。之前它會被當成 Nat 的話轉給 Orch，裡面重複的逐字稿可能讓 Orch 再做一次。
+- **辨識錯字**：例如 Orch 被聽成「O區」「O2CH」。Orch 的指示是看不懂或不確定時先問，不要猜。
+- **唸給 Nat 的版本**是即時語音模型改寫過的，例如不會把 `o96e76b5` 整串唸出來。只供收聽，批准以畫面上 orchd 送來的原文為準。
+
 ## 入口模型（2026-10-03 CLI 測試）
 
 同一段 5.5 KB 中英混合文字（含 `\r\n`、tab、引號、code block），請模型「原文完整轉述」，`codex exec` 每次新對話。

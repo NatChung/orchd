@@ -12,6 +12,7 @@ result; it never means read by Nat, and never approval.
 """
 import hashlib
 import os
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -170,6 +171,8 @@ def _lock(con, entry_id):
 def inbound_wake(row):
     what = (f"reply to question {row['reply_to']}" + (f" (task {row['task_id']})" if row["task_id"] else "")
             if row["kind"] == "reply" else "message")
+    if row["source_raw"]:
+        what = "voice " + what
     return (f"[orchd entry] Nat {what}, entry message {row['id']}, {row['body_bytes']} bytes — "
             "請呼叫 orchd 的 entry_inbox 工具讀取原文。")
 
@@ -203,6 +206,42 @@ def deliver_outbound(con, rt, entry_id):
                            "AND delivery IN ('pending','failed') ORDER BY id", (entry_id,)).fetchall()
         thread = entry["thread_id"]
         return _send(con, rows, thread, lambda row: rt.wake_orch(rt.codex, thread, row["wire_text"]))
+
+
+VOICE_LABEL = "[語音輸入，可能有辨識錯字]"
+
+
+def _tag(name, text):
+    found = re.search(rf"<{name}>(.*?)</{name}>", text, re.S)
+    return found.group(1) if found else None
+
+
+def voice_input(text):
+    """None for typed text. Desktop voice mode hands the interface a <realtime_delegation> block: the voice
+    model's request in <input>, plus a transcript that repeats earlier rounds. Returns {"handoff": True} for the
+    end-of-session transcript flush (not Nat asking for anything), else {"text": what the Orch should get}: the
+    request and only the user lines after the last assistant line, so earlier rounds are not asked again."""
+    if not text.lstrip().startswith("<realtime_delegation>"):
+        return None
+    if (_tag("source", text) or "").strip() == "transcript_tail_flush":
+        return {"handoff": True}
+    request = (_tag("input", text) or "").strip()
+    said, role = [], None
+    for line in (_tag("transcript_delta", text) or "").splitlines():
+        if line.startswith("assistant:"):
+            role, said = "assistant", []
+        elif line.startswith("user:"):
+            role = "user"
+            said.append(line[len("user:"):].strip())
+        elif role == "user" and said:
+            said[-1] += "\n" + line
+    heard = "\n".join(s for s in said if s)
+    if not request and not heard:
+        return {"text": text}
+    parts = [VOICE_LABEL, request or heard]
+    if request and heard and heard != request:
+        parts.append(f"（語音逐字稿：{heard}）")
+    return {"text": "\n".join(parts)}
 
 
 def _source(rt, thread, turn_id):
@@ -252,11 +291,25 @@ def relay(con, rt, entry_id, thread, turn_id=None, reply_to=None):
                          "not Nat's; nothing was relayed")
     if reply_to is not None and not isinstance(reply_to, int):
         raise ValueError("reply_to must be a question id number")
+    voice = voice_input(source["text"])
+    if voice and voice.get("handoff"):  # kept as a record, never delivered or read by the Orch
+        try:
+            with store.immediate(con):
+                message_id = _insert(con, get_entry(con, entry_id), "in", "handoff", source["text"],
+                                     delivery="skipped", read_at=time.time(), source_raw=source["text"],
+                                     source_thread=thread, source_item_id=source["item_id"])
+        except sqlite3.IntegrityError:
+            return dict(status="duplicate", resumed=resumed)
+        return dict(message_id=message_id, kind="handoff", status="skipped_handoff", resumed=resumed,
+                    note="Desktop's end-of-voice-session handoff, not a request from Nat; not passed to the Orch. "
+                         "Say nothing.")
+    body = voice["text"] if voice else source["text"]
     note = None
     try:
         with store.immediate(con):
             entry = get_entry(con, entry_id)
-            fields = dict(source_thread=thread, source_item_id=source["item_id"])
+            fields = dict(source_thread=thread, source_item_id=source["item_id"],
+                          source_raw=source["text"] if voice else None)
             if reply_to is not None:
                 question = _row(con, reply_to)
                 if question is None or question["entry_id"] != entry_id or question["kind"] != "question":
@@ -274,12 +327,12 @@ def relay(con, rt, entry_id, thread, turn_id=None, reply_to=None):
                 con.execute("UPDATE entry_messages SET question_state='answered' WHERE id=?", (reply_to,))
                 fields.update(reply_to=reply_to, task_id=question["task_id"],
                               source_message_id=question["source_message_id"])
-                message_id = _insert(con, entry, "in", "reply", source["text"], **fields)
+                message_id = _insert(con, entry, "in", "reply", body, **fields)
                 following = queued_questions(con, entry)
                 if following:
                     _make_current(con, entry, following[0])
             else:
-                message_id = _insert(con, entry, "in", "message", source["text"], **fields)
+                message_id = _insert(con, entry, "in", "message", body, **fields)
                 current = current_question(con, entry)
                 if current is not None:
                     note = (f"question {current['id']} is still open; this was relayed as a new message, "
