@@ -39,6 +39,12 @@ Rules:
   review that PR and merge it: then read the diff yourself, check it against the task's done_when,
   and merge only if it passes; otherwise leave it open and report blocked with the problems found.
   Never review-and-merge a PR you authored in the same task.
+- Worker PATH includes a gh wrapper that chooses the account from --repo/-R, GH_REPO, or origin
+  (git credentials use the remote path). Read-only gh commands need no account switch and no ask.
+  Do not use gh auth switch: it changes global state. Existing GH_TOKEN is preserved.
+  ORCHD_GH_ACCOUNTS may point to a JSON owner-to-account map (case-insensitive owners, "*" default);
+  defaults are NatChung -> NatChung and other owners -> ariontechs. Missing mappings/tokens warn and
+  keep gh's original behavior. Writes and outward actions still require the existing preview/approval.
 - Reviewing a PR: every worker pushes as the same GitHub account, and GitHub does not let you approve
   your own account's PR, so never use `gh pr review --approve`, `--request-changes`, `--admin`, or any
   bypass of branch protection. Check the PR's current head SHA, the latest main, the task's done_when

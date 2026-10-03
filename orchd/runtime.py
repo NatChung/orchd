@@ -71,6 +71,23 @@ def launch_env():
     return {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE") and k != "ORCHD_ORCH_ID"}
 
 
+def worker_env():
+    """Session-only gh routing; Claude also receives this via settings (daemon launch)."""
+    env = launch_env()
+    wrapper = str(Path(__file__).resolve().parents[1] / "bin" / "worker-bin")
+    env["PATH"] = wrapper + os.pathsep + env.get("PATH", os.defpath)
+    # Replace even absolute gh credential helpers for GitHub, without writing git config.
+    count = int(env.get("GIT_CONFIG_COUNT", "0"))
+    for key, value in [("credential.https://github.com.helper", ""),
+                       ("credential.https://github.com.helper", "!gh auth git-credential"),
+                       ("credential.https://github.com.useHttpPath", "true")]:
+        env[f"GIT_CONFIG_KEY_{count}"] = key
+        env[f"GIT_CONFIG_VALUE_{count}"] = value
+        count += 1
+    env["GIT_CONFIG_COUNT"] = str(count)
+    return env
+
+
 def mcp_env(orch_id):
     """--bg sessions are spawned by the Claude daemon, not by us, so only env written into the MCP config
     reaches the Orch's MCP server."""
@@ -118,7 +135,7 @@ class Runtime:
         """Start a detached process that outlives us, stdout+stderr appended to `log`; return its pid."""
         with open(log, "a") as out:
             return subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
-                                    env=launch_env(), start_new_session=True).pid
+                                    env=worker_env(), start_new_session=True).pid
 
     def pid_alive(self, pid):
         try:  # a finished child of this long-lived process stays a zombie, and kill(0) finds it, until reaped
@@ -270,7 +287,10 @@ class Runtime:
 
     def start_worker(self, worktree, sock, brief, model):
         return self.start_claude(worktree, sock, model, [
-            "--dangerously-skip-permissions", "--settings", '{"crossSessionInbound":"accept"}',
+            "--dangerously-skip-permissions", "--settings", json.dumps({"crossSessionInbound": "accept",
+                "env": {k: v for k, v in worker_env().items()
+                        if k == "PATH" or k == "GH_TOKEN" or k == "ORCHD_GH_ACCOUNTS"
+                        or k.startswith("GIT_CONFIG_")}}),
             "--append-system-prompt", brief])
 
     def orch_socket_path(self, orch_id):
