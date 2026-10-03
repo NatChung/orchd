@@ -124,6 +124,121 @@ class StatsTest(unittest.TestCase):
         self.assertEqual(t["proxy_no_retry_rate"], round(2 / 3, 4))
         self.assertEqual(t["retries_per_task"], round(1 / 3, 4))
 
+    def lock(self, tid, sha):
+        return store.add_message(self.con, tid, "verify_lock", "locked", json.dumps(
+            dict(sha=sha, paths={"file": "blob"}, command="test")))
+
+    def verification(self, tid, lock_id, sha, code=0, **overrides):
+        record = dict(verifier="v-" + tid, verifier_session="s-verifier", author=tid,
+                      lock_id=lock_id, sha=sha, command="test", exit=code, tail="",
+                      hash_ok=True, dirty=False, head_after=sha, cleanup=True,
+                      restored=True, restore_error=None, passed=code == 0)
+        record.update(overrides)
+        return store.add_message(self.con, tid, "verification", "pass or fail", json.dumps(record))
+
+    def test_current_verification_first_fail_then_pass_and_first_pass(self):
+        for tid in ("a", "b"):
+            self.task(tid, task_type=tid)
+        lock = self.lock("a", "sha-a")
+        self.verification("a", lock, "sha-a", 1)
+        self.msg("a", "retry", dict(from_model="sonnet", to_model="opus"))
+        lock = self.lock("a", "sha-a2")
+        self.verification("a", lock, "sha-a2")
+        lock = self.lock("b", "sha-b")
+        self.verification("b", lock, "sha-b")
+        t = self.total()
+        self.assertEqual((t["verify_events"], t["first_pass_verify_n"], t["first_pass_verify_rate"]),
+                         (3, 2, 0.5))
+        self.assertEqual(t["escalations_post_upgrade_verified"], 1)
+        by_type = self.report()["orchs"][0]["by_task_type"]
+        self.assertEqual(by_type["a"]["first_pass_verify_rate"], 0)
+        self.assertEqual(by_type["b"]["first_pass_verify_rate"], 1)
+
+    def test_locks_relocks_stale_and_author_do_not_count_as_results(self):
+        self.task("a")
+        lock = self.lock("a", "sha")
+        self.lock("a", "sha2")
+        for state in ("locked", "relock", "stale"):
+            self.verification("a", lock, "sha", state=state)
+        self.verification("a", lock, "sha", verifier="a")
+        self.verification("a", lock, "sha", role="author")
+        self.verification("a", lock, "sha", author="other")
+        self.msg("a", "report", dict(exit=0, passed=True))
+        t = self.total()
+        for key in ("verify_events", "first_pass_verify_n", "first_pass_verify_rate"):
+            self.assertIsNone(t[key])
+        self.verification("a", lock, "sha", code=0, dirty=True, passed=False)
+        self.assertEqual(self.total()["first_pass_verify_rate"], 0)
+
+    def test_unknown_first_result_is_not_replaced_by_later_pass(self):
+        for kind in ("verification", "verify"):
+            with self.subTest(kind=kind):
+                tid = kind
+                self.task(tid)
+                lock = self.lock(tid, "sha")
+                if kind == "verification":
+                    self.verification(tid, lock, "sha", code=None, passed=None)
+                    self.verification(tid, lock, "sha")
+                else:
+                    self.msg(tid, kind, dict(exit_code=True))
+                    self.msg(tid, kind, dict(exit_code=0))
+                self.assertIsNone(self.total()["first_pass_verify_n"])
+                self.assertIsNone(self.total()["first_pass_verify_rate"])
+
+    def test_post_upgrade_requires_changed_sha_matching_lock_and_retry_interval(self):
+        for case in ("pass", "fail", "missing_before", "missing_after", "same_sha", "wrong_sha",
+                     "wrong_lock", "wrong_command", "later_wrong_sha", "before_retry", "after_next_retry", "relock", "legacy", "unknown"):
+            with self.subTest(case=case):
+                tid = case
+                self.task(tid, orch=case)
+                old = self.lock(tid, "old") if case != "missing_before" else None
+                if case == "before_retry":
+                    self.verification(tid, old, "old")
+                self.msg(tid, "retry", dict(from_model="sonnet", to_model="opus"))
+                sha = "old" if case == "same_sha" else "new"
+                lock = self.lock(tid, sha) if case != "missing_after" else 12345
+                if case == "after_next_retry":
+                    self.msg(tid, "retry", dict(from_model="opus", to_model="sonnet"))
+                if case == "legacy":
+                    self.msg(tid, "verify", dict(exit_code=0))
+                elif case != "before_retry":
+                    self.verification(tid, lock + 1 if case == "wrong_lock" else lock,
+                                      "other" if case == "wrong_sha" else sha,
+                                      1 if case == "fail" else 0,
+                                      **(dict(passed=None, exit=None) if case == "unknown" else
+                                         dict(command="different") if case == "wrong_command" else {}))
+                if case == "later_wrong_sha":
+                    self.verification(tid, lock, "other", 1)
+                if case == "relock":
+                    self.lock(tid, "newer")
+                value = self.total(case)["escalations_post_upgrade_verified"]
+                if case in ("pass", "fail"):
+                    self.assertEqual(value, int(case == "pass"))
+                else:
+                    self.assertIsNone(value)
+
+    def test_multiple_upgrades_are_attributed_to_their_own_retry_intervals(self):
+        self.task("a")
+        self.lock("a", "old")
+        for sha, code in (("first", 1), ("second", 0)):
+            self.msg("a", "retry", dict(from_model="sonnet", to_model="opus"))
+            lock = self.lock("a", sha)
+            self.verification("a", lock, sha, code)
+        t = self.total()
+        self.assertEqual(t["escalations"], 2)
+        self.assertEqual(t["escalations_post_upgrade_verified"], 1)
+        self.assertEqual(t["first_pass_verify_rate"], 0)
+
+    def test_post_upgrade_aggregate_remains_unknown_if_one_upgrade_has_no_evidence(self):
+        self.task("a")
+        self.task("b")
+        self.lock("a", "old")
+        for tid in ("a", "b"):
+            self.msg(tid, "retry", dict(from_model="sol", to_model="opus"))
+            lock = self.lock(tid, "new")
+            self.verification(tid, lock, "new")
+        self.assertIsNone(self.total()["escalations_post_upgrade_verified"])
+
     def test_proxy_no_rework_counts_originals_that_were_reworked(self):
         for tid in ("a", "b"):
             self.task(tid)

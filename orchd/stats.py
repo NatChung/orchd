@@ -520,6 +520,77 @@ def classify_retry(body):
     return "upgrade" if b > a else "not_upgrade"
 
 
+def _verification(m):
+    """(record, verdict) for result events; None for locks/status/author records.
+
+    Current producer writes evidence on the author's task, naming a different verifier.
+    Legacy verify bodies lack that role evidence: retain their exit-code metric only.
+    An unknown first result stays unknown even if a later attempt passes.
+    """
+    if m["kind"] == "verify":
+        r = _json(m["body"])
+        if r.get("role") == "author" or r.get("state") in ("locked", "relock", "stale"):
+            return None
+        code = r.get("exit_code")
+        return r, code == 0 if isinstance(code, int) and not isinstance(code, bool) else None
+    if m["kind"] != "verification":
+        return None
+    r = _json(m.get("evidence"))
+    if (r.get("author") != m["task_id"] or not isinstance(r.get("verifier"), str)
+            or not r["verifier"] or r["verifier"] == r["author"]
+            or r.get("role", "verifier") != "verifier"
+            or r.get("state") in ("locked", "relock", "stale")):
+        return None
+    code = r.get("exit")
+    verdict = r.get("passed")
+    if not isinstance(verdict, bool):
+        verdict = False if isinstance(code, int) and not isinstance(code, bool) and code != 0 else None
+    elif verdict and not (type(code) is int and code == 0 and r.get("hash_ok") is True
+                         and r.get("cleanup") is True and r.get("dirty") is False
+                         and not r.get("error") and r.get("sha")
+                         and r.get("head_after") == r["sha"]):
+        verdict = None
+    return r, verdict
+
+
+def _post_upgrade_verified(msgs):
+    """Count upgrade events whose final locked artifact in that retry interval passed.
+
+    Require a pre-retry lock and a different post-retry SHA, a matching independent
+    result, and no intervening retry/relock. Re-verifying the old SHA cannot establish
+    an upgrade's effect. Any upgrade lacking this evidence keeps the aggregate unknown.
+    This describes recorded artifacts, not the current branch tip (stats is DB-only).
+    """
+    retries = [m for m in msgs if m["kind"] == "retry"]
+    upgrades = [m for m in retries if classify_retry(_json(m["body"])) == "upgrade"]
+    if not upgrades:
+        return None
+    n = 0
+    for retry in upgrades:
+        end = next((m["id"] for m in retries if m["id"] > retry["id"]), float("inf"))
+        before = [m for m in msgs if m["kind"] == "verify_lock" and m["id"] < retry["id"]]
+        after = [m for m in msgs if m["kind"] == "verify_lock" and retry["id"] < m["id"] < end]
+        if not before or not after:
+            return None
+        old, locked = _json(before[-1].get("evidence")), _json(after[-1].get("evidence"))
+        sha = locked.get("sha")
+        if (not isinstance(sha, str) or not sha or not isinstance(old.get("sha"), str)
+                or not old["sha"] or sha == old["sha"]):
+            return None
+        results = []
+        for m in msgs:
+            if m["kind"] != "verification" or not after[-1]["id"] < m["id"] < end:
+                continue
+            result = _verification(m)
+            if result and result[0].get("lock_id") == after[-1]["id"]:
+                matches = result[0].get("sha") == sha and result[0].get("command") == locked.get("command")
+                results.append(result[1] if matches else None)
+        if not results or results[-1] is None:
+            return None
+        n += results[-1] is True
+    return n
+
+
 def _group(tasks, all_tasks, msgs_by_task, prices):
     ids = {t["id"] for t in tasks}
     msgs = [m for i in ids for m in msgs_by_task.get(i, [])]
@@ -542,10 +613,14 @@ def _group(tasks, all_tasks, msgs_by_task, prices):
     upgraded = {t for t, v in verdicts.items() if "upgrade" in v}
     unresolved = sum(v.count("unresolved") for v in verdicts.values())
     verifies = {}
+    verify_events = 0
     for m in msgs:
-        if m["kind"] == "verify":
-            verifies.setdefault(m["task_id"], []).append(_json(m["body"]).get("exit_code"))
-    first = [v[0] for v in verifies.values() if isinstance(v[0], int) and not isinstance(v[0], bool)]
+        result = _verification(m)
+        if result is not None:
+            verify_events += 1
+            verifies.setdefault(m["task_id"], []).append(result[1])
+    first = [v[0] for v in verifies.values() if v[0] is not None]
+    post_upgrade = [_post_upgrade_verified(msgs_by_task.get(t, [])) for t in upgraded]
     return dict(
         tasks=len(tasks),
         status=dict(Counter(t["status"] for t in tasks)),
@@ -564,16 +639,19 @@ def _group(tasks, all_tasks, msgs_by_task, prices):
         escalations_unresolved=unresolved if have("retry") else None,
         escalations_complete=(unresolved == 0) if have("retry") else None,
         escalated_tasks_outcome_completed=(sum(1 for t in done if t["id"] in upgraded) if have("retry") else None),
-        escalations_post_upgrade_verified=None,
+        escalations_post_upgrade_verified=(sum(post_upgrade) if post_upgrade and all(
+            v is not None for v in post_upgrade) else None),
         escalation_note="escalation = retry to a higher historical routing tier (M = sonnet/sol, H = opus; an old routing "
                         "policy, not a quality ranking); same tier or downgrade is not; a retry without both models "
-                        "or with a model outside those tiers is unresolved. Whether an upgrade "
-                        "then passed verification is unknown: no post-upgrade verify role is recorded, and a "
-                        "done outcome is not a verified pass",
-        verify_events=kinds["verify"] if have("verify") else None,
-        first_pass_verify_rate=_rate(sum(1 for c in first if c == 0), len(first)),
+                        "or with a model outside those tiers is unresolved. Post-upgrade verified counts only "
+                        "a changed, locked SHA with an independent result before the next retry; incomplete "
+                        "evidence is unknown, and a done outcome is not a verified pass",
+        verify_events=verify_events or None,
+        first_pass_verify_rate=_rate(sum(c is True for c in first), len(first)),
         first_pass_verify_n=len(first) if first else None,
-        verify_note="author vs independent verify role is not recorded; verify bodies without exit_code are excluded",
+        verify_note="first independent result per author task, across retries/locks; current verification evidence "
+                    "uses passed/exit and verifier/author; legacy verify bodies use exit_code without role proof; "
+                    "unknown first results are excluded, never replaced by later passes",
         proxy_no_retry_rate=_rate(sum(1 for t in done if t["id"] not in retried), len(done)) if have("retry") else None,
         proxy_no_rework_rate=_rate(sum(1 for t in done_originals if t["id"] not in reworked_origin), len(done_originals)),
         proxy_note="no-retry / no-rework among completed tasks: proxies for model choice, not model accuracy",
