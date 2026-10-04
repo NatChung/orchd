@@ -17,7 +17,8 @@ orchd binding      # 沿用已綁定且在線的 Claude Orch；沒有就開一�
 已存在且內容不同的檔案不會被覆蓋。
 
 1. 在 Desktop 打開 `~/orch/interface`，權限選 **`interface`**（init 寫好的權限設定），不要用完整存取權。
-2. 綁定的 Orch 離線時 `orchd binding` 不會自己替換；確定要換用 `orchd binding --new`（舊 Orch 的未答問題留在舊 Orch）。
+2. 綁定的 Orch 閒置被 Claude 收掉時，送訊息或跑 `orchd binding` 會原地接回同一個 Orch（#72）。
+   用 `orchd orch-stop` 停掉、或接回失敗時不會自己替換；確定要換用 `orchd binding --new`（舊 Orch 的未答問題留在舊 Orch）。
    綁到指定的 Orch 用 `orchd binding --to <orch_id>`，`orchd binding --status` 唯讀查看。
 
 入口模型用 `gpt-6.1-sol`（理由見下方「入口模型」）。未 live 驗證：Native Desktop 是否套用這份權限、

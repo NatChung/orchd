@@ -317,7 +317,8 @@ class Runtime:
         directory.chmod(0o700)  # the session crashes before init on any other mode
         return str(directory / "o.sock")
 
-    def start_orch(self, orch_id, model, orch_home):
+    def start_orch(self, orch_id, model, orch_home, resume=None):
+        """Start a Claude Orch; with `resume` (a session id) continue that conversation in a new job (#72)."""
         orch_home = Path(orch_home).resolve()
         # Claude Code 2.1.288 stores pasted/dragged images in this per-session
         # temp tree, not ~/.claude/image-cache. Expose only this home's cwd key.
@@ -344,10 +345,37 @@ class Runtime:
                     "worktree": {"bgIsolation": "none"},
                     "permissions": {"additionalDirectories": [str(images)],
                                     "allow": ["Read", f"Edit(/{orch_home}/groups/**)", "mcp__orchd"]}}
+        if resume and self.exists(sock):
+            self.clear_dead_socket(sock)  # else start_claude's wait for the socket passes on the old file
         job, session = self.start_claude(orch_home, sock, model, [
+            *(["--resume", resume] if resume else []),
             "--restricted", "--permission-mode", "dontAsk", "--strict-mcp-config", "--mcp-config", str(mcp),
             "--settings", json.dumps(settings), "--append-system-prompt", prompt])
         return sock, job, session
+
+    def socket_listening(self, path):
+        with socket.socket(socket.AF_UNIX) as peer:
+            peer.settimeout(5)
+            try:
+                peer.connect(path)
+            except (FileNotFoundError, ConnectionRefusedError):
+                return False
+        return True
+
+    def clear_dead_socket(self, path):
+        """Remove a socket file nobody listens on; refuse when something still accepts on it."""
+        with socket.socket(socket.AF_UNIX) as peer:
+            peer.settimeout(5)
+            try:
+                peer.connect(path)
+            except (FileNotFoundError, ConnectionRefusedError):
+                pass
+            else:
+                raise RuntimeError(f"{path} still accepts connections; its Orch is running")
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
 
     def attach(self, job):
         os.execvp(self.claude, [self.claude, "attach", job])

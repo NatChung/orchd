@@ -8,7 +8,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import paths, store, verify as verification, worker_health
+from . import orch_revive, paths, store, verify as verification, worker_health
 from .orch_health import owner_health
 from .runtime import (DEFAULT_ORCH_MODEL, DEFAULT_WORKER_MODEL, ORCH_MODELS, WORKER_MODELS,
                       claude_job_alive, error_detail, worker_kind)
@@ -651,12 +651,13 @@ def start_orch(con, rt, model_key=DEFAULT_ORCH_MODEL):
 
 
 def stop_orch(con, rt, orch_id):
-    orch = store.get_orch(con, orch_id)
-    if orch is None:
-        raise ValueError(f"unknown orch {orch_id}")
-    if orch["job_id"]:
-        rt.stop_worker(orch["job_id"])
-    store.stop_orch(con, orch_id)
+    with store.task_delivery(con, [f"orch:{orch_id}"]):  # a revive (#72) cannot swap the job mid-stop
+        orch = store.get_orch(con, orch_id)
+        if orch is None:
+            raise ValueError(f"unknown orch {orch_id}")
+        if orch["job_id"]:
+            rt.stop_worker(orch["job_id"])
+        store.stop_orch(con, orch_id)
 
 
 RETRY_STOP_WAIT = 20  # x 0.5s = stop_task_worker's wait: bounded so an MCP call never hangs on a stuck worker
@@ -835,7 +836,7 @@ def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT):
 def _notify_orch(con, rt, orch_id, codex_bin, text):
     orch = store.get_orch(con, orch_id)
     if orch is not None and orch["kind"] == "claude":
-        rt.send_uds(orch["socket"], orch["session_id"], text)
+        orch_revive.send(con, rt, orch_id, text)  # revives an Orch the daemon retired for idling (#72)
     else:  # Codex Orch, or an owner that was never registered
         rt.wake_orch(codex_bin, orch_id, text)
 

@@ -101,8 +101,23 @@ class EntryTest(unittest.TestCase):
 
     # -- Q1: offline -----------------------------------------------------------------------------------
 
-    def test_offline_orch_keeps_the_message_and_starts_nothing(self):
+    def test_retired_orch_is_resumed_in_place_and_gets_the_message(self):
+        self.rt.jobs = {}  # Claude's daemon retired the idle Orch (#72)
+        self.rt.orch_started = None
+        self.rt.nat_says("desk-1", BODY)
+        self.assertEqual(self.relay()["status"], "delivered")
+        self.assertEqual(self.rt.resumed_orchs, [(self.orch, "claude-opus-5-5", "orchsession")])
+        self.assertIsNone(self.rt.orch_started)  # no new Orch
+        (path, session, _), = self.rt.sent
+        self.assertEqual((path, session), (f"/tmp/orchd-o-{self.orch}/o.sock", "resumed1-session"))
+        row = store.get_orch(self.con, self.orch)
+        self.assertEqual((row["job_id"], row["session_id"], row["stopped_at"]), ("resumed1", "resumed1-session", None))
+        self.assertEqual(entry.get_entry(self.con, "desktop")["orch_id"], self.orch)
+        self.assertEqual(entry.inbox(self.con, self.orch)["messages"][0]["body"], BODY)
+
+    def test_offline_orch_keeps_the_message_when_resume_fails(self):
         self.rt.jobs = {}
+        self.rt.resume_fails = True
         self.rt.orch_started = None
         self.rt.nat_says("desk-1", BODY)
         result = self.relay()
@@ -112,16 +127,18 @@ class EntryTest(unittest.TestCase):
         self.assertIsNone(self.rt.orch_started)
         self.assertEqual(store.get_orch(self.con, self.orch)["stopped_at"], None)
         # back online: the kept message goes out on the next call, still verbatim
-        self.rt.jobs = {"orchjob": {}}
+        self.rt.jobs, self.rt.resume_fails = {"orchjob": {}}, False
         status = entry.status(self.con, self.rt, "desktop", "desk-1")
         self.assertEqual(status["not_yet_delivered_to_orch"], [])
         self.assertEqual(len(self.rt.sent), 1)
         self.assertEqual(entry.inbox(self.con, self.orch)["messages"][0]["body"], BODY)
 
-    def test_stopped_orch_is_offline(self):
+    def test_stopped_orch_is_offline_and_never_resumed(self):
         core.stop_orch(self.con, self.rt, self.orch)
+        self.rt.jobs = {}
         self.rt.nat_says("desk-1", "x")
         self.assertEqual(self.relay()["status"], "not_delivered")
+        self.assertFalse(getattr(self.rt, "resumed_orchs", []))
 
     def test_socket_failure_is_kept_and_retried_in_order(self):
         self.rt.uds_fails = True
@@ -471,10 +488,32 @@ class InterfaceTest(unittest.TestCase):
             self.interface()
         self.assertEqual(self.starts, 0)
 
-    def test_offline_orch_is_not_replaced_without_new(self):
+    def test_retired_orch_is_resumed_not_replaced(self):
         orch = self.interface()["orch_id"]
         entry.ask_nat(self.con, self.rt, orch, "open?")
         self.rt.jobs = {}
+        again = self.interface()
+        self.assertEqual((again["orch_id"], again["started_new_orch"], again["revived_orch"]), (orch, False, True))
+        self.assertEqual(again["orch_health"]["state"], "alive")
+        self.assertEqual(self.starts, 1)
+        self.assertEqual(len(self.rt.resumed_orchs), 1)
+
+    def test_retired_orch_claude_still_lists_is_resumed_by_its_dead_socket(self):
+        orch = self.interface()["orch_id"]
+        self.rt.dead_sockets = {f"/tmp/orchd-o-{orch}/o.sock"}  # listed, no pid: health says alive
+        again = self.interface()
+        self.assertEqual((again["orch_id"], again["revived_orch"]), (orch, True))
+        self.assertEqual(store.get_orch(self.con, orch)["job_id"], "resumed1")
+        self.rt.dead_sockets = set()
+        self.assertFalse(self.interface()["revived_orch"])  # the resumed one listens: left alone
+
+    def test_offline_orch_is_not_replaced_without_new(self):
+        orch = self.interface()["orch_id"]
+        entry.ask_nat(self.con, self.rt, orch, "open?")
+        self.rt.jobs, self.rt.resume_fails = {}, True
+        with self.assertRaisesRegex(ValueError, "resuming it failed.*orchd binding --new"):
+            self.interface()
+        store.stop_orch(self.con, orch)  # stopped by Nat: never resumed
         with self.assertRaisesRegex(ValueError, "offline.*1 open question.*orchd binding --new"):
             self.interface()
         self.assertEqual(self.starts, 1)

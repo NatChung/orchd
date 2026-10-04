@@ -42,15 +42,26 @@ class FakeRuntime:
     def orch_socket_path(self, orch_id):
         return f"/tmp/orchd-o-{orch_id}/o.sock"
 
-    def start_orch(self, orch_id, model, orch_home):
-        self.orch_started = (orch_id, model, str(orch_home))
-        return self.orch_socket_path(orch_id), "orchjob", "orchsession"
+    def start_orch(self, orch_id, model, orch_home, resume=None):
+        if resume is None:
+            self.orch_started = (orch_id, model, str(orch_home))
+            return self.orch_socket_path(orch_id), "orchjob", "orchsession"
+        if getattr(self, "resume_fails", False):
+            raise RuntimeError("claude --bg --resume failed: SECRET-token /private/resume.log")
+        resumed = getattr(self, "resumed_orchs", [])
+        self.resumed_orchs = resumed + [(orch_id, model, resume)]
+        job = f"resumed{len(self.resumed_orchs)}"
+        self.jobs[job] = {}  # Claude lists the resumed job
+        return self.orch_socket_path(orch_id), job, f"{job}-session"
 
     def attach(self, job):
         self.attached = job
 
     def send_uds(self, path, session_id, text):
         self.sent.append((path, session_id, text))
+
+    def socket_listening(self, path):
+        return path not in getattr(self, "dead_sockets", ())
 
     def wake_orch(self, codex_bin, thread, text):
         if self.wake_fails:

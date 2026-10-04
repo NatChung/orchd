@@ -42,6 +42,7 @@ class OrchHealthTest(unittest.TestCase):
     def test_missing_owner_and_unread_failed_wakes_are_visible_without_consumption(self):
         self.owner()
         t = self.task()
+        self.rt.resume_fails = True  # the socket is gone and resuming the Orch fails too (#72)
         with patch.object(self.rt, "send_uds", side_effect=FileNotFoundError("SECRET-token /private/socket")):
             self.assertFalse(core.progress(self.con, self.rt, t["id"], "PRIVATE-progress-body"))
             self.assertFalse(core.report(self.con, self.rt, t["id"], "done", "PRIVATE-report", "PRIVATE-evidence"))
@@ -56,7 +57,7 @@ class OrchHealthTest(unittest.TestCase):
             self.assertEqual(delivery["unread_wake_failed_count"], 2)
             latest = delivery["latest_unread_wake_failure"]
             self.assertEqual(latest["kind"], "report")
-            self.assertEqual(latest["error_type"], "FileNotFoundError")
+            self.assertEqual(latest["error_type"], "RuntimeError")
             self.assertIsInstance(latest["message_id"], int)
             self.assertIsInstance(latest["created_at"], float)
             for private in ("PRIVATE", "SECRET", "/private/", "owner-session"):

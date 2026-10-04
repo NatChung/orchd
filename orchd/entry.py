@@ -17,7 +17,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from . import paths, store
+from . import orch_revive, paths, store
 from .orch_health import owner_health
 
 DEFAULT_ENTRY = "desktop"
@@ -41,7 +41,8 @@ def get_entry(con, entry_id):
 
 
 def reachability(con, rt, orch_id):
-    """Q1: a stopped or confirmed-dead Orch is offline; nothing here ever starts or replaces one."""
+    """Q1: a stopped or confirmed-dead Orch is offline; nothing here ever starts or replaces one.
+    Delivery revives a retired one in place (orch_revive, #72); this read never does."""
     orch = store.get_orch(con, orch_id)
     if orch is None:
         return {"state": "dead", "reason": "orch_unregistered"}
@@ -186,14 +187,22 @@ def deliver_inbound(con, rt, entry_id):
                            (entry_id, entry["orch_id"])).fetchall()
         if not rows:
             return {}
-        health = reachability(con, rt, entry["orch_id"])
+        orch_id = entry["orch_id"]
+        health = reachability(con, rt, orch_id)
         if health["state"] == "dead":
-            con.executemany("UPDATE entry_messages SET delivery_error=? WHERE id=?",
-                            [(f"orch offline: {health['reason']}", r["id"]) for r in rows])
-            return {r["id"]: "not_delivered" for r in rows}
-        orch = store.get_orch(con, entry["orch_id"])
-        return _send(con, rows, orch["id"],
-                     lambda row: rt.send_uds(orch["socket"], orch["session_id"], inbound_wake(row)))
+            error = f"orch offline: {health['reason']}"
+            seen = orch_revive.retired(rt, store.get_orch(con, orch_id), health)
+            if seen:
+                try:  # retired by Claude's daemon, not stopped: resume the same Orch (#72)
+                    orch_revive.revive(con, rt, orch_id, seen_job=seen)
+                    error = None
+                except Exception as revive_error:
+                    error += f"; revive failed: {type(revive_error).__name__}: {revive_error}"[:400]
+            if error:
+                con.executemany("UPDATE entry_messages SET delivery_error=? WHERE id=?",
+                                [(error, r["id"]) for r in rows])
+                return {r["id"]: "not_delivered" for r in rows}
+        return _send(con, rows, orch_id, lambda row: orch_revive.send(con, rt, orch_id, inbound_wake(row)))
 
 
 def deliver_outbound(con, rt, entry_id):
@@ -574,15 +583,26 @@ def codex_trusted(home):
 def binding(con, rt, start_orch, new=False, entry_id=DEFAULT_ENTRY):
     """Operator: make sure the interface is bound to a live Claude Orch.
 
-    Reuses the bound Orch unless it is confirmed dead (Q3). A dead one is never replaced silently (Q1): that needs
-    new=True, which starts a new Orch and rebinds; the old Orch's open questions stay with it. With no binding yet,
-    it starts one Orch and binds it. The folder itself comes from `orchd init`.
+    Reuses the bound Orch unless it is confirmed dead (Q3). One Claude's daemon retired for idling is resumed in
+    place (#72). A stopped one is never replaced silently (Q1): that needs new=True, which starts a new Orch and
+    rebinds; the old Orch's open questions stay with it. With no binding yet, it starts one Orch and binds it.
+    The folder itself comes from `orchd init`.
     """
     home = paths.interface_home()
     if not (home / ".codex" / "config.toml").exists():
         raise ValueError(f"{home} is not set up; run `orchd init` first")
     row = con.execute("SELECT * FROM entries WHERE id=?", (entry_id,)).fetchone()
     health = reachability(con, rt, row["orch_id"]) if row is not None else None
+    revived = False
+    seen = orch_revive.retired(rt, store.get_orch(con, row["orch_id"]), health) if row is not None and not new else None
+    if seen:
+        try:
+            orch_revive.revive(con, rt, row["orch_id"], seen_job=seen)
+        except Exception as error:
+            raise ValueError(f"the interface's Orch {row['orch_id']} was retired by Claude and resuming it failed "
+                             f"({type(error).__name__}: {error}). Run `orchd binding --new` to start a new Orch and "
+                             "bind the interface to it") from error
+        health, revived = reachability(con, rt, row["orch_id"]), True
     if row is not None and health["state"] != "dead" and not new:
         orch_id, started = row["orch_id"], False
     else:
@@ -596,7 +616,7 @@ def binding(con, rt, start_orch, new=False, entry_id=DEFAULT_ENTRY):
         bind(con, rt, orch_id, entry_id, force=True)
     trusted = codex_trusted(home)
     return dict(interface=str(home), orch_id=orch_id, orch_model=store.get_orch(con, orch_id)["model"],
-                started_new_orch=started, orch_health=reachability(con, rt, orch_id),
+                started_new_orch=started, revived_orch=revived, orch_health=reachability(con, rt, orch_id),
                 codex_trusted="unknown" if trusted is None else trusted,
                 next=(f"Open {home} in the Codex Desktop app (permissions: interface) and start talking."
                       if trusted else f"Run `orchd init` to trust {home} in Codex, then open it in the Desktop app."))

@@ -81,7 +81,8 @@ orchd binding                       # 綁定在線的 Claude Orch，沒有就開
 - 範本在 `orchd/templates/`；已存在且被改過的檔案不會被覆蓋。`ORCHD_ROOT`、`ORCHD_ORCH_HOME`、`ORCHD_INTERFACE_HOME` 可改位置。
 - Codex trust 由 init 寫入 `~/.codex/config.toml`（先備份）。Claude trust 只檢查：沒 trust 時 init 會告訴你在 `~/orch/home` 開一次 `claude` 接受。
 - `orchd binding`：沿用已綁定且在線的 Orch，沒有就開一個 Claude Opus Orch 並綁上；綁定會保存，重開 Desktop 不用重跑。
-- 綁定的 Orch 離線時不會自己換；確定要換用 `orchd binding --new`，要綁到某個已在跑的 Orch 用 `orchd binding --to ORCH_ID`，只想看狀態用 `orchd binding --status`。
+- Orch 閒置約一小時會被 Claude 收掉；之後有訊息要送給它、或跑 `orchd binding` 時，orchd 會接回同一個 Orch（同一段對話與綁定，#72）。
+- 用 `orchd orch-stop` 停掉、或接回失敗的 Orch 不會自己換；確定要換用 `orchd binding --new`，要綁到某個已在跑的 Orch 用 `orchd binding --to ORCH_ID`，只想看狀態用 `orchd binding --status`。
 
 之後在 Codex Desktop 打開 `~/orch/interface`，權限選 **`interface`**（init 寫好的權限設定；不要選完整存取權），開新對話直接講話：
 

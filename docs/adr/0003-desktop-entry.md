@@ -18,6 +18,10 @@ ADR-0002 讓每個 Desktop session 自成一組，也曾以「多一層身分或
   唸出來的版本只供收聽，批准以畫面原文為準。
 - 一次只有一題 current，其餘排隊；回答以 `reply_to` 綁題，不符就拒收，不猜。
 - 固定 Orch 離線時保留訊息、明說沒轉交，不啟動也不替換 Orch。
+  - 修訂（#72）：Claude Code 的 daemon 會把閒置約一小時的背景 session 收掉（`retire …: idle-prompt, idle 61m`），
+    這不是 Nat 停掉的。`stopped_at` 為空、job 不在或 socket 連不上時，orchd 用 `claude --bg --resume` 接回**同一個** Orch
+    （同一段對話、同一個 orch_id 與綁定，job／session id 換新），再送訊息。這不是替換；`orchd orch-stop` 停掉的 Orch 永不接回，
+    接回失敗時照原規則保留訊息、明說沒轉交。不做保活：daemon 只放過 attached／pinned／排程中的 session，orchd 碰不到或要每小時燒一個回合。
 
 代價：多一層搬運、身分與恢復狀態；`role=user` 不能證明是 Nat 本人（`codex queue` 也會寫同樣的紀錄），
 orchd 只排除自己送進去的文字。MCP role 只擋 orchd 自己的工具；Codex host 的其他內建工具要靠入口專案的
