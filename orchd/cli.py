@@ -11,6 +11,7 @@
   orchd ack ID                                worker: acknowledge a task
   orchd report ID --status done|blocked --summary S [--evidence E]
   orchd progress ID "text"                    worker: interim update to the Orch; the task keeps running
+  orchd flush ID [--after-pid PID]            run by a Codex turn's shell when codex exits: send answers queued meanwhile
   orchd ask ID "question with full preview"   worker: ask Orch/Nat and wait for an answer
   orchd verify ID [--timeout S]               verifier worker: rerun the verified task's locked command at its locked SHA
   orchd orchs                                 read-only Orch inventory as JSON
@@ -62,6 +63,9 @@ def main(argv=None):
     prog = sub.add_parser("progress")
     prog.add_argument("task_id")
     prog.add_argument("text")
+    fl = sub.add_parser("flush")
+    fl.add_argument("task_id")
+    fl.add_argument("--after-pid", type=int)
     ask = sub.add_parser("ask")
     ask.add_argument("task_id")
     ask.add_argument("question")
@@ -179,6 +183,10 @@ def main(argv=None):
     elif args.cmd == "progress":
         woke = core.progress(con, rt, args.task_id, args.text)
         print(f"progress sent on {args.task_id}" + ("" if woke else " (stored; waking Orch failed)"))
+    elif args.cmd == "flush":
+        result = core.auto_flush(con, rt, args.task_id, args.after_pid)
+        print(json.dumps(result, ensure_ascii=False))
+        return 1 if result["status"] == "failed" else 0
     elif args.cmd == "ask":
         woke = core.ask(con, rt, args.task_id, args.question)
         print(f"asked on {args.task_id}; wait for an [orchd answer {args.task_id}] message"

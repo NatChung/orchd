@@ -491,8 +491,20 @@ class Runtime:
     def codex_log(self, task_id):
         return str(Path(self.socket_path(task_id)).parent / "codex.jsonl")
 
+    def codex_turn(self, cmd, log):
+        """Wrap one Codex turn so that, when `codex` exits for any reason, the same shell runs `orchd flush <task>`
+        and the answers queued meanwhile go out as the next turn. No daemon: the shell is the turn's process group
+        leader and its pid is the task's job_id, so stopping the turn (close, interrupt) kills the flush with it.
+        The task id is the log's directory (`/tmp/orchd-<id>/codex*.jsonl`)."""
+        name = Path(log).parent.name
+        if not name.startswith("orchd-"):
+            return cmd
+        script = 'task=$1; orchd=$2; shift 2; "$@"; "$orchd" flush "$task" --after-pid $$'
+        return ["/bin/sh", "-c", script, "orchd-turn", name[len("orchd-"):], paths.orchd_executable(), *cmd]
+
     def start_codex_worker(self, worktree, log, prompt, model):
-        pid = self.spawn([self.codex, "exec", *CODEX_FLAGS, "-m", model, "-C", worktree, prompt], worktree, log)
+        pid = self.spawn(self.codex_turn([self.codex, "exec", *CODEX_FLAGS, "-m", model, "-C", worktree, prompt], log),
+                         worktree, log)
         for _ in range(150):
             for line in Path(log).read_text(errors="replace").splitlines() if self.exists(log) else []:
                 try:
@@ -513,11 +525,12 @@ class Runtime:
 
     def resume_codex_worker(self, worktree, log, thread, text, model):
         """Resume falls back to config.toml's model unless told, so pass the task's model every turn."""
-        return str(self.spawn([self.codex, "exec", "resume", *CODEX_FLAGS, "-m", model, thread, text], worktree, log))
+        cmd = [self.codex, "exec", "resume", *CODEX_FLAGS, "-m", model, thread, text]
+        return str(self.spawn(self.codex_turn(cmd, log), worktree, log))
 
     def stop_codex(self, pid):
         """An idle worker's pid is long gone and may be reused, so kill only a process that is still codex."""
-        comm = self.run(["ps", "-p", str(pid), "-o", "comm="], check=False).stdout
+        comm = self.run(["ps", "-ww", "-p", str(pid), "-o", "args="], check=False).stdout  # a turn is a shell around codex
         if "codex" not in comm:
             return
         try:

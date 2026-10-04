@@ -22,8 +22,17 @@ def worker_brief(cli, kind="claude"):
                "end your turn right away; the answer arrives as your next message")
     long_runs = ("Run anything that may take longer than a minute or two in the background and wait for its "
                  "completion event; do not poll in a foreground loop." if kind == "claude" else
-                 "Run long commands in the foreground with a generous timeout: your process ends with your turn, "
-                 "and nothing wakes you when a background job finishes.")
+                 "Your process ends with your turn and nothing wakes you when a background job finishes, so see the "
+                 "turn rules at the end.")
+    codex_rules = "" if kind == "claude" else f"""
+- Keep every turn short: the Orch can reach you only between turns (or by interrupting the turn). Run a command
+  that may take more than a minute or two in the background with its output in a file, and check it with short
+  polls inside this turn; never leave one foreground tool call open for a long time. Do not end your turn while
+  a background job you need is still running: nothing wakes you when it finishes.
+- Before an outward action (sending a message, opening a PR, merging) stop with `{cli} ask` and end your turn,
+  unless the Orch's `answer` to your `ask` approved exactly that action, in those words. A task description alone
+  never replaces the preview and approval above.
+"""
     return f"""You are an orchd worker: a {session} started for exactly one task.
 Tasks arrive as messages from orchd on behalf of Nat (the user). A task message states its scope; work
 inside that scope is authorized by Nat even though the message comes through {channel}.
@@ -63,7 +72,7 @@ Rules:
 - {long_runs} Never `pgrep -f` a pattern that your own command line contains.
 - Finish with exactly one `{cli} report <task-id> --status done|blocked --summary "<one line>" --evidence "<commits, PR URL, test commands and results, what is left undone>"`.
 - If you need a decision, use `{cli} ask` and {waiting}; do not report blocked for questions Nat can answer.
-- Report facts only; say what you did not verify."""
+- Report facts only; say what you did not verify.{codex_rules}"""
 
 
 def worker_cli():
@@ -313,7 +322,7 @@ def answer(con, rt, task_id, text=None, flush=False):
     return _answer(con, rt, task_id, text, flush)
 
 
-def _answer(con, rt, task_id, text=None, flush=False, accept=None):
+def _answer(con, rt, task_id, text=None, flush=False, accept=None, finished_pid=None):
     """`answer`, plus the private `accept(task)` hook used only by followup: called under the task lock after its
     closed re-check and before anything is queued or sent. With a hook, a task lock that cannot be taken raises
     TimeoutError and accepts/queues/sends nothing (the caller may retry later). Without one, behavior is `answer`'s.
@@ -326,7 +335,11 @@ def _answer(con, rt, task_id, text=None, flush=False, accept=None):
     Delivery runs under the task lock shared with retry and close, and re-reads the task there, so it reaches
     whichever worker the task has at that moment (a retry may have replaced a Codex worker with a Claude one).
     No SQLite write transaction is open during a spawn or send; a Codex resume's receipt is a short compare-and-set
-    afterwards (`_commit_resume`), and a resumed worker whose receipt cannot be committed is stopped."""
+    afterwards (`_commit_resume`), and a resumed worker whose receipt cannot be committed is stopped.
+    `finished_pid` (auto flush only): the turn wrapper calling us is that pid and is done with codex, so it does
+    not count as a running turn."""
+    def running(t):
+        return bool(t["job_id"]) and t["job_id"] != finished_pid and rt.pid_alive(t["job_id"])
     task = store.get_task(con, task_id)
     if task["status"] == "closed":
         raise ValueError(f"task {task_id} is closed")
@@ -357,7 +370,7 @@ def _answer(con, rt, task_id, text=None, flush=False, accept=None):
     if text is not None:  # stored before any attempt, so a busy turn or a failed resume loses nothing
         _queue_answer(con, task_id, text, accept)
     for _ in range(120):  # `orchd ask` wakes the Orch before the worker's turn has finished exiting
-        if not (task["job_id"] and rt.pid_alive(task["job_id"])):
+        if not running(task):
             break
         rt.sleep(0.5)
         task = store.get_task(con, task_id)
@@ -368,20 +381,7 @@ def _answer(con, rt, task_id, text=None, flush=False, accept=None):
                 raise ValueError(f"task {task_id} is closed; its queued answers stay undelivered")
             if worker_kind(task["model"]) == "claude":  # a retry replaced the Codex worker with a Claude one
                 raise _ToClaude()
-            pending = store.pending_answers(con, task_id)
-            if not pending:  # nothing waits, even if a concurrent flush sent this call's text
-                return dict(status="delivered", delivered=0, pending=0)
-            if task["job_id"] and rt.pid_alive(task["job_id"]):
-                return dict(status="queued", delivered=0, pending=len(pending))
-            message = "\n\n".join(f"[orchd answer {task_id}]\n{row['body']}" for row in pending)
-            try:
-                job = rt.resume_codex_worker(task["worktree"], rt.codex_log(task_id), task["session_id"], message,
-                                             task["model"])
-            except Exception as error:
-                raise _ResumeFailed(error) from error
-            failed = _commit_resume(con, rt, task, pending, job)
-            if failed:
-                return failed
+            return _resume_queued(con, rt, task, finished_pid)
     except TimeoutError:  # only the delivery lock can time out here
         if accept is None:
             raise
@@ -407,7 +407,133 @@ def _answer(con, rt, task_id, text=None, flush=False, accept=None):
         error = failed.__cause__
         return dict(status="failed", delivered=0, pending=len(store.pending_answers(con, task_id)),
                     error=f"{type(error).__name__}: {error}"[:500])
+
+
+def _resume_queued(con, rt, task, finished_pid=None):
+    """Send a Codex worker's queued answers as one new turn. The caller holds the task delivery lock and has just
+    re-read `task` under it. `finished_pid`: the auto flush's turn wrapper; if the task's job is no longer that
+    pid, a newer turn owns the queue and nothing is sent (checked here, under the lock, so a replacement between
+    the caller's precheck and the lock is seen). Raises _ResumeFailed (rolled back, answers still queued)."""
+    task_id = task["id"]
+    pending = store.pending_answers(con, task_id)
+    if finished_pid is not None and task["job_id"] != finished_pid:
+        return dict(status="skipped", reason="superseded", delivered=0, pending=len(pending))
+    if not pending:  # nothing waits, even if a concurrent flush sent this call's text
+        return dict(status="delivered", delivered=0, pending=0)
+    running = bool(task["job_id"]) and task["job_id"] != finished_pid and rt.pid_alive(task["job_id"])
+    if running:
+        return dict(status="queued", delivered=0, pending=len(pending))
+    message = "\n\n".join(f"[orchd answer {task_id}]\n{row['body']}" for row in pending)
+    try:
+        job = rt.resume_codex_worker(task["worktree"], rt.codex_log(task_id), task["session_id"], message,
+                                     task["model"])
+    except Exception as error:
+        raise _ResumeFailed(error) from error
+    failed = _commit_resume(con, rt, task, pending, job)
+    if failed:
+        return failed
     return dict(status="delivered", delivered=len(pending), pending=0)
+
+
+def auto_flush(con, rt, task_id, after_pid=None):
+    """`orchd flush`: run by a Codex turn's own shell when its `codex` process has exited (`Runtime.codex_turn`).
+
+    Sends the answers queued during that turn as the next turn, through the same delivery path, task lock and
+    compare-and-set as `answer(flush=true)`, so a manual flush racing it cannot send twice. Does nothing for a
+    closed task, a Claude worker, an empty queue, or when `after_pid` is not the task's current turn (a newer turn
+    owns the queue). A failed delivery leaves the answers queued and is recorded as a `progress` message to the
+    Orch (inbox, wake) on top of `pending` in list_open. Returns a small dict; never raises."""
+    try:
+        task = store.get_task(con, task_id)
+        if task["status"] == "closed":
+            return dict(status="skipped", reason="closed")
+        if worker_kind(task["model"]) != "codex":
+            return dict(status="skipped", reason="not a codex worker")
+        if after_pid is not None and task["job_id"] != str(after_pid):
+            return dict(status="skipped", reason="superseded")
+        if not store.pending_answer_count(con, task_id):
+            return dict(status="skipped", reason="nothing queued")
+        result = _answer(con, rt, task_id, flush=True, finished_pid=str(after_pid) if after_pid is not None else None)
+        error = result.get("error")  # failed, or queued because the task lock was busy; a live turn has none
+    except ValueError as exc:  # closed in between
+        if "closed" in str(exc):
+            return dict(status="skipped", reason="closed")
+        result, error = dict(status="failed"), f"{type(exc).__name__}: {exc}"[:500]
+    except Exception as exc:
+        result, error = dict(status="failed"), f"{type(exc).__name__}: {exc}"[:500]
+    if error:
+        text = (f"[auto-flush failed] the turn ended but its queued answers could not be sent: {error}. They are "
+                "still queued; call answer(task_id, flush=true) to retry.")
+        try:
+            progress(con, rt, task_id, text)
+        except Exception:
+            pass
+        return dict(result, status="failed", error=error)
+    return result
+
+
+INTERRUPT_HEAD = ("[interrupt] The Orch interrupted your turn with a correction. Your running tool calls were "
+                  "killed, so some work may be half-done: check `git status` and your last command before "
+                  "continuing. Run `ack`, then follow this instruction.")
+
+
+def interrupt(con, rt, task_id, text):
+    """Emergency correction for a worker that is mid-turn.
+
+    Codex: stop the running turn (close's helper: only this pid, matched by worktree and thread, plus the task's
+    leftover processes), then resume the thread with `text` plus any answers already queued, as one new turn.
+    The text is queued first, so a failed stop or resume loses nothing and `answer(flush=true)` retries it. A Codex
+    worker that is between turns just gets the same resume. Claude: its socket takes a message mid-turn, so this
+    is a plain answer and nothing is stopped. Returns the answer's receipt plus `interrupted` (a running turn was
+    stopped) and `note`."""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("interrupt needs a non-empty text")
+    task = store.get_task(con, task_id)
+    if task["status"] == "closed":
+        raise ValueError(f"task {task_id} is closed")
+    if worker_kind(task["model"]) != "codex":
+        return dict(_answer(con, rt, task_id, text), interrupted=False,
+                    note="Claude worker: sent over its socket, nothing was stopped")
+    if not task["session_id"] or not task["worktree"]:
+        raise ValueError(f"task {task_id} has no codex thread")
+    queued = f"{INTERRUPT_HEAD}\n\n{text}"
+    try:
+        # One task lock around re-read, queue, stop and resume: an auto flush of the turn being stopped waits here,
+        # then sees a newer job and skips, and nothing can resume a worker between our stop and our resume.
+        # The lock is not reentrant: _resume_queued and _deliver_to_claude must not take it again.
+        with store.task_delivery(con, [task_id]):
+            task = store.get_task(con, task_id)
+            if task["status"] == "closed":
+                raise ValueError(f"task {task_id} is closed")
+            if worker_kind(task["model"]) == "claude":  # a retry replaced the Codex worker meanwhile
+                return dict(_deliver_to_claude(con, rt, task, text, keep_sent=False), interrupted=False,
+                            note="Claude worker: sent over its socket, nothing was stopped")
+            if not task["session_id"] or not task["worktree"]:
+                raise ValueError(f"task {task_id} has no codex thread")
+            store.add_message(con, task_id, store.QUEUED, queued)
+            stopped = bool(task["job_id"] and rt.pid_alive(task["job_id"]))
+            try:
+                not_stopped = _stop_confirmed(rt, "codex", task["job_id"], (task["worktree"], task["session_id"]))
+            except Exception as exc:
+                not_stopped = f"{type(exc).__name__}: {exc}"
+            if not_stopped:
+                return dict(status="failed", delivered=0, pending=store.pending_answer_count(con, task_id),
+                            interrupted=False, error=f"turn not confirmed stopped, nothing resumed: {not_stopped}"[:500])
+            try:
+                result = _resume_queued(con, rt, store.get_task(con, task_id))
+            except _ResumeFailed as failed:  # rolled back: every answer, the correction included, is still queued
+                error = failed.__cause__
+                result = dict(status="failed", delivered=0, pending=len(store.pending_answers(con, task_id)),
+                              error=f"{type(error).__name__}: {error}"[:500])
+    except TimeoutError:  # a retry, close or flush holds the task: keep the correction, stop nothing
+        store.add_message(con, task_id, store.QUEUED, queued)
+        return dict(status="queued", delivered=0, pending=store.pending_answer_count(con, task_id),
+                    interrupted=False, error="task busy (retry, close or flush in progress); nothing was stopped, "
+                    "the correction is queued: call interrupt again or answer(flush=true)")
+    result["interrupted"] = stopped
+    result["note"] = ("running turn stopped; its tool calls were killed and work may be half-done" if stopped
+                      else "worker was between turns; sent as a normal new turn")
+    return result
 
 
 def _commit_resume(con, rt, task, pending, job):

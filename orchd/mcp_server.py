@@ -87,13 +87,14 @@ TOOLS = [
      "description": "Send an answer to a worker's question. For outward sends, pass Nat's decision verbatim. "
                     "Returns status delivered|queued|failed with delivered and pending counts. A Codex worker gets "
                     "answers as a new turn on its thread; if its turn is still running this waits up to 60s, then "
-                    "queues the answer (status queued: stored, NOT yet seen by the worker). Nothing sends queued "
-                    "answers by itself: whenever that worker next reports, asks or sends progress and you read the "
-                    "inbox, call answer with flush=true (or with a new text) to send every pending answer, oldest "
-                    "first, in one turn. If you get queued while the task is in status question, the worker already asked "
-                    "and is only finishing its exit, so no further wake will come: retry flush=true after a short "
-                    "wait, or once list_open shows worker_alive null. failed: the turn could not start; the answers "
-                    "stay queued, retry with "
+                    "queues the answer (status queued: stored, NOT yet seen by the worker). A Codex turn's own shell sends "
+                    "queued answers automatically the moment the turn's process exits (as one new turn, oldest first), "
+                    "even after an MCP restart; a failure there reaches your inbox as a progress message "
+                    "\"[auto-flush failed]\" and the answers stay queued. You can still call answer with flush=true "
+                    "(or a new text) to send them yourself. If you get queued while the task is in status question, the "
+                    "worker already asked and is only finishing its exit: the auto flush follows within seconds (or "
+                    "retry flush=true). failed: the turn could not start; the answers "
+"stay queued, retry with "
                     "flush=true instead of resending the text. failed with uncertain=true: a turn did start but its "
                     "receipt could not be written, so it was stopped (or the error says MAY STILL BE RUNNING). The "
                     "answers already reached that worker but still read as pending, so a later flush sends them "
@@ -104,6 +105,18 @@ TOOLS = [
          "entry_reply_id": {"type": "integer", "description":
                             "Instead of text: send Nat's reply from entry_inbox verbatim from orchd's store. Refused "
                             "if that reply answers a question of another task"}}}},
+    {"name": "interrupt",
+     "description": "EMERGENCY correction for a Codex worker that is mid-turn and must not finish what it is doing. "
+                    "It STOPS the worker's running turn (killing in-flight tool calls and the task's leftover "
+                    "processes, which can leave half-done work: a half-applied edit, a half-run command), then starts "
+                    "a new turn on the same thread with your text (plus any queued answers). Use answer instead for "
+                    "anything that can wait for the turn to end. Returns the answer receipt (status "
+                    "delivered|failed, pending) plus interrupted (true when a running turn was stopped) and note. If "
+                    "the turn cannot be confirmed stopped nothing is resumed and the text stays queued. A Claude "
+                    "worker needs no interrupt (its socket takes messages mid-turn): the text is sent like answer, "
+                    "nothing is stopped, and the note says so.",
+     "inputSchema": {"type": "object", "required": ["task_id", "text"], "properties": {
+         "task_id": {"type": "string"}, "text": {"type": "string", "description": "The correction, in full"}}}},
     {"name": "close",
      "description": "Close a task: stop its worker, remove its worktree if clean and pushed, otherwise keep it and say why.",
      "inputSchema": {"type": "object", "required": ["task_id"], "properties": {
@@ -130,8 +143,8 @@ TOOLS = [
      "description": "Add an instruction to an open task: the same worker, worktree, branch and session continue; the model "
                     "never changes (use retry for that) and no new task or owner is created. Refused for a closed or "
                     "unknown task. It uses the answer delivery path: a Claude worker is sent it at once under the task "
-                    "lock; a Codex worker mid-turn queues it in the same FIFO as answers (status queued; flush with "
-                    "answer flush=true after its next progress/ask/report; if the task is in question status the worker has already asked and will not wake you again, so flush later yourself, or when list_open worker_alive turns null, same as for answer). Returns status delivered|queued|failed "
+                    "lock; a Codex worker mid-turn queues it in the same FIFO as answers (status queued; sent "
+                    "automatically when its turn ends, or flush with answer flush=true, same as for answer). Returns status delivered|queued|failed "
                     "with delivered and pending counts, and errors if it could not be sent (nothing is lost if "
                     "queued). A delivered result with record_error was sent; only orchd's bookkeeping failed, so do "
                     "not resend it. If the task lock stays busy (close, retry or adopt running) it raises and nothing "
@@ -228,6 +241,8 @@ def call(name, args, thread, con, rt):
                 raise ValueError("pass text or entry_reply_id, not both")
             text = entry.reply_text(con, thread, args["entry_reply_id"], args["task_id"])
         return core.answer(con, rt, args["task_id"], text, flush=bool(args.get("flush")))
+    if name == "interrupt":
+        return core.interrupt(con, rt, args["task_id"], args.get("text"))
     if name == "entry_inbox":
         return entry.inbox(con, thread)
     if name == "send_to_nat":

@@ -122,7 +122,7 @@ Claude Orch 的現行選項仍為 `opus` 與 `sonnet`，預設 `opus`，不受 w
 - 設計：`codex exec` 沒有 `--bg`，一次只跑一個回合就結束。所以 Codex worker 是同一個 thread 上的一串程序：派工時 `codex exec --json`（brief＋任務放在同一個 prompt，因為沒有 `--append-system-prompt`；不寫 AGENTS.md 進 worktree，否則 worktree 一直是 dirty），回答時 `codex exec resume <thread>`。`session_id` 存 thread id，`job_id` 存目前回合的 pid，`socket` 為空。沒有另開欄位，worker 種類由 model 前綴 `gpt-` 判斷。
 - 跟 Claude worker 的行為差異：
   - `orchd ask` 之後 Codex worker 要結束回合（不是等待）；答案以新回合送達。回合進行中的 `answer` 改為排隊（#12，見下節）。
-  - 長指令在前景跑、給足 timeout：回合結束程序就結束，背景工作結束時沒有東西叫醒它。
+  - 長指令：回合結束程序就結束，背景工作結束時沒有東西叫醒它（9/30 原為「前景跑」，#12 起改為背景跑加短輪詢，見 10/4 節）。
   - `list_open` 的 `worker_alive`：pid 還在 = true；已 ask / report 而沒有程序 = null（可 resume）；其他情況沒有程序 = false（回合中途結束、沒有回報）。
   - `view_worker` 回合中會被拒；回合之間開 Ghostty 跑 `codex resume <thread>`。
   - token 從 `~/.codex/sessions/**/rollout-*-<thread>.jsonl` 最後一筆 `token_count.total_token_usage` 撈，對應到 Claude 的欄位（codex 的 input 含 cached，要扣掉）。
@@ -130,6 +130,19 @@ Claude Orch 的現行選項仍為 `opus` 與 `sonnet`，預設 `opus`，不受 w
   - `exec resume` 不帶 `-m` 會改用 config.toml 的預設 model（實測變成 Astra），所以每次 resume 都帶任務的 model。
   - MCP server 是長時間跑的 process，spawn 出來的 codex 結束後會變成 zombie，`kill(pid, 0)` 仍然成功；`pid_alive` 先用 `waitpid(WNOHANG)` 收掉。
 - 端到端（2026-09-30，scratch repo＋本機 bare remote，worker 為 GPT-6.1 Sol）：dispatch → ack → commit、push -u → report；另一個任務 ask → answer 走 `exec resume` → report → close（worktree 移除、usage 已記錄）。Orch thread 是假的，所以叫醒 Orch 記為 wake_error，符合預期。review 修正後在同一個 process 內重跑 ask → answer：兩個回合都是 gpt-6.1-sol。還沒從真正的 Orch（MCP）派過。
+
+## Codex worker 回合結束自動 flush 加緊急 interrupt（#12，2026-10-04）
+- 取代 10/2 的 lazy flush（Nat 選 a + c + d；改用 app-server 的 b 這次不做）。原因：lazy flush 之後，排隊的 answer 要等 Orch 再呼叫一次 `answer` 才送出；worker 回合結束後沒有東西叫醒任何人，Orch 若不再來，指示就卡在 queue。Claude worker 用 socket，沒有這個問題。
+- a. 自動 flush：每個 Codex 回合（`exec` 與 `exec resume`）改成 `sh -c '<codex ...>; orchd flush <task_id> --after-pid $$'`（`Runtime.codex_turn`）。沒有 daemon；shell 是回合的 process group leader，它的 pid 就是 `job_id`，所以 MCP server 重啟後仍有效。
+  - `orchd flush` = `core.auto_flush`：走和 `answer(flush=true)` 同一條路（task lock、`_commit_resume` 的 CAS、FIFO 合成一個回合），所以手動 flush 與自動 flush 競爭只會送一次。`--after-pid` 讓 shell 自己那個還活著的 pid 不被當成「回合進行中」；`job_id` 不等於 `--after-pid`（已有新回合）就略過；這個檢查在 task delivery lock 內再做一次（lock 外那次只是快速預檢），所以預檢之後才換掉 job 的情況也會略過。
+  - 不觸發：task 已 closed、Claude worker、queue 空、被新回合取代。close / interrupt 用 killpg 停掉整個回合 process group，shell 也一起死，不會再 flush。codex 自己崩潰（shell 還在）照樣 flush。
+  - 失敗：答案留在 queue；寫一則 `progress` 訊息「[auto-flush failed] ...」（進 Orch inbox 並叫醒），`list_open.pending` 仍顯示未送數量；Orch 可用 `answer(flush=true)` 重試。`orchd flush` 失敗時結束碼為 1。
+  - worker 自己 ack / progress / ask / report 的行為不變。worker `report` 後若還有排隊答案，也會被送出（開新回合）。
+- c. `interrupt(task_id, text)`（Orch 的 MCP 工具）：在同一個 task delivery lock 內（re-read、排隊、停止、resume、收據都在鎖內，不巢狀取得）：先把 text（加 `[interrupt]` 前綴）排進 queue，再用 close 的 `_stop_confirmed`（只認這個 pid + worktree / thread，並配合 #48 清掉任務的殘留程序）停掉目前回合，確認停掉後走 flush 開新回合（排隊中的舊答案一起，FIFO）。會中斷進行中的工具呼叫、可能留下做到一半的工作，只用於緊急更正，工具說明已寫明。停不掉就不 resume、text 留在 queue；resume 失敗也留在 queue；lock 被別的呼叫佔住（逾時）就只排隊、不停任何東西，回 `queued` 加說明。回合剛好自己結束時，它的 auto flush 會卡在 lock 上，等 interrupt 結束後看到新 job 而略過，所以不會有 flush 插在 stop 和 resume 之間。worker 在回合之間就等同一般 resume（`interrupted=false`）。Claude worker：走 socket 照 answer 送出，不停任何東西，回傳 note 說明。
+- d. worker 規則（Codex brief 末尾）：回合要短；長指令放背景、輸出寫檔、回合內用短輪詢檢查，不開長時間的前景工具呼叫，也不要在背景工作未完成時結束回合（沒人叫醒它）；對外動作（發訊息、開 PR、merge）一律先用 `ask` 停下來並結束回合，只有 Orch 在 answer 裡逐字核准那個動作才能做；任務描述本身不取代這個 ask。取代 9/30 「長指令在前景跑」那條。
+- 取代 10/2 節中「不自動送出」「Orch 的責任：看到 queued 要自己 flush」「question 狀態的例外」：現在回合結束就送。其餘交付契約（回傳格式、持久化、CAS、close 規則、followup 共用）不變。
+- macOS 上 psutil 讀不到 sh wrapper 自己的 `ORCHD_WORKTREE`（只有子程序讀得到）；close / interrupt 靠 args 比對加 killpg 停 wrapper，`tests/test_auto_flush.py::WrapperCleanupTest` 用真的 sh wrapper 驗證 wrapper 與 codex 子程序都被停掉、也沒有 flush。
+- 沒做 / 已知限制：沒有自動重試（失敗只通知 Orch，不會自己再 flush）；shell 被 SIGKILL（只殺 shell 不殺 process group）或整機斷電時不會 flush，Orch 手動 `answer(flush=true)`；interrupt 只對 Codex 回合有意義；改用 app-server 的 `turn/steer`（b）未做。
 
 ## Codex worker 回合中的 answer 排隊（#12，2026-10-02）
 - 問題：`codex exec` 回合中收不到訊息，`answer` 等 60 秒後報 `still in a turn`，Orch 的指示送不進去。

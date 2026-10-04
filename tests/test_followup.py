@@ -316,9 +316,9 @@ class FollowupAcceptanceTest(unittest.TestCase):
         (event,) = self.events(t)
         self.assertEqual((event["status"], event["message"]), ("accepted", "delivered but record lags"))
 
-    def test_mcp_followup_description_has_question_flush_exception(self):
+    def test_mcp_followup_description_mentions_auto_flush(self):  # the question-status exception ended with #12
         tool = next(x for x in mcp_server.TOOLS if x["name"] == "followup")
-        self.assertIn("question", tool["description"])
+        self.assertIn("automatically when its turn ends", tool["description"])
         self.assertIn("flush", tool["description"])
 
 
