@@ -19,13 +19,15 @@ from .runtime import DEFAULT_WORKER_MODEL, WORKER_MODELS, Runtime
 
 TOOLS = [
     {"name": "list_orchs",
-     "annotations": {"readOnlyHint": True},
-     "description": "Read-only registry inventory, including Orchs with no open tasks. Returns orch_id, kind, "
-                    "created_at, stopped_at, health (alive/dead/unknown), health_reason and open_task_count; "
+     "annotations": {"readOnlyHint": False},
+     "description": "Full registry inventory as JSON text (also supplied as structuredContent), including dead, "
+                    "unknown and archived Orchs. Only the CLI filters its default display. Returns orch_id, kind, "
+                    "created_at, stopped_at, health (alive/idle/dead/unknown), archived, archival observation timestamps, health_reason and open_task_count; "
                     "counts covers registered Orchs only. stopped_at is bookkeeping, not liveness. "
                     "Codex health is unknown. unidentified_claude_sessions lists live background sessions "
                     "excluding registered Orchs and known workers; their role is unknown, null if unavailable. "
-                    "Does not register the caller, stop sessions or clean up records.",
+                    "Records verified death observations and reversibly archives unencumbered Orchs after one hour. "
+                    "Does not register the caller, stop sessions or delete records.",
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "dispatch",
      "description": "Start one worker (Claude or Codex, by model) for one task in a fresh worktree of a repo under ~/projects. "
@@ -231,7 +233,7 @@ def call(name, args, thread, con, rt):
             raise ValueError("inbox needs the caller's thread id")
         return core.inbox(con, thread)
     if name == "list_orchs":
-        return inventory.list_orchs(con, rt)
+        return inventory.list_orchs(con, rt, observe=True)
     if name == "list_open":
         return core.list_open(con, rt)
     if name == "answer":
@@ -305,6 +307,8 @@ def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY):
                         store.register_orch(con, thread, "codex")
                 data = call(params.get("name"), params.get("arguments") or {}, thread, con, rt)
             result = {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False, indent=1)}]}
+            if role != "entry" and params.get("name") == "list_orchs":
+                result["structuredContent"] = data
         except Exception as error:
             traceback.print_exc(file=sys.stderr)
             result = {"isError": True, "content": [{"type": "text", "text": f"{type(error).__name__}: {error}"}]}

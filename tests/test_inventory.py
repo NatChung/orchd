@@ -19,7 +19,7 @@ class InventoryTest(unittest.TestCase):
         self.con = store.connect(self.path)
         self.addCleanup(self.con.close)
         self.rt = Mock()
-        self.rt.live_jobs.return_value = {"claude-job": {}}
+        self.rt.live_jobs.return_value = {"claude-job": {"pid": 4242, "status": "idle"}}
 
     def register(self):
         store.register_orch(self.con, "claude", "claude", job_id="claude-job")
@@ -43,7 +43,7 @@ class InventoryTest(unittest.TestCase):
         self.assertIsNotNone(rows["claude"]["stopped_at"])
         self.assertEqual(rows["claude"]["health"], "alive")
         self.assertEqual(rows["codex"]["health"], "unknown")
-        self.assertEqual(out["counts"], dict(registered=2, alive=1, dead=0, unknown=1))
+        self.assertEqual(out["counts"], dict(registered=2, idle=0, alive=1, dead=0, unknown=1))
         self.assertEqual(before, list(self.con.iterdump()))
         self.assertNotIn("PRIVATE", json.dumps(out))
         self.rt.live_jobs.assert_called_once_with()
@@ -61,13 +61,13 @@ class InventoryTest(unittest.TestCase):
         self.rt.live_jobs.side_effect = None
         self.rt.live_jobs.return_value = {}
         self.assertEqual(inventory.list_orchs(self.con, self.rt)["counts"],
-                         dict(registered=2, alive=0, dead=1, unknown=1))
+                         dict(registered=2, idle=0, alive=0, dead=1, unknown=1))
 
     def test_unidentified_sessions_exclude_known_workers_and_dead(self):
         self.register()
         self.task("closed", "codex", "closed")
-        self.rt.live_jobs.return_value = {"claude-job": {}, "worker-job": {},
-                                          "unknown": {"prompt": "PRIVATE"},
+        self.rt.live_jobs.return_value = {"claude-job": {"pid": 4242, "status": "idle"}, "worker-job": {},
+                                          "unknown": {"prompt": "PRIVATE", "pid": 4242, "status": "idle"},
                                           "failed": {"state": "failed"}}
         self.assertEqual(inventory.list_orchs(self.con, self.rt)["unidentified_claude_sessions"],
                          [dict(job_id="unknown", health="alive")])
@@ -75,7 +75,7 @@ class InventoryTest(unittest.TestCase):
     def test_empty_registry(self):
         self.rt.live_jobs.return_value = {}
         self.assertEqual(inventory.list_orchs(self.con, self.rt),
-                         dict(orchs=[], counts=dict(registered=0, alive=0, dead=0, unknown=0),
+                         dict(orchs=[], counts=dict(registered=0, idle=0, alive=0, dead=0, unknown=0),
                               unidentified_claude_sessions=[]))
 
     def test_mcp_does_not_register_caller_or_write(self):
@@ -85,23 +85,23 @@ class InventoryTest(unittest.TestCase):
             reply = mcp_server.handle(dict(id=1, method="tools/call", params=dict(
                 name="list_orchs", arguments={}, _meta=dict(threadId="new-caller"))), self.con, self.rt)
         data = json.loads(reply["result"]["content"][0]["text"])
+        self.assertEqual(data, reply["result"]["structuredContent"])
+        self.assertEqual({row["orch_id"] for row in data["orchs"]}, {"claude", "codex"})
         self.assertEqual(data["counts"]["registered"], 2)
         self.assertEqual(before, list(self.con.iterdump()))
         self.assertIn("list_orchs", {t["name"] for t in mcp_server.TOOLS})
 
-    def test_cli_snapshot_leaves_source_files_unchanged(self):
+    def test_cli_displays_only_live_orchs(self):
         self.register()
-        def source():
-            return {p.name: (p.read_bytes(), p.stat().st_mtime_ns) for p in Path(self.tmp.name).iterdir()
-                    if p.is_file()}
-        before = source()
         cli = runpy.run_path(str(Path(__file__).resolve().parents[1] / "bin/orchd"))
         output = io.StringIO()
         with patch.dict(os.environ, {"ORCHD_HOME": self.tmp.name}), patch(
-                "orchd.runtime.Runtime.live_jobs", return_value={"claude-job": {}}), contextlib.redirect_stdout(output):
+                "orchd.runtime.Runtime.live_jobs", return_value={"claude-job": {"pid": 4242, "status": "idle"}}), contextlib.redirect_stdout(output):
             self.assertEqual(cli["main"](["orchs"]), 0)
-        self.assertEqual(json.loads(output.getvalue())["counts"]["registered"], 2)
-        self.assertEqual(before, source())
+        self.assertIn("claude  claude  alive", output.getvalue())
+        self.assertNotIn("codex  codex", output.getvalue())
+        self.assertIn("unknown health", output.getvalue())
+
 
     def test_cli_missing_db_does_not_create_home(self):
         cli = runpy.run_path(str(Path(__file__).resolve().parents[1] / "bin/orchd"))

@@ -92,6 +92,22 @@ orchd binding                       # 綁定在線的 Claude Orch，沒有就開
 
 另外兩種 Orch 照舊：`orchd orch` 開 Claude Opus Orch（`--no-attach` 只開在背景）；Codex Desktop 在 `~/orch/home` 開的 session 也是一個 Orch，自成一組（[ADR-0002](docs/adr/0002-multiple-groups.md)）。
 
+從 `orchd orchs` 找到 id 後，用 `orchd attach <id>` 接回同一個 Claude Orch。
+存活必須有 runtime 的 pid 與已知 live status；歷史 job 的 outcome 不能證明存活。
+Claude daemon 閒置退出，但仍保留 session、job 與 socket 身分且未經 `orch-stop`，顯示為 `idle (session_resumable)`。
+attach 會明示恢復原對話，沿用 #72 的 `--resume` 流程（原 Orch id 不變，runtime job/session id 可更新），再驗證後 attach。
+查詢失敗、身分衝突或目標死亡會報錯；不改 Desktop binding，也不停止其他 session。
+Codex 沒有可靠的存活探測，維持 unknown；預設僅提示 unknown 數量，詳情用 `--all`。
+
+預設清單中的死 Orch，只在仍有未結任務、通知／問題或 Desktop binding 時合併成一行接管提醒。
+CLI 查詢及 MCP `list_orchs` 會記錄成功的死亡探測：第一次與後續確認至少隔一小時，且沒有任何上述掛件，才封存。
+查詢失敗或不確定會中斷死亡觀察窗口；Codex unknown 永不自動封存。
+封存只是一個可還原標記，不刪任務、訊息或統計，不改 `stopped_at`。
+用 `--restore ID` 解除標記；之後探測到 alive／idle 也會自動解除。
+死 Orch 手動還原後仍需 `--all` 才能查看，且會重新開始一小時觀察。
+MCP `list_orchs` 的文字內容維持完整 JSON（包含 dead、unknown、archived 與觀察時間），並同時附上相同的 `structuredContent`；精簡顯示只用於 CLI。不能把 unknown 當成死亡。
+
+
 ## 指令
 
 | 指令 | 用途 |
@@ -104,7 +120,9 @@ orchd binding                       # 綁定在線的 Claude Orch，沒有就開
 | `orchd upgrade` | 安裝版更新到最新 commit（只換程式） |
 | `orchd orch [--model opus\|sonnet] [--no-attach]` | 開 Claude Orch |
 | `orchd orch-stop ID` | 停 Claude Orch |
-| `orchd orchs` | 唯讀 Orch 清單 |
+| `orchd orchs [--all]` | 預設只列 alive／idle 可接回的 Orch；`--all` 包含 dead、unknown、封存 |
+| `orchd orchs --restore ID` | 解除封存並重設死亡觀察窗口，保留所有歷史 |
+| `orchd attach ID [--viewer]` | 接回指定 Claude Orch；`--viewer` 用 Ghostty 開窗 |
 | `orchd list` | 未結任務、worker／Orch 健康、通知失敗 |
 | `orchd watch [--since HH:MM]` | 即時看 Orch 與 worker 的訊息 |
 | `orchd summary [--since HH:MM]` | 每個 Orch 的 worker、模型、問題、token |

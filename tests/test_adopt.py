@@ -11,7 +11,7 @@ class AdoptTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.con = store.connect(Path(self.tmp.name) / "t.db")
         self.rt = FakeRuntime()
-        self.rt.jobs = {"newjob": {}}  # oldjob absent = confirmed dead
+        self.rt.jobs = {"newjob": {"pid": 4242, "status": "idle"}}  # oldjob absent = confirmed dead
         store.register_orch(self.con, "old", "claude", socket="/s/old", session_id="so", job_id="oldjob")
         store.register_orch(self.con, "new", "claude", socket="/s/new", session_id="sn", job_id="newjob")
 
@@ -68,7 +68,7 @@ class AdoptTest(unittest.TestCase):
 
     def test_alive_and_unknown_owner_rejected_by_default_and_nothing_changes(self):
         tid = self.task()
-        self.rt.jobs = {"newjob": {}, "oldjob": {}}
+        self.rt.jobs = {"newjob": {"pid": 4242, "status": "idle"}, "oldjob": {"pid": 4242, "status": "idle"}}
         with self.assertRaisesRegex(ValueError, "alive"):
             core.adopt(self.con, self.rt, "new", [tid])
         self.rt.jobs = None  # probe failure -> unknown
@@ -88,7 +88,7 @@ class AdoptTest(unittest.TestCase):
 
     def test_force_moves_from_alive_owner_and_notifies_old(self):
         tid = self.task()
-        self.rt.jobs = {"newjob": {}, "oldjob": {}}
+        self.rt.jobs = {"newjob": {"pid": 4242, "status": "idle"}, "oldjob": {"pid": 4242, "status": "idle"}}
         out = core.adopt(self.con, self.rt, "new", [tid], force=True)
         self.assertTrue(out["forced"])
         self.assertEqual(out["old_owner_notified"], {"old": True})
@@ -98,7 +98,7 @@ class AdoptTest(unittest.TestCase):
 
     def test_failed_old_notify_still_moves_once_and_records_evidence(self):
         tid = self.task()
-        self.rt.jobs = {"newjob": {}, "oldjob": {}}
+        self.rt.jobs = {"newjob": {"pid": 4242, "status": "idle"}, "oldjob": {"pid": 4242, "status": "idle"}}
         real = self.rt.send_uds
 
         def flaky(path, session, text):
@@ -137,7 +137,7 @@ class AdoptTest(unittest.TestCase):
         self.rt.jobs = {}  # new owner now confirmed dead too
         with self.assertRaisesRegex(ValueError, "dead"):
             core.adopt(self.con, self.rt, "new", [tid])
-        self.rt.jobs = {"newjob": {}}
+        self.rt.jobs = {"newjob": {"pid": 4242, "status": "idle"}}
         store.stop_orch(self.con, "new")
         with self.assertRaisesRegex(ValueError, "stopped"):
             core.adopt(self.con, self.rt, "new", [tid])

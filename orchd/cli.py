@@ -14,7 +14,8 @@
   orchd flush ID [--after-pid PID]            run by a Codex turn's shell when codex exits: send answers queued meanwhile
   orchd ask ID "question with full preview"   worker: ask Orch/Nat and wait for an answer
   orchd verify ID [--timeout S]               verifier worker: rerun the verified task's locked command at its locked SHA
-  orchd orchs                                 read-only Orch inventory as JSON
+  orchd orchs [--all] [--json] [--restore ID]          live/resumable Orchs; --all includes archived/unknown
+  orchd attach ID [--viewer]                  attach an existing Claude Orch (resume its conversation if idle)
   orchd list                                  open tasks, worker/Orch health, unread notification failures
   orchd watch [--since HH:MM]                 live timeline of Orch <-> worker messages
   orchd summary [--since HH:MM]               per Orch: workers, models, questions, parallelism, tokens
@@ -73,7 +74,13 @@ def main(argv=None):
     ver.add_argument("task_id")
     ver.add_argument("--timeout", type=float)
     sub.add_parser("list")
-    sub.add_parser("orchs")
+    orchs = sub.add_parser("orchs")
+    orchs.add_argument("--json", action="store_true", help="output the complete MCP inventory JSON")
+    orchs.add_argument("--all", action="store_true", help="include dead, unknown and archived Orchs")
+    orchs.add_argument("--restore", metavar="ORCH_ID", help="clear archival and restart the death observation window")
+    attach = sub.add_parser("attach")
+    attach.add_argument("orch_id")
+    attach.add_argument("--viewer", action="store_true", help="open Ghostty instead of attaching in this terminal")
     for name in ("watch", "summary"):
         sub.add_parser(name).add_argument("--since", help="HH:MM today (default: last 30 minutes for watch, all for summary)")
     stats_p = sub.add_parser("stats")
@@ -129,15 +136,27 @@ def main(argv=None):
             return 1
         print(json.dumps(report, ensure_ascii=False, indent=1) if args.json else stats.format_table(report))
         return 0
-    if args.cmd == "orchs":
-        from orchd import inventory, stats
-        try:
-            with stats.open_snapshot(store.home() / "orchd.db") as snap:
-                report = inventory.list_orchs(snap.con, Runtime())
-        except stats.SnapshotError as err:
-            print(f"orchd orchs: {err}", file=sys.stderr)
+    if args.cmd in ("orchs", "attach"):
+        from orchd import inventory
+        if not (store.home() / "orchd.db").exists():
+            print("orchd: no registry DB", file=sys.stderr)
             return 1
-        print(json.dumps(report, ensure_ascii=False, indent=1))
+        con = store.connect()
+        try:
+            if args.cmd == "attach":
+                inventory.attach(con, Runtime(), args.orch_id, viewer=args.viewer)
+            elif args.restore:
+                inventory.restore(con, args.restore)
+                print(f"Restored {args.restore}; use --all to inspect dead/unknown Orchs.")
+            else:
+                report = inventory.list_orchs(con, Runtime(), observe=True)
+                print(json.dumps(report, ensure_ascii=False, indent=1) if args.json
+                      else inventory.render(report, all=args.all))
+        except (ValueError, RuntimeError, OSError) as err:
+            print(f"orchd {args.cmd}: {err}", file=sys.stderr)
+            return 1
+        finally:
+            con.close()
         return 0
     con, rt = store.connect(), Runtime()
     if args.cmd in ("watch", "summary"):

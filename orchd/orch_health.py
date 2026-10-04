@@ -23,21 +23,49 @@ def owner_health(orch, jobs):
         ):
             reason = "runtime_invalid"
         elif orch["job_id"] in jobs:
-            # `state` is the task outcome, not process liveness: per
-            # https://code.claude.com/docs/en/agent-view#list-sessions-as-json pid/status appear only while the
-            # process is alive, and the CLI mapper can emit state=failed with a live pid + status idle/waiting.
-            # So failed is dead only when the entry carries no live-process evidence at all; evidence we cannot
-            # read is unknown, never guessed. pids are not probed locally (reuse proves nothing about identity).
+            # agents retains historical jobs. Only pid + a known live status is
+            # process evidence; task outcome alone never proves liveness.
             entry = jobs[orch["job_id"]]
-            if entry.get("state") != "failed":
+            if (isinstance(entry.get("pid"), int) and not isinstance(entry["pid"], bool)
+                    and entry["pid"] > 0 and entry.get("status") in LIVE_STATUSES):
                 state, reason = "alive", "job_present"
             elif entry.get("pid") is None and entry.get("status") is None:
-                state, reason = "dead", "job_failed"
-            elif (isinstance(entry.get("pid"), int) and not isinstance(entry["pid"], bool)
-                  and entry["pid"] > 0 and entry.get("status") in LIVE_STATUSES):
-                state, reason = "alive", "job_present"
+                state, reason = "dead", "job_failed" if entry.get("state") == "failed" else "job_retired"
             else:
-                state, reason = "unknown", "job_failed_unverified"
+                reason = "job_failed_unverified" if entry.get("state") == "failed" else "job_unverified"
         else:
             state, reason = "dead", "job_absent"
     return {"state": state, "reason": reason}
+
+
+def session_health(orch, jobs, rt):
+    """Registry/session probe shared by inventory and foreground selection.
+
+    A resumable conversation is usable even after its daemon process retires.
+    Socket errors and contradictory session identities are unknown, not death.
+    """
+    health = owner_health(orch, jobs)
+    if orch is None or orch["kind"] != "claude" or health["state"] == "unknown":
+        return health
+    entry = jobs.get(orch["job_id"], {})
+    if entry.get("sessionId") and orch["session_id"] and entry["sessionId"] != orch["session_id"]:
+        return {"state": "unknown", "reason": "session_mismatch"}
+    if orch["socket"]:
+        try:
+            listening = rt.socket_listening(orch["socket"])
+        except Exception:
+            return {"state": "unknown", "reason": "socket_unavailable"}
+        if listening is not True and listening is not False:
+            return {"state": "unknown", "reason": "socket_invalid"}
+        if listening:
+            if health["state"] == "dead":
+                return {"state": "unknown", "reason": "socket_job_conflict"}
+            return health
+        if health["state"] == "alive":
+            if orch["stopped_at"] is not None or not orch["session_id"]:
+                return {"state": "unknown", "reason": "socket_job_conflict"}
+            health = {"state": "dead", "reason": "job_retired"}
+    if (health["state"] == "dead" and orch["stopped_at"] is None
+            and orch["session_id"] and orch["job_id"] and orch["socket"]):
+        return {"state": "idle", "reason": "session_resumable"}
+    return health

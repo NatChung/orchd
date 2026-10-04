@@ -66,7 +66,7 @@ class ReviveTest(unittest.TestCase):
         self.assertEqual(len(self.rt.resumed_orchs), 1)
 
     def test_alive_orch_is_left_alone_without_a_failed_send(self):
-        self.rt.jobs["orchjob"] = {}
+        self.rt.jobs["orchjob"] = {"pid": 4242, "status": "idle"}
         self.assertEqual(orch_revive.revive(self.con, self.rt, self.orch)["job_id"], "orchjob")
         self.assertFalse(getattr(self.rt, "resumed_orchs", []))
 

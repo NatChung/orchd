@@ -18,7 +18,7 @@ BODY = "請寄給 Ann：\r\n\t「quoted」 'single'\n```sh\necho $HOME\n```\né
 class EntryRuntime(FakeRuntime):
     def __init__(self):
         super().__init__()
-        self.jobs = {"orchjob": {}, "job1": {}}
+        self.jobs = {"orchjob": {"pid": 4242, "status": "idle"}, "job1": {}}
         self.user_messages = {}  # thread -> [{turn_id, item_id, text}]
         self.uds_fails = False
 
@@ -127,7 +127,7 @@ class EntryTest(unittest.TestCase):
         self.assertIsNone(self.rt.orch_started)
         self.assertEqual(store.get_orch(self.con, self.orch)["stopped_at"], None)
         # back online: the kept message goes out on the next call, still verbatim
-        self.rt.jobs, self.rt.resume_fails = {"orchjob": {}}, False
+        self.rt.jobs, self.rt.resume_fails = {"orchjob": {"pid": 4242, "status": "idle"}}, False
         status = entry.status(self.con, self.rt, "desktop", "desk-1")
         self.assertEqual(status["not_yet_delivered_to_orch"], [])
         self.assertEqual(len(self.rt.sent), 1)
@@ -500,7 +500,8 @@ class InterfaceTest(unittest.TestCase):
 
     def test_retired_orch_claude_still_lists_is_resumed_by_its_dead_socket(self):
         orch = self.interface()["orch_id"]
-        self.rt.dead_sockets = {f"/tmp/orchd-o-{orch}/o.sock"}  # listed, no pid: health says alive
+        self.rt.jobs["orchjob"] = {}  # historical listing without process evidence
+        self.rt.dead_sockets = {f"/tmp/orchd-o-{orch}/o.sock"}
         again = self.interface()
         self.assertEqual((again["orch_id"], again["revived_orch"]), (orch, True))
         self.assertEqual(store.get_orch(self.con, orch)["job_id"], "resumed1")
@@ -517,7 +518,7 @@ class InterfaceTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "offline.*1 open question.*orchd binding --new"):
             self.interface()
         self.assertEqual(self.starts, 1)
-        self.rt.jobs = {"orchjob": {}}
+        self.rt.jobs = {"orchjob": {"pid": 4242, "status": "idle"}}
         store.stop_orch(self.con, orch)
         replaced = self.interface(new=True)
         self.assertTrue(replaced["started_new_orch"])

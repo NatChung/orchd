@@ -69,7 +69,7 @@ class OrchHealthTest(unittest.TestCase):
         self.owner()
         self.task()
         for jobs, state, reason, worker in (
-            ({"owner-job": {}}, "alive", "job_present", False),
+            ({"owner-job": {"pid": 4242, "status": "idle"}}, "alive", "job_present", False),
             ({"job1": {}}, "dead", "job_absent", True),
             (None, "unknown", "runtime_unavailable", None),
         ):
@@ -113,7 +113,7 @@ class OrchHealthTest(unittest.TestCase):
 
     def test_runtime_ignores_rows_without_background_job_ids(self):
         owner = self.owner()
-        background = {"id": owner["job_id"], "kind": "background", "status": "idle"}
+        background = {"id": owner["job_id"], "kind": "background", "pid": 4242, "status": "idle"}
         for invalid_id in (None, "", 42, False, [], {}):
             interactive = {"kind": "interactive", "pid": 23365, "status": "idle"}
             if invalid_id is not None:
@@ -135,18 +135,15 @@ class OrchHealthTest(unittest.TestCase):
                 self.assertEqual(owner_health(owner, Runtime().live_jobs()),
                                  {"state": "unknown", "reason": "runtime_unavailable"})
 
-    def test_listed_failed_owner_job_is_dead_but_other_listed_states_are_not(self):
+    def test_historical_jobs_without_process_evidence_are_dead(self):
         owner = self.owner()
-        failed = {owner["job_id"]: {"state": "failed", "reapedMidWorkAt": "2026-10-01T11:04:36Z"}}
-        self.assertEqual(owner_health(owner, failed), {"state": "dead", "reason": "job_failed"})
-        for entry in ({"state": "working"}, {"state": "blocked"}, {"state": "done", "status": "idle"},
+        for entry in ({"state": "working"}, {"state": "blocked"}, {"state": "done"},
                       {"state": "somethingnew"}, {}):
-            with self.subTest(entry=entry):  # idle/done live jobs and unknown states are never guessed dead
+            with self.subTest(entry=entry):
                 self.assertEqual(owner_health(owner, {owner["job_id"]: entry}),
-                                 {"state": "alive", "reason": "job_present"})
-        self.assertEqual(owner_health(owner, None), {"state": "unknown", "reason": "runtime_unavailable"})
-        self.assertEqual(owner_health(owner, {"other": {"state": "failed"}}),
-                         {"state": "dead", "reason": "job_absent"})
+                                 {"state": "dead", "reason": "job_retired"})
+        self.assertEqual(owner_health(owner, {owner["job_id"]: {"status": "idle"}}),
+                         {"state": "unknown", "reason": "job_unverified"})
 
     def test_failed_owner_job_with_live_process_evidence_is_not_dead(self):
         owner = self.owner()
@@ -177,7 +174,7 @@ class OrchHealthTest(unittest.TestCase):
         self.task()
         store.stop_orch(self.con, "owner-A")
         before = list(self.con.iterdump())
-        for jobs, state in ((None, "unknown"), ({"owner-job": {}}, "alive"), ({}, "dead")):
+        for jobs, state in ((None, "unknown"), ({"owner-job": {"pid": 4242, "status": "idle"}}, "alive"), ({}, "dead")):
             self.rt.jobs = jobs
             row, = core.list_open(self.con, self.rt)
             self.assertEqual(row["owner_health"]["state"], state)

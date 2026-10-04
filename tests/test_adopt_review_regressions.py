@@ -14,7 +14,7 @@ from orchd.runtime import Runtime
 
 class IsolatedRuntime(Runtime):
     def __init__(self):
-        self.jobs = {"newjob": {}, "otherjob": {}}
+        self.jobs = {"newjob": {"pid": 4242, "status": "idle"}, "otherjob": {}}
         self.commands = []
         self.on_probe = None
 
@@ -61,7 +61,7 @@ class Review(unittest.TestCase):
 
     def test_alive_default_reject_and_dead_direct(self):
         self.con.execute("UPDATE orchs SET kind='claude',job_id='oldjob' WHERE id='old'")
-        self.rt.jobs["oldjob"] = {}
+        self.rt.jobs["oldjob"] = {"pid": 4242, "status": "idle"}
         with self.assertRaisesRegex(ValueError, "alive"):
             core.adopt(self.con, self.rt, "new", ["task"])
         del self.rt.jobs["oldjob"]

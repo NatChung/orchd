@@ -8,7 +8,7 @@ the row's job_id and session_id change; the orch_id, socket path and Desktop bin
 from . import paths, store
 from .orch_health import owner_health
 
-REVIVABLE = ("job_absent", "job_failed")  # owner_health reasons that mean the job ended, not that we cannot tell
+REVIVABLE = ("job_absent", "job_failed", "job_retired")  # owner_health reasons that mean the job ended, not that we cannot tell
 GONE = (FileNotFoundError, ConnectionRefusedError)  # what connecting to a retired Orch's socket raises
 
 
@@ -19,7 +19,7 @@ def revivable(orch):
 
 def retired(rt, orch, health):
     """The job a revive should replace, or None. `claude agents` keeps listing a retired job (no pid, no status)
-    and owner_health calls that alive, so an alive verdict is checked against the socket."""
+    so an alive verdict is also checked against the socket."""
     if not revivable(orch):
         return None
     if health["state"] == "dead":

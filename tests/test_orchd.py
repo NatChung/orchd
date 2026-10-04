@@ -51,7 +51,7 @@ class FakeRuntime:
         resumed = getattr(self, "resumed_orchs", [])
         self.resumed_orchs = resumed + [(orch_id, model, resume)]
         job = f"resumed{len(self.resumed_orchs)}"
-        self.jobs[job] = {}  # Claude lists the resumed job
+        self.jobs[job] = {"pid": 4242, "status": "idle"}  # live resumed process
         return self.orch_socket_path(orch_id), job, f"{job}-session"
 
     def attach(self, job):

@@ -89,6 +89,7 @@ TASK_COLUMNS = ("model TEXT", "model_reason TEXT", "task_type TEXT", "rework_of 
                 "found_by TEXT", "outcome TEXT", "rating INTEGER",
                 "verify TEXT", "manual_checks TEXT", "verifies TEXT")
 MESSAGE_COLUMNS = ("recipient_orch TEXT", "notice_error TEXT", "notice_recipient TEXT")
+ORCH_COLUMNS = ("first_seen_dead REAL", "last_verified_dead REAL", "archived_at REAL")
 # entry_messages columns a DB created from an early #37 draft lacks (nullable: ALTER cannot add NOT NULL).
 ENTRY_MESSAGE_COLUMNS = ("body_bytes INTEGER", "body_sha256 TEXT", "wire_text TEXT", "source_thread TEXT",
                          "source_item_id TEXT", "source_raw TEXT", "source_turn TEXT")
@@ -118,7 +119,7 @@ def connect(path=None):
                 con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
             except sqlite3.OperationalError:  # another process added it first
                 pass
-    for table, columns in (("messages", MESSAGE_COLUMNS), ("entry_messages", ENTRY_MESSAGE_COLUMNS)):
+    for table, columns in (("messages", MESSAGE_COLUMNS), ("entry_messages", ENTRY_MESSAGE_COLUMNS), ("orchs", ORCH_COLUMNS)):
         have = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
         for column in columns:
             if column.split()[0] not in have:
@@ -210,7 +211,7 @@ def list_orchs(con):
     """Registry inventory including owners with zero open tasks; no writes."""
     marks = ",".join("?" * len(OPEN))
     return con.execute(
-        "SELECT o.id,o.kind,o.created_at,o.stopped_at,o.job_id,COUNT(t.id) AS open_task_count "
+        "SELECT o.*,COUNT(t.id) AS open_task_count "
         "FROM orchs o LEFT JOIN tasks t ON t.orch_thread=o.id "
         f"AND t.status IN ({marks}) GROUP BY o.id ORDER BY o.created_at,o.id", OPEN).fetchall()
 
