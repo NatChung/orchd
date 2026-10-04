@@ -150,7 +150,8 @@ else:
         rt.run = lambda cmd, **kw: seen.update(cmd=cmd, **kw) or subprocess.CompletedProcess(cmd, 0, 'claude attach j1', '')
         rt.agents = lambda: [{'id': 'j1', 'sessionId': 's1'}]
         rt.exists = lambda path: True
-        with patch.dict(os.environ, self.env, clear=True):
+        with patch.dict(os.environ, dict(self.env, ORCHD_WORKTREE='/parent-task'), clear=True):
+            self.assertNotIn('ORCHD_WORKTREE', worker_env())
             rt.start_worker('/wt', '/tmp/s', 'brief', 'claude-sonnet-5-5')
             settings = json.loads(seen['cmd'][seen['cmd'].index('--settings') + 1])
             installed = self.root / 'state' / 'worker-bin'
@@ -158,11 +159,13 @@ else:
             self.assertTrue(os.access(installed / 'gh', os.X_OK))
             self.assertEqual((installed / 'gh').read_bytes(), (WRAPPER / 'gh').read_bytes())
             self.assertEqual(settings['crossSessionInbound'], 'accept')
+            self.assertEqual(settings['env']['ORCHD_WORKTREE'], str(Path('/wt').resolve()))
             with patch('orchd.runtime.subprocess.Popen') as popen:
                 rt.spawn(['codex', 'exec'], str(self.repo), str(self.root / 'log'))
                 env = popen.call_args.kwargs['env']
                 self.assertEqual(env['PATH'].split(os.pathsep)[0], str(installed))
                 self.assertEqual(env['GIT_CONFIG_COUNT'], '3')
+                self.assertEqual(env['ORCHD_WORKTREE'], str(self.repo.resolve()))
         self.assertIn('Read-only gh commands need no account switch and no ask', worker_brief('orchd'))
         self.assertIn('Before any outward send', worker_brief('orchd'))
 

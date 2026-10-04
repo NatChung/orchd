@@ -587,16 +587,19 @@ def _close_locked(con, rt, task_id, outcome, rating):
         return dict(task_id=task_id, closed=True, worktree="already closed")
     fields = {k: v for k, v in (("outcome", outcome), ("rating", rating)) if v is not None}
     kept, step = None, f"worker {task['job_id']} not confirmed stopped"
+    cleanup = None
     try:
-        if task["job_id"]:
-            rt.stop_task_worker(worker_kind(task["model"]), task["job_id"],
-                                (task["worktree"], task["session_id"]))
+        if task["job_id"] or task["worktree"]:
+            cleanup = rt.stop_task_worker(worker_kind(task["model"]), task["job_id"],
+                                          (task["worktree"], task["session_id"]))
         step = "worktree check or removal failed"
         if task["worktree"]:
             removable, reason = rt.worktree_state(task["worktree"], task["base"])
             kept = rt.remove_worktree(task["repo_path"], task["worktree"], task["base"]) if removable else reason
     except Exception as e:  # not closed: status stays as it was, so close can simply be run again
         detail = error_detail(e)
+        if cleanup:
+            detail += f"; process cleanup: {json.dumps(cleanup)}"
         store.update_task(con, task_id, note=f"close pending, {step}, worktree kept (run close again): {detail}")
         raise RuntimeError(f"close of {task_id} not finished, {step}"
                            + (f", worktree {task['worktree']} left in place" if task["worktree"] else "")
@@ -610,7 +613,8 @@ def _close_locked(con, rt, task_id, outcome, rating):
         stale = (task["note"] or "").startswith("close pending")
         _record_usage(con, rt, task)
         store.add_message(con, task_id, "close", json.dumps(dict(
-            outcome=fields.get("outcome", task["outcome"]), rating=fields.get("rating", task["rating"]))))
+            outcome=fields.get("outcome", task["outcome"]), rating=fields.get("rating", task["rating"]),
+            **({"process_cleanup": cleanup} if cleanup else {}))))
         store.update_task(con, task_id, status="closed", **fields,
                           note=(f"worktree kept: {kept}" if kept else None if stale else task["note"]))
         con.execute("COMMIT")
@@ -618,7 +622,8 @@ def _close_locked(con, rt, task_id, outcome, rating):
         con.execute("ROLLBACK")
         raise
     return dict(task_id=task_id, closed=True,
-                worktree=f"kept at {task['worktree']} ({kept})" if kept else "removed")
+                worktree=f"kept at {task['worktree']} ({kept})" if kept else "removed",
+                **({"process_cleanup": cleanup} if cleanup else {}))
 
 
 def view(con, rt, task_id):
@@ -673,7 +678,7 @@ def _stop_confirmed(rt, kind, job, marks):
     """Stop exactly this task's job or pid through close's helper and confirm it is gone. A Codex pid counts as
     ours only while its args name this task's worktree or thread, so a reused pid is never killed. A stop that
     cannot be confirmed (still running, or its state unreadable) returns the reason, never a success."""
-    if not job:
+    if not job and not any(marks):
         return None
     try:
         rt.stop_task_worker(kind, job, marks, wait=RETRY_STOP_WAIT * 0.5)

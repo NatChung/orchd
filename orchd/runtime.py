@@ -16,6 +16,7 @@ import uuid
 from pathlib import Path
 
 from . import paths
+from .processes import cleanup_processes, task_processes
 
 
 WORKER_MODELS = {"sol": "gpt-6.1-sol", "sonnet": "claude-sonnet-5-5"}
@@ -69,7 +70,8 @@ def claude_job_alive(jobs, job_id):
 def launch_env():
     """Keep a parent Claude session's variables and Orch id out of the sessions we start (belt and braces:
     the Claude daemon may spawn --bg sessions from its own environment anyway)."""
-    return {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE") and k != "ORCHD_ORCH_ID"}
+    return {k: v for k, v in os.environ.items()
+            if not k.startswith("CLAUDE") and k not in ("ORCHD_ORCH_ID", "ORCHD_WORKTREE")}
 
 
 def worker_bin_dir():
@@ -90,9 +92,11 @@ def worker_bin_dir():
     return str(directory)
 
 
-def worker_env():
+def worker_env(worktree=None):
     """Session-only gh routing; Claude also receives this via settings (daemon launch)."""
     env = launch_env()
+    if worktree:
+        env["ORCHD_WORKTREE"] = str(Path(worktree).resolve())
     env["PATH"] = worker_bin_dir() + os.pathsep + env.get("PATH", os.defpath)
     # Replace even absolute gh credential helpers for GitHub, without writing git config.
     count = int(env.get("GIT_CONFIG_COUNT", "0"))
@@ -153,7 +157,7 @@ class Runtime:
         """Start a detached process that outlives us, stdout+stderr appended to `log`; return its pid."""
         with open(log, "a") as out:
             return subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
-                                    env=worker_env(), start_new_session=True).pid
+                                    env=worker_env(cwd), start_new_session=True).pid
 
     def pid_alive(self, pid):
         try:  # a finished child of this long-lived process stays a zombie, and kill(0) finds it, until reaped
@@ -306,8 +310,9 @@ class Runtime:
     def start_worker(self, worktree, sock, brief, model):
         return self.start_claude(worktree, sock, model, [
             "--dangerously-skip-permissions", "--settings", json.dumps({"crossSessionInbound": "accept",
-                "env": {k: v for k, v in worker_env().items()
+                "env": {k: v for k, v in worker_env(worktree).items()
                         if k == "PATH" or k == "GH_TOKEN" or k == "ORCHD_GH_ACCOUNTS"
+                        or k == "ORCHD_WORKTREE"
                         or k.startswith("GIT_CONFIG_")}}),
             "--append-system-prompt", brief])
 
@@ -402,6 +407,23 @@ class Runtime:
         self.run([self.claude, "stop", job], timeout=30, check=False)
 
     def stop_task_worker(self, kind, job, marks=(), wait=10.0):
+        """Capture task processes before stopping, then clean even detached/reparented children.
+        The first mark is the task worktree; no names or cwd-only matches authorize signals.
+        Cleanup also runs if the vendor stop fails, and its PID receipt is returned to close."""
+        worktree = marks[0] if marks else None
+        processes = task_processes(worktree) if worktree else {}
+        stop_error = None
+        try:
+            if job:
+                self._stop_task_worker(kind, job, marks, wait)
+        except RuntimeError as e:
+            stop_error = e
+        receipt = cleanup_processes(worktree, processes) if worktree else None
+        if stop_error:
+            raise RuntimeError(f"{stop_error}; process cleanup: {json.dumps(receipt)}") from None
+        return receipt
+
+    def _stop_task_worker(self, kind, job, marks=(), wait=10.0):
         """Stop one task's worker and confirm it is gone; raise RuntimeError when that cannot be confirmed (the
         stop failed or timed out while the worker still runs, or its state cannot be read). Only this job/pid is
         touched. Callers keep the worktree and the task open on error, so a later call simply retries."""
@@ -482,7 +504,10 @@ class Runtime:
             if not self.pid_alive(pid):
                 break
             self.sleep(0.2)
-        self.stop_codex(pid)
+        try:
+            self.stop_codex(pid)
+        finally:
+            cleanup_processes(worktree, task_processes(worktree))
         raise RuntimeError("codex exec started no thread: " + Path(log).read_text(errors="replace")[-500:]
                            if self.exists(log) else "codex exec wrote no log")
 
