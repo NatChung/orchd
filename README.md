@@ -142,6 +142,12 @@ Worker 用：`orchd ack`、`orchd progress`、`orchd ask`、`orchd report`、`or
 - [docs/orch-permissions.md](docs/orch-permissions.md)：Claude Orch 的檔案權限
 - [docs/review-merge-policy.md](docs/review-merge-policy.md)：worker 的 review／merge 規則
 
+## 協作
+
+- 改動一律開 branch、推上來開 PR，由 Nat review 後 merge。不要直接推 `main`，也不要自己 merge。
+- 理由：`main` 沒有 branch protection（私有 repo、免費方案不支援），推上 `main` 的東西不會被擋；而 `orchd upgrade` 裝的就是預設 branch 最新的 commit，大家下次升級就會裝到。
+- 想先在自己機器上試 branch：`uv tool install --force --refresh git+ssh://…/orchd@<branch>`，試完 `orchd upgrade` 回到 `main`。
+
 ## 測試
 
 ```sh
