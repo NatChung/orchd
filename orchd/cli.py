@@ -17,6 +17,8 @@
   orchd orchs [--all] [--json] [--restore ID]          live/resumable Orchs; --all includes archived/unknown
   orchd attach ID [--viewer]                  attach an existing Claude Orch (resume its conversation if idle)
   orchd list                                  open tasks, worker/Orch health, unread notification failures
+  orchd goal add|set|show|list|export --md      central goals, audit history, markdown snapshot
+  orchd board --html PATH                     private static project board, no inbox consumption
   orchd watch [--since HH:MM]                 live timeline of Orch <-> worker messages
   orchd summary [--since HH:MM]               per Orch: workers, models, questions, parallelism, tokens
   orchd stats [--since T] [--json]            per Orch x task_type: counts, rework, source-backed tokens, cost estimate
@@ -25,9 +27,11 @@
   orchd close ID                              stop a task's worker and clean its worktree if safe
 """
 import argparse
+import getpass
 import json
 import sys
 import time
+from pathlib import Path
 
 from orchd import core, store
 from orchd.runtime import DEFAULT_ORCH_MODEL, ORCH_MODELS, Runtime
@@ -74,6 +78,31 @@ def main(argv=None):
     ver.add_argument("task_id")
     ver.add_argument("--timeout", type=float)
     sub.add_parser("list")
+    goal = sub.add_parser("goal", help="central goals, audit history and markdown snapshot")
+    goal_sub = goal.add_subparsers(dest="goal_cmd", required=True)
+    from orchd import goals
+    for command in ("add", "set"):
+        mutation = goal_sub.add_parser(command)
+        if command == "add":
+            mutation.add_argument("repo")
+        else:
+            mutation.add_argument("goal_id")
+        mutation.add_argument("--actor", default=f"operator:{getpass.getuser()}", help="audit actor; MCP records Orch id")
+        mutation.add_argument("--fields", type=json.loads, default={}, help="JSON object; null clears optional fields")
+        for field in goals.INPUT_FIELDS:
+            if field == "repo":
+                continue
+            kind = json.loads if field in ("companies", "linked_tasks") else float if field == "v" else int if field == "j" else str
+            mutation.add_argument("--" + field.replace("_", "-"), type=kind, default=argparse.SUPPRESS)
+    goal_sub.add_parser("show").add_argument("goal_id")
+    goal_list = goal_sub.add_parser("list")
+    goal_list.add_argument("--repo")
+    goal_list.add_argument("--status", choices=["active", "waiting", "paused", "done"])
+    export = goal_sub.add_parser("export")
+    export.add_argument("--md", action="store_true", required=True)
+    export.add_argument("--repo")
+    board = sub.add_parser("board", help="render a private static snapshot, without consuming inbox")
+    board.add_argument("--html", required=True, type=Path)
     orchs = sub.add_parser("orchs")
     orchs.add_argument("--json", action="store_true", help="output the complete MCP inventory JSON")
     orchs.add_argument("--all", action="store_true", help="include dead, unknown and archived Orchs")
@@ -96,6 +125,49 @@ def main(argv=None):
     doc.add_argument("--profile", choices=["nat"], help="also check Nat's own machine layout (accounts, SSH aliases, connectors)")
     doc.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+
+    if args.cmd in ("goal", "board"):
+        from orchd import board as board_module, stats
+        # Read operations use a private DB+WAL copy. Migrate only that copy so old DBs render too.
+        read_only = args.cmd == "board" or args.goal_cmd in ("show", "list", "export")
+        snap = con = None
+        try:
+            if read_only:
+                path = store.home() / "orchd.db"
+                if not path.exists():
+                    raise ValueError(f"no orchd DB at {path}")
+                snap = stats.open_snapshot(path)
+                copy_path = snap.con.execute("PRAGMA database_list").fetchone()[2]
+                snap.con.close()
+                snap.con = None
+                con = store.connect(copy_path)
+            else:
+                con = store.connect()
+            if args.cmd == "board":
+                args.html.write_text(board_module.render(board_module.snapshot(con, Runtime())), encoding="utf-8")
+                print(str(args.html))
+            elif args.goal_cmd in ("add", "set"):
+                if not isinstance(args.fields, dict):
+                    raise ValueError("--fields must be a JSON object")
+                fields = dict(args.fields)
+                fields.update({k: getattr(args, k) for k in goals.INPUT_FIELDS if hasattr(args, k)})
+                print(json.dumps(goals.set_goal(con, getattr(args, "goal_id", None), actor=args.actor, **fields),
+                                 ensure_ascii=False, indent=1))
+            elif args.goal_cmd == "show":
+                print(json.dumps(goals.get(con, args.goal_id, history=True), ensure_ascii=False, indent=1))
+            elif args.goal_cmd == "list":
+                print(json.dumps(goals.list_goals(con, args.repo, args.status), ensure_ascii=False, indent=1))
+            else:
+                print(goals.export_md(con, args.repo))
+            return 0
+        except (ValueError, KeyError, OSError, stats.SnapshotError) as error:
+            print(f"orchd {args.cmd}: {error}", file=sys.stderr)
+            return 1
+        finally:
+            if con is not None:
+                con.close()
+            if snap is not None:
+                snap.close()
 
     if args.cmd == "doctor":  # read-only; must not touch the DB
         from orchd import doctor

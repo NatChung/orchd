@@ -16,7 +16,7 @@ import re
 import sys
 import traceback
 
-from . import core, entry, inventory, store, verify as verification
+from . import core, entry, goals, inventory, store, verify as verification
 from .runtime import DEFAULT_WORKER_MODEL, WORKER_MODELS, Runtime
 
 TOOLS = [
@@ -44,6 +44,8 @@ TOOLS = [
          "model": {"type": "string", "enum": list(WORKER_MODELS), "default": DEFAULT_WORKER_MODEL,
                    "description": "sol = GPT-6.1 Sol on Codex, the default and preferred worker; "
                                   "sonnet = Claude Sonnet 5.5, use when switching to another vendor"},
+         "goal_id": {"type": "string", "description": "Central goal id; must belong to repo"},
+         "goal_critical": {"type": "boolean", "description": "Requires goal_id; whether the task is critical to that goal"},
          "backend": {"type": "string", "enum": ["exec", "app-server"], "default": "exec",
                      "description": "Opt-in Codex app-server; default exec remains unchanged"},
          "model_reason": {"type": "string", "description": "One sentence: why this model for this task"},
@@ -193,6 +195,32 @@ TOOLS += [
          "quote_worker_question": {"type": "boolean"}}}},
 ]
 
+GOAL_PROPERTIES = {key: {"type": "string"} for key in goals.TEXT_FIELDS}
+GOAL_PROPERTIES.update({key: {"type": ["string", "null"], "description": "YYYY-MM-DD or null"}
+                        for key in goals.DATE_FIELDS})
+GOAL_PROPERTIES.update(companies={"type": "array", "items": {"type": "string"}},
+                       v={"type": ["number", "null"], "minimum": 0, "maximum": 10,
+                          "description": "Record Nat's approved value; null means unknown"},
+                       j={"type": "integer", "enum": [1, 2, 3, 5, 8]})
+GOAL_PROPERTIES["linked_tasks"] = {"type": "array", "description": "Explicit replacement; omit to preserve links, [] to unlink all",
+    "items": {"type": "object", "required": ["task_id", "goal_critical"], "additionalProperties": False,
+              "properties": {"task_id": {"type": "string"}, "goal_critical": {"type": "boolean"}}}}
+GOAL_PROPERTIES["type"]["enum"] = ["goal", "continuous"]
+GOAL_PROPERTIES["status"]["enum"] = ["active", "waiting", "paused", "done"]
+TOOLS += [
+    {"name": "goal_list", "annotations": {"readOnlyHint": True},
+     "description": "Read central project goals and linked tasks; includes paused/done. No inbox consumption.",
+     "inputSchema": {"type": "object", "properties": {
+         "repo": {"type": "string"}, "status": {"type": "string", "enum": ["active", "waiting", "paused", "done"]}}}},
+    {"name": "goal_set", "annotations": {"readOnlyHint": False},
+     "description": "Create (omit goal_id, supply repo) or update a central goal. Records caller, time and before/after history. "
+                    "Only record Nat-approved V; no automatic value judgment.",
+     "inputSchema": {"type": "object", "required": ["fields"], "properties": {
+         "goal_id": {"type": "string"},
+         "fields": {"type": "object", "additionalProperties": False, "properties": GOAL_PROPERTIES}}}},
+]
+
+
 ENTRY_TOOLS = [
     {"name": "foreground",
      "description": "Open a new Ghostty window for the bound Orch ({target: 'orch'}) or its worker "
@@ -240,6 +268,12 @@ ENTRY_INSTRUCTIONS = (
 
 
 def call(name, args, thread, con, rt):
+    if name == "goal_list":
+        return goals.list_goals(con, args.get("repo"), args.get("status"))
+    if name == "goal_set":
+        if not thread:
+            raise ValueError("goal_set needs the caller's thread id for history")
+        return goals.set_goal(con, args.get("goal_id"), actor=f"orch:{thread}", **args.get("fields", {}))
     if name == "dispatch":
         t = core.dispatch(con, rt, orch_thread=thread, repo=args["repo"], title=args["title"],
                           instructions=args["instructions"], done_when=args["done_when"],
@@ -247,7 +281,8 @@ def call(name, args, thread, con, rt):
                           task_type=args.get("task_type"), rework_of=args.get("rework_of"),
                           found_by=args.get("found_by"), verify=args.get("verify"),
                           manual_checks=args.get("manual_checks"), verifies=args.get("verifies"),
-                          backend=args.get("backend", "exec"))
+                          backend=args.get("backend", "exec"), goal_id=args.get("goal_id"),
+                          goal_critical=args.get("goal_critical"))
         return {"task_id": t["id"], "status": t["status"], "branch": t["branch"], "worktree": t["worktree"],
                 "orch_id": thread, "model": t["model"],
                 "other_open_on_repo": core.other_open_on_repo(con, t["repo"], thread, t["id"])}

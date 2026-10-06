@@ -124,6 +124,8 @@ MCP `list_orchs` 的文字內容維持完整 JSON（包含 dead、unknown、arch
 | `orchd orchs --restore ID` | 解除封存並重設死亡觀察窗口，保留所有歷史 |
 | `orchd attach ID [--viewer]` | 接回指定 Claude Orch；`--viewer` 用 Ghostty 開窗 |
 | `orchd list` | 未結任務、worker／Orch 健康、通知失敗 |
+| `orchd goal add\|set\|show\|list\|export --md` | 中央專案目標、變更歷史、markdown 快照 |
+| `orchd board --html PATH` | 靜態專案看板；唯讀快照、不消費 inbox |
 | `orchd watch [--since HH:MM]` | 即時看 Orch 與 worker 的訊息 |
 | `orchd summary [--since HH:MM]` | 每個 Orch 的 worker、模型、問題、token |
 | `orchd stats [--since T] [--json]` | 每個 Orch × 任務類型的數量、重工、token、成本估算 |
@@ -137,6 +139,7 @@ Worker 用：`orchd ack`、`orchd progress`、`orchd ask`、`orchd report`、`or
 ## 文件
 
 - [docs/entry.md](docs/entry.md)：interface 的工具、交付狀態、入口模型測試與未驗證項目
+- [docs/goals-board.md](docs/goals-board.md)：中央 goals、優先分數、看板、#76 PG 表匯入步驟
 - [docs/decisions.md](docs/decisions.md)：系統決策紀錄
 - [docs/adr/](docs/adr/)：架構決策
 - [docs/orch-permissions.md](docs/orch-permissions.md)：Claude Orch 的檔案權限

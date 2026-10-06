@@ -116,7 +116,7 @@ def _choice(name, value, valid):
 
 def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, model=DEFAULT_WORKER_MODEL,
              model_reason=None, task_type=None, rework_of=None, found_by=None, verify=None, manual_checks=None,
-             verifies=None, backend="exec"):
+             verifies=None, backend="exec", goal_id=None, goal_critical=None):
     if not orch_thread:
         raise ValueError("dispatch needs the caller's thread id")
     _choice("model", model, tuple(WORKER_MODELS))
@@ -142,21 +142,26 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
     _choice("backend", backend, ("exec", "app-server"))
     if backend == "app-server" and worker_kind(WORKER_MODELS[model]) != "codex":
         raise ValueError("app-server backend requires a Codex model")
+    from . import goals
+    goals.validate_link(con, repo, goal_id, goal_critical)
     repo_path = rt.repo_path(repo)
     kind = worker_kind(WORKER_MODELS[model])
     if kind == "claude" and not rt.claude_trusted(repo_path):
         raise ValueError(f"Claude has not trusted {repo_path}. Ask Nat to run `claude` there once and accept "
                          "the trust prompt, then dispatch again.")
     task_id = store.new_task_id()
-    task = store.create_task(con, id=task_id, repo=repo, repo_path=str(repo_path), title=title,
-                             instructions=instructions, done_when=done_when,
-                             orch_thread=orch_thread, codex_bin=rt.codex, model=WORKER_MODELS[model],
-                             model_reason=model_reason, task_type=task_type, rework_of=rework_of, found_by=found_by,
-                             verify=verify, manual_checks=manual_checks, verifies=verifies, backend=backend)
+    with store.immediate(con) if goal_id is not None else contextlib.nullcontext():
+        task = store.create_task(con, id=task_id, repo=repo, repo_path=str(repo_path), title=title,
+                                 instructions=instructions, done_when=done_when,
+                                 orch_thread=orch_thread, codex_bin=rt.codex, model=WORKER_MODELS[model],
+                                 model_reason=model_reason, task_type=task_type, rework_of=rework_of, found_by=found_by,
+                                 verify=verify, manual_checks=manual_checks, verifies=verifies, backend=backend,
+                                 goal_id=goal_id, goal_critical=goal_critical)
+        goals.record_dispatch(con, goal_id, task_id, f"orch:{orch_thread}")
     spec = {k: v for k, v in dict(verify=verify, manual_checks=manual_checks, verifies=verifies).items() if v}
     store.add_message(con, task_id, "dispatch", json.dumps(
         dict(model=WORKER_MODELS[model], model_reason=model_reason, task_type=task_type,
-             rework_of=rework_of, found_by=found_by, **spec), ensure_ascii=False))
+             rework_of=rework_of, found_by=found_by, goal_id=goal_id, goal_critical=goal_critical, **spec), ensure_ascii=False))
     try:
         base, branch, worktree = rt.create_worktree(repo_path, repo, task_id)
         store.update_task(con, task_id, base=base, branch=branch, worktree=worktree)
@@ -695,7 +700,8 @@ def list_open(con, rt):
         else:
             alive = claude_job_alive(jobs, t["job_id"])
         out.append(dict(task_id=t["id"], repo=t["repo"], title=t["title"], status=t["status"],
-                        model=task_model(t), worker_alive=alive, worktree=t["worktree"], branch=t["branch"],
+                        model=task_model(t), worker_alive=alive, goal_id=t["goal_id"], goal_critical=t["goal_critical"],
+                        worktree=t["worktree"], branch=t["branch"],
                         orch_thread=t["orch_thread"], note=t["note"], backend=t["backend"],
                         generation=t["generation"], turn_state=t["turn_state"],
                         uncertain_delivery=bool(con.execute("SELECT 1 FROM worker_deliveries WHERE task_id=? "

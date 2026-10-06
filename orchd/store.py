@@ -29,6 +29,42 @@ CREATE TABLE IF NOT EXISTS tasks(
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS goals(
+    id TEXT PRIMARY KEY,
+    repo TEXT NOT NULL,
+    type TEXT NOT NULL DEFAULT 'goal' CHECK(type IN ('goal','continuous')),
+    intent TEXT NOT NULL DEFAULT '',
+    pg TEXT NOT NULL DEFAULT '',
+    sprint_goal TEXT NOT NULL DEFAULT '',
+    sprint_start TEXT,
+    sprint_end TEXT,
+    done_when TEXT NOT NULL DEFAULT '',
+    evidence TEXT NOT NULL DEFAULT '',
+    authority TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','waiting','paused','done')),
+    ball TEXT NOT NULL DEFAULT '',
+    blocker TEXT NOT NULL DEFAULT '',
+    follow_up_date TEXT,
+    source TEXT NOT NULL DEFAULT '',
+    last_confirmed_date TEXT,
+    companies TEXT NOT NULL DEFAULT '[]',
+    plan TEXT NOT NULL DEFAULT '',
+    v REAL CHECK(v BETWEEN 0 AND 10),
+    j INTEGER NOT NULL DEFAULT 1 CHECK(j IN (1,2,3,5,8)),
+    deadline TEXT,
+    last_progress_date TEXT,
+    waiting_nat_since TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS goal_history(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    goal_id TEXT NOT NULL REFERENCES goals(id),
+    actor TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    changes TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS goal_history_goal ON goal_history(goal_id, id);
 CREATE TABLE IF NOT EXISTS worker_deliveries(
     id TEXT PRIMARY KEY, task_id TEXT NOT NULL, generation TEXT NOT NULL,
     thread_id TEXT NOT NULL, turn_id TEXT, message_ids TEXT NOT NULL,
@@ -94,7 +130,8 @@ CREATE TABLE IF NOT EXISTS entry_messages(
 """
 
 # Columns added after v1. Nullable so old rows and old code keep working against the same DB.
-TASK_COLUMNS = ("model TEXT", "model_reason TEXT", "task_type TEXT", "rework_of TEXT",
+TASK_COLUMNS = ("goal_id TEXT REFERENCES goals(id)", "goal_critical INTEGER CHECK(goal_critical IN (0,1))",
+                "model TEXT", "model_reason TEXT", "task_type TEXT", "rework_of TEXT",
                 "found_by TEXT", "outcome TEXT", "rating INTEGER",
                 "verify TEXT", "manual_checks TEXT", "verifies TEXT",
                 "backend TEXT NOT NULL DEFAULT 'exec'", "generation TEXT", "endpoint TEXT",
