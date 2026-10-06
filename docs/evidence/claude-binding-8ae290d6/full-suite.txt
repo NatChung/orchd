@@ -1,0 +1,745 @@
+....../Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x107447e20>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x107447f10>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x10756c040>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x10756c130>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x10756c310>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x10756c220>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+............../Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:244: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x107447f10>
+  row = con.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:244: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x107447e20>
+  row = con.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:244: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x10756c220>
+  row = con.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:244: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x10756cc70>
+  row = con.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:244: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x10756c040>
+  row = con.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:244: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x106d7b5b0>
+  row = con.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:244: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x106d7b880>
+  row = con.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:244: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x10756c310>
+  row = con.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+.............................................................................../Users/natchung/.local/share/uv/python/cpython-3.13.15-macos-aarch64-none/lib/python3.13/subprocess.py:1140: ResourceWarning: subprocess 67058 is still running
+  _warn("subprocess %s is still running" % self.pid,
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+../Users/natchung/.local/share/uv/python/cpython-3.13.15-macos-aarch64-none/lib/python3.13/subprocess.py:1140: ResourceWarning: subprocess 67084 is still running
+  _warn("subprocess %s is still running" % self.pid,
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+./Users/natchung/.local/share/uv/python/cpython-3.13.15-macos-aarch64-none/lib/python3.13/subprocess.py:1140: ResourceWarning: subprocess 67361 is still running
+  _warn("subprocess %s is still running" % self.pid,
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+........./Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:244: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1072063e0>
+  row = con.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:244: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dc9a0>
+  row = con.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:244: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dd120>
+  row = con.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:244: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dd300>
+  row = con.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+..../Users/natchung/.local/share/uv/python/cpython-3.13.15-macos-aarch64-none/lib/python3.13/unittest/case.py:655: ResourceWarning: unclosed file <_io.TextIOWrapper name=31 encoding='UTF-8'>
+  self.doCleanups()
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+............./Users/natchung/.local/share/uv/tools/orchd/lib/python3.13/site-packages/psutil/_common.py:216: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1072062f0>
+  def __init__(self, pid, name=None, msg=None):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/.local/share/uv/tools/orchd/lib/python3.13/site-packages/psutil/_common.py:216: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x10756e6b0>
+  def __init__(self, pid, name=None, msg=None):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/.local/share/uv/tools/orchd/lib/python3.13/site-packages/psutil/_common.py:216: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x10756f970>
+  def __init__(self, pid, name=None, msg=None):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/.local/share/uv/tools/orchd/lib/python3.13/site-packages/psutil/_common.py:216: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x10756ec50>
+  def __init__(self, pid, name=None, msg=None):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/.local/share/uv/tools/orchd/lib/python3.13/site-packages/psutil/_common.py:216: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x10763bb50>
+  def __init__(self, pid, name=None, msg=None):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/.local/share/uv/tools/orchd/lib/python3.13/site-packages/psutil/_common.py:216: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dd300>
+  def __init__(self, pid, name=None, msg=None):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/.local/share/uv/tools/orchd/lib/python3.13/site-packages/psutil/_common.py:216: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dd3f0>
+  def __init__(self, pid, name=None, msg=None):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/.local/share/uv/tools/orchd/lib/python3.13/site-packages/psutil/_common.py:216: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dd120>
+  def __init__(self, pid, name=None, msg=None):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/.local/share/uv/tools/orchd/lib/python3.13/site-packages/psutil/_common.py:216: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dd210>
+  def __init__(self, pid, name=None, msg=None):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/.local/share/uv/tools/orchd/lib/python3.13/site-packages/psutil/_common.py:216: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dd8a0>
+  def __init__(self, pid, name=None, msg=None):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/.local/share/uv/tools/orchd/lib/python3.13/site-packages/psutil/_common.py:216: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dcb80>
+  def __init__(self, pid, name=None, msg=None):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/.local/share/uv/tools/orchd/lib/python3.13/site-packages/psutil/_common.py:216: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1072d0c70>
+  def __init__(self, pid, name=None, msg=None):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/.local/share/uv/tools/orchd/lib/python3.13/site-packages/psutil/_common.py:216: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076ddc60>
+  def __init__(self, pid, name=None, msg=None):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+..................................................................................................................Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 406, in handle
+    data = call(params.get("name"), params.get("arguments") or {}, thread, con, rt)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 302, in call
+    text = entry.reply_text(con, thread, args["entry_reply_id"], args["task_id"])
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/entry.py", line 548, in reply_text
+    raise ValueError(f"entry message {reply_id} answers question {row['reply_to']} of task {row['task_id']}, "
+                     f"not task {task_id}")
+ValueError: entry message 2 answers question 1 of task 9453f829, not task 1415cf42
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 406, in handle
+    data = call(params.get("name"), params.get("arguments") or {}, thread, con, rt)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 302, in call
+    text = entry.reply_text(con, thread, args["entry_reply_id"], args["task_id"])
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/entry.py", line 545, in reply_text
+    raise ValueError(f"entry message {reply_id} is not a reply to a question; ask again with "
+                     "ask_nat(task_id=...) so Nat's answer carries reply_to")
+ValueError: entry message 3 is not a reply to a question; ask again with ask_nat(task_id=...) so Nat's answer carries reply_to
+..orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 367, in entry_call
+    raise PermissionError(f"{name} is not available to the Desktop entry")
+PermissionError: dispatch is not available to the Desktop entry
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 367, in entry_call
+    raise PermissionError(f"{name} is not available to the Desktop entry")
+PermissionError: answer is not available to the Desktop entry
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 367, in entry_call
+    raise PermissionError(f"{name} is not available to the Desktop entry")
+PermissionError: close is not available to the Desktop entry
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 367, in entry_call
+    raise PermissionError(f"{name} is not available to the Desktop entry")
+PermissionError: retry is not available to the Desktop entry
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 367, in entry_call
+    raise PermissionError(f"{name} is not available to the Desktop entry")
+PermissionError: followup is not available to the Desktop entry
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 367, in entry_call
+    raise PermissionError(f"{name} is not available to the Desktop entry")
+PermissionError: inbox is not available to the Desktop entry
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 367, in entry_call
+    raise PermissionError(f"{name} is not available to the Desktop entry")
+PermissionError: send_to_nat is not available to the Desktop entry
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 367, in entry_call
+    raise PermissionError(f"{name} is not available to the Desktop entry")
+PermissionError: ask_nat is not available to the Desktop entry
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 367, in entry_call
+    raise PermissionError(f"{name} is not available to the Desktop entry")
+PermissionError: entry_inbox is not available to the Desktop entry
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 367, in entry_call
+    raise PermissionError(f"{name} is not available to the Desktop entry")
+PermissionError: list_open is not available to the Desktop entry
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 367, in entry_call
+    raise PermissionError(f"{name} is not available to the Desktop entry")
+PermissionError: view_worker is not available to the Desktop entry
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 367, in entry_call
+    raise PermissionError(f"{name} is not available to the Desktop entry")
+PermissionError: dispatch is not available to the Desktop entry
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 372, in entry_call
+    raise PermissionError(f"unexpected argument(s) {', '.join(sorted(extra))}; the entry passes ids only")
+PermissionError: unexpected argument(s) text; the entry passes ids only
+orchd entry meta keys: ['threadId']
+................................orchd entry meta keys: ['threadId']
+orchd entry meta keys: ['threadId']
+.orchd entry meta keys: ['threadId']
+.orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 376, in entry_call
+    return entry_foreground(args, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 346, in entry_foreground
+    raise PermissionError(f"task {target} does not belong to this entry's bound Orch")
+PermissionError: task abcdef12 does not belong to this entry's bound Orch
+orchd entry meta keys: ['threadId']
+.orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 376, in entry_call
+    return entry_foreground(args, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 347, in entry_foreground
+    core.view(con, rt, target)
+    ~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/core.py", line 818, in view
+    raise ValueError(f"task {task_id}'s codex worker is in a turn; `orchd watch` shows its progress")
+ValueError: task abcdef12's codex worker is in a turn; `orchd watch` shows its progress
+orchd entry meta keys: ['threadId']
+.orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 376, in entry_call
+    return entry_foreground(args, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 347, in entry_foreground
+    core.view(con, rt, target)
+    ~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/core.py", line 821, in view
+    rt.open_viewer(task["job_id"])
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "/Users/natchung/.local/share/uv/python/cpython-3.13.15-macos-aarch64-none/lib/python3.13/unittest/mock.py", line 1169, in __call__
+    return self._mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/Users/natchung/.local/share/uv/python/cpython-3.13.15-macos-aarch64-none/lib/python3.13/unittest/mock.py", line 1173, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/Users/natchung/.local/share/uv/python/cpython-3.13.15-macos-aarch64-none/lib/python3.13/unittest/mock.py", line 1234, in _execute_mock_call
+    raise effect
+OSError: Ghostty unavailable
+.orchd entry meta keys: ['threadId']
+.orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 376, in entry_call
+    return entry_foreground(args, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 359, in entry_foreground
+    raise ValueError("foreground accepts only {target: 'orch'} or {task_id: '<8-hex id>'}")
+ValueError: foreground accepts only {target: 'orch'} or {task_id: '<8-hex id>'}
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 369, in entry_call
+    raise ValueError("entry tool arguments must be an object")
+ValueError: entry tool arguments must be an object
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 369, in entry_call
+    raise ValueError("entry tool arguments must be an object")
+ValueError: entry tool arguments must be an object
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 369, in entry_call
+    raise ValueError("entry tool arguments must be an object")
+ValueError: entry tool arguments must be an object
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 376, in entry_call
+    return entry_foreground(args, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 359, in entry_foreground
+    raise ValueError("foreground accepts only {target: 'orch'} or {task_id: '<8-hex id>'}")
+ValueError: foreground accepts only {target: 'orch'} or {task_id: '<8-hex id>'}
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 376, in entry_call
+    return entry_foreground(args, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 359, in entry_foreground
+    raise ValueError("foreground accepts only {target: 'orch'} or {task_id: '<8-hex id>'}")
+ValueError: foreground accepts only {target: 'orch'} or {task_id: '<8-hex id>'}
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 376, in entry_call
+    return entry_foreground(args, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 359, in entry_foreground
+    raise ValueError("foreground accepts only {target: 'orch'} or {task_id: '<8-hex id>'}")
+ValueError: foreground accepts only {target: 'orch'} or {task_id: '<8-hex id>'}
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 372, in entry_call
+    raise PermissionError(f"unexpected argument(s) {', '.join(sorted(extra))}; the entry passes ids only")
+PermissionError: unexpected argument(s) orch_id; the entry passes ids only
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 376, in entry_call
+    return entry_foreground(args, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 359, in entry_foreground
+    raise ValueError("foreground accepts only {target: 'orch'} or {task_id: '<8-hex id>'}")
+ValueError: foreground accepts only {target: 'orch'} or {task_id: '<8-hex id>'}
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 376, in entry_call
+    return entry_foreground(args, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 359, in entry_foreground
+    raise ValueError("foreground accepts only {target: 'orch'} or {task_id: '<8-hex id>'}")
+ValueError: foreground accepts only {target: 'orch'} or {task_id: '<8-hex id>'}
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 376, in entry_call
+    return entry_foreground(args, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 359, in entry_foreground
+    raise ValueError("foreground accepts only {target: 'orch'} or {task_id: '<8-hex id>'}")
+ValueError: foreground accepts only {target: 'orch'} or {task_id: '<8-hex id>'}
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 376, in entry_call
+    return entry_foreground(args, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 359, in entry_foreground
+    raise ValueError("foreground accepts only {target: 'orch'} or {task_id: '<8-hex id>'}")
+ValueError: foreground accepts only {target: 'orch'} or {task_id: '<8-hex id>'}
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 376, in entry_call
+    return entry_foreground(args, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 359, in entry_foreground
+    raise ValueError("foreground accepts only {target: 'orch'} or {task_id: '<8-hex id>'}")
+ValueError: foreground accepts only {target: 'orch'} or {task_id: '<8-hex id>'}
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 372, in entry_call
+    raise PermissionError(f"unexpected argument(s) {', '.join(sorted(extra))}; the entry passes ids only")
+PermissionError: unexpected argument(s) command; the entry passes ids only
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 372, in entry_call
+    raise PermissionError(f"unexpected argument(s) {', '.join(sorted(extra))}; the entry passes ids only")
+PermissionError: unexpected argument(s) command; the entry passes ids only
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 372, in entry_call
+    raise PermissionError(f"unexpected argument(s) {', '.join(sorted(extra))}; the entry passes ids only")
+PermissionError: unexpected argument(s) path; the entry passes ids only
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 372, in entry_call
+    raise PermissionError(f"unexpected argument(s) {', '.join(sorted(extra))}; the entry passes ids only")
+PermissionError: unexpected argument(s) path; the entry passes ids only
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 372, in entry_call
+    raise PermissionError(f"unexpected argument(s) {', '.join(sorted(extra))}; the entry passes ids only")
+PermissionError: unexpected argument(s) socket; the entry passes ids only
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 372, in entry_call
+    raise PermissionError(f"unexpected argument(s) {', '.join(sorted(extra))}; the entry passes ids only")
+PermissionError: unexpected argument(s) socket; the entry passes ids only
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 372, in entry_call
+    raise PermissionError(f"unexpected argument(s) {', '.join(sorted(extra))}; the entry passes ids only")
+PermissionError: unexpected argument(s) url; the entry passes ids only
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 372, in entry_call
+    raise PermissionError(f"unexpected argument(s) {', '.join(sorted(extra))}; the entry passes ids only")
+PermissionError: unexpected argument(s) url; the entry passes ids only
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 372, in entry_call
+    raise PermissionError(f"unexpected argument(s) {', '.join(sorted(extra))}; the entry passes ids only")
+PermissionError: unexpected argument(s) unknown; the entry passes ids only
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 372, in entry_call
+    raise PermissionError(f"unexpected argument(s) {', '.join(sorted(extra))}; the entry passes ids only")
+PermissionError: unexpected argument(s) unknown; the entry passes ids only
+.orchd entry meta keys: ['threadId']
+Resuming Orch ob837265's saved conversation before attach.
+.orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 376, in entry_call
+    return entry_foreground(args, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 344, in entry_foreground
+    task = store.get_task(con, target)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py", line 246, in get_task
+    raise KeyError(f"unknown task {task_id}")
+KeyError: 'unknown task abcdef12'
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 376, in entry_call
+    return entry_foreground(args, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 346, in entry_foreground
+    raise PermissionError(f"task {target} does not belong to this entry's bound Orch")
+PermissionError: task abcdef12 does not belong to this entry's bound Orch
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 376, in entry_call
+    return entry_foreground(args, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 331, in entry_foreground
+    bound = entry.get_entry(con, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/entry.py", line 39, in get_entry
+    raise ValueError(f"entry {entry_id} is not bound to an Orch; Nat binds it with `orchd binding`")
+ValueError: entry desktop is not bound to an Orch; Nat binds it with `orchd binding`
+orchd entry meta keys: ['threadId']
+Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 399, in handle
+    data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 376, in entry_call
+    return entry_foreground(args, con, rt, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 343, in entry_foreground
+    bound = entry.get_entry(con, entry_id)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/entry.py", line 39, in get_entry
+    raise ValueError(f"entry {entry_id} is not bound to an Orch; Nat binds it with `orchd binding`")
+ValueError: entry desktop is not bound to an Orch; Nat binds it with `orchd binding`
+............................Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 406, in handle
+    data = call(params.get("name"), params.get("arguments") or {}, thread, con, rt)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 324, in call
+    return core.followup(con, rt, args["task_id"], args.get("message"))
+           ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/core.py", line 643, in followup
+    task = store.get_task(con, task_id)  # KeyError for a missing task
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py", line 246, in get_task
+    raise KeyError(f"unknown task {task_id}")
+KeyError: 'unknown task nope'
+....Claude binding: binary=/Users/natchung/.local/share/claude/versions/2.1.291, version=claude attach j1, protocol=cross-session JSONL user frame (--messaging-socket-path)
+............../Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:407: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076ddd50>
+  con.execute("COMMIT")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:407: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1072d1b70>
+  con.execute("COMMIT")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+.......................................Claude binding: binary=/Users/natchung/.local/share/claude/versions/2.1.291, version=2.1.291, protocol=cross-session JSONL user frame (--messaging-socket-path)
+Claude binding: session exists, waiting for messaging socket; Claude >=2.1.290 restricted sessions ignore the socket flag.
+................................................/Users/natchung/.local/share/uv/python/cpython-3.13.15-macos-aarch64-none/lib/python3.13/subprocess.py:1140: ResourceWarning: subprocess 79457 is still running
+  _warn("subprocess %s is still running" % self.pid,
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+...................../Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1072d27a0>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x10763bb50>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076df4c0>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x107444220>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1072d1300>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1072d3c40>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076ddd50>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dd7b0>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dc6d0>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dda80>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dcc70>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076df1f0>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076df100>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076df010>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076def20>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dd8a0>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dcb80>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076ddc60>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076df790>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076df880>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076df970>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dfa60>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1074444f0>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1074446d0>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dfb50>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+..........Claude binding: binary=/Users/natchung/.local/share/claude/versions/2.1.291, version=claude attach j1, protocol=cross-session JSONL user frame (--messaging-socket-path)
+....Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 406, in handle
+    data = call(params.get("name"), params.get("arguments") or {}, thread, con, rt)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 278, in call
+    t = core.dispatch(con, rt, orch_thread=thread, repo=args["repo"], title=args["title"],
+                      instructions=args["instructions"], done_when=args["done_when"],
+    ...<4 lines>...
+                      backend=args.get("backend", "exec"), goal_id=args.get("goal_id"),
+                      goal_critical=args.get("goal_critical"))
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/core.py", line 147, in dispatch
+    repo_path = rt.repo_path(repo)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/tests/test_orchd.py", line 26, in repo_path
+    raise ValueError("not a repo")
+ValueError: not a repo
+............./Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:176: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1074446d0>
+  con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:176: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1074444f0>
+  con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:176: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x107444220>
+  con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:176: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x10756e6b0>
+  con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:176: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x10763bb50>
+  con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:176: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1072d3c40>
+  con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:176: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1072d1300>
+  con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:176: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1072d3b50>
+  con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:176: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1072d27a0>
+  con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:176: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1072d07c0>
+  con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:176: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1072d1990>
+  con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:176: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1072d3100>
+  con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:176: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dfb50>
+  con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:176: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076df970>
+  con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:176: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076df880>
+  con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:176: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dfa60>
+  con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:176: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076df790>
+  con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:176: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076ddc60>
+  con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:176: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dcb80>
+  con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:176: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dd8a0>
+  con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+......./Users/natchung/.local/share/uv/python/cpython-3.13.15-macos-aarch64-none/lib/python3.13/pathlib/_local.py:277: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076df970>
+  @property
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+............/Users/natchung/.local/share/uv/python/cpython-3.13.15-macos-aarch64-none/lib/python3.13/pathlib/_local.py:277: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1072d1300>
+  @property
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/.local/share/uv/python/cpython-3.13.15-macos-aarch64-none/lib/python3.13/pathlib/_local.py:277: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1072d3b50>
+  @property
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/.local/share/uv/python/cpython-3.13.15-macos-aarch64-none/lib/python3.13/pathlib/_local.py:277: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dda80>
+  @property
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+.............Traceback (most recent call last):
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 406, in handle
+    data = call(params.get("name"), params.get("arguments") or {}, thread, con, rt)
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/mcp_server.py", line 320, in call
+    t = core.retry(con, rt, args["task_id"], args.get("model"), args.get("reason"), backend=args.get("backend"))
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/core.py", line 963, in retry
+    _choice("model", model, tuple(WORKER_MODELS))
+    ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/core.py", line 114, in _choice
+    raise ValueError(f"unknown {name} {value!r}; use one of {', '.join(valid)}")
+ValueError: unknown model 'opus'; use one of sol, sonnet
+.../Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dfe20>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dff10>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dda80>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x107998040>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x107998130>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x107998220>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x107998310>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x107998400>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1079984f0>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1079985e0>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1079986d0>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x107445210>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/projects/.orchd-worktrees/orchd-8ae290d6/orchd/store.py:168: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1074453f0>
+  con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+........................................................................................................................................................................................................./Users/natchung/.local/share/uv/python/cpython-3.13.15-macos-aarch64-none/lib/python3.13/unittest/mock.py:2253: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1074453f0>
+  def __init__(self, name, parent):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/.local/share/uv/python/cpython-3.13.15-macos-aarch64-none/lib/python3.13/unittest/mock.py:2253: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x107445210>
+  def __init__(self, name, parent):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/.local/share/uv/python/cpython-3.13.15-macos-aarch64-none/lib/python3.13/unittest/mock.py:2253: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dda80>
+  def __init__(self, name, parent):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/.local/share/uv/python/cpython-3.13.15-macos-aarch64-none/lib/python3.13/unittest/mock.py:2253: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dff10>
+  def __init__(self, name, parent):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/.local/share/uv/python/cpython-3.13.15-macos-aarch64-none/lib/python3.13/unittest/mock.py:2253: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1076dfe20>
+  def __init__(self, name, parent):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+/Users/natchung/.local/share/uv/python/cpython-3.13.15-macos-aarch64-none/lib/python3.13/unittest/mock.py:2253: ResourceWarning: unclosed database in <sqlite3.Connection object at 0x1079986d0>
+  def __init__(self, name, parent):
+ResourceWarning: Enable tracemalloc to get the object allocation traceback
+....
+----------------------------------------------------------------------
+Ran 705 tests in 264.746s
+
+OK
+{"status": "delivered", "delivered": 1, "pending": 0}

@@ -1,0 +1,261 @@
+[
+  {
+    "label": "binding",
+    "passed": true,
+    "result": [
+      "/tmp/orchd-o-8ae2fullcomm2-2.1.291/o.sock",
+      "08241177",
+      "08241177-abf0-445c-bbdc-2819f5cb8be9"
+    ],
+    "seconds": 3.959983624983579,
+    "socket": {
+      "path": "/tmp/orchd-o-8ae2fullcomm2-2.1.291/o.sock",
+      "inode": 52913981,
+      "mtime_ns": 1791272221918031098,
+      "size": 0
+    }
+  },
+  {
+    "label": "entry_binding",
+    "result": {
+      "entry_id": "desktop",
+      "orch_id": "8ae2fullcomm2-2.1.291",
+      "model": "opus",
+      "orch_health": {
+        "state": "alive",
+        "reason": "job_present"
+      },
+      "notice": "sent"
+    }
+  },
+  {
+    "label": "e2e",
+    "events": [
+      {
+        "type": "tool_use",
+        "id": "toolu_016QgSsmxz9TfYWvPT5ceRrq",
+        "name": "ToolSearch",
+        "input": {
+          "query": "orchd dispatch inbox answer send_to_nat",
+          "max_results": 10
+        },
+        "caller": {
+          "type": "direct"
+        }
+      },
+      {
+        "type": "tool_result",
+        "tool_use_id": "toolu_016QgSsmxz9TfYWvPT5ceRrq",
+        "content": [
+          {
+            "type": "tool_reference",
+            "tool_name": "mcp__orchd__answer"
+          },
+          {
+            "type": "tool_reference",
+            "tool_name": "mcp__orchd__dispatch"
+          },
+          {
+            "type": "tool_reference",
+            "tool_name": "mcp__orchd__inbox"
+          },
+          {
+            "type": "tool_reference",
+            "tool_name": "mcp__orchd__entry_inbox"
+          },
+          {
+            "type": "tool_reference",
+            "tool_name": "mcp__orchd__send_to_nat"
+          },
+          {
+            "type": "tool_reference",
+            "tool_name": "mcp__orchd__lock_verify"
+          },
+          {
+            "type": "tool_reference",
+            "tool_name": "mcp__orchd__ask_nat"
+          },
+          {
+            "type": "tool_reference",
+            "tool_name": "mcp__orchd__followup"
+          },
+          {
+            "type": "tool_reference",
+            "tool_name": "mcp__orchd__goal_list"
+          },
+          {
+            "type": "tool_reference",
+            "tool_name": "mcp__orchd__interrupt"
+          }
+        ]
+      },
+      {
+        "type": "tool_use",
+        "id": "toolu_01K1ztG3dypMELcZMsZ1UeS6",
+        "name": "mcp__orchd__dispatch",
+        "input": {
+          "repo": "probe",
+          "title": "Synthetic E2E communication probe",
+          "instructions": "This is a synthetic communication test; do not modify files, commit, push, install, or send externally. Run orchd ack for your task, then orchd ask for your task with exact question SYNTHETIC_E2E_QUESTION and end the turn. After an orchd answer containing SYNTHETIC_E2E_ANSWER arrives, run orchd report --status done --summary SYNTHETIC_E2E_WORKER_DONE --evidence 'answer received'.",
+          "done_when": "The exact answer reaches the worker and report is stored.",
+          "model": "sonnet",
+          "model_reason": "same vendor isolated communication probe",
+          "task_type": "investigation"
+        },
+        "caller": {
+          "type": "direct"
+        }
+      },
+      {
+        "tool_use_id": "toolu_01K1ztG3dypMELcZMsZ1UeS6",
+        "type": "tool_result",
+        "content": [
+          {
+            "type": "text",
+            "text": "{\n \"task_id\": \"50fdc87b\",\n \"status\": \"running\",\n \"branch\": \"orchd/50fdc87b\",\n \"worktree\": \"/tmp/orchd-8ae290d6-e2e2/home/projects/.orchd-worktrees/probe-50fdc87b\",\n \"orch_id\": \"8ae2fullcomm2-2.1.291\",\n \"model\": \"claude-sonnet-5-5\",\n \"other_open_on_repo\": []\n}"
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "text": "I dispatched task 50fdc87b and am waiting for the worker's question."
+      },
+      {
+        "type": "tool_use",
+        "id": "toolu_01BthpCVdQARLjPZKTQu1ybz",
+        "name": "mcp__orchd__inbox",
+        "input": {},
+        "caller": {
+          "type": "direct"
+        }
+      },
+      {
+        "tool_use_id": "toolu_01BthpCVdQARLjPZKTQu1ybz",
+        "type": "tool_result",
+        "content": [
+          {
+            "type": "text",
+            "text": "[\n {\n  \"task_id\": \"50fdc87b\",\n  \"repo\": \"probe\",\n  \"title\": \"Synthetic E2E communication probe\",\n  \"kind\": \"ack\",\n  \"body\": \"worker acknowledged the task\",\n  \"evidence\": null,\n  \"task_status\": \"question\",\n  \"model\": \"claude-sonnet-5-5\",\n  \"pending\": 0,\n  \"verification\": {\n   \"state\": \"none\"\n  }\n },\n {\n  \"task_id\": \"50fdc87b\",\n  \"repo\": \"probe\",\n  \"title\": \"Synthetic E2E communication probe\",\n  \"kind\": \"question\",\n  \"body\": \"SYNTHETIC_E2E_QUESTION\",\n  \"evidence\": null,\n  \"task_status\": \"question\",\n  \"model\": \"claude-sonnet-5-5\",\n  \"pending\": 0,\n  \"verification\": {\n   \"state\": \"none\"\n  }\n }\n]"
+          }
+        ]
+      },
+      {
+        "type": "tool_use",
+        "id": "toolu_011gJQKW1x7ZhiPnb3pBFNrp",
+        "name": "mcp__orchd__answer",
+        "input": {
+          "task_id": "50fdc87b",
+          "text": "SYNTHETIC_E2E_ANSWER"
+        },
+        "caller": {
+          "type": "direct"
+        }
+      },
+      {
+        "tool_use_id": "toolu_011gJQKW1x7ZhiPnb3pBFNrp",
+        "type": "tool_result",
+        "content": [
+          {
+            "type": "text",
+            "text": "{\n \"status\": \"delivered\",\n \"delivered\": 1,\n \"pending\": 0\n}"
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "text": "The answer was delivered, and I'm waiting for the worker's report."
+      },
+      {
+        "type": "tool_use",
+        "id": "toolu_01Rj6w7ff6TNaRQFzmVjnfxQ",
+        "name": "mcp__orchd__inbox",
+        "input": {},
+        "caller": {
+          "type": "direct"
+        }
+      },
+      {
+        "tool_use_id": "toolu_01Rj6w7ff6TNaRQFzmVjnfxQ",
+        "type": "tool_result",
+        "content": [
+          {
+            "type": "text",
+            "text": "[\n {\n  \"task_id\": \"50fdc87b\",\n  \"repo\": \"probe\",\n  \"title\": \"Synthetic E2E communication probe\",\n  \"kind\": \"report\",\n  \"body\": \"done: SYNTHETIC_E2E_WORKER_DONE\",\n  \"evidence\": \"answer received\",\n  \"task_status\": \"done\",\n  \"model\": \"claude-sonnet-5-5\",\n  \"pending\": 0,\n  \"verification\": {\n   \"state\": \"none\"\n  }\n }\n]"
+          }
+        ]
+      },
+      {
+        "type": "tool_use",
+        "id": "toolu_01G6caEZ9DAykUygH792z4Eb",
+        "name": "mcp__orchd__send_to_nat",
+        "input": {
+          "text": "SYNTHETIC_E2E_DONE"
+        },
+        "caller": {
+          "type": "direct"
+        }
+      },
+      {
+        "tool_use_id": "toolu_01G6caEZ9DAykUygH792z4Eb",
+        "type": "tool_result",
+        "content": [
+          {
+            "type": "text",
+            "text": "{\n \"message_id\": 1,\n \"kind\": \"message\",\n \"body_bytes\": 18,\n \"body_sha256\": \"09e8e8ed120c4ceae88db672b2c8f86eecb8547a697cebee5e0ec3fac82843f3\",\n \"delivery\": \"pending\",\n \"task_id\": null,\n \"note\": \"no Desktop entry thread has called yet; Nat sees it when the entry calls status\",\n \"current_question\": null,\n \"queued_questions\": []\n}"
+          }
+        ]
+      }
+    ],
+    "tasks": [
+      {
+        "id": "50fdc87b",
+        "status": "done",
+        "repo": "probe",
+        "socket": "/tmp/orchd-50fdc87b/w.sock",
+        "session_id": "9cd7bb0e-979a-4152-92f6-d013ffa3cbcd"
+      }
+    ],
+    "messages": [
+      {
+        "task_id": "50fdc87b",
+        "kind": "dispatch",
+        "body": "{\"model\": \"claude-sonnet-5-5\", \"model_reason\": \"same vendor isolated communication probe\", \"task_type\": \"investigation\", \"rework_of\": null, \"found_by\": null, \"goal_id\": null, \"goal_critical\": null}",
+        "wake_error": null
+      },
+      {
+        "task_id": "50fdc87b",
+        "kind": "ack",
+        "body": "worker acknowledged the task",
+        "wake_error": null
+      },
+      {
+        "task_id": "50fdc87b",
+        "kind": "question",
+        "body": "SYNTHETIC_E2E_QUESTION",
+        "wake_error": null
+      },
+      {
+        "task_id": "50fdc87b",
+        "kind": "answer",
+        "body": "SYNTHETIC_E2E_ANSWER",
+        "wake_error": null
+      },
+      {
+        "task_id": "50fdc87b",
+        "kind": "report",
+        "body": "done: SYNTHETIC_E2E_WORKER_DONE",
+        "wake_error": null
+      }
+    ],
+    "outbound": [
+      {
+        "body": "SYNTHETIC_E2E_DONE",
+        "delivery": "pending"
+      }
+    ]
+  },
+  {
+    "label": "cleanup",
+    "survivors": []
+  }
+]

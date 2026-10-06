@@ -261,7 +261,7 @@ def main(argv=None):
                 result = entry.bind(con, rt, args.to, args.entry, force=True)
             else:
                 result = entry.binding(con, rt, lambda: core.start_orch(con, rt, "opus"), args.new, args.entry)
-        except ValueError as error:
+        except (ValueError, RuntimeError, OSError) as error:
             print(f"binding: {error}", file=sys.stderr)
             return 1
         print(json.dumps(result, ensure_ascii=False, indent=1))

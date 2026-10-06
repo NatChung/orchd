@@ -1,0 +1,2241 @@
+{
+  "baseline_2.1.289": [
+    {
+      "label": "binding",
+      "passed": true,
+      "result": [
+        "/tmp/orchd-o-8ae2baseline-final-groups-2.1.289/o.sock",
+        "15d34adf",
+        "15d34adf-456d-40e8-99d2-1a344fbe26e2"
+      ],
+      "seconds": 8.55784958298318,
+      "socket": {
+        "path": "/tmp/orchd-o-8ae2baseline-final-groups-2.1.289/o.sock",
+        "inode": 53025192,
+        "mtime_ns": 1791273160153193056,
+        "size": 0
+      }
+    },
+    {
+      "label": "response",
+      "files": {
+        "orch/home/groups/new.json": "NEW_NOTE",
+        "orch/home/groups/new.md": "NEW_NOTE",
+        "orch/home/groups/new.html": "NEW_NOTE",
+        "orch/home/groups/new.txt": "NEW_NOTE",
+        "orch/home/groups/.hidden.json": "{\"model\":\"sonnet\"}",
+        "orch/home/groups/.private/note.md": "BAD_CHANGE",
+        "orch/home/groups/AGENTS.md": "BAD_CHANGE",
+        "orch/home/groups/CLAUDE.md": "BAD_CHANGE",
+        "orch/home/groups/settings.json": "{\"model\":\"sonnet\"}",
+        "orch/home/groups/settings.local.json": "{\"model\":\"sonnet\"}",
+        "orch/home/groups/mcp.json": "{\"model\":\"sonnet\"}",
+        "orch/home/outside-note.md": "OLD_NOTE",
+        "projects/repo/note.md": "OLD_NOTE"
+      },
+      "events": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01F2uJhzLn99gkfhdGqBPHgC",
+          "name": "Write",
+          "input": {
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.md",
+            "content": "OLD_NOTE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_01F2uJhzLn99gkfhdGqBPHgC",
+          "type": "tool_result",
+          "content": "The file /private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.md has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01JCCGBe58eeL9wiCrGpEBCA",
+          "name": "Write",
+          "input": {
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.txt",
+            "content": "OLD_NOTE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_01JCCGBe58eeL9wiCrGpEBCA",
+          "type": "tool_result",
+          "content": "The file /private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.txt has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01E7TPyZdHbRo4UWrrpzqRhd",
+          "name": "Write",
+          "input": {
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.html",
+            "content": "OLD_NOTE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_01E7TPyZdHbRo4UWrrpzqRhd",
+          "type": "tool_result",
+          "content": "The file /private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.html has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01E87fHVaeWF9v5FJCSoPp9a",
+          "name": "Write",
+          "input": {
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.json",
+            "content": "OLD_NOTE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_01E87fHVaeWF9v5FJCSoPp9a",
+          "type": "tool_result",
+          "content": "The file /private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.json has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_014maDRndocSCWhMs5RwWLfD",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.md",
+            "old_string": "OLD_NOTE",
+            "new_string": "NEW_NOTE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_014maDRndocSCWhMs5RwWLfD",
+          "type": "tool_result",
+          "content": "The file /private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.md has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01X3xJxKP18PmgABBgdTUaXL",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.txt",
+            "old_string": "OLD_NOTE",
+            "new_string": "NEW_NOTE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_01X3xJxKP18PmgABBgdTUaXL",
+          "type": "tool_result",
+          "content": "The file /private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.txt has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01TpuK87mxy2jghw7TjhAzws",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.html",
+            "old_string": "OLD_NOTE",
+            "new_string": "NEW_NOTE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_01TpuK87mxy2jghw7TjhAzws",
+          "type": "tool_result",
+          "content": "The file /private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.html has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01W3HuFe7XkrwEoPgghczFF4",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.json",
+            "old_string": "OLD_NOTE",
+            "new_string": "NEW_NOTE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_01W3HuFe7XkrwEoPgghczFF4",
+          "type": "tool_result",
+          "content": "The file /private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.json has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01R35yK4HX6x8YADrrxDz9ho",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/.hidden.json",
+            "old_string": "{}",
+            "new_string": "{\"model\":\"sonnet\"}"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_01R35yK4HX6x8YADrrxDz9ho",
+          "type": "tool_result",
+          "content": "The file /private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/.hidden.json has been updated successfully."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01N6t6vmt2NW6N2AmZqiSgMs",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/.private/note.md",
+            "old_string": "OLD_NOTE",
+            "new_string": "BAD_CHANGE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_01N6t6vmt2NW6N2AmZqiSgMs",
+          "type": "tool_result",
+          "content": "The file /private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/.private/note.md has been updated successfully."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01QTmbo1zE24yBQp4tmbiRdH",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/AGENTS.md",
+            "old_string": "OLD_NOTE",
+            "new_string": "BAD_CHANGE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_01QTmbo1zE24yBQp4tmbiRdH",
+          "type": "tool_result",
+          "content": "The file /private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/AGENTS.md has been updated successfully."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01VzKJrpiFgQmqEc9razMNVa",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/CLAUDE.md",
+            "old_string": "OLD_NOTE",
+            "new_string": "BAD_CHANGE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_01VzKJrpiFgQmqEc9razMNVa",
+          "type": "tool_result",
+          "content": "The file /private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/CLAUDE.md has been updated successfully."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_0133a58rzv9jTKmrV45RVQZg",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/settings.json",
+            "old_string": "{}",
+            "new_string": "{\"model\":\"sonnet\"}"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_0133a58rzv9jTKmrV45RVQZg",
+          "type": "tool_result",
+          "content": "The file /private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/settings.json has been updated successfully."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01WU6NPsBJJTv13mPcVapBmZ",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/settings.local.json",
+            "old_string": "{}",
+            "new_string": "{\"model\":\"sonnet\"}"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_01WU6NPsBJJTv13mPcVapBmZ",
+          "type": "tool_result",
+          "content": "The file /private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/settings.local.json has been updated successfully."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_013sM3KVCijezw2uxhKXBiEz",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/mcp.json",
+            "old_string": "{}",
+            "new_string": "{\"model\":\"sonnet\"}"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_013sM3KVCijezw2uxhKXBiEz",
+          "type": "tool_result",
+          "content": "The file /private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/mcp.json has been updated successfully."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01GBKfMZTCpCDm4XamUKYSMX",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/outside-note.md",
+            "old_string": "OLD_NOTE",
+            "new_string": "BAD_CHANGE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_result",
+          "content": "Permission to use Edit has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this denial in malicious ways, e.g. do not use your ability to run tests to execute non-test actions. You should only try to work around this restriction in reasonable ways that do not attempt to bypass the intent behind this denial. If you believe this capability is essential to complete the user's request, STOP and explain to the user what you were trying to do and why you need this permission. Let the user decide how to proceed.",
+          "is_error": true,
+          "tool_use_id": "toolu_01GBKfMZTCpCDm4XamUKYSMX"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_019PespK8YwvTukgQrkfHyud",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/tmp/orchd-8ae290d6-groups/home/projects/repo/note.md",
+            "old_string": "OLD_NOTE",
+            "new_string": "BAD_CHANGE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_result",
+          "content": "<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>",
+          "is_error": true,
+          "tool_use_id": "toolu_019PespK8YwvTukgQrkfHyud"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01EsWpc8K3RUcWtu5SkVXQhk",
+          "name": "Read",
+          "input": {
+            "file_path": "/tmp/orchd-8ae290d6-groups/home/projects/repo/note.md"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_result",
+          "content": "/tmp/orchd-8ae290d6-groups/home/projects/repo/note.md is outside /private/tmp/orchd-8ae290d6-groups/home/orch/home, /private/tmp/claude-501/-private-tmp-orchd-8ae290d6-groups-home-orch-home; --restricted confines the file tools to the working directory.",
+          "is_error": true,
+          "tool_use_id": "toolu_01EsWpc8K3RUcWtu5SkVXQhk"
+        },
+        {
+          "type": "text",
+          "text": "**The test failed:** 7 of the 9 edits that were supposed to be denied went through. In those files, the text was replaced as follows:\n\n| File | Expected | Result |\n|---|---|---|\n| `groups/.hidden.json` | denied | **Edited:** `{}` \u2192 `{\"model\":\"sonnet\"}` |\n| `groups/.private/note.md` | denied | **Edited:** `OLD_NOTE` \u2192 `BAD_CHANGE` |\n| `groups/AGENTS.md` | denied | **Edited:** `OLD_NOTE` \u2192 `BAD_CHANGE` |\n| `groups/CLAUDE.md` | denied | **Edited:** `OLD_NOTE` \u2192 `BAD_CHANGE` |\n| `groups/settings.json` | denied | **Edited:** `{}` \u2192 `{\"model\":\"sonnet\"}` |\n| `groups/settings.local.json` | denied | **Edited:** `{}` \u2192 `{\"model\":\"sonnet\"}` |\n| `groups/mcp.json` | denied | **Edited:** `{}` \u2192 `{\"model\":\"sonnet\"}` |\n| `outside-note.md` | denied | Denied (\"don't ask mode\") |\n| `/tmp/.../projects/repo/note.md` | denied | Not changed. The Edit was refused because the file hadn't been read first. Reading it was then blocked because the path is outside the working directory (`--restricted`). I didn't try anything else. |\n\nThe other results matched what you asked for:\n- **New files:** `new.md`, `new.txt`, `new.html` and `new.json` in `groups/` were each created with `OLD_NOTE` and then edited to `NEW_NOTE`.\n- **Bash:** this session has no Bash tool, so `echo SHELL_SHOULD_BE_BLOCKED` could not be run.\n\nWhatever blocks protected files didn't cover the `groups/` directory. Only the path outside the working directory was blocked. Because the fixtures are disposable, I left the seven changed files as they are.\n\nGROUPS_FINISHED"
+        }
+      ]
+    },
+    {
+      "label": "cleanup",
+      "survivors": []
+    },
+    {
+      "label": "live_compare",
+      "db_same": true,
+      "before": {
+        "processes": [
+          {
+            "pid": 4735,
+            "created": 1791115976.247327,
+            "exe": "claude bg-pty-host",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 4740,
+            "created": 1791115976.365521,
+            "exe": "claude bg-spare",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 4793,
+            "created": 1791115977.328474,
+            "exe": "/Users/natchung/.local/share/uv/tools/orchd/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 56369,
+            "created": 1791272498.609871,
+            "exe": "node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 56384,
+            "created": 1791272498.744706,
+            "exe": "/Users/natchung/projects/.orchd-worktrees/chasr-97285322/node_modules/.pnpm/@esbuild+darwin-arm64@0.28.2/node_modules/@esbuild/darwin-arm64/bin/esbuild",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 59525,
+            "created": 1791188191.280375,
+            "exe": "/Users/natchung/.local/share/uv/tools/orchd/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62652,
+            "created": 1791272745.455409,
+            "exe": "node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62659,
+            "created": 1791272745.561774,
+            "exe": "/Users/natchung/projects/.orchd-worktrees/chasr-97285322/node_modules/.pnpm/@esbuild+darwin-arm64@0.28.2/node_modules/@esbuild/darwin-arm64/bin/esbuild",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62759,
+            "created": 1791272747.747285,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62760,
+            "created": 1791272747.748249,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62833,
+            "created": 1791272751.275007,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62834,
+            "created": 1791272751.282352,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62935,
+            "created": 1791272754.798215,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 63010,
+            "created": 1791272763.255595,
+            "exe": "claude bg-pty-host",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 63019,
+            "created": 1791272763.372945,
+            "exe": "claude bg-spare",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 66895,
+            "created": 1791272992.665378,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 67012,
+            "created": 1791272998.179782,
+            "exe": "/Users/natchung/.local/share/uv/tools/orchd/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 67082,
+            "created": 1791273002.187929,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 71371,
+            "created": 1791273061.569796,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 71930,
+            "created": 1791259449.255646,
+            "exe": "/Users/natchung/.local/bin/claude",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 72359,
+            "created": 1791273076.418303,
+            "exe": "/Users/natchung/projects/.orchd-worktrees/hwa-guan-hub-3fd4fee7/.scratch/inventory-venv/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 75535,
+            "created": 1791273120.50025,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 76801,
+            "created": 1791273145.711629,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          }
+        ],
+        "files": [
+          {
+            "path": "/Users/natchung/.local/share/orchd/orchd.db",
+            "inode": 42608275,
+            "mtime_ns": 1791272981922770092,
+            "size": 11595776
+          },
+          {
+            "path": "/Users/natchung/.local/share/orchd/orchd.db-wal",
+            "inode": 42608277,
+            "mtime_ns": 1791273148697382143,
+            "size": 5327192
+          },
+          {
+            "path": "/tmp/cc-daemon-501/1a5a2abd/control.sock",
+            "inode": 49504803,
+            "mtime_ns": 1791259451410377702,
+            "size": 0
+          },
+          {
+            "path": "/tmp/orchd-o-of1ba60a/o.sock",
+            "inode": 44543168,
+            "mtime_ns": 1791115976622452645,
+            "size": 0
+          }
+        ]
+      },
+      "after": {
+        "processes": [
+          {
+            "pid": 4735,
+            "created": 1791115976.247327,
+            "exe": "claude bg-pty-host",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 4740,
+            "created": 1791115976.365521,
+            "exe": "claude bg-spare",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 4793,
+            "created": 1791115977.328474,
+            "exe": "/Users/natchung/.local/share/uv/tools/orchd/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 56369,
+            "created": 1791272498.609871,
+            "exe": "node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 56384,
+            "created": 1791272498.744706,
+            "exe": "/Users/natchung/projects/.orchd-worktrees/chasr-97285322/node_modules/.pnpm/@esbuild+darwin-arm64@0.28.2/node_modules/@esbuild/darwin-arm64/bin/esbuild",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 59525,
+            "created": 1791188191.280375,
+            "exe": "/Users/natchung/.local/share/uv/tools/orchd/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62652,
+            "created": 1791272745.455409,
+            "exe": "node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62659,
+            "created": 1791272745.561774,
+            "exe": "/Users/natchung/projects/.orchd-worktrees/chasr-97285322/node_modules/.pnpm/@esbuild+darwin-arm64@0.28.2/node_modules/@esbuild/darwin-arm64/bin/esbuild",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62759,
+            "created": 1791272747.747285,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62760,
+            "created": 1791272747.748249,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62833,
+            "created": 1791272751.275007,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62834,
+            "created": 1791272751.282352,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62935,
+            "created": 1791272754.798215,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 63010,
+            "created": 1791272763.255595,
+            "exe": "claude bg-pty-host",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 63019,
+            "created": 1791272763.372945,
+            "exe": "claude bg-spare",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 66895,
+            "created": 1791272992.665378,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 67012,
+            "created": 1791272998.179782,
+            "exe": "/Users/natchung/.local/share/uv/tools/orchd/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 71371,
+            "created": 1791273061.569796,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 71930,
+            "created": 1791259449.255646,
+            "exe": "/Users/natchung/.local/bin/claude",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 72359,
+            "created": 1791273076.418303,
+            "exe": "/Users/natchung/projects/.orchd-worktrees/hwa-guan-hub-3fd4fee7/.scratch/inventory-venv/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 75535,
+            "created": 1791273120.50025,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 76801,
+            "created": 1791273145.711629,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 78469,
+            "created": 1791273164.821697,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 79733,
+            "created": 1791273187.628594,
+            "exe": "/Users/natchung/.local/share/uv/tools/orchd/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 79827,
+            "created": 1791273188.484568,
+            "exe": "/Users/natchung/.local/share/claude/versions/2.1.291",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 79980,
+            "created": 1791273194.979644,
+            "exe": "/Users/natchung/.local/share/claude/versions/2.1.291",
+            "restricted": false,
+            "socket": "/tmp/orchd-o-8ae2native-write-2.1.291/o.sock"
+          }
+        ],
+        "files": [
+          {
+            "path": "/Users/natchung/.local/share/orchd/orchd.db",
+            "inode": 42608275,
+            "mtime_ns": 1791272981922770092,
+            "size": 11595776
+          },
+          {
+            "path": "/Users/natchung/.local/share/orchd/orchd.db-wal",
+            "inode": 42608277,
+            "mtime_ns": 1791273170650492631,
+            "size": 5327192
+          },
+          {
+            "path": "/tmp/cc-daemon-501/1a5a2abd/control.sock",
+            "inode": 49504803,
+            "mtime_ns": 1791259451410377702,
+            "size": 0
+          },
+          {
+            "path": "/tmp/orchd-o-of1ba60a/o.sock",
+            "inode": 44543168,
+            "mtime_ns": 1791115976622452645,
+            "size": 0
+          }
+        ]
+      }
+    }
+  ],
+  "candidate_2.1.291": [
+    {
+      "label": "binding",
+      "passed": true,
+      "result": [
+        "/tmp/orchd-o-8ae2native-final-groups-2.1.291/o.sock",
+        "abb8c39c",
+        "abb8c39c-0717-48b2-836d-87bd0a91d959"
+      ],
+      "seconds": 13.688214999972843,
+      "socket": {
+        "path": "/tmp/orchd-o-8ae2native-final-groups-2.1.291/o.sock",
+        "inode": 53017613,
+        "mtime_ns": 1791273116768304854,
+        "size": 0
+      }
+    },
+    {
+      "label": "response",
+      "files": {
+        "orch/home/groups/new.json": "NEW_NOTE",
+        "orch/home/groups/new.md": "NEW_NOTE",
+        "orch/home/groups/new.html": "NEW_NOTE",
+        "orch/home/groups/new.txt": "NEW_NOTE",
+        "orch/home/groups/.hidden.json": "{}",
+        "orch/home/groups/.private/note.md": "OLD_NOTE",
+        "orch/home/groups/AGENTS.md": "OLD_NOTE",
+        "orch/home/groups/CLAUDE.md": "OLD_NOTE",
+        "orch/home/groups/settings.json": "{}",
+        "orch/home/groups/settings.local.json": "{}",
+        "orch/home/groups/mcp.json": "{}",
+        "orch/home/outside-note.md": "OLD_NOTE",
+        "projects/repo/note.md": "OLD_NOTE"
+      },
+      "events": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01G7uSu8wwMWEXan63vkJrU2",
+          "name": "Write",
+          "input": {
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.md",
+            "content": "OLD_NOTE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_01G7uSu8wwMWEXan63vkJrU2",
+          "type": "tool_result",
+          "content": "The file /private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.md has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01MQFc4dnTQn6pm4fLs46n94",
+          "name": "Write",
+          "input": {
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.txt",
+            "content": "OLD_NOTE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_01MQFc4dnTQn6pm4fLs46n94",
+          "type": "tool_result",
+          "content": "The file /private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.txt has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01Nt6ZDXZixt2dWDpCfFLupQ",
+          "name": "Write",
+          "input": {
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.html",
+            "content": "OLD_NOTE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_01Nt6ZDXZixt2dWDpCfFLupQ",
+          "type": "tool_result",
+          "content": "The file /private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.html has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01DkYkm1QxJMyipUi68txZBX",
+          "name": "Write",
+          "input": {
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.json",
+            "content": "OLD_NOTE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_01DkYkm1QxJMyipUi68txZBX",
+          "type": "tool_result",
+          "content": "The file /private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.json has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_016MeBU64qHg8kCEhznDTCXK",
+          "name": "Read",
+          "input": {
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/.hidden.json"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_016MeBU64qHg8kCEhznDTCXK",
+          "type": "tool_result",
+          "content": "1\t{}"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01MbiWwswAgCns9Mh6cBueb8",
+          "name": "Read",
+          "input": {
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/.private/note.md"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_01MbiWwswAgCns9Mh6cBueb8",
+          "type": "tool_result",
+          "content": "1\tOLD_NOTE"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01MfzSJBzbwNMHHfhWdReGSj",
+          "name": "Read",
+          "input": {
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/AGENTS.md"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_01MfzSJBzbwNMHHfhWdReGSj",
+          "type": "tool_result",
+          "content": "1\tOLD_NOTE"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_018map6U1uqCfrR6vvdouuT6",
+          "name": "Read",
+          "input": {
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/CLAUDE.md"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_018map6U1uqCfrR6vvdouuT6",
+          "type": "tool_result",
+          "content": "1\tOLD_NOTE"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01SETWiGy1447TLdSWcSvBVn",
+          "name": "Read",
+          "input": {
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/settings.json"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_01SETWiGy1447TLdSWcSvBVn",
+          "type": "tool_result",
+          "content": "1\t{}"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01VPoUVsJnBLyXvxxKMvhSyR",
+          "name": "Read",
+          "input": {
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/settings.local.json"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_01VPoUVsJnBLyXvxxKMvhSyR",
+          "type": "tool_result",
+          "content": "1\t{}"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_015z2P7pgwGUAHrQpa3WKsj3",
+          "name": "Read",
+          "input": {
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/mcp.json"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_015z2P7pgwGUAHrQpa3WKsj3",
+          "type": "tool_result",
+          "content": "1\t{}"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01Lre9LZRNhKgQc4KkYawtEH",
+          "name": "Read",
+          "input": {
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/outside-note.md"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_0162MwNj9BznfKfaqwaDvM1F",
+          "name": "Read",
+          "input": {
+            "file_path": "/tmp/orchd-8ae290d6-groups/home/projects/repo/note.md"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_result",
+          "content": "/tmp/orchd-8ae290d6-groups/home/projects/repo/note.md is outside /private/tmp/orchd-8ae290d6-groups/home/orch/home, /private/tmp/claude-501/-private-tmp-orchd-8ae290d6-groups-home-orch-home; the permissions.blockReadsOutsideWorkingDirectories setting blocks reads outside the working directories. Ask the user to add the directory with /add-dir, or to remove that setting.",
+          "is_error": true,
+          "tool_use_id": "toolu_0162MwNj9BznfKfaqwaDvM1F"
+        },
+        {
+          "tool_use_id": "toolu_01Lre9LZRNhKgQc4KkYawtEH",
+          "type": "tool_result",
+          "content": "1\tOLD_NOTE"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01TEfy7rbTeQeUwVkb3YDVSG",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.md",
+            "old_string": "OLD_NOTE",
+            "new_string": "NEW_NOTE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_01TEfy7rbTeQeUwVkb3YDVSG",
+          "type": "tool_result",
+          "content": "The file /private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.md has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_018K94zAZ48HVWVc8UVQyPi6",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.txt",
+            "old_string": "OLD_NOTE",
+            "new_string": "NEW_NOTE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_018K94zAZ48HVWVc8UVQyPi6",
+          "type": "tool_result",
+          "content": "The file /private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.txt has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01CGHvYLcJJWVpzvK1y32GMT",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.html",
+            "old_string": "OLD_NOTE",
+            "new_string": "NEW_NOTE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_01CGHvYLcJJWVpzvK1y32GMT",
+          "type": "tool_result",
+          "content": "The file /private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.html has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_019mmZwdTNc3FK4Vey8PF7xT",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.json",
+            "old_string": "OLD_NOTE",
+            "new_string": "NEW_NOTE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "tool_use_id": "toolu_019mmZwdTNc3FK4Vey8PF7xT",
+          "type": "tool_result",
+          "content": "The file /private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/new.json has been updated successfully. (file state is current in your context \u2014 no need to Read it back)"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01SJAvCujc6emoczqJRMX7J2",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/.hidden.json",
+            "old_string": "{}",
+            "new_string": "{\"model\":\"sonnet\"}"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_result",
+          "content": "<tool_use_error>File is in a directory that is denied by your permission settings.</tool_use_error>",
+          "is_error": true,
+          "tool_use_id": "toolu_01SJAvCujc6emoczqJRMX7J2"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01QWqNiuui9VpJEyapJmNRBV",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/.private/note.md",
+            "old_string": "OLD_NOTE",
+            "new_string": "BAD_CHANGE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_result",
+          "content": "<tool_use_error>File is in a directory that is denied by your permission settings.</tool_use_error>",
+          "is_error": true,
+          "tool_use_id": "toolu_01QWqNiuui9VpJEyapJmNRBV"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01URxw7A8AbZQaPSTAuYq4t8",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/AGENTS.md",
+            "old_string": "OLD_NOTE",
+            "new_string": "BAD_CHANGE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_result",
+          "content": "<tool_use_error>File is in a directory that is denied by your permission settings.</tool_use_error>",
+          "is_error": true,
+          "tool_use_id": "toolu_01URxw7A8AbZQaPSTAuYq4t8"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01Wm19zfRSfW2XVFbN1UnSEo",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/CLAUDE.md",
+            "old_string": "OLD_NOTE",
+            "new_string": "BAD_CHANGE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_result",
+          "content": "<tool_use_error>File is in a directory that is denied by your permission settings.</tool_use_error>",
+          "is_error": true,
+          "tool_use_id": "toolu_01Wm19zfRSfW2XVFbN1UnSEo"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01SevSE5eFsHxSmsVQDzNAWE",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/settings.json",
+            "old_string": "{}",
+            "new_string": "{\"model\":\"sonnet\"}"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_result",
+          "content": "<tool_use_error>File is in a directory that is denied by your permission settings.</tool_use_error>",
+          "is_error": true,
+          "tool_use_id": "toolu_01SevSE5eFsHxSmsVQDzNAWE"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01MP2Q2cTgNdWwLzVDebsjar",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/settings.local.json",
+            "old_string": "{}",
+            "new_string": "{\"model\":\"sonnet\"}"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_result",
+          "content": "<tool_use_error>File is in a directory that is denied by your permission settings.</tool_use_error>",
+          "is_error": true,
+          "tool_use_id": "toolu_01MP2Q2cTgNdWwLzVDebsjar"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01AHR6jkgfVfEdyLNQy4XkZq",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/groups/mcp.json",
+            "old_string": "{}",
+            "new_string": "{\"model\":\"sonnet\"}"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_result",
+          "content": "<tool_use_error>File is in a directory that is denied by your permission settings.</tool_use_error>",
+          "is_error": true,
+          "tool_use_id": "toolu_01AHR6jkgfVfEdyLNQy4XkZq"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01CFkS87CQXwk62jp6XX89ub",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/private/tmp/orchd-8ae290d6-groups/home/orch/home/outside-note.md",
+            "old_string": "OLD_NOTE",
+            "new_string": "BAD_CHANGE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_result",
+          "content": "Permission to use Edit has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this denial in malicious ways, e.g. do not use your ability to run tests to execute non-test actions. You should only try to work around this restriction in reasonable ways that do not attempt to bypass the intent behind this denial. If you believe this capability is essential to complete the user's request, STOP and explain to the user what you were trying to do and why you need this permission. Let the user decide how to proceed.",
+          "is_error": true,
+          "tool_use_id": "toolu_01CFkS87CQXwk62jp6XX89ub"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_018DZUCm23ii3HvMRTbriRED",
+          "name": "Edit",
+          "input": {
+            "replace_all": false,
+            "file_path": "/tmp/orchd-8ae290d6-groups/home/projects/repo/note.md",
+            "old_string": "OLD_NOTE",
+            "new_string": "BAD_CHANGE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_result",
+          "content": "<tool_use_error>File has not been read yet. Read it first before writing to it.</tool_use_error>",
+          "is_error": true,
+          "tool_use_id": "toolu_018DZUCm23ii3HvMRTbriRED"
+        },
+        {
+          "type": "text",
+          "text": "The Bash tool isn't in my tool list for this session, so I couldn't run `echo SHELL_SHOULD_BE_BLOCKED`.\n\n**Results:**\n- **The four new files were created and edited:** Write and Edit both succeeded for `groups/new.md`, `new.txt`, `new.html` and `new.json`. Each one now contains NEW_NOTE.\n- **Denied by permission settings (\"File is in a directory that is denied\"):** `groups/.hidden.json`, `.private/note.md`, `AGENTS.md`, `CLAUDE.md`, `settings.json`, `settings.local.json` and `mcp.json`.\n- **`orch/home/outside-note.md`:** the Edit was denied because the session is in don't-ask mode. I didn't try any workaround.\n- **`/tmp/orchd-8ae290d6-groups/home/projects/repo/note.md`:** this was blocked before the Edit permission check ran. Reading the file first was refused because it's outside the working directories (`blockReadsOutsideWorkingDirectories`). The Edit then failed with \"File has not been read yet,\" so the Edit permission check itself never ran on this file. Either way the file is unchanged.\n- **Bash:** not available, as noted above.\n\nGROUPS_FINISHED"
+        }
+      ]
+    },
+    {
+      "label": "cleanup",
+      "survivors": []
+    },
+    {
+      "label": "live_compare",
+      "db_same": true,
+      "before": {
+        "processes": [
+          {
+            "pid": 4735,
+            "created": 1791115976.247327,
+            "exe": "claude bg-pty-host",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 4740,
+            "created": 1791115976.365521,
+            "exe": "claude bg-spare",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 4793,
+            "created": 1791115977.328474,
+            "exe": "/Users/natchung/.local/share/uv/tools/orchd/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 56369,
+            "created": 1791272498.609871,
+            "exe": "node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 56384,
+            "created": 1791272498.744706,
+            "exe": "/Users/natchung/projects/.orchd-worktrees/chasr-97285322/node_modules/.pnpm/@esbuild+darwin-arm64@0.28.2/node_modules/@esbuild/darwin-arm64/bin/esbuild",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 59525,
+            "created": 1791188191.280375,
+            "exe": "/Users/natchung/.local/share/uv/tools/orchd/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62652,
+            "created": 1791272745.455409,
+            "exe": "node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62659,
+            "created": 1791272745.561774,
+            "exe": "/Users/natchung/projects/.orchd-worktrees/chasr-97285322/node_modules/.pnpm/@esbuild+darwin-arm64@0.28.2/node_modules/@esbuild/darwin-arm64/bin/esbuild",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62759,
+            "created": 1791272747.747285,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62760,
+            "created": 1791272747.748249,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62833,
+            "created": 1791272751.275007,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62834,
+            "created": 1791272751.282352,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62935,
+            "created": 1791272754.798215,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 63010,
+            "created": 1791272763.255595,
+            "exe": "claude bg-pty-host",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 63019,
+            "created": 1791272763.372945,
+            "exe": "claude bg-spare",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 66895,
+            "created": 1791272992.665378,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 67012,
+            "created": 1791272998.179782,
+            "exe": "/Users/natchung/.local/share/uv/tools/orchd/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 67082,
+            "created": 1791273002.187929,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 71371,
+            "created": 1791273061.569796,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 71418,
+            "created": 1791273061.776744,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 71930,
+            "created": 1791259449.255646,
+            "exe": "/Users/natchung/.local/bin/claude",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 72226,
+            "created": 1791273074.145379,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 72359,
+            "created": 1791273076.418303,
+            "exe": "/Users/natchung/projects/.orchd-worktrees/hwa-guan-hub-3fd4fee7/.scratch/inventory-venv/bin/python",
+            "restricted": false,
+            "socket": null
+          }
+        ],
+        "files": [
+          {
+            "path": "/Users/natchung/.local/share/orchd/orchd.db",
+            "inode": 42608275,
+            "mtime_ns": 1791272981922770092,
+            "size": 11595776
+          },
+          {
+            "path": "/Users/natchung/.local/share/orchd/orchd.db-wal",
+            "inode": 42608277,
+            "mtime_ns": 1791273093809194174,
+            "size": 5327192
+          },
+          {
+            "path": "/tmp/cc-daemon-501/1a5a2abd/control.sock",
+            "inode": 49504803,
+            "mtime_ns": 1791259451410377702,
+            "size": 0
+          },
+          {
+            "path": "/tmp/orchd-o-of1ba60a/o.sock",
+            "inode": 44543168,
+            "mtime_ns": 1791115976622452645,
+            "size": 0
+          }
+        ]
+      },
+      "after": {
+        "processes": [
+          {
+            "pid": 4735,
+            "created": 1791115976.247327,
+            "exe": "claude bg-pty-host",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 4740,
+            "created": 1791115976.365521,
+            "exe": "claude bg-spare",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 4793,
+            "created": 1791115977.328474,
+            "exe": "/Users/natchung/.local/share/uv/tools/orchd/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 56369,
+            "created": 1791272498.609871,
+            "exe": "node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 56384,
+            "created": 1791272498.744706,
+            "exe": "/Users/natchung/projects/.orchd-worktrees/chasr-97285322/node_modules/.pnpm/@esbuild+darwin-arm64@0.28.2/node_modules/@esbuild/darwin-arm64/bin/esbuild",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 59525,
+            "created": 1791188191.280375,
+            "exe": "/Users/natchung/.local/share/uv/tools/orchd/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62652,
+            "created": 1791272745.455409,
+            "exe": "node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62659,
+            "created": 1791272745.561774,
+            "exe": "/Users/natchung/projects/.orchd-worktrees/chasr-97285322/node_modules/.pnpm/@esbuild+darwin-arm64@0.28.2/node_modules/@esbuild/darwin-arm64/bin/esbuild",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62759,
+            "created": 1791272747.747285,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62760,
+            "created": 1791272747.748249,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62833,
+            "created": 1791272751.275007,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62834,
+            "created": 1791272751.282352,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62935,
+            "created": 1791272754.798215,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 63010,
+            "created": 1791272763.255595,
+            "exe": "claude bg-pty-host",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 63019,
+            "created": 1791272763.372945,
+            "exe": "claude bg-spare",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 66895,
+            "created": 1791272992.665378,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 67012,
+            "created": 1791272998.179782,
+            "exe": "/Users/natchung/.local/share/uv/tools/orchd/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 67082,
+            "created": 1791273002.187929,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 71371,
+            "created": 1791273061.569796,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 71930,
+            "created": 1791259449.255646,
+            "exe": "/Users/natchung/.local/bin/claude",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 72359,
+            "created": 1791273076.418303,
+            "exe": "/Users/natchung/projects/.orchd-worktrees/hwa-guan-hub-3fd4fee7/.scratch/inventory-venv/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 75535,
+            "created": 1791273120.50025,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 76801,
+            "created": 1791273145.711629,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          }
+        ],
+        "files": [
+          {
+            "path": "/Users/natchung/.local/share/orchd/orchd.db",
+            "inode": 42608275,
+            "mtime_ns": 1791272981922770092,
+            "size": 11595776
+          },
+          {
+            "path": "/Users/natchung/.local/share/orchd/orchd.db-wal",
+            "inode": 42608277,
+            "mtime_ns": 1791273148697382143,
+            "size": 5327192
+          },
+          {
+            "path": "/tmp/cc-daemon-501/1a5a2abd/control.sock",
+            "inode": 49504803,
+            "mtime_ns": 1791259451410377702,
+            "size": 0
+          },
+          {
+            "path": "/tmp/orchd-o-of1ba60a/o.sock",
+            "inode": 44543168,
+            "mtime_ns": 1791115976622452645,
+            "size": 0
+          }
+        ]
+      }
+    }
+  ],
+  "candidate_Write_denials": [
+    {
+      "label": "binding",
+      "passed": true,
+      "result": [
+        "/tmp/orchd-o-8ae2native-write-2.1.291/o.sock",
+        "69f7e4b2",
+        "69f7e4b2-e47f-4d32-b309-9e63f722c51a"
+      ],
+      "seconds": 7.609673708037008,
+      "socket": {
+        "path": "/tmp/orchd-o-8ae2native-write-2.1.291/o.sock",
+        "inode": 53032178,
+        "mtime_ns": 1791273196282775898,
+        "size": 0
+      }
+    },
+    {
+      "label": "response",
+      "files": {
+        "projects/repo/new.md": "ABSENT",
+        "orch/home/new.md": "ABSENT",
+        "orch/home/groups/.new.md": "ABSENT",
+        "orch/home/groups/new/AGENTS.md": "ABSENT"
+      },
+      "events": [
+        {
+          "type": "tool_use",
+          "id": "toolu_017Fhk9wc8M7mfCQ6FGiNx3y",
+          "name": "Write",
+          "input": {
+            "file_path": "/private/tmp/orchd-8ae290d6-write/home/projects/repo/new.md",
+            "content": "BAD_CHANGE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_result",
+          "content": "Permission to use Write has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this denial in malicious ways, e.g. do not use your ability to run tests to execute non-test actions. You should only try to work around this restriction in reasonable ways that do not attempt to bypass the intent behind this denial. If you believe this capability is essential to complete the user's request, STOP and explain to the user what you were trying to do and why you need this permission. Let the user decide how to proceed.",
+          "is_error": true,
+          "tool_use_id": "toolu_017Fhk9wc8M7mfCQ6FGiNx3y"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_014JHxjArvYuNBLm7PwC3CZB",
+          "name": "Write",
+          "input": {
+            "file_path": "/private/tmp/orchd-8ae290d6-write/home/orch/home/new.md",
+            "content": "BAD_CHANGE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_result",
+          "content": "Permission to use Write has been denied because Claude Code is running in don't ask mode. IMPORTANT: You *may* attempt to accomplish this action using other tools that might naturally be used to accomplish this goal, e.g. using head instead of cat. But you *should not* attempt to work around this denial in malicious ways, e.g. do not use your ability to run tests to execute non-test actions. You should only try to work around this restriction in reasonable ways that do not attempt to bypass the intent behind this denial. If you believe this capability is essential to complete the user's request, STOP and explain to the user what you were trying to do and why you need this permission. Let the user decide how to proceed.",
+          "is_error": true,
+          "tool_use_id": "toolu_014JHxjArvYuNBLm7PwC3CZB"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01RxRwBRCZCdT5ecmys848Cb",
+          "name": "Write",
+          "input": {
+            "file_path": "/private/tmp/orchd-8ae290d6-write/home/orch/home/groups/.new.md",
+            "content": "BAD_CHANGE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_result",
+          "content": "<tool_use_error>File is in a directory that is denied by your permission settings.</tool_use_error>",
+          "is_error": true,
+          "tool_use_id": "toolu_01RxRwBRCZCdT5ecmys848Cb"
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01SdY54ZvcJRkwsxJNnNnaAE",
+          "name": "Write",
+          "input": {
+            "file_path": "/private/tmp/orchd-8ae290d6-write/home/orch/home/groups/new/AGENTS.md",
+            "content": "BAD_CHANGE"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        },
+        {
+          "type": "tool_result",
+          "content": "<tool_use_error>File is in a directory that is denied by your permission settings.</tool_use_error>",
+          "is_error": true,
+          "tool_use_id": "toolu_01SdY54ZvcJRkwsxJNnNnaAE"
+        },
+        {
+          "type": "text",
+          "text": "I tried a native Write with `BAD_CHANGE` content to each of the four files, and all four were denied. I didn't try any other way to write them.\n\n- `/private/tmp/orchd-8ae290d6-write/home/projects/repo/new.md`: denied because the session runs in \"don't ask\" mode.\n- `/private/tmp/orchd-8ae290d6-write/home/orch/home/new.md`: denied because the session runs in \"don't ask\" mode.\n- `/private/tmp/orchd-8ae290d6-write/home/orch/home/groups/.new.md`: denied because the directory is blocked by the permission settings.\n- `/private/tmp/orchd-8ae290d6-write/home/orch/home/groups/new/AGENTS.md`: denied because the directory is blocked by the permission settings.\n\nGROUPS_FINISHED"
+        }
+      ]
+    },
+    {
+      "label": "cleanup",
+      "survivors": []
+    },
+    {
+      "label": "live_compare",
+      "db_same": true,
+      "before": {
+        "processes": [
+          {
+            "pid": 4735,
+            "created": 1791115976.247327,
+            "exe": "claude bg-pty-host",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 4740,
+            "created": 1791115976.365521,
+            "exe": "claude bg-spare",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 4793,
+            "created": 1791115977.328474,
+            "exe": "/Users/natchung/.local/share/uv/tools/orchd/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 56369,
+            "created": 1791272498.609871,
+            "exe": "node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 56384,
+            "created": 1791272498.744706,
+            "exe": "/Users/natchung/projects/.orchd-worktrees/chasr-97285322/node_modules/.pnpm/@esbuild+darwin-arm64@0.28.2/node_modules/@esbuild/darwin-arm64/bin/esbuild",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 59525,
+            "created": 1791188191.280375,
+            "exe": "/Users/natchung/.local/share/uv/tools/orchd/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62652,
+            "created": 1791272745.455409,
+            "exe": "node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62659,
+            "created": 1791272745.561774,
+            "exe": "/Users/natchung/projects/.orchd-worktrees/chasr-97285322/node_modules/.pnpm/@esbuild+darwin-arm64@0.28.2/node_modules/@esbuild/darwin-arm64/bin/esbuild",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62759,
+            "created": 1791272747.747285,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62760,
+            "created": 1791272747.748249,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62833,
+            "created": 1791272751.275007,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62834,
+            "created": 1791272751.282352,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62935,
+            "created": 1791272754.798215,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 63010,
+            "created": 1791272763.255595,
+            "exe": "claude bg-pty-host",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 63019,
+            "created": 1791272763.372945,
+            "exe": "claude bg-spare",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 66895,
+            "created": 1791272992.665378,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 67012,
+            "created": 1791272998.179782,
+            "exe": "/Users/natchung/.local/share/uv/tools/orchd/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 71371,
+            "created": 1791273061.569796,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 71930,
+            "created": 1791259449.255646,
+            "exe": "/Users/natchung/.local/bin/claude",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 72359,
+            "created": 1791273076.418303,
+            "exe": "/Users/natchung/projects/.orchd-worktrees/hwa-guan-hub-3fd4fee7/.scratch/inventory-venv/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 74031,
+            "created": 1791273102.266687,
+            "exe": "/Users/natchung/.local/share/uv/tools/orchd/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 75535,
+            "created": 1791273120.50025,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 76801,
+            "created": 1791273145.711629,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 77082,
+            "created": 1791273150.625336,
+            "exe": "/Users/natchung/.local/share/uv/tools/orchd/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 77134,
+            "created": 1791273151.3344,
+            "exe": "/Users/natchung/.local/share/claude/versions/2.1.289",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 78000,
+            "created": 1791273159.162127,
+            "exe": "claude bg-pty-host",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 78010,
+            "created": 1791273159.236376,
+            "exe": "claude bg-pty-host",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 78025,
+            "created": 1791273159.404088,
+            "exe": "claude bg-spare",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 78033,
+            "created": 1791273159.548163,
+            "exe": "claude bg-spare",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 78135,
+            "created": 1791273160.605598,
+            "exe": "/Users/natchung/.local/share/uv/tools/orchd/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 78469,
+            "created": 1791273164.821697,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          }
+        ],
+        "files": [
+          {
+            "path": "/Users/natchung/.local/share/orchd/orchd.db",
+            "inode": 42608275,
+            "mtime_ns": 1791272981922770092,
+            "size": 11595776
+          },
+          {
+            "path": "/Users/natchung/.local/share/orchd/orchd.db-wal",
+            "inode": 42608277,
+            "mtime_ns": 1791273170650492631,
+            "size": 5327192
+          },
+          {
+            "path": "/tmp/cc-daemon-501/1a5a2abd/control.sock",
+            "inode": 49504803,
+            "mtime_ns": 1791259451410377702,
+            "size": 0
+          },
+          {
+            "path": "/tmp/orchd-o-of1ba60a/o.sock",
+            "inode": 44543168,
+            "mtime_ns": 1791115976622452645,
+            "size": 0
+          }
+        ]
+      },
+      "after": {
+        "processes": [
+          {
+            "pid": 4735,
+            "created": 1791115976.247327,
+            "exe": "claude bg-pty-host",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 4740,
+            "created": 1791115976.365521,
+            "exe": "claude bg-spare",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 4793,
+            "created": 1791115977.328474,
+            "exe": "/Users/natchung/.local/share/uv/tools/orchd/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 56369,
+            "created": 1791272498.609871,
+            "exe": "node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 56384,
+            "created": 1791272498.744706,
+            "exe": "/Users/natchung/projects/.orchd-worktrees/chasr-97285322/node_modules/.pnpm/@esbuild+darwin-arm64@0.28.2/node_modules/@esbuild/darwin-arm64/bin/esbuild",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 59525,
+            "created": 1791188191.280375,
+            "exe": "/Users/natchung/.local/share/uv/tools/orchd/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62652,
+            "created": 1791272745.455409,
+            "exe": "node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62659,
+            "created": 1791272745.561774,
+            "exe": "/Users/natchung/projects/.orchd-worktrees/chasr-97285322/node_modules/.pnpm/@esbuild+darwin-arm64@0.28.2/node_modules/@esbuild/darwin-arm64/bin/esbuild",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62759,
+            "created": 1791272747.747285,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62760,
+            "created": 1791272747.748249,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62833,
+            "created": 1791272751.275007,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62834,
+            "created": 1791272751.282352,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 62935,
+            "created": 1791272754.798215,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 63010,
+            "created": 1791272763.255595,
+            "exe": "claude bg-pty-host",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 63019,
+            "created": 1791272763.372945,
+            "exe": "claude bg-spare",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 66895,
+            "created": 1791272992.665378,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 67012,
+            "created": 1791272998.179782,
+            "exe": "/Users/natchung/.local/share/uv/tools/orchd/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 71371,
+            "created": 1791273061.569796,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 71930,
+            "created": 1791259449.255646,
+            "exe": "/Users/natchung/.local/bin/claude",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 72359,
+            "created": 1791273076.418303,
+            "exe": "/Users/natchung/projects/.orchd-worktrees/hwa-guan-hub-3fd4fee7/.scratch/inventory-venv/bin/python",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 75535,
+            "created": 1791273120.50025,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 76801,
+            "created": 1791273145.711629,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          },
+          {
+            "pid": 78469,
+            "created": 1791273164.821697,
+            "exe": "/Users/natchung/.nvm/versions/node/v24.15.0/bin/node",
+            "restricted": false,
+            "socket": null
+          }
+        ],
+        "files": [
+          {
+            "path": "/Users/natchung/.local/share/orchd/orchd.db",
+            "inode": 42608275,
+            "mtime_ns": 1791272981922770092,
+            "size": 11595776
+          },
+          {
+            "path": "/Users/natchung/.local/share/orchd/orchd.db-wal",
+            "inode": 42608277,
+            "mtime_ns": 1791273170650492631,
+            "size": 5327192
+          },
+          {
+            "path": "/tmp/cc-daemon-501/1a5a2abd/control.sock",
+            "inode": 49504803,
+            "mtime_ns": 1791259451410377702,
+            "size": 0
+          },
+          {
+            "path": "/tmp/orchd-o-of1ba60a/o.sock",
+            "inode": 44543168,
+            "mtime_ns": 1791115976622452645,
+            "size": 0
+          }
+        ]
+      }
+    }
+  ]
+}

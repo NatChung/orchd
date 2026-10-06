@@ -1,0 +1,7 @@
+.....Claude binding: binary=/Users/natchung/.local/share/claude/versions/2.1.291, version=2.1.291, protocol=cross-session JSONL user frame (--messaging-socket-path)
+Claude binding: session exists, waiting for messaging socket; Claude >=2.1.290 restricted sessions ignore the socket flag.
+.........
+----------------------------------------------------------------------
+Ran 14 tests in 0.110s
+
+OK

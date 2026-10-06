@@ -1,0 +1,124 @@
+{
+  "cases": [
+    {
+      "version": "2.1.289",
+      "events": [
+        {
+          "label": "binding",
+          "passed": true,
+          "result": [
+            "/tmp/orchd-o-8ae2baseline-image-2.1.289/o.sock",
+            "95937297",
+            "95937297-4322-4cdd-be52-dc2f64c8b7b9"
+          ],
+          "seconds": 3.7918509999872185,
+          "socket": {
+            "path": "/tmp/orchd-o-8ae2baseline-image-2.1.289/o.sock",
+            "inode": 52969141,
+            "mtime_ns": 1791272446700208719,
+            "size": 0
+          }
+        },
+        {
+          "label": "response",
+          "events": [
+            {
+              "type": "tool_use",
+              "id": "toolu_01Ua73RmY2k6kXGuW7WSyv9u",
+              "name": "Read",
+              "input": {
+                "file_path": "/private/tmp/claude-501/-private-tmp-orchd-8ae290d6-images2-home-orch-home/probe/images/pixel.png"
+              },
+              "caller": {
+                "type": "direct"
+              }
+            },
+            {
+              "tool_use_id": "toolu_01Ua73RmY2k6kXGuW7WSyv9u",
+              "type": "tool_result",
+              "content": [
+                {
+                  "type": "image",
+                  "source": {
+                    "type": "base64",
+                    "data": "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAb0lEQVR4nO3PAQkAAAyEwO9feoshgnABdLep8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3IPanc8OLDQitxAAAAAElFTkSuQmCC",
+                    "media_type": "image/png"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": "The Read call on `/private/tmp/claude-501/-private-tmp-orchd-8ae290d6-images2-home-orch-home/probe/images/pixel.png` came back as an image, not text or an error. It shows a plain red square. I didn't publish or change anything.\n\nIMAGE_FINISHED"
+            }
+          ],
+          "protected": null
+        },
+        {
+          "label": "cleanup",
+          "survivors": []
+        }
+      ]
+    },
+    {
+      "version": "2.1.291",
+      "events": [
+        {
+          "label": "binding",
+          "passed": true,
+          "result": [
+            "/tmp/orchd-o-8ae2native-image-2.1.291/o.sock",
+            "5a0a3e74",
+            "5a0a3e74-9fb3-4e04-a4da-a08b9c34f269"
+          ],
+          "seconds": 4.4693141669849865,
+          "socket": {
+            "path": "/tmp/orchd-o-8ae2native-image-2.1.291/o.sock",
+            "inode": 52969471,
+            "mtime_ns": 1791272460889928798,
+            "size": 0
+          }
+        },
+        {
+          "label": "response",
+          "events": [
+            {
+              "type": "tool_use",
+              "id": "toolu_01HbvxE6aQvUYFfYDnmVG6Nc",
+              "name": "Read",
+              "input": {
+                "file_path": "/private/tmp/claude-501/-private-tmp-orchd-8ae290d6-images2-home-orch-home/probe/images/pixel.png"
+              },
+              "caller": {
+                "type": "direct"
+              }
+            },
+            {
+              "tool_use_id": "toolu_01HbvxE6aQvUYFfYDnmVG6Nc",
+              "type": "tool_result",
+              "content": [
+                {
+                  "type": "image",
+                  "source": {
+                    "type": "base64",
+                    "data": "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAb0lEQVR4nO3PAQkAAAyEwO9feoshgnABdLep8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3I8QUNyPEFDcjxBQ3IPanc8OLDQitxAAAAAElFTkSuQmCC",
+                    "media_type": "image/png"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "text",
+              "text": "I read `/private/tmp/claude-501/-private-tmp-orchd-8ae290d6-images2-home-orch-home/probe/images/pixel.png` and it came back as an image, not as text or an error. It shows one solid red square. I didn't publish or change anything.\n\nIMAGE_FINISHED"
+            }
+          ],
+          "protected": null
+        },
+        {
+          "label": "cleanup",
+          "survivors": []
+        }
+      ]
+    }
+  ]
+}

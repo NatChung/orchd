@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from orchd.runtime import Runtime
+from orchd.runtime import Runtime, ORCH_TOOLS
 
 
 class OrchPermissionsTest(unittest.TestCase):
@@ -25,14 +25,32 @@ class OrchPermissionsTest(unittest.TestCase):
             cwd, actual_sock, model, args = start.call_args.args
             self.assertEqual((cwd, actual_sock, model), (home, sock, "opus"))
             self.assertNotIn("--session-id", args)
-            self.assertIn("--restricted", args)
+            self.assertNotIn("--restricted", args)
+            self.assertEqual(args[args.index("--tools") + 1], ORCH_TOOLS)
+            self.assertEqual(args[args.index("--setting-sources") + 1], "")
+            self.assertNotIn("--disable-slash-commands", args)
+            for tool in ("Read", "Grep", "Glob", "Edit", "Write", "Skill", "ToolSearch", "Artifact"):
+                self.assertIn(tool, ORCH_TOOLS.split(","))
+            for tool in ("Bash", "PowerShell", "REPL", "WebFetch"):
+                self.assertNotIn(tool, ORCH_TOOLS.split(","))
+            self.assertIn("--no-chrome", args)
             self.assertEqual(args[args.index("--permission-mode") + 1], "dontAsk")
             self.assertIn("--strict-mcp-config", args)
             settings = json.loads(args[args.index("--settings") + 1])
             self.assertEqual(settings["worktree"], {"bgIsolation": "none"})
             self.assertEqual(settings["crossSessionInbound"], "accept")
+            self.assertEqual(settings["permissions"]["disableBypassPermissionsMode"], "disable")
+            self.assertEqual(settings["env"]["CLAUDE_CODE_DISABLE_AUTO_MEMORY"], "1")
+            mcp = json.loads(Path(args[args.index("--mcp-config") + 1]).read_text())
+            self.assertEqual(set(mcp["mcpServers"]), {"orchd"})
             self.assertEqual(settings["permissions"]["allow"],
-                             ["Read", f"Edit(/{home}/groups/**)", "mcp__orchd"])
+                             [f"Read(/{home}/**)", f"Read(/{settings['permissions']['additionalDirectories'][0]}/**)",
+                              f"Edit(/{home}/groups/**)", "mcp__orchd"])
+            self.assertTrue(settings["permissions"]["blockReadsOutsideWorkingDirectories"])
+            self.assertIn(f"Edit(/{home}/CLAUDE.md)", settings["permissions"]["deny"])
+            for pattern in (".*", ".*/**", "AGENTS.md", "CLAUDE.md", "settings.json",
+                            "settings.local.json", "mcp.json"):
+                self.assertIn(f"Edit(/{home}/groups/**/{pattern})", settings["permissions"]["deny"])
             images, = settings["permissions"]["additionalDirectories"]
             key = re.sub(r"[^a-zA-Z0-9]", "-", str(home))
             self.assertEqual(images, str((Path("/tmp") / f"claude-{os.getuid()}" / key).resolve()))

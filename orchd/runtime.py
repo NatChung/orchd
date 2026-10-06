@@ -25,6 +25,13 @@ WORKER_MODELS = {"sol": "gpt-6.1-sol", "sonnet": "claude-sonnet-5-5"}
 ORCH_MODELS = {"sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}
 DEFAULT_WORKER_MODEL = "sol"
 DEFAULT_ORCH_MODEL = "opus"
+# Native tools observed in the 2.1.289 restricted Orch, including background-only
+# tools and Agent/Task aliases. New CLI tools are not implicitly granted.
+ORCH_TOOLS = ",".join((
+    "Task", "Agent", "CronDelete", "CronList", "DesignSync", "Edit", "EnterWorktree", "ExitWorktree",
+    "Glob", "Grep", "ListAgents", "NotebookEdit", "Read", "ReportFindings", "ScheduleWakeup",
+    "SendMessage", "Skill", "TaskStop", "ToolSearch", "WebSearch", "Write", "Artifact", "AskUserQuestion",
+))
 CODEX_FLAGS = ["--json", "--dangerously-bypass-approvals-and-sandbox"]
 USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 
@@ -72,7 +79,7 @@ def launch_env():
     """Keep a parent Claude session's variables and Orch id out of the sessions we start (belt and braces:
     the Claude daemon may spawn --bg sessions from its own environment anyway)."""
     return {k: v for k, v in os.environ.items()
-            if not k.startswith("CLAUDE") and k not in ("ORCHD_ORCH_ID", "ORCHD_WORKTREE")}
+            if (not k.startswith("CLAUDE") or k == "CLAUDE_CONFIG_DIR") and k not in ("ORCHD_ORCH_ID", "ORCHD_WORKTREE")}
 
 
 def worker_bin_dir():
@@ -182,7 +189,9 @@ class Runtime:
     def claude_trusted(self, repo_path):
         """Claude keys trust by the repo's main checkout; worktrees inherit it, subdirs of ~/projects do not."""
         try:
-            data = json.loads((Path.home() / ".claude.json").read_text())
+            config = (Path(os.environ["CLAUDE_CONFIG_DIR"]) / ".claude.json"
+                      if os.environ.get("CLAUDE_CONFIG_DIR") else Path.home() / ".claude.json")
+            data = json.loads(config.read_text())
         except (OSError, ValueError):
             return False
         return bool((data.get("projects") or {}).get(str(repo_path), {}).get("hasTrustDialogAccepted"))
@@ -295,18 +304,42 @@ class Runtime:
         return data
 
     def start_claude(self, cwd, sock, model, extra_args):
+        version = self.run([self.claude, "--version"], timeout=10, env=launch_env()).stdout.strip()
+        binary = Path(shutil.which(self.claude) or self.claude).resolve()
+        diagnostic = f"binary={binary}, version={version}, protocol=cross-session JSONL user frame (--messaging-socket-path)"
+        print(f"Claude binding: {diagnostic}", file=sys.stderr)
         cmd = [self.claude, "--bg", "--model", model, *extra_args, "--messaging-socket-path", sock]
         out = self.run(cmd, cwd=cwd, timeout=60, check=False, env=launch_env())
         match = re.search(r"claude attach ([a-zA-Z0-9-]+)", out.stdout)
         if not match:
-            raise RuntimeError("claude --bg returned no job id: " + (out.stdout + out.stderr)[-500:])
+            raise RuntimeError(f"claude --bg returned no job id ({diagnostic}): "
+                               + redact((out.stdout + out.stderr)[-500:]))
         job = match[1]
-        for _ in range(125):
-            agent = next((a for a in self.agents() if a.get("id") == job), None)
-            if agent and agent.get("sessionId") and self.exists(sock):
-                return job, agent["sessionId"]
-            self.sleep(0.2)
-        raise RuntimeError(f"claude job {job} did not publish its session and socket")
+        deadline = time.monotonic() + 25
+        failure = "did not publish its session and socket"
+        waiting_logged = False
+        try:
+            while time.monotonic() < deadline:
+                agent = next((a for a in self.agents() if a.get("id") == job), None)
+                if agent and agent.get("sessionId") and self.exists(sock):
+                    return job, agent["sessionId"]
+                if agent and agent.get("state") in CLAUDE_DEAD_STATES:
+                    failure = "failed before publishing its socket"
+                    break
+                if agent and agent.get("sessionId") and not waiting_logged:
+                    print("Claude binding: session exists, waiting for messaging socket; "
+                          "Claude >=2.1.290 restricted sessions ignore the socket flag.", file=sys.stderr)
+                    waiting_logged = True
+                self.sleep(0.2)
+        except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+            failure = "startup query failed: " + error_detail(error)
+        try:
+            self.stop_worker(job)
+        except (OSError, subprocess.SubprocessError) as error:
+            failure += "; cleanup could not stop job: " + error_detail(error)
+        raise RuntimeError(f"claude job {job} {failure}; {diagnostic}. "
+                           "Restricted mode on Claude >=2.1.290 ignores --messaging-socket-path; "
+                           "also check daemon version, authentication and messaging capability.")
 
     def start_worker(self, worktree, sock, brief, model):
         return self.start_claude(worktree, sock, model, [
@@ -347,15 +380,28 @@ class Runtime:
                   f"Orch home sessions' cached input images are readable under {images}/<session-id>/images/. "
                   "Only files under groups/ in your Orch home may be edited. "
                   f"Instructions from AGENTS.md follow:\n{agents}")
-        settings = {"crossSessionInbound": "accept",
+        settings = {"env": {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"},
+                    "crossSessionInbound": "accept",
                     "worktree": {"bgIsolation": "none"},
                     "permissions": {"additionalDirectories": [str(images)],
-                                    "allow": ["Read", f"Edit(/{orch_home}/groups/**)", "mcp__orchd"]}}
+                                    "allow": [f"Read(/{orch_home}/**)", f"Read(/{images}/**)",
+                                              f"Edit(/{orch_home}/groups/**)", "mcp__orchd"],
+                                    "deny": [f"Edit(/{orch_home}/.claude/**)", f"Edit(/{orch_home}/.git/**)",
+                                             f"Edit(/{orch_home}/.mcp.json)", f"Edit(/{orch_home}/CLAUDE.md)",
+                                             f"Edit(/{orch_home}/AGENTS.md)",
+                                             f"Edit(/{orch_home}/groups/**/.*)",
+                                             f"Edit(/{orch_home}/groups/**/.*/**)",
+                                             *[f"Edit(/{orch_home}/groups/**/{name})" for name in
+                                               ("AGENTS.md", "CLAUDE.md", "settings.json",
+                                                "settings.local.json", "mcp.json")]],
+                                    "blockReadsOutsideWorkingDirectories": True,
+                                    "disableBypassPermissionsMode": "disable"}}
         if resume and self.exists(sock):
             self.clear_dead_socket(sock)  # else start_claude's wait for the socket passes on the old file
         job, session = self.start_claude(orch_home, sock, model, [
             *(["--resume", resume] if resume else []),
-            "--restricted", "--permission-mode", "dontAsk", "--strict-mcp-config", "--mcp-config", str(mcp),
+            "--tools", ORCH_TOOLS, "--setting-sources", "", "--no-chrome",
+            "--permission-mode", "dontAsk", "--strict-mcp-config", "--mcp-config", str(mcp),
             "--settings", json.dumps(settings), "--append-system-prompt", prompt])
         return sock, job, session
 

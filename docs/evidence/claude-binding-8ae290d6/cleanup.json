@@ -1,0 +1,72 @@
+{
+  "sandbox_processes": [],
+  "roots": [
+    {
+      "root": "/tmp/orchd-8ae290d6",
+      "home_exists": false,
+      "state_exists": false,
+      "control_namespace_exists": false
+    },
+    {
+      "root": "/tmp/orchd-8ae290d6-e2e",
+      "home_exists": false,
+      "state_exists": false,
+      "control_namespace_exists": false
+    },
+    {
+      "root": "/tmp/orchd-8ae290d6-images2",
+      "home_exists": false,
+      "state_exists": false,
+      "control_namespace_exists": false
+    },
+    {
+      "root": "/tmp/orchd-8ae290d6-parity291",
+      "home_exists": false,
+      "state_exists": false,
+      "control_namespace_exists": false
+    },
+    {
+      "root": "/tmp/orchd-8ae290d6-e2e2",
+      "home_exists": false,
+      "state_exists": false,
+      "control_namespace_exists": false
+    },
+    {
+      "root": "/tmp/orchd-8ae290d6-protected3",
+      "home_exists": false,
+      "state_exists": false,
+      "control_namespace_exists": false
+    },
+    {
+      "root": "/tmp/orchd-8ae290d6-protected2",
+      "home_exists": false,
+      "state_exists": false,
+      "control_namespace_exists": false
+    },
+    {
+      "root": "/tmp/orchd-8ae290d6-protected",
+      "home_exists": false,
+      "state_exists": false,
+      "control_namespace_exists": false
+    },
+    {
+      "root": "/tmp/orchd-8ae290d6-images",
+      "home_exists": false,
+      "state_exists": false,
+      "control_namespace_exists": false
+    },
+    {
+      "root": "/tmp/orchd-8ae290d6-child",
+      "home_exists": false,
+      "state_exists": false,
+      "control_namespace_exists": false
+    },
+    {
+      "root": "/tmp/orchd-8ae290d6-parity",
+      "home_exists": false,
+      "state_exists": false,
+      "control_namespace_exists": false
+    }
+  ],
+  "orch_socket_dirs": []
+}
