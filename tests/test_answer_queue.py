@@ -272,3 +272,28 @@ class AnswerQueueTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+from tests.app_support import AppBase
+from unittest.mock import patch
+from orchd import core, store
+
+class AppAnswerQueueTest(AppBase):
+    def test_busy_answer_is_fifo_and_idle_flush_delivers_one_batch(self):
+        self.queue("first");self.queue("second")
+        self.assertEqual(self.supervisor.flush()["status"], "queued")
+        self.assertEqual(self.supervisor.rpc.calls, [])
+        self.idle();result=self.supervisor.flush()
+        self.assertEqual(result["delivered"], 2)
+        text=self.supervisor.rpc.calls[-1][1]["input"][0]["text"]
+        self.assertLess(text.index("first"),text.index("second"))
+        self.assertEqual(store.pending_answer_count(self.con,self.id),0)
+
+    def test_receipt_failure_is_uncertain_and_never_resent(self):
+        self.queue();self.idle()
+        with patch.object(self.supervisor,"receipt",side_effect=OSError("DB unavailable")):
+            result=self.supervisor.flush()
+        self.assertTrue(result["uncertain"])
+        self.assertEqual(store.pending_answer_count(self.con,self.id),1)
+        self.assertTrue(self.supervisor.flush()["uncertain"])
+        self.assertEqual(len(self.supervisor.rpc.calls),1)

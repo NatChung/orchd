@@ -593,3 +593,16 @@ class FollowupReceiptBoundaryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+from tests.app_support import AppBase
+from unittest.mock import patch
+from orchd import core, store
+
+class AppFollowupTest(AppBase):
+    def test_followup_acceptance_and_fifo_are_preserved(self):
+        with patch("orchd.app_worker.control",side_effect=lambda task,cmd: self.supervisor.flush()):
+            result=core.followup(self.con,self.rt,self.id,"new scope within task")
+        self.assertEqual(result["status"],"queued")
+        self.assertIn("[followup]",store.pending_answers(self.con,self.id)[0]["body"])
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM messages WHERE kind='followup'").fetchone()[0],1)

@@ -11,6 +11,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -587,6 +588,11 @@ class Runtime:
                            if isinstance(c, dict) and c.get("type") in ("text", "Text", "input_text"))
             found.append({"turn_id": payload.get("turn_id"), "item_id": item.get("id"), "text": text})
         return found
+
+    def open_app_viewer(self, database, task):
+        self.run(["open", "-na", "Ghostty.app", "--args", f"--working-directory={task['worktree']}", "-e",
+                  sys.executable, "-m", "orchd.app_worker", "viewer", database, task["id"], task["generation"]],
+                 timeout=30, env=worker_env(task["worktree"]))
 
     def open_codex_viewer(self, worktree, thread):
         self.run(["open", "-na", "Ghostty.app", "--args", f"--working-directory={worktree}", "-e",

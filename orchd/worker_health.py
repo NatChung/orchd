@@ -18,6 +18,8 @@ def assess(status, worker_alive, reported, *, task_id=None, worktree=None, branc
     None: the query failed or a Codex thread is between turns; never guessed from timestamps), "orphan" (running or
     acked, worker confirmed dead, no report), or None for statuses outside this check (starting, failed, question).
     """
+    if isinstance(worker_alive, str):
+        worker_alive = None if worker_alive == "unknown" else worker_alive != "dead"
     if status in FINISHED or reported:
         return dict(worker_health="finished", recovery_hint=None)
     if status not in WATCHED:

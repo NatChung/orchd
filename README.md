@@ -153,3 +153,61 @@ Worker 用：`orchd ack`、`orchd progress`、`orchd ask`、`orchd report`、`or
 ```sh
 python3 -m unittest discover -s tests
 ```
+
+## Opt-in Codex app-server workers
+
+App-server workers require `websocket-client`. Reinstall with dependencies after a code-only
+checkout update (`uv pip install -e .` in its environment); installed tools should use
+`orchd upgrade`. Default exec workers do not import or require websocket-client.
+
+`dispatch(..., model="sol", backend="app-server")` selects a private app-server and RPC
+supervisor for that task attempt. Omitting `backend` keeps `exec`; existing rows migrate to
+`exec`, and Claude workers keep their existing transport. This does not enable the shared
+Codex daemon or change global Codex configuration. Tested with `codex-cli 0.160.1`;
+[the upstream app-server protocol](https://learn.chatgpt.com/docs/app-server) is experimental.
+
+Each attempt stores its generation, supervisor/server PID + birth time + process group,
+private UDS endpoint (0700 directory, 0600 sockets), thread and active turn. `socket` remains
+the Claude transport field. `view_worker(task_id)` opens a new Ghostty window running the
+native `codex --remote unix://ENDPOINT resume THREAD` through a registered wrapper, while
+busy or idle. Closing the window releases the viewer without stopping the worker. Multiple
+viewers can attach; normal FIFO answers wait until all viewers exit to protect human drafts.
+An explicit interrupt cancels the matching turn, waits for `interrupted`, then sends the
+correction and pending FIFO as a new turn, including when a viewer is attached.
+
+`turn/completed` drives a generation/thread/turn-guarded flush. RPC deliveries are journaled
+before sending; a confirmed response commits queued-message receipts. A disconnect or receipt
+failure leaves pending visible and blocks automatic resend. Reconnection resumes the same
+thread and reads paginated full turn history; matching user-message `clientId` reconciles
+receipts. Missing history evidence stays uncertain: inspect `worker_deliveries` and the task's
+private logs before an explicit retry. This is not an exactly-once guarantee across RPC and
+SQLite. Retry stops the old attempt before replacing it; retrying to Sonnet returns to its
+existing backend. Close stops registered viewers, supervisor, server and marked descendants,
+using bounded TERM/KILL and stored process identities. Stop failure preserves worktree/pending.
+`worker_alive` is `alive`, `idle`, `active`, `unknown` or `dead` for app-server tasks; legacy
+workers retain their existing boolean/null values. Report/ask status is separate from turn state.
+Opt-in tasks require lifecycle clients running this version; the existing installed service is not
+upgraded by these changes. The native TUI can change its model/settings; task model bookkeeping
+is not reconciled from those UI changes (structured FIFO turns reapply the task model/permissions).
+
+Manual isolated acceptance (requires tmux, Codex authentication, and installed dependencies):
+
+```sh
+python3 scripts/app_server_e2e.py
+```
+
+The script uses a temp git worktree, private DB/CODEX_HOME/tmux socket, and temporary auth copy
+removed in `finally`. It verifies mid-turn attach and same-turn input, viewer-close continuation,
+one queued-answer auto-flush, and close with no leftover processes. Unit tests additionally
+cover stale guards, uncertain receipts, reconnect reconciliation, interrupt ordering, failed
+startup, ownership, and targeted process-group kill. No Ghostty GUI/window-focus test, long-run
+resource measurements, or full worker MCP/browser integration test has been performed here.
+The supervisor does not restart a crashed server or replay uncertain deliveries automatically;
+its process identity and pending state remain available for explicit retry/close. Private runtime
+logs/directories are retained for diagnosis. Native interrupt cancels Codex-owned tools; detached
+marked jobs are guaranteed cleanup on retry/close, not on interrupt.
+
+The later Desktop foreground tool should accept only a task id (and optionally expected
+generation), check its binding/ownership, then call this existing viewer path. It must not accept
+commands, paths or endpoints, must report unknown/dead/superseded attempts, and must distinguish
+opening a new window from focusing an existing one. This PR does not add that entry tool.

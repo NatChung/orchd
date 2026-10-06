@@ -113,3 +113,29 @@ class WorkerProcessesTest(unittest.TestCase):
                             os.kill(pid, signal.SIGKILL)
                         except ProcessLookupError:
                             pass
+
+
+class AppProcessIdentityTest(unittest.TestCase):
+    def test_reused_birth_is_not_signalled_and_bounded_kill_targets_only_group(self):
+        import json
+        import subprocess
+        import sys
+        from orchd import app_worker
+        unrelated=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True)
+        owned=subprocess.Popen([sys.executable,'-c',
+            'import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); print("ready",flush=True); time.sleep(60)'],
+            stdout=subprocess.PIPE,text=True,start_new_session=True)
+        try:
+            self.assertEqual(owned.stdout.readline().strip(),'ready')
+            raw=app_worker.identity(owned.pid)
+            wrong=json.loads(raw);wrong['birth']-=1
+            app_worker.stop_identity(json.dumps(wrong),grace=.1)
+            self.assertIsNone(owned.poll())
+            app_worker.stop_identity(raw,grace=.1)
+            self.assertEqual(owned.wait(timeout=2),-9)
+            self.assertIsNone(unrelated.poll())
+        finally:
+            for p in (owned,unrelated):
+                if p.poll() is None:p.kill()
+                p.wait()
+            owned.stdout.close()

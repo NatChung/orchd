@@ -42,6 +42,8 @@ TOOLS = [
          "model": {"type": "string", "enum": list(WORKER_MODELS), "default": DEFAULT_WORKER_MODEL,
                    "description": "sol = GPT-6.1 Sol on Codex, the default and preferred worker; "
                                   "sonnet = Claude Sonnet 5.5, use when switching to another vendor"},
+         "backend": {"type": "string", "enum": ["exec", "app-server"], "default": "exec",
+                     "description": "Opt-in Codex app-server; default exec remains unchanged"},
          "model_reason": {"type": "string", "description": "One sentence: why this model for this task"},
          "task_type": {"type": "string", "enum": list(core.TASK_TYPES)},
          "rework_of": {"type": "string", "description": "Task id this task redoes or fixes"},
@@ -78,7 +80,8 @@ TOOLS = [
                     "pending counts undelivered queued answers and followups without revealing their bodies, "
                     "consuming them or flushing; it remains nonzero until delivery is recorded, including "
                     "during a flush or after a failed receipt. "
-                    "worker_alive null: unknown, or a Codex worker between turns (it asked or reported and can "
+                    "App-server worker_alive is alive/idle/active/unknown/dead; uncertain_delivery flags held receipts. "
+                    "Legacy worker_alive null: unknown, or a Codex worker between turns (it asked or reported and can "
                     "still be answered); false: its process ended without a report. "
                     "owner_health is independent: alive/dead from a successful Claude job probe, unknown "
                     "when unverified (including Codex owners). notification_delivery shows unread counts "
@@ -127,7 +130,8 @@ TOOLS = [
          "rating": {"type": "integer", "minimum": 1, "maximum": 3, "description": "Nat's optional 1-3 score"}}}},
     {"name": "view_worker",
      "description": "Open a Ghostty window attached to a task's worker so Nat can watch or type. A Codex worker opens only "
-                    "between turns, as `codex resume`; do not answer it while Nat is typing there.",
+                    "between turns on exec; app-server workers attach with the native remote TUI while busy or idle. "
+                    "App-server FIFO answers wait until all viewer windows close.",
      "inputSchema": {"type": "object", "required": ["task_id"], "properties": {"task_id": {"type": "string"}}}},
     {"name": "retry",
      "description": "Replace a task's worker with a new one on the same worktree and branch, keeping all its local work "
@@ -140,6 +144,8 @@ TOOLS = [
          "model": {"type": "string", "enum": list(WORKER_MODELS),
                    "description": "sol = GPT-6.1 Sol on Codex, the default and preferred worker; "
                                   "sonnet = Claude Sonnet 5.5, use when switching to another vendor"},
+         "backend": {"type": "string", "enum": ["exec", "app-server"],
+                     "description": "Optional; retains Codex attempt backend, Sonnet uses its existing backend"},
          "reason": {"type": "string", "description": "Why this worker is being replaced and why this model"}}}},
     {"name": "followup",
      "description": "Add an instruction to an open task: the same worker, worktree, branch and session continue; the model "
@@ -224,7 +230,8 @@ def call(name, args, thread, con, rt):
                           model=args.get("model") or DEFAULT_WORKER_MODEL, model_reason=args.get("model_reason"),
                           task_type=args.get("task_type"), rework_of=args.get("rework_of"),
                           found_by=args.get("found_by"), verify=args.get("verify"),
-                          manual_checks=args.get("manual_checks"), verifies=args.get("verifies"))
+                          manual_checks=args.get("manual_checks"), verifies=args.get("verifies"),
+                          backend=args.get("backend", "exec"))
         return {"task_id": t["id"], "status": t["status"], "branch": t["branch"], "worktree": t["worktree"],
                 "orch_id": thread, "model": t["model"],
                 "other_open_on_repo": core.other_open_on_repo(con, t["repo"], thread, t["id"])}
@@ -259,7 +266,7 @@ def call(name, args, thread, con, rt):
     if name == "view_worker":
         return core.view(con, rt, args["task_id"])
     if name == "retry":
-        t = core.retry(con, rt, args["task_id"], args.get("model"), args.get("reason"))
+        t = core.retry(con, rt, args["task_id"], args.get("model"), args.get("reason"), backend=args.get("backend"))
         return {"task_id": t["id"], "status": t["status"], "model": t["model"], "branch": t["branch"],
                 "worktree": t["worktree"]}
     if name == "followup":

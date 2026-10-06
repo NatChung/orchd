@@ -588,3 +588,18 @@ class CloseRetryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+from tests.app_support import AppBase
+from unittest.mock import patch
+from orchd import core, store
+
+class AppCloseRecoveryTest(AppBase):
+    def test_stop_failure_keeps_task_worktree_and_pending(self):
+        self.queue()
+        with patch("orchd.app_worker.stop",side_effect=RuntimeError("not confirmed")):
+            with self.assertRaises(RuntimeError):core.close(self.con,self.rt,self.id)
+        task=store.get_task(self.con,self.id)
+        self.assertEqual(task["status"],"running")
+        self.assertEqual(task["worktree"],"/tmp/app-test-wt")
+        self.assertEqual(store.pending_answer_count(self.con,self.id),1)

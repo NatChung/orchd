@@ -335,3 +335,58 @@ class TurnWrapperTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+from tests.app_support import AppBase
+from unittest.mock import patch
+from orchd import core, store
+
+class AppAutoFlushTest(AppBase):
+    def test_completion_guard_and_repeat_flush_send_only_once(self):
+        self.queue();self.complete()
+        guard=(self.gen,"thread","turn")
+        self.assertEqual(self.supervisor.flush(guard)["delivered"],1)
+        self.assertEqual(self.supervisor.flush(guard)["status"],"queued")
+        self.assertEqual(len(self.supervisor.rpc.calls),1)
+        self.complete(turn="turn")
+        self.assertEqual(store.get_task(self.con,self.id)["active_turn"],"next-turn")
+
+    def test_old_generation_thread_turn_and_closed_cannot_flush(self):
+        self.queue();self.idle()
+        for guard in [("b"*32,"thread","turn"),(self.gen,"other","turn"),(self.gen,"thread","old")]:
+            self.assertEqual(self.supervisor.flush(guard)["status"],"skipped")
+        store.update_task(self.con,self.id,status="closed")
+        self.assertEqual(self.supervisor.flush()["status"],"skipped")
+        self.assertEqual(self.supervisor.rpc.calls,[])
+
+    def test_failed_and_interrupted_are_recorded_and_guarded(self):
+        for state in ("failed","interrupted"):
+            store.update_task(self.con,self.id,active_turn="turn",turn_state="active")
+            self.complete(status=state)
+            task=store.get_task(self.con,self.id)
+            self.assertEqual(task["turn_state"],state)
+            self.assertIn(state,task["note"])
+
+    def test_interrupt_waits_for_same_turn_interrupted_before_new_turn(self):
+        self.queue("correction")
+        rpc=self.supervisor.rpc;original=rpc.call
+        def call(method,params,timeout=20):
+            result=original(method,params,timeout)
+            if method=="turn/interrupt":
+                rpc.events.put({"method":"turn/completed","params":{"threadId":"thread",
+                    "turn":{"id":"turn","status":"interrupted"}}})
+            return result
+        rpc.call=call
+        result=self.supervisor.interrupt()
+        self.assertTrue(result["interrupted"])
+        self.assertEqual([m for m,p in rpc.calls],["turn/interrupt","turn/start"])
+
+    def test_stale_interrupt_cannot_cancel_correction_already_auto_flushed(self):
+        self.queue("correction")
+        self.complete();self.supervisor.flush()
+        result=self.supervisor.command(dict(command="interrupt",generation=self.gen,
+            expected_generation=self.gen,expected_thread="thread",expected_turn="turn"))
+        self.assertFalse(result["interrupted"])
+        self.assertEqual(store.get_task(self.con,self.id)["active_turn"],"next-turn")
+        self.assertEqual([m for m,p in self.supervisor.rpc.calls],["turn/start"])
+        self.assertEqual(store.pending_answer_count(self.con,self.id),0)

@@ -8,7 +8,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import orch_revive, paths, store, verify as verification, worker_health
+from . import app_worker, orch_revive, paths, store, verify as verification, worker_health
 from .orch_health import owner_health
 from .runtime import (DEFAULT_ORCH_MODEL, DEFAULT_WORKER_MODEL, ORCH_MODELS, WORKER_MODELS,
                       claude_job_alive, error_detail, worker_kind)
@@ -82,6 +82,12 @@ def worker_cli():
     return f"ORCHD_HOME={shlex.quote(home)} {orchd}" if home else orchd
 
 
+def app_brief():
+    return worker_brief(worker_cli(), "codex").replace(
+        "Codex session run with `codex exec`", "Codex thread on a task-scoped app-server").replace(
+        "Your process ends with your turn", "Your model turn ends when you reply")
+
+
 def task_message(task):
     return f"""[orchd task {task['id']}]
 Repo: {task['repo']}
@@ -110,7 +116,7 @@ def _choice(name, value, valid):
 
 def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, model=DEFAULT_WORKER_MODEL,
              model_reason=None, task_type=None, rework_of=None, found_by=None, verify=None, manual_checks=None,
-             verifies=None):
+             verifies=None, backend="exec"):
     if not orch_thread:
         raise ValueError("dispatch needs the caller's thread id")
     _choice("model", model, tuple(WORKER_MODELS))
@@ -133,6 +139,9 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
             raise ValueError(f"verifies: unknown task {verifies}") from None
         if verified["status"] == "closed":
             raise ValueError(f"verifies: task {verifies} is closed")
+    _choice("backend", backend, ("exec", "app-server"))
+    if backend == "app-server" and worker_kind(WORKER_MODELS[model]) != "codex":
+        raise ValueError("app-server backend requires a Codex model")
     repo_path = rt.repo_path(repo)
     kind = worker_kind(WORKER_MODELS[model])
     if kind == "claude" and not rt.claude_trusted(repo_path):
@@ -143,7 +152,7 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
                              instructions=instructions, done_when=done_when,
                              orch_thread=orch_thread, codex_bin=rt.codex, model=WORKER_MODELS[model],
                              model_reason=model_reason, task_type=task_type, rework_of=rework_of, found_by=found_by,
-                             verify=verify, manual_checks=manual_checks, verifies=verifies)
+                             verify=verify, manual_checks=manual_checks, verifies=verifies, backend=backend)
     spec = {k: v for k, v in dict(verify=verify, manual_checks=manual_checks, verifies=verifies).items() if v}
     store.add_message(con, task_id, "dispatch", json.dumps(
         dict(model=WORKER_MODELS[model], model_reason=model_reason, task_type=task_type,
@@ -151,7 +160,11 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
     try:
         base, branch, worktree = rt.create_worktree(repo_path, repo, task_id)
         store.update_task(con, task_id, base=base, branch=branch, worktree=worktree)
-        if kind == "codex":  # no system-prompt flag and no socket: the brief leads the first turn's prompt
+        if backend == "app-server":
+            task = store.get_task(con, task_id)
+            app_worker.start(con, rt, task, task_message(task), WORKER_MODELS[model], brief=app_brief())
+            con.execute("UPDATE tasks SET status='running' WHERE id=? AND status='starting'", (task_id,))
+        elif kind == "codex":  # no system-prompt flag and no socket: the brief leads the first turn's prompt
             task = store.get_task(con, task_id)
             job, session = rt.start_codex_worker(worktree, rt.codex_log(task_id),
                                                  worker_brief(worker_cli(), kind) + "\n\n" + task_message(task),
@@ -345,6 +358,14 @@ def _answer(con, rt, task_id, text=None, flush=False, accept=None, finished_pid=
         raise ValueError(f"task {task_id} is closed")
     if text is None and not flush:
         raise ValueError("answer needs text, or flush=true to send queued answers")
+    if app_worker.enabled(task):
+        if text is not None:
+            _queue_answer(con, task_id, text, accept)
+        try:
+            return app_worker.control(store.get_task(con, task_id), "flush")
+        except Exception as exc:
+            return dict(status="failed", delivered=0, pending=store.pending_answer_count(con, task_id),
+                        error=f"{type(exc).__name__}: {exc}")
     if worker_kind(task["model"]) != "codex":
         try:
             with store.task_delivery(con, [task_id]):
@@ -435,7 +456,7 @@ def _resume_queued(con, rt, task, finished_pid=None):
     return dict(status="delivered", delivered=len(pending), pending=0)
 
 
-def auto_flush(con, rt, task_id, after_pid=None):
+def auto_flush(con, rt, task_id, after_pid=None, generation=None, thread=None, turn=None):
     """`orchd flush`: run by a Codex turn's own shell when its `codex` process has exited (`Runtime.codex_turn`).
 
     Sends the answers queued during that turn as the next turn, through the same delivery path, task lock and
@@ -447,6 +468,12 @@ def auto_flush(con, rt, task_id, after_pid=None):
         task = store.get_task(con, task_id)
         if task["status"] == "closed":
             return dict(status="skipped", reason="closed")
+        if app_worker.enabled(task):
+            if after_pid is not None:
+                return dict(status="skipped", reason="legacy wrapper")
+            if generation is None or thread is None or turn is None:
+                return dict(status="skipped", reason="RPC completion guard required")
+            return app_worker.control(task, "flush", guard=[generation, thread, turn])
         if worker_kind(task["model"]) != "codex":
             return dict(status="skipped", reason="not a codex worker")
         if after_pid is not None and task["job_id"] != str(after_pid):
@@ -491,6 +518,16 @@ def interrupt(con, rt, task_id, text):
     task = store.get_task(con, task_id)
     if task["status"] == "closed":
         raise ValueError(f"task {task_id} is closed")
+    if app_worker.enabled(task):
+        _queue_answer(con, task_id, "[interrupt] Codex cancelled your running turn. Check git status and "
+                      f"any detached jobs before continuing; run ack, then follow this correction.\n\n{text}", None)
+        try:
+            return app_worker.control(store.get_task(con, task_id), "interrupt",
+                                      expected_generation=task["generation"], expected_thread=task["session_id"],
+                                      expected_turn=task["active_turn"])
+        except Exception as exc:
+            return dict(status="failed", interrupted=False, delivered=0,
+                        pending=store.pending_answer_count(con, task_id), error=str(exc))
     if worker_kind(task["model"]) != "codex":
         return dict(_answer(con, rt, task_id, text), interrupted=False,
                     note="Claude worker: sent over its socket, nothing was stopped")
@@ -650,14 +687,20 @@ def list_open(con, rt):
         jobs = None
     out = []
     for t in store.open_tasks(con):
-        if worker_kind(t["model"]) == "codex":  # between turns there is no process, only a resumable thread
+        if app_worker.enabled(t):
+            alive = app_worker.health(t)
+        elif worker_kind(t["model"]) == "codex":  # between turns there is no process, only a resumable thread
             alive = True if t["job_id"] and rt.pid_alive(t["job_id"]) else (
                 None if t["status"] in ("question", "done", "blocked") else False)
         else:
             alive = claude_job_alive(jobs, t["job_id"])
         out.append(dict(task_id=t["id"], repo=t["repo"], title=t["title"], status=t["status"],
                         model=task_model(t), worker_alive=alive, worktree=t["worktree"], branch=t["branch"],
-                        orch_thread=t["orch_thread"], note=t["note"],
+                        orch_thread=t["orch_thread"], note=t["note"], backend=t["backend"],
+                        generation=t["generation"], turn_state=t["turn_state"],
+                        uncertain_delivery=bool(con.execute("SELECT 1 FROM worker_deliveries WHERE task_id=? "
+                            "AND generation IS ? AND state IN ('sending','uncertain') LIMIT 1",
+                            (t["id"], t["generation"])).fetchone()),
                         pending=store.pending_answer_count(con, t["id"]),
                         owner_health=owner_health(store.get_orch(con, t["orch_thread"]), jobs),
                         notification_delivery=store.notification_delivery(con, t["id"]),
@@ -715,7 +758,9 @@ def _close_locked(con, rt, task_id, outcome, rating):
     kept, step = None, f"worker {task['job_id']} not confirmed stopped"
     cleanup = None
     try:
-        if task["job_id"] or task["worktree"]:
+        if app_worker.enabled(task):
+            cleanup = app_worker.stop(con, task)
+        elif task["job_id"] or task["worktree"]:
             cleanup = rt.stop_task_worker(worker_kind(task["model"]), task["job_id"],
                                           (task["worktree"], task["session_id"]))
         step = "worktree check or removal failed"
@@ -754,6 +799,12 @@ def _close_locked(con, rt, task_id, outcome, rating):
 
 def view(con, rt, task_id):
     task = store.get_task(con, task_id)
+    if app_worker.enabled(task):
+        if task["status"] == "closed" or app_worker.health(task) not in ("alive", "idle", "active"):
+            raise ValueError("app-server worker unavailable; inspect health before viewing")
+        database = con.execute("PRAGMA database_list").fetchone()[2]
+        rt.open_app_viewer(database, task)
+        return f"opened Ghostty: remote Codex thread {task['session_id']} (new window)"
     if not task["job_id"]:
         raise ValueError(f"task {task_id} has no worker")
     if worker_kind(task["model"]) == "codex":
@@ -813,7 +864,13 @@ def _stop_confirmed(rt, kind, job, marks):
     return None
 
 
-def _stop_old_worker(rt, task):
+def _stop_old_worker(rt, task, con=None):
+    if app_worker.enabled(task):
+        try:
+            app_worker.stop(con, task)
+            return None
+        except Exception as exc:
+            return str(exc)
     return _stop_confirmed(rt, worker_kind(task["model"]), task["job_id"], (task["worktree"], task["session_id"]))
 
 
@@ -846,7 +903,9 @@ def retry_message(con, task, from_model, to_model, reason, pending=()):
     history = "\n".join(lines) or "The previous worker sent no progress or report."
     answers = ""
     if pending:  # same framing as a flush, oldest first: each is an answer the previous worker never received
-        answers = ("\n\nAnswers the previous worker never received, oldest first:\n\n"
+        heading = ("Pending answers (an uncertain delivery may already have reached the previous worker), oldest first:"
+                   if app_worker.enabled(task) else "Answers the previous worker never received, oldest first:")
+        answers = (f"\n\n{heading}\n\n"
                    + "\n\n".join(f"[orchd answer {task['id']}]\n{row['body']}" for row in pending))
     return task_message(task) + f"""
 
@@ -876,7 +935,10 @@ def _abandon_new_worker(con, rt, task_id, kind, worktree, new, stage, error, fie
             _retry_failed(con, task_id, stage, detail, new_job_id=new["job_id"], new_session_id=new["session_id"],
                           new_stopped=stopped, **fields)
             if store.get_task(con, task_id)["status"] != "closed":  # never reopen a task a close finished
-                store.update_task(con, task_id, status="failed", **new,
+                store.update_task(con, task_id, status="failed", **new, backend="exec",
+                                  generation=None, endpoint=None, control_endpoint=None,
+                                  supervisor_identity=None, server_identity=None, active_turn=None,
+                                  turn_state=None, last_completed_turn=None,
                                   note=f"retry failed at {stage}: new worker {new['job_id']} {state}: {detail}"[:1000])
     except Exception as write_error:
         raise RuntimeError(f"retry of {task_id} failed at {stage} ({detail}); new worker {new['job_id']} ({kind}) "
@@ -884,7 +946,7 @@ def _abandon_new_worker(con, rt, task_id, kind, worktree, new, stage, error, fie
             from error
 
 
-def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT):
+def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT, backend=None):
     """Replace a task's worker on the same worktree and branch with any model, recording from -> to and why.
 
     Runs under the task's cross-process lock (store.task_delivery, shared with answer flush, close and adopt), so
@@ -899,6 +961,10 @@ def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT):
             raise ValueError(f"task {task_id} is closed")
         if task["status"] == "starting":
             raise ValueError(f"task {task_id} is still starting its first worker")
+        target_backend = backend or (task["backend"] if worker_kind(WORKER_MODELS[model]) == "codex" else "exec")
+        _choice("backend", target_backend, ("exec", "app-server"))
+        if target_backend == "app-server" and worker_kind(WORKER_MODELS[model]) != "codex":
+            raise ValueError("app-server requires Codex")
         worktree = task["worktree"]
         if not worktree or not rt.exists(worktree):
             raise ValueError(f"task {task_id} has no worktree to continue in ({worktree or 'none recorded'})")
@@ -909,7 +975,7 @@ def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT):
         from_model = task["model"]
         old = dict(old_model=from_model, old_job_id=task["job_id"], old_session_id=task["session_id"])
         fields = dict(to_model=to_model, reason=reason, **old)
-        not_stopped = _stop_old_worker(rt, task)
+        not_stopped = _stop_old_worker(rt, task, con)
         if not_stopped:
             _retry_failed(con, task_id, "stop", not_stopped, **fields)
             raise ValueError(f"task {task_id}'s worker {task['job_id']} did not stop; no new worker was started: "
@@ -921,6 +987,18 @@ def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT):
         directory, tag = Path(rt.socket_path(task_id)).parent, f"r{attempt}-{uuid.uuid4().hex[:6]}"
         pending = store.pending_answers(con, task_id)  # FIFO; they become the new worker's, with a receipt below
         prompt = retry_message(con, task, from_model, to_model, reason, pending)
+        if target_backend == "app-server":
+            try:
+                store.update_task(con, task_id, status="running", note=None)
+                current = app_worker.start(con, rt, task, prompt, to_model, pending, brief=app_brief())
+                store.add_message(con, task_id, "retry", json.dumps(dict(**fields,
+                    from_model=from_model, new_job_id=current["job_id"], new_session_id=current["session_id"],
+                    answers_delivered=len(pending), generation=current["generation"])))
+                return store.get_task(con, task_id)
+            except Exception as exc:
+                _retry_failed(con, task_id, "app-server start", str(exc), **fields)
+                store.update_task(con, task_id, status="failed", note=f"retry failed: {exc}")
+                raise
         new = dict(model=to_model, job_id=None, session_id=None, socket=None)
         stage = "spawn"
         try:
@@ -946,6 +1024,9 @@ def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT):
                     (*new.values(), time.time(), task_id, task["job_id"])).rowcount
                 if changed != 1:
                     raise _Superseded("the task was closed or its worker changed while retrying")
+                store.update_task(con, task_id, backend="exec", generation=None, endpoint=None,
+                                  control_endpoint=None, supervisor_identity=None, server_identity=None,
+                                  active_turn=None, turn_state=None, last_completed_turn=None)
                 store.mark_read(con, [row["id"] for row in pending])  # the same receipt an answer flush writes
                 for row in pending:
                     store.add_message(con, task_id, "answer", row["body"])

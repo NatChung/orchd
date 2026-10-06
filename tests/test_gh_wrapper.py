@@ -50,6 +50,9 @@ else:
                         CALLS=str(self.root / 'calls'), INPUT=str(self.root / 'input'), ACTIVE=str(self.active))
         for key in ('GH_TOKEN', 'GH_REPO', 'ORCHD_GH_ACCOUNTS'):
             self.env.pop(key, None)
+        for key in list(self.env):
+            if key.startswith('GIT_CONFIG'):
+                self.env.pop(key)
         subprocess.run(['git', 'init', '-q', str(self.root / 'repo')], check=True)
         self.repo = self.root / 'repo'
         subprocess.run(['git', 'remote', 'add', 'origin', 'git@github-NatChung:NatChung/orchd.git'],

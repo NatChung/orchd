@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Orch dispatches, workers execute: run many agent tasks in parallel and keep them manageable."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["psutil>=6.0,<8"]
+dependencies = ["psutil>=6.0,<8", "websocket-client>=1.8,<2"]
 
 [project.scripts]
 orchd = "orchd.cli:main"

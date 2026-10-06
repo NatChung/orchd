@@ -29,6 +29,15 @@ CREATE TABLE IF NOT EXISTS tasks(
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS worker_deliveries(
+    id TEXT PRIMARY KEY, task_id TEXT NOT NULL, generation TEXT NOT NULL,
+    thread_id TEXT NOT NULL, turn_id TEXT, message_ids TEXT NOT NULL,
+    state TEXT NOT NULL, error TEXT, created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS worker_viewers(
+    task_id TEXT NOT NULL, generation TEXT NOT NULL, identity TEXT NOT NULL,
+    PRIMARY KEY(task_id, generation, identity)
+);
 CREATE TABLE IF NOT EXISTS messages(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id TEXT NOT NULL REFERENCES tasks(id),
@@ -87,7 +96,10 @@ CREATE TABLE IF NOT EXISTS entry_messages(
 # Columns added after v1. Nullable so old rows and old code keep working against the same DB.
 TASK_COLUMNS = ("model TEXT", "model_reason TEXT", "task_type TEXT", "rework_of TEXT",
                 "found_by TEXT", "outcome TEXT", "rating INTEGER",
-                "verify TEXT", "manual_checks TEXT", "verifies TEXT")
+                "verify TEXT", "manual_checks TEXT", "verifies TEXT",
+                "backend TEXT NOT NULL DEFAULT 'exec'", "generation TEXT", "endpoint TEXT",
+                "control_endpoint TEXT", "supervisor_identity TEXT", "server_identity TEXT",
+                "active_turn TEXT", "turn_state TEXT", "last_completed_turn TEXT")
 MESSAGE_COLUMNS = ("recipient_orch TEXT", "notice_error TEXT", "notice_recipient TEXT")
 ORCH_COLUMNS = ("first_seen_dead REAL", "last_verified_dead REAL", "archived_at REAL")
 # entry_messages columns a DB created from an early #37 draft lacks (nullable: ALTER cannot add NOT NULL).

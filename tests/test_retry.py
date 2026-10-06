@@ -758,3 +758,45 @@ class RetryKeepsWorktreeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+from tests.app_support import AppBase
+from unittest.mock import patch
+from orchd import core, store
+
+class AppRetryTest(AppBase):
+    def test_unconfirmed_app_stop_keeps_pending_and_worktree(self):
+        self.queue()
+        with patch("orchd.app_worker.stop",side_effect=RuntimeError("identity unreadable")), \
+             patch("orchd.app_worker.start") as spawn:
+            with self.assertRaises(ValueError):core.retry(self.con,self.rt,self.id,"sol","retry")
+        spawn.assert_not_called()
+        task=store.get_task(self.con,self.id)
+        self.assertEqual(task["generation"],self.gen)
+        self.assertEqual(store.pending_answer_count(self.con,self.id),1)
+
+    def test_app_retry_to_claude_clears_app_identity_only_after_stop(self):
+        self.queue()
+        with patch("orchd.app_worker.stop") as stop:
+            task=core.retry(self.con,self.rt,self.id,"sonnet","change provider")
+        stop.assert_called_once()
+        self.assertEqual(task["backend"],"exec")
+        self.assertIsNone(task["generation"])
+        self.assertIsNone(task["endpoint"])
+        self.assertEqual(store.pending_answer_count(self.con,self.id),0)
+
+    def test_failed_cross_provider_receipt_records_legacy_replacement_identity(self):
+        self.queue()
+        original=store.add_message
+        def add(con,task_id,kind,*args,**kwargs):
+            if kind=="retry":raise sqlite3.OperationalError("receipt failed")
+            return original(con,task_id,kind,*args,**kwargs)
+        with patch("orchd.app_worker.stop"),patch.object(core,"_stop_confirmed",return_value=None), \
+             patch.object(store,"add_message",side_effect=add):
+            with self.assertRaises(sqlite3.OperationalError):
+                core.retry(self.con,self.rt,self.id,"sonnet","change provider")
+        task=store.get_task(self.con,self.id)
+        self.assertEqual(task["backend"],"exec")
+        self.assertIsNone(task["generation"])
+        self.assertEqual(task["model"],"claude-sonnet-5-5")
+        self.assertEqual(store.pending_answer_count(self.con,self.id),1)

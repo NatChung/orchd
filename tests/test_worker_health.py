@@ -151,3 +151,21 @@ class ListOpenHealthTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+from tests.app_support import AppBase
+from unittest.mock import patch
+from orchd import core, store
+
+class AppWorkerHealthTest(AppBase):
+    def test_app_states_are_not_truthy_dead_or_unknown(self):
+        from orchd.worker_health import assess
+        for state,expected in [("dead","orphan"),("unknown","unknown"),("active","alive"),("idle","alive"),("alive","alive")]:
+            self.assertEqual(assess("running",state,False)["worker_health"],expected)
+
+    def test_list_shows_backend_state_and_uncertain_delivery(self):
+        with patch("orchd.app_worker.health",return_value="idle"):
+            result=core.list_open(self.con,self.rt)[0]
+        self.assertEqual(result["backend"],"app-server")
+        self.assertEqual(result["worker_alive"],"idle")
+        self.assertFalse(result["uncertain_delivery"])
