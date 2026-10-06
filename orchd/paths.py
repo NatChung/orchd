@@ -31,6 +31,58 @@ def config_dir(home=None, env=None):
     return Path(env.get("ORCHD_CONFIG_DIR") or Path(home or Path.home()) / ".config" / "orchd")
 
 
+def projects_dir(home=None, env=None):
+    """Shared project root for doctor and dispatch, independent of the caller's cwd.
+
+    Explicit env/config wins; a checkout under the target HOME uses its parent.
+    Installed copies keep ~/projects as the fallback.
+    """
+    env = os.environ if env is None else env
+    home = Path(home or Path.home())
+
+    def expand(value):
+        # Expand against the target HOME, including checks for another user.
+        if value == "~":
+            return home
+        if value.startswith("~/"):
+            return home / value[2:]
+        path = Path(value)
+        if not path.is_absolute():
+            raise ValueError("projects_dir must be an absolute path or start with ~/")
+        return path
+
+    if env.get("ORCHD_PROJECTS"):
+        return expand(env["ORCHD_PROJECTS"])
+    config = config_dir(home, env) / "config.toml"
+    try:
+        text = config.read_text(encoding="utf-8") if config.exists() else None
+    except FileNotFoundError:
+        pass
+    except (OSError, UnicodeError) as exc:
+        raise ValueError(f"cannot read {config} ({type(exc).__name__})") from exc
+    else:
+        if text is None:
+            data = {}
+        else:
+            try:
+                import tomllib
+            except ImportError as exc:
+                raise ValueError("reading orchd config.toml requires Python 3.11+") from exc
+            try:
+                data = tomllib.loads(text)
+            except tomllib.TOMLDecodeError as exc:
+                raise ValueError(f"invalid TOML in {config}") from exc
+        value = data.get("projects_dir")
+        if value is not None:
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"projects_dir in {config} must be a non-empty string")
+            return expand(value)
+    checkout = Path(__file__).resolve().parents[1]
+    if checkout.is_relative_to(home.resolve()) and (checkout / ".git").is_dir():
+        return home / checkout.relative_to(home.resolve()).parent
+    return home / "projects"
+
+
 def orchd_executable(env=None):
     """Absolute path of the orchd command that generated configs, Claude Orchs and workers should run.
 

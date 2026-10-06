@@ -68,9 +68,15 @@ def planned_files(home, env, orchd_bin=None):
                 text = render(relative, values) if source.name == "config.toml" else source.read_text()
                 files[target / source.relative_to(TEMPLATES / base)] = text
     files[orch / ".codex" / "config.toml"] += _approvals("orchd", [t["name"] for t in mcp_server.TOOLS])
-    if env.get("ORCHD_HOME"):  # a non-default state dir must reach both MCP servers
+    # Desktop MCP servers do not inherit the shell that ran init.
+    overrides = {key: env[key] for key in ("ORCHD_HOME", "ORCHD_CONFIG_DIR") if env.get(key)}
+    if env.get("ORCHD_PROJECTS"):
+        overrides["ORCHD_PROJECTS"] = str(paths.projects_dir(home, env))
+    if overrides:
         for server, target in (("orchd", orch), ("orchd_entry", interface)):
-            files[target / ".codex" / "config.toml"] += f'\n[mcp_servers.{server}.env]\nORCHD_HOME = "{env["ORCHD_HOME"]}"\n'
+            files[target / ".codex" / "config.toml"] += (
+                f'\n[mcp_servers.{server}.env]\n'
+                + "".join(f"{key} = {_toml_string(value)}\n" for key, value in overrides.items()))
     return files
 
 

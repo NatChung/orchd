@@ -147,6 +147,16 @@ class InitTest(unittest.TestCase):
             cfg = tomllib.loads((self.home / "orch" / folder / ".codex" / "config.toml").read_text())
             self.assertEqual(cfg["mcp_servers"][server]["env"], {"ORCHD_HOME": "/tmp/orchd-state"})
 
+    def test_projects_override_reaches_both_mcp_servers(self):
+        self.env = {"ORCHD_PROJECTS": "~/Git Projects", "ORCHD_CONFIG_DIR": str(self.home / "settings")}
+        self.init(trust=False)
+        for folder, server in (("home", "orchd"), ("interface", "orchd_entry")):
+            cfg = tomllib.loads((self.home / "orch" / folder / ".codex" / "config.toml").read_text())
+            self.assertEqual(cfg["mcp_servers"][server]["env"], {
+                "ORCHD_PROJECTS": str(self.home / "Git Projects"),
+                "ORCHD_CONFIG_DIR": str(self.home / "settings"),
+            })
+
     def test_migrate_copies_kept_files_and_skips_generated_and_vcs(self):
         old = Path(self.tmp.name) / "old-orch"
         for path, text in {"AGENTS.md": "old rules", ".codex/config.toml": "old", ".git/HEAD": "ref", ".gitignore": "x",

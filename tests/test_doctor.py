@@ -189,6 +189,28 @@ class RequiredChecks(DoctorCase):
         d.check_socket_dir()
         self.assertEqual(d.checks[0].status, doctor.FAIL)
 
+    def test_custom_projects_config_avoids_required_failure(self):
+        custom = self.home / "GitProjects"
+        (self.home / "projects").rename(custom)
+        config = self.home / ".config" / "orchd"
+        config.mkdir(parents=True)
+        (config / "config.toml").write_text('projects_dir = "~/GitProjects"\n')
+        d, by = self.run_doctor()
+        self.assertEqual(by["projects dir"].status, doctor.PASS)
+        self.assertEqual(d.projects, custom)
+        self.assertEqual(doctor.exit_code(d.checks), 0)
+
+    def test_checkout_parent_is_detected_without_default_projects(self):
+        custom = self.home / "GitProjects"
+        (self.home / "projects").rename(custom)
+        checkout = custom / "orchd"
+        (checkout / ".git").mkdir(parents=True)
+        with mock.patch("orchd.paths.__file__", str(checkout / "orchd" / "paths.py")):
+            d, by = self.run_doctor()
+        self.assertEqual(by["projects dir"].status, doctor.PASS)
+        self.assertEqual(d.projects, custom)
+        self.assertEqual(doctor.exit_code(d.checks), 0)
+
     def test_missing_projects_dir_fails(self):
         d = doctor.Doctor(runner=make_runner(), home=self.home, env={}, projects=self.home / "nope")
         d.check_repos_trust()

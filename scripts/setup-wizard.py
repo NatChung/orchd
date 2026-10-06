@@ -671,7 +671,14 @@ def main(argv=None, env=None, input_fn=input):
     ap.add_argument("--strict", action="store_true")
     args = ap.parse_args(argv)
     home = args.home or Path.home()
-    env = env or Env(home=home, projects=args.projects or home / "projects")
+    if env is None:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+        from orchd import paths
+        try:
+            projects = args.projects or paths.projects_dir(home)
+        except ValueError as exc:
+            ap.error(str(exc))
+        env = Env(home=home, projects=projects)
     if args.interactive:
         steps = interactive(env, args.profile, input_fn)
         return 1 if args.strict and any(s.status != PASS for s in steps) else 0

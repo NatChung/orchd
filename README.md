@@ -21,6 +21,7 @@ orchd doctor
   `uv tool install git+ssh://git@github-NatChung/NatChung/orchd`
 - repo 目前是 private：要有讀取權限；HTTPS 安裝需要 token，所以用 SSH。
 - `orchd: command not found`：`~/.local/bin` 不在 PATH，跑一次 `uv tool update-shell` 再開新終端機。
+- 首次在終端機執行 `orchd doctor`，若找不到專案目錄，會詢問 Git repos 的上層目錄並保存，之後不再詢問。不需要使用特定的目錄名稱。`--json`、`--no-input` 或非互動執行只檢查、不詢問也不保存。
 - `orchd doctor` 在 `orchd init` 之前會顯示「orch home not set up yet」，這是提醒下一步，不是失敗。
 - MCP 不另外安裝：就是同一支程式的 `orchd mcp`，由 `orchd init`（和 `orchd orch`）寫進設定，設定裡記的是安裝後 `orchd` 的絕對路徑。
 - 在 repo 裡開發時直接跑 `bin/orchd`；這時產生的設定會指向這份 checkout。
@@ -53,6 +54,13 @@ uv tool uninstall orchd
 
 放在 `~/.config/orchd/`（`ORCHD_CONFIG_DIR` 可改）：
 
+- `config.toml`：專案根目錄，doctor 與派工共用；支援 `~/` 或絕對路徑。例如：
+
+  ```toml
+  projects_dir = "~/GitProjects"
+  ```
+
+  `ORCHD_PROJECTS` 可覆寫此設定。未設定時，從 HOME 下的 repo checkout 執行會自動使用 checkout 的上層目錄；安裝版預設 `~/projects`。設定不依執行時的工作目錄改變，Desktop 與背景派工也使用同一位置。
 - `init.toml`：Orch 家的 Codex 權限額外要讀的路徑、要關掉的 app。
 
   ```toml
@@ -129,7 +137,7 @@ MCP `list_orchs` 的文字內容維持完整 JSON（包含 dead、unknown、arch
 | `orchd watch [--since HH:MM]` | 即時看 Orch 與 worker 的訊息 |
 | `orchd summary [--since HH:MM]` | 每個 Orch 的 worker、模型、問題、token |
 | `orchd stats [--since T] [--json]` | 每個 Orch × 任務類型的數量、重工、token、成本估算 |
-| `orchd doctor [--profile nat] [--json]` | 唯讀檢查本機設定 |
+| `orchd doctor [--profile nat] [--json] [--no-input]` | 檢查本機設定；終端機首次可設定專案目錄 |
 | `orchd adopt NEW_ORCH [TASK_ID...] [--from OLD] [--force]` | 把未結任務移給另一個 Orch |
 | `orchd close ID` | 停 worker，安全時清掉 worktree |
 | `orchd mcp [--role orch\|entry] [--entry NAME]` | MCP server（Orch 或 interface 用，通常不用手動跑） |

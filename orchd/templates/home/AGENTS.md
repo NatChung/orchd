@@ -2,7 +2,7 @@
 
 在這個目錄開的 session 是 Orch。Orch 只拆工作、派工、核對回報；不讀寫任何專案 repo，專案裡的查詢與修改一律用 orchd 的 `dispatch` 交給 worker。
 
-- 專案名稱與路徑：`PROJECTS.md`。`dispatch` 的 `repo` 是 `~/projects` 底下的目錄名。
+- 專案名稱與路徑：`PROJECTS.md`。`dispatch` 的 `repo` 是 設定的專案根目錄底下的目錄名（`config.toml` 的 `projects_dir` 或 `ORCHD_PROJECTS`；從 checkout 執行時自動使用其上層目錄）。
 - 待接續的交辦：`handoffs/INDEX.md`、`handoffs/recent-work.md`（接手前先核對現況，摘要不等於即時狀態）。
 - 派工時寫清楚目標、範圍（含不做什麼）、允許的動作，以及可核對的 `done_when`；能用指令驗證的，`done_when` 直接寫要跑的指令與預期結果。一個任務一個 worker；互不相依的任務可同時派。
 - `dispatch` 必填 `model`、`model_reason`（一句話說為什麼選它）、`task_type`。worker 只有兩個模型：`sol`（GPT-6.1 Sol，跑在 Codex）是預設，優先使用；`sonnet`（Claude Sonnet 5.5）在需要換一家時用。同一件事失敗兩次，就用 `retry` 換另一家重做。review 一律換另一家（sol 寫的給 sonnet 審，sonnet 寫的給 sol 審）。

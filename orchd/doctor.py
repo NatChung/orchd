@@ -5,7 +5,8 @@ Every check reports pass / fail / warn / unknown and carries a severity:
   optional  integrations other machines may lack (gh, codex, codegraph, rtk ...): never worse than warn
   profile   Nat's own machine layout (4 GitHub accounts, SSH aliases, connectors): only run with --profile nat
 
-Nothing here installs, logs in, trusts, or edits config. The only write is a throwaway 0700 temp dir for the
+The Doctor checks never install, log in, trust, or edit config. The CLI may offer
+a separate first-run project setup in a terminal (disabled by --json / --no-input). The only write is a throwaway 0700 temp dir for the
 socket probe, removed in `finally`. Secrets are never read or printed: auth is judged from exit codes and
 status flags, token files only by existence.
 """
@@ -73,7 +74,12 @@ class Doctor:
         self.runner = runner
         self.home = Path(home) if home else Path.home()
         self.env = os.environ if env is None else env
-        self.projects = Path(projects or self.env.get("ORCHD_PROJECTS") or self.home / "projects")
+        self._projects_problem = None
+        try:
+            self.projects = Path(projects) if projects is not None else paths.projects_dir(self.home, self.env)
+        except ValueError as exc:
+            self.projects = self.home / "projects"
+            self._projects_problem = str(exc)
         self.orch_home = Path(orch_home or paths.orch_home(self.home, self.env))
         self.data_dir = Path(data_dir or self.env.get("ORCHD_HOME") or self.home / ".local/share/orchd")
         self.tmp_root = tmp_root
@@ -368,10 +374,14 @@ class Doctor:
                      f"trusted paths and MCP command/args/cwd checked in {', '.join(sources)}: all under {self.home}")
 
     def check_repos_trust(self):
+        if self._projects_problem:
+            self.add("projects dir", REQUIRED, FAIL, self._projects_problem,
+                     "Fix projects_dir in ~/.config/orchd/config.toml or set ORCHD_PROJECTS to an absolute path.")
+            return
         try:
             repos = sorted(p for p in self.projects.iterdir() if (p / ".git").exists())
         except FileNotFoundError:
-            self.add("projects dir", REQUIRED, FAIL, f"{self.projects} missing", f"mkdir {self.projects}")
+            self.add("projects dir", REQUIRED, FAIL, f"{self.projects} missing", "Run `orchd doctor` in a terminal to select your projects directory, or set projects_dir in ~/.config/orchd/config.toml / ORCHD_PROJECTS.")
             return
         except NotADirectoryError:
             self.add("projects dir", REQUIRED, FAIL, f"{self.projects} is a file, not a directory",
@@ -486,7 +496,7 @@ class Doctor:
                      f"{len(found)} {pattern} file(s) present (contents not read)" if found
                      else f"no {pattern} under {cfgdir}")
         for tool in ("slack-tools", "line-tools"):
-            p = self.home / "projects" / "nat-assistant" / "connectors" / tool
+            p = self.projects / "nat-assistant" / "connectors" / tool
             self.add(f"nat: {tool} code", PROFILE, PASS if p.is_dir() else WARN,
                      "present" if p.is_dir() else f"{p} missing (code only; credentials checked above)")
 

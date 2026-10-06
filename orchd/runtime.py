@@ -121,7 +121,7 @@ def worker_env(worktree=None):
 def mcp_env(orch_id):
     """--bg sessions are spawned by the Claude daemon, not by us, so only env written into the MCP config
     reaches the Orch's MCP server."""
-    env = {"ORCHD_ORCH_ID": orch_id}
+    env = {"ORCHD_ORCH_ID": orch_id, "ORCHD_PROJECTS": str(paths.projects_dir())}
     if os.environ.get("ORCHD_HOME"):
         env["ORCHD_HOME"] = os.environ["ORCHD_HOME"]
     return env
@@ -139,7 +139,7 @@ class Runtime:
     def __init__(self):
         self.claude = _bin("claude", "ORCHD_CLAUDE")
         self.codex = _bin("codex", "ORCHD_CODEX")
-        self.projects = Path(os.environ.get("ORCHD_PROJECTS", Path.home() / "projects"))
+        self.projects = paths.projects_dir()
 
     # -- process plumbing (tests override these) --------------------------------
     def run(self, cmd, cwd=None, timeout=60, check=True, env=None):

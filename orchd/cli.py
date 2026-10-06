@@ -22,7 +22,7 @@
   orchd watch [--since HH:MM]                 live timeline of Orch <-> worker messages
   orchd summary [--since HH:MM]               per Orch: workers, models, questions, parallelism, tokens
   orchd stats [--since T] [--json]            per Orch x task_type: counts, rework, source-backed tokens, cost estimate
-  orchd doctor [--profile nat] [--json]       read-only machine check; exit 1 required fail, 2 required unknown
+  orchd doctor [--profile nat] [--json] [--no-input]   machine check; first-run terminal setup; exit 1 required fail, 2 required unknown
   orchd adopt NEW_ORCH [TASK_ID...] [--from OLD_ORCH] [--force]   move open tasks to another Orch (operator only)
   orchd close ID                              stop a task's worker and clean its worktree if safe
 """
@@ -123,7 +123,8 @@ def main(argv=None):
     sub.add_parser("close").add_argument("task_id")
     doc = sub.add_parser("doctor")
     doc.add_argument("--profile", choices=["nat"], help="also check Nat's own machine layout (accounts, SSH aliases, connectors)")
-    doc.add_argument("--json", action="store_true")
+    doc.add_argument("--json", action="store_true", help="read-only JSON output; never prompt")
+    doc.add_argument("--no-input", action="store_true", help="read-only check; skip first-run project setup")
     args = parser.parse_args(argv)
 
     if args.cmd in ("goal", "board"):
@@ -169,8 +170,15 @@ def main(argv=None):
             if snap is not None:
                 snap.close()
 
-    if args.cmd == "doctor":  # read-only; must not touch the DB
+    if args.cmd == "doctor":  # no DB; only interactive first-run setup may save the chosen project root
         from orchd import doctor
+        if not args.json and not args.no_input and sys.stdin.isatty():
+            from orchd.project_setup import prompt_projects
+            try:
+                prompt_projects()
+            except (OSError, UnicodeError, ValueError) as error:
+                print(f"doctor: could not save project settings: {error}", file=sys.stderr)
+                return 1
         checks = doctor.Doctor(profile=args.profile).run_all()
         print(json.dumps([c.as_dict() for c in checks], ensure_ascii=False, indent=1) if args.json
               else doctor.render(checks))
