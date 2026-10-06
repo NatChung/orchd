@@ -1,5 +1,5 @@
 # Nat 的 Desktop interface：只轉交原文給綁定的 Orch。由 `orchd init` 產生。
-# 讀不到家目錄、沒有網路、不能寫檔；只掛 orchd 的入口 MCP（relay／status）。
+# 讀不到家目錄、沒有網路、不能寫檔；只掛 orchd 的入口 MCP（relay／status／foreground）。
 model = "gpt-6.1-sol"
 model_reasoning_effort = "low"
 default_permissions = "interface"
@@ -41,3 +41,6 @@ command = "$ORCHD"
 args = ["mcp", "--role", "entry"]
 startup_timeout_sec = 30
 tool_timeout_sec = 120
+
+# init 從 ENTRY_TOOLS 產生每個工具的允許設定，包括受限的 foreground。
+$ENTRY_APPROVALS

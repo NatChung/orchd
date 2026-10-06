@@ -9,8 +9,10 @@ registered as a codex Orch on its first call other than the read-only `list_orch
 their arguments are ids (never a body), and the caller is never registered as an Orch. This guards orchd's
 own tools only; the Codex host's other tools are limited by the entry project's config, not here.
 """
+import contextlib
 import json
 import os
+import re
 import sys
 import traceback
 
@@ -192,6 +194,17 @@ TOOLS += [
 ]
 
 ENTRY_TOOLS = [
+    {"name": "foreground",
+     "description": "Open a new Ghostty window for the bound Orch ({target: 'orch'}) or its worker "
+                    "({task_id: eight hex digits}). Uses the existing attach/viewer paths; exec Codex refuses "
+                    "while busy. No watch-only mode or takeover lease. Each call requests a new window, never "
+                    "focuses an existing one. launch_requested does not prove the window is visible.",
+     "annotations": {"readOnlyHint": False},
+     "inputSchema": {"type": "object", "additionalProperties": False,
+                     "properties": {"target": {"type": "string", "enum": ["orch"]},
+                                    "task_id": {"type": "string", "pattern": "^[0-9a-fA-F]{8}$"}},
+                     "oneOf": [{"required": ["target"], "not": {"required": ["task_id"]}},
+                               {"required": ["task_id"], "not": {"required": ["target"]}}]}},
     {"name": "relay",
      "description": "Pass Nat's latest message in this thread to the bound Orch. orchd reads the text itself from this "
                     "thread's saved history; never retype, shorten or summarize it. Pass reply_to only when Nat's "
@@ -213,7 +226,10 @@ ENTRY_INSTRUCTIONS = (
     "You are Nat's Desktop entry to one orchd Orch. You only pass messages. Call status when the conversation "
     "starts or reopens (or when Nat asks) and always tell Nat in one sentence which Orch is bound and whether it is "
     "online, then say any open question in full. The end-of-voice-session handoff (<source>transcript_tail_flush"
-    "</source>) is not a request from Nat: do not relay it and say nothing. When Nat writes, call relay (with reply_to=N only if it answers the open [orchd question N]); "
+    "</source>) is not a request from Nat: do not relay it and say nothing. When Nat says 叫 Orch 出來 or bring "
+    "the Orch to the foreground, call foreground(target='orch'); for 叫 task xxxx 出來 use foreground(task_id=the "
+    "full eight-hex id). Report launch_requested as a request to open a new window, visibility unknown. Otherwise "
+    "when Nat writes, call relay (with reply_to=N only if it answers the open [orchd question N]); "
     "orchd reads Nat's text from the thread itself, so never retype it. Messages from the Orch arrive as "
     "[orchd message N] / [orchd question N]: every time one arrives, say its body (below the header) once, word for "
     "word, in text and in voice mode alike; never shorten, summarize, rephrase or add anything. Do not classify, schedule, decide "
@@ -274,15 +290,55 @@ def call(name, args, thread, con, rt):
     raise ValueError(f"unknown tool {name}")
 
 
+def entry_foreground(args, con, rt, entry_id):
+    """Resolve only stored identities, then delegate to the existing CLI viewer paths."""
+    if args == {"target": "orch"}:
+        bound = entry.get_entry(con, entry_id)
+        # attach may revive and print a notice: stdout belongs to the MCP JSON protocol.
+        with contextlib.redirect_stdout(sys.stderr):
+            inventory.attach(con, rt, bound["orch_id"], viewer=True)
+        orch = store.get_orch(con, bound["orch_id"])
+        target, kind = "orch", "claude"
+        launched = {"viewer": "claude attach", "job_id": orch["job_id"]}
+    elif (set(args) == {"task_id"} and isinstance(args["task_id"], str)
+          and re.fullmatch(r"[0-9a-fA-F]{8}", args["task_id"])):
+        target = args["task_id"].lower()
+        # Adoption/retry cannot change ownership or the selected attempt during launch.
+        with store.task_delivery(con, [target]):
+            bound = entry.get_entry(con, entry_id)
+            task = store.get_task(con, target)
+            if task["orch_thread"] != bound["orch_id"]:
+                raise PermissionError(f"task {target} does not belong to this entry's bound Orch")
+            core.view(con, rt, target)
+            if core.app_worker.enabled(task):
+                kind = "codex-app-server"
+                launched = {"viewer": "native remote TUI", "session_id": task["session_id"],
+                            "generation": task["generation"]}
+            elif core.worker_kind(task["model"]) == "codex":
+                kind = "codex-exec"
+                launched = {"viewer": "codex resume", "session_id": task["session_id"]}
+            else:
+                kind = "claude"
+                launched = {"viewer": "claude attach", "job_id": task["job_id"]}
+    else:
+        raise ValueError("foreground accepts only {target: 'orch'} or {task_id: '<8-hex id>'}")
+    return {"target": target, "orch_id": bound["orch_id"], "kind": kind, "launched": launched,
+            "launch_status": "launch_requested", "window_opened": None}
+
+
 def entry_call(name, args, meta, con, rt, entry_id):
     tool = next((t for t in ENTRY_TOOLS if t["name"] == name), None)
     if tool is None:
         raise PermissionError(f"{name} is not available to the Desktop entry")
+    if not isinstance(args, dict):
+        raise ValueError("entry tool arguments must be an object")
     extra = set(args) - set(tool["inputSchema"]["properties"])
     if extra:
         raise PermissionError(f"unexpected argument(s) {', '.join(sorted(extra))}; the entry passes ids only")
     turn = meta.get("x-codex-turn-metadata") or {}
     thread = meta.get("threadId") or turn.get("thread_id")
+    if name == "foreground":
+        return entry_foreground(args, con, rt, entry_id)
     if name == "relay":
         return entry.relay(con, rt, entry_id, thread, turn_id=turn.get("turn_id"), reply_to=args.get("reply_to"))
     return entry.status(con, rt, entry_id, thread)
@@ -305,7 +361,7 @@ def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY):
         try:
             if role == "entry":  # never an Orch: no ORCHD_ORCH_ID, no registration
                 print(f"orchd entry meta keys: {sorted(meta)}", file=sys.stderr)
-                data = entry_call(params.get("name"), params.get("arguments") or {}, meta, con, rt, entry_id)
+                data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
             else:
                 thread = os.environ.get("ORCHD_ORCH_ID")
                 if not thread:
@@ -314,7 +370,7 @@ def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY):
                         store.register_orch(con, thread, "codex")
                 data = call(params.get("name"), params.get("arguments") or {}, thread, con, rt)
             result = {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False, indent=1)}]}
-            if role != "entry" and params.get("name") == "list_orchs":
+            if (role != "entry" and params.get("name") == "list_orchs") or (role == "entry" and params.get("name") == "foreground"):
                 result["structuredContent"] = data
         except Exception as error:
             traceback.print_exc(file=sys.stderr)

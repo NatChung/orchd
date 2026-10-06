@@ -207,7 +207,8 @@ its process identity and pending state remain available for explicit retry/close
 logs/directories are retained for diagnosis. Native interrupt cancels Codex-owned tools; detached
 marked jobs are guaranteed cleanup on retry/close, not on interrupt.
 
-The later Desktop foreground tool should accept only a task id (and optionally expected
-generation), check its binding/ownership, then call this existing viewer path. It must not accept
-commands, paths or endpoints, must report unknown/dead/superseded attempts, and must distinguish
-opening a new window from focusing an existing one. This PR does not add that entry tool.
+The Desktop entry's `foreground` tool accepts only `{target: "orch"}` or `{task_id: "<8-hex id>"}`,
+checks the binding/current ownership, and delegates to the existing Orch attach or worker viewer path.
+Each call requests a new Ghostty window; visibility is unknown, and focusing/reusing windows is out of
+scope. Existing interfaces need config/AGENTS regeneration after installation; `upgrade` does not do
+that automatically. See [docs/entry.md](docs/entry.md) for the steps and backend behavior.

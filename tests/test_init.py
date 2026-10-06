@@ -114,7 +114,7 @@ class InitTest(unittest.TestCase):
         self.assertEqual(iface["mcp_servers"]["orchd_entry"]["args"], ["mcp", "--role", "entry"])
         self.assertNotIn("/usr/bin/python3", (interface / ".codex" / "config.toml").read_text())
         self.assertEqual({k: v["approval_mode"] for k, v in iface["mcp_servers"]["orchd_entry"]["tools"].items()},
-                         {"relay": "approve", "status": "approve"})
+                         {"relay": "approve", "status": "approve", "foreground": "approve"})
 
     def test_generic_template_has_no_personal_values(self):
         self.init(trust=False)

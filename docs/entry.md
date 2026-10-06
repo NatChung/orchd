@@ -16,6 +16,12 @@ orchd binding      # 沿用已綁定且在線的 Claude Orch；沒有就開一�
 且 `relay`／`status` 預先核准（`approval_policy = "never"` 下沒核准的 MCP 工具會被直接擋掉）。
 已存在且內容不同的檔案不會被覆蓋。
 
+新增 foreground 後，既有入口需要重新產生 `~/orch/interface/.codex/config.toml` 與 `~/orch/interface/AGENTS.md`：
+先將這兩個檔案移到備份位置，再用新版程式跑 `orchd init`，核對輸出為 created，必要時重新套用自己的修改，
+然後重開 Desktop 入口對話以載入新設定。自訂 interface 路徑時用相應路徑。
+`orchd upgrade` **不會**自動做這一步：它只重新安裝程式，不呼叫 init、不改 `~/orch`；
+單獨再跑 init 也會保留舊的不同內容。此變更未升級、重啟或改動任何 live 入口。
+
 1. 在 Desktop 打開 `~/orch/interface`，權限選 **`interface`**（init 寫好的權限設定），不要用完整存取權。
 2. 綁定的 Orch 閒置被 Claude 收掉時，送訊息或跑 `orchd binding` 會原地接回同一個 Orch（#72）。
    用 `orchd orch-stop` 停掉、或接回失敗時不會自己替換；確定要換用 `orchd binding --new`（舊 Orch 的未答問題留在舊 Orch）。
@@ -39,6 +45,21 @@ orchd 的 MCP server 在 Native 是否也不受這份權限限制（它要寫 `O
 狀態：`pending`／`held`（排隊中的題目）／`delivered`／`failed`／`uncertain`／`not_delivered`（Orch 離線，已保存）。
 `delivered` 只代表送到 Orch 的 socket、Desktop queue 或工具結果，不代表 Nat 已讀，更不代表同意。
 `uncertain`（送出但收據沒寫進去）不會自動重送。
+
+## 叫出 Orch 或 worker
+
+入口的 `foreground` 只接受 `{"target":"orch"}` 或 `{"task_id":"八碼 hex id"}`，兩者不可並用，
+也不接受 command、path、socket、URL 或其他參數。Orch 預設為本入口綁定的那一個；task 必須存在且目前屬於
+本入口綁定的 Orch（採用後以目前 owner 為準）。
+
+Orch 沿用 `orchd attach ORCH_ID --viewer`：健康檢查、閒置／被 daemon 收掉時接回同一段對話，再 attach。
+worker 沿用 `view_worker`：Claude 用 `claude attach JOB`；app-server Sol 用 native remote TUI，忙碌時也能 attach；
+exec Sol 忙碌時明確拒絕，回合之間用 `codex resume`。沒有 watch-only 模式，也沒有 takeover lease。
+每次呼叫都要求開新的 Ghostty 視窗；重用或 focus 既有視窗不在範圍內。
+
+成功結果包含 `target`、`orch_id`、`kind`、`launched`（viewer 與 job/session identity）、
+`launch_status: "launch_requested"`、`window_opened: null`。啟動命令成功只代表已要求開窗，沒有驗證視窗可見或 OS focus；
+失敗以 MCP error 回傳，不會宣稱已開窗。GUI 未 live 驗證。
 
 ## 已知限制與未驗證
 

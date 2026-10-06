@@ -57,6 +57,7 @@ def planned_files(home, env, orchd_bin=None):
     reads, apps = personal(home, env)
     values = dict(HOME=str(Path(home)), ORCH_HOME=str(orch), INTERFACE_HOME=str(interface),
                   ORCHD=str(orchd_bin or paths.orchd_executable(env)),
+                  ENTRY_APPROVALS=_approvals("orchd_entry", [t["name"] for t in mcp_server.ENTRY_TOOLS]),
                   EXTRA_READ="".join(f"{_toml_string(p)} = \"read\"\n" for p in reads),
                   DISABLED_APPS="".join(f"\n[apps.{_toml_string(a)}]\nenabled = false\n" for a in apps))
     files = {}
@@ -67,7 +68,6 @@ def planned_files(home, env, orchd_bin=None):
                 text = render(relative, values) if source.name == "config.toml" else source.read_text()
                 files[target / source.relative_to(TEMPLATES / base)] = text
     files[orch / ".codex" / "config.toml"] += _approvals("orchd", [t["name"] for t in mcp_server.TOOLS])
-    files[interface / ".codex" / "config.toml"] += _approvals("orchd_entry", [t["name"] for t in mcp_server.ENTRY_TOOLS])
     if env.get("ORCHD_HOME"):  # a non-default state dir must reach both MCP servers
         for server, target in (("orchd", orch), ("orchd_entry", interface)):
             files[target / ".codex" / "config.toml"] += f'\n[mcp_servers.{server}.env]\nORCHD_HOME = "{env["ORCHD_HOME"]}"\n'
