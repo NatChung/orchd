@@ -32,7 +32,7 @@ Orch 指令現在必須明確使用 `orch start|stop|restart|list|attach`。舊�
 | 指令與完整參數 | 說明 | 常用範例 |
 | --- | --- | --- |
 | `orchd init [--from OLD_HOME] [--no-trust]` | 建立 home／interface 範本與 trust，保留已修改範本。 | `orchd init` |
-| `orchd doctor [--profile example] [--json]` | 唯讀檢查機器是否就緒。 | `orchd doctor` |
+| `orchd doctor [--profile example] [--json] [--no-input]` | 檢查機器是否就緒；終端機首次執行時可保存專案目錄。`--json`／`--no-input` 不詢問。 | `orchd doctor` |
 | `orchd upgrade` | 從 uv 記錄的來源更新程式。 | `orchd upgrade` |
 
 `init --from` 複製舊 Orch home 的內容；目標檔案若仍是未修改的 init 範本，會以來源檔案替換，其他既有檔案則保留並列出。略過 `.git`、`.gitignore`、`.DS_Store`、`.claude`、`.codex` 與 `AGENTS.md`；`--no-trust` 跳過 Codex trust 寫入與 Claude trust 檢查。`doctor` 結束碼：0 通過、1 必要檢查失敗、2 必要檢查未知；`--profile example` 是選用的合成範例。

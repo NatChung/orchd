@@ -32,7 +32,7 @@ Removed entry points exit with code 2 and point to the new command. Without a su
 | Command and complete arguments | Description | Common example |
 | --- | --- | --- |
 | `orchd init [--from OLD_HOME] [--no-trust]` | Create home/interface templates and configure trust without overwriting edited templates. | `orchd init` |
-| `orchd doctor [--profile example] [--json]` | Check machine readiness without changing configuration. | `orchd doctor` |
+| `orchd doctor [--profile example] [--json] [--no-input]` | Check machine readiness; on the first terminal run, offer to save the projects directory. `--json` / `--no-input` never prompt. | `orchd doctor` |
 | `orchd upgrade` | Update the uv-installed program from its recorded source. | `orchd upgrade` |
 
 `init --from` copies content from an old Orch home. It replaces destination files that still match an unmodified init template; other existing files are kept and listed. It skips `.git`, `.gitignore`, `.DS_Store`, `.claude`, `.codex`, and `AGENTS.md`; `--no-trust` skips Codex trust writes and Claude trust checks. Doctor exit codes: 0 passed, 1 required check failed, 2 required check unknown. `--profile example` is an optional fictional layout.

@@ -24,6 +24,8 @@ orchd doctor
 
 `doctor` checks the machine without changing its configuration. Before initialization, it reminds you to set up the Orch home. For development from a checkout, use `bin/orchd`.
 
+On the first terminal run, if no projects directory is configured or detected, `orchd doctor` asks for the parent directory of your Git repositories and saves it to `config.toml`; it does not ask again. `--json`, `--no-input`, and non-interactive runs only check and never prompt or save.
+
 ```sh
 orchd upgrade
 ```
@@ -62,7 +64,13 @@ Use [public issues](https://github.com/NatChung/orchd/issues) for general bugs a
 | Orch root | `~/orch` | `ORCHD_ROOT` |
 | Orch home | `~/orch/home` | `ORCHD_ORCH_HOME` |
 | Desktop entry | `~/orch/interface` | `ORCHD_INTERFACE_HOME` |
-| Projects directory | `~/projects` | `ORCHD_PROJECTS` |
+| Projects directory | parent of a checkout under HOME, else `~/projects` | `projects_dir` in `config.toml`, `ORCHD_PROJECTS` |
+
+`config.toml` in the personal settings directory sets the projects directory shared by doctor and dispatch (`~/` or an absolute path); `ORCHD_PROJECTS` overrides it. The value does not depend on the current working directory, so Desktop and background dispatch use the same location:
+
+```toml
+projects_dir = "~/GitProjects"
+```
 
 `init.toml` controls extra paths the Orch home can read and apps to disable. Set these for your own work scope; the example includes no real connector IDs:
 
