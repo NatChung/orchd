@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 try:
     import tomllib
@@ -16,6 +17,18 @@ except ImportError:  # pragma: no cover - installs require 3.11
     tomllib = None
 
 PINS = ("rev", "branch", "tag")
+PUBLIC_SOURCE = "git+https://github.com/NatChung/orchd.git"
+
+
+def legacy_source(url):
+    """Archive URLs and legacy SSH installs need an explicit public reinstall."""
+    if not url:
+        return False
+    parsed = urlsplit(url)
+    path = parsed.path if "://" in url else url.split(":", 1)[-1]
+    repo = path.rstrip("/").removesuffix(".git").lower().strip("/")
+    return repo == "natchung/orchd-archive" or (
+        repo == "natchung/orchd" and (parsed.scheme == "ssh" or "://" not in url))
 
 
 def installed_commit(prefix):
@@ -72,6 +85,11 @@ def upgrade(prefix=None, run=default_run, which=shutil.which, checkout=None):
     except ValueError as error:
         return 1, [f"cannot upgrade: {error}.",
                    "uv install: uv tool install --force --refresh <the URL you installed from>; pipx: pipx upgrade orchd"]
+    if legacy_source(git_url):
+        return 1, ["This install uses an archive or legacy SSH source; switch explicitly to the public HTTPS source.",
+                   f"run: uv tool install --force --refresh {PUBLIC_SOURCE}",
+                   "Keep private-history checkouts separate; clone https://github.com/NatChung/orchd.git into a new directory.",
+                   "Changing a checkout remote does not change uv's recorded installation source."]
     uv = which("uv")
     if not uv:
         return 1, ["cannot upgrade: uv is not on PATH.", f"run by hand: uv tool install --force --refresh {spec}"]
