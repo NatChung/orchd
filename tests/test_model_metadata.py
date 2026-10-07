@@ -1,0 +1,122 @@
+import contextlib
+import io
+import json
+import os
+import tempfile
+import unittest
+from unittest import mock
+
+from orchd import core, store
+from tests.test_orchd import FakeRuntime
+
+
+class ModelMetadataTest(unittest.TestCase):
+    """inbox / list_open expose each task's stored full model id. Temporary ORCHD_HOME only."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        patcher = mock.patch.dict(os.environ, {"ORCHD_HOME": self.tmp.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.con = store.connect()
+        self.rt = FakeRuntime()
+
+    def tearDown(self):
+        self.con.close()
+        self.tmp.cleanup()
+
+    def dispatch(self, thread="thread-A", **kw):
+        kw = {"model_reason": "clear scope", "task_type": "code", **kw}
+        return core.dispatch(self.con, self.rt, orch_thread=thread, repo="demo", title="T",
+                             instructions="do it", done_when="tests pass", **kw)
+
+    def test_every_message_kind_carries_the_task_stored_model(self):
+        t = self.dispatch()
+        stored = store.get_task(self.con, t["id"])["model"]
+        core.ack(self.con, t["id"])
+        core.progress(self.con, self.rt, t["id"], "halfway")
+        core.ask(self.con, self.rt, t["id"], "which one?")
+        core.report(self.con, self.rt, t["id"], "done", "ok", "ev")
+        msgs = core.inbox(self.con, "thread-A")
+        self.assertEqual([m["kind"] for m in msgs], ["ack", "progress", "question", "report"])
+        self.assertTrue(all(m["model"] == stored for m in msgs))
+        for key in ("task_id", "repo", "title", "kind", "body", "evidence", "task_status"):
+            self.assertIn(key, msgs[0])
+
+    def test_model_is_the_full_stored_id_not_the_alias(self):
+        for alias in core.WORKER_MODELS:
+            t = self.dispatch(model=alias)
+            self.assertEqual(self.row(t["id"])["model"], core.WORKER_MODELS[alias])
+
+    def row(self, task_id):
+        return next(r for r in core.list_open(self.con, self.rt) if r["task_id"] == task_id)
+
+    def test_list_open_keeps_existing_fields_and_does_not_consume_inbox(self):
+        t = self.dispatch()
+        core.ack(self.con, t["id"])
+        row = self.row(t["id"])
+        for key in ("owner_health", "notification_delivery", "worker_health", "recovery_hint", "worker_alive"):
+            self.assertIn(key, row)
+        self.assertEqual(len(core.inbox(self.con, "thread-A")), 1)  # list_open left it unread
+
+    def test_legacy_null_and_empty_model_is_unknown(self):
+        for legacy in (None, "", "  "):
+            t = self.dispatch()
+            self.con.execute("UPDATE tasks SET model=? WHERE id=?", (legacy, t["id"]))
+            core.ack(self.con, t["id"])
+            self.assertEqual(self.row(t["id"])["model"], "unknown")
+        msgs = core.inbox(self.con, "thread-A")
+        self.assertEqual({m["model"] for m in msgs}, {"unknown"})
+
+    def test_historical_opus_model_is_displayed_without_changing_storage(self):
+        t = self.dispatch()
+        store.update_task(self.con, t["id"], model="claude-opus-5-5")
+        core.ack(self.con, t["id"])
+        before = dict(store.get_task(self.con, t["id"]))
+        self.assertEqual(self.row(t["id"])["model"], "claude-opus-5-5")
+        self.assertEqual(core.inbox(self.con, "thread-A")[0]["model"], "claude-opus-5-5")
+        self.assertEqual(dict(store.get_task(self.con, t["id"])), before)
+
+    def test_other_orch_messages_are_not_consumed(self):
+        a, b = self.dispatch("thread-A"), self.dispatch("thread-B")
+        core.ack(self.con, a["id"])
+        core.ack(self.con, b["id"])
+        self.assertEqual([m["task_id"] for m in core.inbox(self.con, "thread-A")], [a["id"]])
+        self.assertEqual([m["task_id"] for m in core.inbox(self.con, "thread-B")], [b["id"]])
+
+    def test_mcp_descriptions_document_model(self):
+        from orchd import mcp_server
+        tools = {t["name"]: t["description"] for t in mcp_server.TOOLS}
+        self.assertIn("model", tools["inbox"])
+        self.assertIn("model", tools["list_open"])
+
+    def test_mcp_worker_model_schema_and_dispatch_validation(self):
+        from orchd import mcp_server
+        tools = {t["name"]: t for t in mcp_server.TOOLS}
+        for name in ("dispatch", "retry"):
+            prop = tools[name]["inputSchema"]["properties"]["model"]
+            self.assertEqual(prop["enum"], ["sol", "sonnet"])
+            self.assertIn("default and preferred", prop["description"])
+            self.assertNotIn("opus", json.dumps(tools[name]))
+            self.assertNotIn("M tier", json.dumps(tools[name]))
+        self.assertEqual(tools["dispatch"]["inputSchema"]["properties"]["model"]["default"], "sol")
+
+        args = dict(repo="demo", title="T", instructions="do it", done_when="tests pass",
+                    model_reason="clear scope", task_type="code")
+        def dispatch(**extra):
+            # Exercise the JSON-RPC handler: schema hints alone do not validate tools/call arguments.
+            with contextlib.redirect_stderr(io.StringIO()):
+                return mcp_server.handle({"id": 1, "method": "tools/call", "params": {
+                    "name": "dispatch", "arguments": dict(args, **extra),
+                    "_meta": {"threadId": "thread-A"}}}, self.con, self.rt)["result"]
+
+        for model in ("opus", "claude-opus-5-5"):
+            result = dispatch(model=model)
+            self.assertTrue(result["isError"])
+            self.assertIn("use one of sol, sonnet", result["content"][0]["text"])
+        self.assertEqual(store.open_tasks(self.con), [])
+        for extra, full in (({}, "gpt-6.1-sol"), ({"model": "sol"}, "gpt-6.1-sol"),
+                            ({"model": "sonnet"}, "claude-sonnet-5-5")):
+            result = dispatch(**extra)
+            self.assertNotIn("isError", result)
+            self.assertEqual(json.loads(result["content"][0]["text"])["model"], full)

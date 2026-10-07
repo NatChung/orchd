@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+"""Run orchd from a checkout without installing it. The command line lives in orchd/cli.py."""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from orchd.cli import __doc__, main  # noqa: E402,F401
+
+if __name__ == "__main__":
+    sys.exit(main())

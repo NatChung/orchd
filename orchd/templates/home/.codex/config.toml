@@ -1,0 +1,28 @@
+# Orch 的鎖：只能讀寫 Orch 家（$ORCH_HOME），不碰任何專案 repo。由 `orchd init` 產生。
+# 派工工具：orchd MCP（$ORCHD）。
+# 個人要額外開放讀取的路徑與要關掉的 app，寫在 ~/.config/orchd/init.toml（見 README），不寫在這個範本。
+default_permissions = "orch"
+approval_policy = "never"
+
+[features]
+network_proxy = false
+plugins = false
+multi_agent = false
+
+[permissions.orch.filesystem]
+":minimal" = "read"
+"$HOME" = "deny"
+"$HOME/.local/bin" = "read"
+"$HOME/.codex/packages/standalone" = "read"
+"/opt/homebrew" = "read"
+$EXTRA_READ"$ORCH_HOME" = "write"
+"$ORCH_HOME/.codex" = "read"
+
+[permissions.orch.network]
+enabled = false
+$DISABLED_APPS
+[mcp_servers.orchd]
+command = "$ORCHD"
+args = ["mcp"]
+startup_timeout_sec = 30
+tool_timeout_sec = 180

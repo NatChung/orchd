@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orchd"
+version = "0.1.0"
+description = "Orch dispatches, workers execute: run many agent tasks in parallel and keep them manageable."
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.11"
+dependencies = ["psutil>=6.0,<8", "websocket-client>=1.8,<2"]
+
+[project.scripts]
+orchd = "orchd.cli:main"
+
+[tool.setuptools]
+packages = ["orchd"]
+
+[tool.setuptools.package-data]
+# `**/*` skips dot-directories, so the .codex templates are named explicitly.
+orchd = ["templates/*/*.md", "templates/*/*/*.md", "templates/*/.codex/*.toml", "worker_bin/gh"]

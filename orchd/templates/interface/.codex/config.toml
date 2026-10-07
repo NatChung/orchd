@@ -1,0 +1,46 @@
+# Operator 的 Desktop interface：只轉交原文給綁定的 Orch。由 `orchd init` 產生。
+# 讀不到家目錄、沒有網路、不能寫檔；只掛 orchd 的入口 MCP（relay／status／foreground）。
+model = "gpt-6.1-sol"
+model_reasoning_effort = "low"
+default_permissions = "interface"
+approval_policy = "never"
+approvals_reviewer = "user"
+allow_login_shell = false
+# web search runs on OpenAI's side: network.enabled = false does not stop it (#55 live probe).
+web_search = "disabled"
+
+# Built-in tools the interface never needs (#55). Sub-agents cannot be switched off in this Codex version
+# (multi_agent=false and agents.max_depth=0 do not stop collab spawn); a spawned one inherits this profile.
+[features]
+network_proxy = false
+plugins = false
+multi_agent = false
+multi_agent_v2 = false
+shell_tool = false
+unified_exec = false
+image_generation = false
+view_image = false
+goals = false
+apps = false
+memories = false
+browser_use = false
+computer_use = false
+
+[permissions.interface.filesystem]
+":minimal" = "read"
+"$HOME" = "deny"
+"$HOME/.codex/packages/standalone" = "read"
+"$HOME/.local/bin" = "read"
+"$INTERFACE_HOME" = "read"
+
+[permissions.interface.network]
+enabled = false
+
+[mcp_servers.orchd_entry]
+command = "$ORCHD"
+args = ["mcp", "--role", "entry"]
+startup_timeout_sec = 30
+tool_timeout_sec = 120
+
+# init 從 ENTRY_TOOLS 產生每個工具的允許設定，包括受限的 foreground。
+$ENTRY_APPROVALS
