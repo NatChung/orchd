@@ -30,6 +30,29 @@ orchd upgrade
 
 Upgrade reads the source recorded by uv and installs the latest commit on that source's default branch. It drops branch pins and leaves the database and personal settings in place. Existing sessions and MCP processes can keep the old code; start new sessions when convenient. Upgrade does not restart the daemon. Update checkout installations in their own checkout.
 
+## Migrating from the private repository
+
+The former private repository is [orchd-archive](https://github.com/NatChung/orchd-archive). The public repository starts with clean history. Keep existing private-history clones separate:
+
+```sh
+# In your old clone, preserve its connection to the archive.
+git remote set-url origin https://github.com/NatChung/orchd-archive.git
+# Outside that clone, choose a new, unused directory.
+git clone https://github.com/NatChung/orchd.git orchd-public
+uv tool install --force --refresh git+https://github.com/NatChung/orchd.git
+uv tool list
+orchd --help
+orchd upgrade
+```
+
+Reinstalling changes uv's update source; changing a clone's remote alone does not. Do not pull the public history into a private-history clone or depend on GitHub's old-name redirects. Public upgrades use HTTPS and require no GitHub token. `orchd upgrade` warns about archive and legacy SSH installation sources and prints the reinstall command. Older installed versions need the explicit reinstall above before they gain this warning.
+
+Compare the commit reported by `orchd upgrade` with public `main`; the package version alone can remain unchanged. Your database and personal settings stay in place. Finish active tasks before starting new sessions or MCP processes with the new program; upgrade does not restart them.
+
+## Issues and contributions
+
+Use [public issues](https://github.com/NatChung/orchd/issues) for general bugs and improvements, with synthetic examples and redacted logs. Keep customer details, personal information, internal URLs, and sensitive configuration in an access-controlled private tracker (for existing private users, orchd-archive). Never post secrets in any issue. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Configuration
 
 | Purpose | Default | Override |

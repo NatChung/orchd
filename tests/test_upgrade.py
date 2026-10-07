@@ -87,6 +87,26 @@ class UpgradeTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("not installed with `uv tool install`", lines[0])
 
+    def test_legacy_sources_stop_before_network_or_reinstall(self):
+        for url in ["ssh://git@github-personal/NatChung/orchd.git",
+                    "git@github.com:NatChung/orchd.git",
+                    "https://github.com/NatChung/orchd-archive.git",
+                    "ssh://git@github.com/NatChung/orchd-archive"]:
+            with self.subTest(url=url):
+                self.receipt('{ name = "orchd", git = "' + url + '" }')
+                code, lines = self.upgrade()
+                self.assertEqual(code, 1)
+                self.assertEqual(self.calls, [])
+                self.assertIn("uv tool install --force --refresh git+https://github.com/NatChung/orchd.git", lines[1])
+                self.assertEqual(upgrade.installed_commit(self.prefix), OLD)
+
+    def test_public_https_source_upgrades_normally(self):
+        self.receipt('{ name = "orchd", git = "https://github.com/NatChung/orchd.git" }')
+        code, lines = self.upgrade()
+        self.assertEqual(code, 0)
+        self.assertEqual(self.calls[-1][-1], upgrade.PUBLIC_SOURCE)
+        self.assertIn("orchd aaaaaaa -> bbbbbbb", lines)
+
     def test_checkout_points_at_git_pull(self):
         bin_orchd = Path(self.tmp.name) / "co" / "bin" / "orchd"
         bin_orchd.parent.mkdir(parents=True)

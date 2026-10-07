@@ -30,6 +30,29 @@ orchd upgrade
 
 upgrade 讀取 uv 安裝紀錄的來源，安裝該來源預設 branch 的最新 commit；branch pin 會移除。它不更新資料庫或個人設定。既有 session／MCP process 仍持有原本程式，請在方便時開始新 session；更新不是重新啟動 daemon 的指令。Checkout 安裝請在自己的 checkout 更新程式。
 
+## 從私人 repo 遷移
+
+原本私人 repo 已改名為 [orchd-archive](https://github.com/NatChung/orchd-archive)。公開版使用乾淨的新歷史，請保留舊 clone，另開新目錄：
+
+```sh
+# 在舊 clone 內，把 remote 指向 archive。
+git remote set-url origin https://github.com/NatChung/orchd-archive.git
+# 離開舊 clone，在尚不存在的新目錄 clone 公開版。
+git clone https://github.com/NatChung/orchd.git orchd-public
+uv tool install --force --refresh git+https://github.com/NatChung/orchd.git
+uv tool list
+orchd --help
+orchd upgrade
+```
+
+重新安裝才會更換 uv 的更新來源；單改 clone remote 不會改變安裝來源。不要把公開版新歷史 pull 進舊私人 clone，也不要依賴 GitHub 舊名稱轉址。公開版用 HTTPS，不需要 GitHub token。新版 upgrade 會偵測 archive 或舊 SSH 安裝來源並提示重新安裝指令；舊版需先手動重新安裝，才會取得這個提示。
+
+用 upgrade 顯示的 commit 核對公開版 main；只看套件版本不夠，版本號可能不變。資料庫與個人設定保留。等進行中的任務結束後，再以新程式開始 session 或 MCP process；upgrade 不會重啟既有 process。
+
+## 問題與貢獻
+
+一般 bug 與改善放在[公開 issues](https://github.com/NatChung/orchd/issues)，使用假資料並遮蔽 log。含客戶資訊、個資、內部網址或敏感設定的內容，放在有存取控制的私人 tracker；既有私人使用者可使用 orchd-archive。任何 issue 都不要貼 secrets。詳見 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
 ## 設定
 
 預設位置與可覆寫的環境變數：
