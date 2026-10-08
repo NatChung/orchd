@@ -3,6 +3,8 @@
   orchd mcp [--role orch|entry] [--entry NAME]   run the MCP server for an Orch session, or for the Desktop entry (stdio)
   orchd orch [--model opus|sonnet] [--no-attach]   start a Claude Orch, then attach to it
   orchd orch-stop ID                          stop a Claude Orch
+  orchd orch-restart [OLD_ID] [--model opus|sonnet] [--dry-run]
+                                              stop, confirm death, start, adopt, and rebind Desktop
   orchd init [--from OLD_ORCH_HOME] [--no-trust]   create ~/orch/home and ~/orch/interface, trust them in Codex
   orchd upgrade                               reinstall the uv-installed orchd at its source's newest commit
   orchd binding [--new | --to ORCH_ID | --status] [--entry NAME]
@@ -49,6 +51,10 @@ def main(argv=None):
                       choices=list(ORCH_MODELS))
     orch.add_argument("--no-attach", action="store_true")
     sub.add_parser("orch-stop").add_argument("orch_id")
+    restart = sub.add_parser("orch-restart", help="replace an Orch and adopt its open tasks")
+    restart.add_argument("old_id", nargs="?", help="defaults to the Desktop binding's Orch")
+    restart.add_argument("--model", choices=list(ORCH_MODELS), help="defaults to the old Orch's model")
+    restart.add_argument("--dry-run", action="store_true", help="read-only plan; no stop, start, adopt or rebind")
     init = sub.add_parser("init")
     init.add_argument("--from", dest="source", help="copy what an old Orch home kept (e.g. ~/projects/orch); never overwrites")
     init.add_argument("--no-trust", action="store_true", help="do not write Codex trust or check Claude trust")
@@ -230,6 +236,32 @@ def main(argv=None):
         finally:
             con.close()
         return 0
+    if args.cmd == "orch-restart":
+        from orchd import orch_restart, stats
+        con = snap = None
+        try:
+            if args.dry_run:
+                # Plan against a private DB/WAL snapshot, including any needed schema migration.
+                snap = stats.open_snapshot(store.home() / "orchd.db")
+                copy_path = snap.con.execute("PRAGMA database_list").fetchone()[2]
+                snap.con.close()
+                snap.con = None
+                con = store.connect(copy_path)
+            else:
+                con = store.connect()
+            result = orch_restart.restart(con, Runtime(), args.old_id, args.model, args.dry_run)
+            print(json.dumps(result, ensure_ascii=False, indent=1))
+            if result["status"] == "done":
+                print(f"New Orch: {result['new_orch']}; first prompt: {result['first_prompt']}")
+            return 0 if result["status"] in ("done", "dry-run") else 1
+        except (ValueError, OSError, stats.SnapshotError) as error:
+            print(f"orch-restart select: {error}; inspect with `orchd orchs --all`", file=sys.stderr)
+            return 1
+        finally:
+            if con is not None:
+                con.close()
+            if snap is not None:
+                snap.close()
     con, rt = store.connect(), Runtime()
     if args.cmd in ("watch", "summary"):
         from orchd import watch
