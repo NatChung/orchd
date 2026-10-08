@@ -2,7 +2,7 @@
 
 [繁體中文](commands.zh-TW.md)
 
-Based on argparse in `orchd/cli.py` and dynamic fields in `orchd/goals.py`. All commands, subcommands, positional arguments and flags are covered below. Every level supports `-h` / `--help`. Examples are instructions, not operations executed during this documentation change.
+Based on argparse in `orchd/cli.py` and dynamic fields in `orchd/goals.py`. All commands, subcommands, positional arguments and flags are covered below. Every level supports `-h` / `--help`.
 
 ## Remember these for daily use
 
@@ -21,7 +21,7 @@ Based on argparse in `orchd/cli.py` and dynamic fields in `orchd/goals.py`. All 
 | `orchd doctor [--profile example] [--json]` | Check machine readiness without changing configuration. | `orchd doctor` |
 | `orchd upgrade` | Update the uv-installed program from its recorded source. | `orchd upgrade` |
 
-`init --from` copies retained content from an old Orch home without overwriting; `--no-trust` skips Codex trust writes and Claude trust checks. Doctor exit codes: 0 passed, 1 required check failed, 2 required check unknown. `--profile example` is an optional fictional layout.
+`init --from` copies content from an old Orch home. It replaces destination files that still match an unmodified init template; other existing files are kept and listed. It skips `.git`, `.gitignore`, `.DS_Store`, `.claude`, `.codex`, and `AGENTS.md`; `--no-trust` skips Codex trust writes and Claude trust checks. Doctor exit codes: 0 passed, 1 required check failed, 2 required check unknown. `--profile example` is an optional fictional layout.
 
 ## Orch management
 
@@ -32,9 +32,9 @@ Based on argparse in `orchd/cli.py` and dynamic fields in `orchd/goals.py`. All 
 | `orchd orch-restart [OLD_ID] [--model sonnet\|opus] [--dry-run]` | Replace an Orch, adopt its open tasks and rebind its Desktop entry. | `orchd orch-restart` |
 | `orchd orchs [--all] [--json] [--restore ORCH_ID]` | List live/resumable Orchs; restore clears archival and resets death observation. | `orchd orchs` |
 | `orchd attach ORCH_ID [--viewer]` | Attach to an existing Orch; resume its conversation if idle. | `orchd attach ORCH_ID` |
-| `orchd adopt NEW_ORCH [TASK_ID ...] [--from OLD_ORCH] [--force]` | Operator: transfer open tasks to another Orch. | `orchd adopt NEW_ORCH --from OLD_ORCH` |
+| `orchd adopt NEW_ORCH (TASK_ID ... [--from OLD_ORCH] \| --from OLD_ORCH) [--force]` | Operator: transfer open tasks to another Orch. | `orchd adopt NEW_ORCH --from OLD_ORCH` |
 
-`orch` defaults to opus; `--no-attach` only starts it. `orchs` hides dead, unknown and archived Orchs by default; `--all` includes them and `--json` emits the complete inventory. `attach --viewer` opens Ghostty. `adopt --from` transfers all open tasks or limits named task IDs; `--force` also permits transfer from an alive/unknown owner and notifies it.
+`orch` defaults to opus; `--no-attach` only starts it. `orchs` hides dead, unknown and archived Orchs by default; `--all` includes them and `--json` emits the complete inventory. `attach --viewer` opens Ghostty. After `NEW_ORCH`, provide at least one `TASK_ID` or `--from OLD_ORCH`; both may be used together. `adopt --from` transfers all open tasks or limits named task IDs; `--force` also permits transfer from an alive/unknown owner and notifies it.
 
 ## Desktop entry
 
@@ -42,7 +42,7 @@ Based on argparse in `orchd/cli.py` and dynamic fields in `orchd/goals.py`. All 
 | --- | --- | --- |
 | `orchd binding [--entry NAME] [--new \| --to ORCH_ID \| --status]` | Bind the Desktop interface to a live Claude Orch, or inspect the binding. | `orchd binding` |
 
-`binding` defaults to entry desktop and starts an Orch if none is available. Mutually exclusive modes: `--new` starts a new Orch, `--to` selects a live Orch, `--status` reads binding/health/questions/delivery only.
+Run `orchd init` first to create the interface configuration. `binding` defaults to entry desktop. It starts an Orch when there is no binding yet; otherwise it reuses the binding. A stopped or confirmed-dead bound Orch causes an error: use `--new` explicitly to start and rebind, leaving the old Orch's open questions with it. A session retired by Claude for idling can resume in place; a failed resume also requires `--new`. Mutually exclusive modes: `--new` starts a new Orch, `--to` selects a live Orch, `--status` reads binding/health/questions/delivery only.
 
 ## Tasks and goals
 
@@ -59,7 +59,7 @@ Based on argparse in `orchd/cli.py` and dynamic fields in `orchd/goals.py`. All 
 | `orchd goal list [--repo REPO] [--status active\|waiting\|paused\|done]` | Read goals filtered by repository or status. | `orchd goal list --repo example` |
 | `orchd goal export --md [--repo REPO]` | Print a Markdown snapshot of central goals. | `orchd goal export --md` |
 
-`watch --since` / `summary --since` use local HH:MM today; watch defaults to the last 30 minutes and summary to all messages. Board writes a file; rerun to refresh it.
+Both `--since` flags use local HH:MM today. `watch` starts after the last message ID whose timestamp is before the cutoff, then follows new messages; it defaults to the last 30 minutes. `summary` selects tasks created at or after the cutoff and summarizes all messages belonging to those tasks; it defaults to all tasks. Board writes a file; rerun to refresh it.
 
 ### GOAL_OPTIONS: every add/set flag
 
@@ -74,7 +74,7 @@ Based on argparse in `orchd/cli.py` and dynamic fields in `orchd/goals.py`. All 
 --v --j --linked-tasks
 ```
 
-Every field flag takes a value. General fields are text; dates use YYYY-MM-DD. `--companies` takes a JSON string array; `--linked-tasks` takes a JSON array of objects with `task_id` and boolean `goal_critical`. `--v` is a number from 0–10 recording Operator-approved value; `--j` is 1, 2, 3, 5 or 8. `--type` is goal/continuous; `--status` is active/waiting/paused/done. `--fields` is a JSON object with underscore field names; flags override it. JSON null clears optional dates or v. Repo is immutable after creation. `--actor` defaults to `operator:<OS user>` and is audit attribution, not authentication. See [goals and board](goals-board.md).
+Every field flag takes a value. General fields are text; dates use YYYY-MM-DD. `--companies` takes a JSON string array; `--linked-tasks` takes a JSON array of objects with `task_id` and boolean `goal_critical`. `--v` is a number from 0–10 recording Operator-approved value; `--j` is 1, 2, 3, 5 or 8. `--type` is goal/continuous; `--status` is active/waiting/paused/done. `--fields` is a JSON object with underscore field names; flags override it. To clear optional dates or v, pass JSON null through `--fields`, for example `orchd goal set GOAL_ID --fields '{"deadline": null, "v": null}'`. `--deadline null` and `--v null` do not work; do not override the null with a flag for the same field. Repo is immutable after creation. `--actor` defaults to `operator:<OS user>` and is audit attribution, not authentication. See [goals and board](goals-board.md).
 
 ## Worker reporting
 
@@ -124,7 +124,7 @@ After success, use the printed new Orch ID and first prompt `盤點上次` (take
    orchd doctor
    ```
 
-3. If you have a locally copied old Orch home, use `orchd init --from OLD_HOME` to retain its notes without overwriting files. This copies home content; it does not transfer the database, running sessions or workers. Set personal paths/account mappings locally; see [configuration](../README.md#configuration). Do not commit credentials or machine settings.
+3. If you have a locally copied old Orch home, use `orchd init --from OLD_HOME` to copy its notes. Unmodified init templates are replaced; other existing files are kept. This copies home content; it does not transfer the database, running sessions or workers. Set personal paths/account mappings locally; see [configuration](../README.md#configuration). Do not commit credentials or machine settings.
 4. Accept Claude trust manually in `~/orch/home`. Run `orchd binding`, open `~/orch/interface` in Codex Desktop, select the interface permissions created by init, request status first, then describe your work. `binding --status` checks the entry.
 
 ### Upgrade
@@ -137,17 +137,3 @@ orchd doctor
 Upgrade installs the newest default-branch commit from uv's recorded source, dropping branch pins while keeping database/personal settings. Check the reported commit; the package version can remain unchanged. Existing sessions, daemon and MCP processes are not restarted and may keep old code. Finish active work and start new sessions/MCP processes with the new program; use the restart workflow when replacing an Orch.
 
 For an archive/legacy install, reinstall from the public HTTPS source first; see [migration](../README.md#migrating-from-the-private-repository). Checkout installs must be updated in their own checkout.
-
-## CLI coverage evidence
-
-Checked against the checkout CLI on 2026-10-08: 24 top-level commands and all 5 goal subcommands (30 successful help calls including the root). Each call used only `--help`, before command dispatch; no application operation was run. The inventory came from argparse, including dynamic goal fields, and every option was checked against both language versions. Reproduce with a Python environment containing the project's dependencies:
-
-```sh
-python3 bin/orchd --help
-for command in mcp orch orch-stop orch-restart init upgrade binding ack report progress flush ask verify list goal board orchs attach watch summary stats adopt close doctor; do
-  python3 bin/orchd "$command" --help
-done
-for command in add set show list export; do
-  python3 bin/orchd goal "$command" --help
-done
-```

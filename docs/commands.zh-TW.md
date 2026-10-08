@@ -2,7 +2,7 @@
 
 [English](commands.md)
 
-以 `orchd/cli.py` 的 argparse 定義與 `orchd/goals.py` 的動態欄位為準。下列涵蓋所有指令、子指令、位置參數與旗標；每層都支援 `-h`／`--help`。範例是操作指南，並非本次已執行的操作。
+以 `orchd/cli.py` 的 argparse 定義與 `orchd/goals.py` 的動態欄位為準。下列涵蓋所有指令、子指令、位置參數與旗標；每層都支援 `-h`／`--help`。
 
 ## 日常只需要記這幾個
 
@@ -21,7 +21,7 @@
 | `orchd doctor [--profile example] [--json]` | 唯讀檢查機器是否就緒。 | `orchd doctor` |
 | `orchd upgrade` | 從 uv 記錄的來源更新程式。 | `orchd upgrade` |
 
-`init --from` 複製舊 Orch home 保留的內容，不覆寫；`--no-trust` 跳過 Codex trust 寫入與 Claude trust 檢查。`doctor` 結束碼：0 通過、1 必要檢查失敗、2 必要檢查未知；`--profile example` 是選用的合成範例。
+`init --from` 複製舊 Orch home 的內容；目標檔案若仍是未修改的 init 範本，會以來源檔案替換，其他既有檔案則保留並列出。略過 `.git`、`.gitignore`、`.DS_Store`、`.claude`、`.codex` 與 `AGENTS.md`；`--no-trust` 跳過 Codex trust 寫入與 Claude trust 檢查。`doctor` 結束碼：0 通過、1 必要檢查失敗、2 必要檢查未知；`--profile example` 是選用的合成範例。
 
 ## Orch 管理
 
@@ -32,9 +32,9 @@
 | `orchd orch-restart [OLD_ID] [--model sonnet\|opus] [--dry-run]` | 換新 Orch、接手未結任務，並重新綁定原有 Desktop 入口。 | `orchd orch-restart` |
 | `orchd orchs [--all] [--json] [--restore ORCH_ID]` | 列出存活／可恢復的 Orch；restore 清除封存並重設死亡觀察期。 | `orchd orchs` |
 | `orchd attach ORCH_ID [--viewer]` | 連入既有 Orch，閒置時恢復對話。 | `orchd attach ORCH_ID` |
-| `orchd adopt NEW_ORCH [TASK_ID ...] [--from OLD_ORCH] [--force]` | Operator：將未結任務移交給另一個 Orch。 | `orchd adopt NEW_ORCH --from OLD_ORCH` |
+| `orchd adopt NEW_ORCH (TASK_ID ... [--from OLD_ORCH] \| --from OLD_ORCH) [--force]` | Operator：將未結任務移交給另一個 Orch。 | `orchd adopt NEW_ORCH --from OLD_ORCH` |
 
-`orch` 預設 model 為 opus；`--no-attach` 只啟動。`orchs` 預設隱藏死亡、未知與封存的 Orch；`--all` 顯示全部，`--json` 輸出完整 inventory。`attach --viewer` 開 Ghostty。`adopt --from` 可移交全部未結任務或限制指定 task ID；`--force` 也允許從存活或未知的 owner 移交並通知它。
+`orch` 預設 model 為 opus；`--no-attach` 只啟動。`orchs` 預設隱藏死亡、未知與封存的 Orch；`--all` 顯示全部，`--json` 輸出完整 inventory。`attach --viewer` 開 Ghostty。`NEW_ORCH` 後必須至少給一個 `TASK_ID` 或 `--from OLD_ORCH`，也可兩者一起使用。`adopt --from` 可移交全部未結任務或限制指定 task ID；`--force` 也允許從存活或未知的 owner 移交並通知它。
 
 ## Desktop 入口
 
@@ -42,7 +42,7 @@
 | --- | --- | --- |
 | `orchd binding [--entry NAME] [--new \| --to ORCH_ID \| --status]` | 將 Desktop interface 綁定到存活的 Claude Orch，或查看綁定。 | `orchd binding` |
 
-`binding` 預設 entry 為 desktop；沒有可用 Orch 時會啟動一個。`--new` 開新 Orch、`--to` 指定存活 Orch、`--status` 唯讀查綁定／健康／問題／delivery，三者互斥。
+先跑 `orchd init` 建立 interface 設定。`binding` 預設 entry 為 desktop；尚無綁定時才會自動啟動 Orch，已有綁定則沿用。已綁定的 Orch 停止或確認死亡時會報錯，需用 `--new` 明確啟動並重新綁定，舊 Orch 的未結問題仍留在原處。Claude 因閒置退出的 session 可原地 resume；失敗時也需 `--new`。`--new` 開新 Orch、`--to` 指定存活 Orch、`--status` 唯讀查綁定／健康／問題／delivery，三者互斥。
 
 ## 查看任務與目標
 
@@ -59,7 +59,7 @@
 | `orchd goal list [--repo REPO] [--status active\|waiting\|paused\|done]` | 依 repo 或狀態讀取目標。 | `orchd goal list --repo example` |
 | `orchd goal export --md [--repo REPO]` | 印出中央目標的 Markdown 快照。 | `orchd goal export --md` |
 
-`watch --since`／`summary --since` 使用今日本地 HH:MM；預設 watch 為最近 30 分鐘、summary 為全部。board 輸出檔案，重新執行才更新。
+兩者的 `--since` 都使用今日本地 HH:MM。`watch` 從時間點之前最後一筆訊息的 ID 之後開始顯示，並持續追蹤新訊息；預設從最近 30 分鐘開始。`summary` 篩選該時間點（含）之後建立的任務，再彙整這些任務的所有訊息；預設包含全部任務。board 輸出檔案，重新執行才更新。
 
 ### GOAL_OPTIONS：add 與 set 的全部旗標
 
@@ -74,7 +74,7 @@
 --v --j --linked-tasks
 ```
 
-每個欄位旗標都需要值。一般欄位為字串；日期為 YYYY-MM-DD；`--companies` 為 JSON 字串陣列；`--linked-tasks` 為 JSON 陣列，元素含 `task_id` 與布林 `goal_critical`。`--v` 為 0–10 數字，記錄 Operator 核准值；`--j` 為 1、2、3、5、8。`--type` 為 goal／continuous，`--status` 為 active／waiting／paused／done。`--fields` 是 JSON object，欄位名稱用底線；旗標優先，可用 JSON null 清除可選日期或 v。repo 建立後不可變。`--actor` 預設 `operator:<OS user>`，是稽核歸屬而非身分驗證。詳見[目標與看板](goals-board.md)。
+每個欄位旗標都需要值。一般欄位為字串；日期為 YYYY-MM-DD；`--companies` 為 JSON 字串陣列；`--linked-tasks` 為 JSON 陣列，元素含 `task_id` 與布林 `goal_critical`。`--v` 為 0–10 數字，記錄 Operator 核准值；`--j` 為 1、2、3、5、8。`--type` 為 goal／continuous，`--status` 為 active／waiting／paused／done。`--fields` 是 JSON object，欄位名稱用底線；旗標優先。清除可選日期或 v 必須透過 `--fields` 的 JSON null，例如 `orchd goal set GOAL_ID --fields '{"deadline": null, "v": null}'`；`--deadline null` 與 `--v null` 都無效，且不要再用同欄位旗標覆蓋 null。repo 建立後不可變。`--actor` 預設 `operator:<OS user>`，是稽核歸屬而非身分驗證。詳見[目標與看板](goals-board.md)。
 
 ## Worker 回報
 
@@ -124,7 +124,7 @@ restart 已包含停舊 Orch、用新的 runtime／socket 查詢確認死亡、�
    orchd doctor
    ```
 
-3. 若已把舊 Orch home 複製到本機，可用 `orchd init --from OLD_HOME` 保留筆記而不覆寫。這只複製 home 內容，不移轉資料庫、執行中的 session 或 worker。個人路徑與帳號 mapping 留在本機，見[設定](../README.zh-TW.md#設定)；不要提交憑證或機器設定。
+3. 若已把舊 Orch home 複製到本機，可用 `orchd init --from OLD_HOME` 複製筆記；未修改的 init 範本會被替換，其他既有檔案保留。這只複製 home 內容，不移轉資料庫、執行中的 session 或 worker。個人路徑與帳號 mapping 留在本機，見[設定](../README.zh-TW.md#設定)；不要提交憑證或機器設定。
 4. 在 `~/orch/home` 手動接受 Claude trust。執行 `orchd binding`，在 Codex Desktop 開啟 `~/orch/interface`，選 init 建立的 interface 權限，先要求 status，再交辦工作。用 `binding --status` 檢查入口。
 
 ### 升級
@@ -137,17 +137,3 @@ orchd doctor
 upgrade 從 uv 記錄的來源安裝預設 branch 最新 commit，移除 branch pin，保留資料庫與個人設定。核對輸出的 commit；套件版本可能不變。既有 session、daemon 與 MCP process 不會重啟，可能仍使用舊程式。完成進行中的工作後，開始新 session／MCP process；換新 Orch 時使用上面的重開流程。
 
 若安裝來源為 archive／舊來源，先從公開 HTTPS 來源重新安裝，見[遷移說明](../README.zh-TW.md#從私人-repo-遷移)。Checkout 安裝需在自己的 checkout 更新。
-
-## CLI 涵蓋證據
-
-2026-10-08 以本 checkout CLI 核對：24 個頂層指令、goal 的全部 5 個子指令，含根層共 30 次 help 呼叫皆成功。每次都只用 `--help`，在 dispatch 前結束，沒有執行實際應用操作。清單來自 argparse（包含 goal 動態欄位），並逐一核對兩個語言版本的全部旗標。可在具備專案依賴的 Python 環境重現：
-
-```sh
-python3 bin/orchd --help
-for command in mcp orch orch-stop orch-restart init upgrade binding ack report progress flush ask verify list goal board orchs attach watch summary stats adopt close doctor; do
-  python3 bin/orchd "$command" --help
-done
-for command in add set show list export; do
-  python3 bin/orchd goal "$command" --help
-done
-```

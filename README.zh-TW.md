@@ -100,6 +100,10 @@ orchd list
 
 在 `~/orch/home` 手動接受 Claude trust，再於 Codex Desktop 開啟 `~/orch/interface`、選擇 init 建立的 interface 權限，先要求 status，再交辦工作。
 
+`binding` 必須先跑 `init`；尚無綁定時會啟動 Orch，已有綁定但 Orch 離線時會報錯，需明確用 `orchd binding --new` 開新 Orch 並重新綁定。Claude 因閒置退出的 session 可原地 resume。
+
+`orchd orch-restart --dry-run` 只讀取並列出計畫，不實際執行。
+
 日常記住 `orch-restart`（重開 Orch，包含 adopt 與原有 Desktop 重新 bind）、`list`（任務）、`doctor`（檢查）與 `upgrade`（更新）即可。完整指令、全部旗標、worker 回報與重開／換電腦／升級流程，見[分組指令參考](docs/commands.zh-TW.md)。Worker 回報 done 仍待核對，部署與驗收另行確認。
 
 另見 [CONTEXT.md](CONTEXT.md)、[架構決策](docs/adr/)、[入口](docs/entry.md)、[權限](docs/orch-permissions.md)、[目標與看板](docs/goals-board.md)與 [review／merge](docs/review-merge-policy.md)。

@@ -98,6 +98,10 @@ orchd list
 
 Accept Claude trust manually in `~/orch/home`, then open `~/orch/interface` in Codex Desktop, select the interface permissions created by init, request status first, and describe your work.
 
+`binding` requires `init` first. It starts an Orch when no binding exists; an offline bound Orch causes an error and requires `orchd binding --new` to start a replacement and rebind. A session retired by Claude for idling can resume in place.
+
+`orchd orch-restart --dry-run` only reads and prints the plan; it does not execute it.
+
 For daily use, remember `orch-restart` (replace an Orch, including adopt and rebinding its existing Desktop entry), `list` (tasks), `doctor` (checks), and `upgrade` (updates). See the [grouped command reference](docs/commands.md) for every command and flag, worker reporting, and restart/new-computer/upgrade workflows. A worker report marked done still awaits verification; deployment and acceptance are separate decisions.
 
 See also [CONTEXT.md](CONTEXT.md), [architecture decisions](docs/adr/), [entry](docs/entry.md), [permissions](docs/orch-permissions.md), [goals and board](docs/goals-board.md), and [review/merge policy](docs/review-merge-policy.md).
