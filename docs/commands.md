@@ -8,10 +8,24 @@ Based on argparse in `orchd/cli.py` and dynamic fields in `orchd/goals.py`. All 
 
 | Command | Purpose |
 | --- | --- |
-| `orchd orch-restart` | Replace the Desktop-bound Orch, adopt open tasks and rebind. |
+| `orchd orch restart` | Replace the Desktop-bound Orch, adopt open tasks and rebind. |
 | `orchd list` | Check open tasks and health. |
 | `orchd doctor` | Check machine readiness. |
 | `orchd upgrade` | Update the uv-installed program. |
+
+## BREAKING CHANGE: upgrade commands
+
+Orch commands now require an explicit `orch start|stop|restart|list|attach` action. The old entry points were removed; there are no aliases. Update scripts, shell aliases, runbooks and handoff notes using this table. Existing flags and action behavior stay the same.
+
+| Before upgrade (removed) | After upgrade |
+| --- | --- |
+| `orchd orch [--model ...] [--no-attach]` | `orchd orch start [--model ...] [--no-attach]` |
+| `orchd orch-stop ID` | `orchd orch stop ID` |
+| `orchd orch-restart [ID]` | `orchd orch restart [ID]` |
+| `orchd orchs` | `orchd orch list` |
+| `orchd attach ID` | `orchd orch attach ID` |
+
+Removed entry points exit with code 2 and point to the new command. Without a subcommand, the Orch command prints its action help and exits with code 2; it does not start an Orch. `--help` still exits with code 0.
 
 ## Installation and maintenance
 
@@ -27,14 +41,14 @@ Based on argparse in `orchd/cli.py` and dynamic fields in `orchd/goals.py`. All 
 
 | Command and complete arguments | Description | Common example |
 | --- | --- | --- |
-| `orchd orch [--model sonnet\|opus] [--no-attach]` | Start a Claude Orch and attach by default. | `orchd orch --model sonnet` |
-| `orchd orch-stop ORCH_ID` | Stop the named Claude Orch. | `orchd orch-stop ORCH_ID` |
-| `orchd orch-restart [OLD_ID] [--model sonnet\|opus] [--dry-run]` | Replace an Orch, adopt its open tasks and rebind its Desktop entry. | `orchd orch-restart` |
-| `orchd orchs [--all] [--json] [--restore ORCH_ID]` | List live/resumable Orchs; restore clears archival and resets death observation. | `orchd orchs` |
-| `orchd attach ORCH_ID [--viewer]` | Attach to an existing Orch; resume its conversation if idle. | `orchd attach ORCH_ID` |
+| `orchd orch start [--model sonnet\|opus] [--no-attach]` | Start a Claude Orch and attach by default. | `orchd orch start --model sonnet` |
+| `orchd orch stop ORCH_ID` | Stop the named Claude Orch. | `orchd orch stop ORCH_ID` |
+| `orchd orch restart [OLD_ID] [--model sonnet\|opus] [--dry-run]` | Replace an Orch, adopt its open tasks and rebind its Desktop entry. | `orchd orch restart` |
+| `orchd orch list [--all] [--json] [--restore ORCH_ID]` | List live/resumable Orchs; restore clears archival and resets death observation. | `orchd orch list` |
+| `orchd orch attach ORCH_ID [--viewer]` | Attach to an existing Orch; resume its conversation if idle. | `orchd orch attach ORCH_ID` |
 | `orchd adopt NEW_ORCH (TASK_ID ... [--from OLD_ORCH] \| --from OLD_ORCH) [--force]` | Operator: transfer open tasks to another Orch. | `orchd adopt NEW_ORCH --from OLD_ORCH` |
 
-`orch` defaults to opus; `--no-attach` only starts it. `orchs` hides dead, unknown and archived Orchs by default; `--all` includes them and `--json` emits the complete inventory. `attach --viewer` opens Ghostty. After `NEW_ORCH`, provide at least one `TASK_ID` or `--from OLD_ORCH`; both may be used together. `adopt --from` transfers all open tasks or limits named task IDs; `--force` also permits transfer from an alive/unknown owner and notifies it.
+`orch start` defaults to opus; `--no-attach` only starts it. `orch list` hides dead, unknown and archived Orchs by default; `--all` includes them and `--json` emits the complete inventory. `orch attach --viewer` opens Ghostty. After `NEW_ORCH`, provide at least one `TASK_ID` or `--from OLD_ORCH`; both may be used together. `adopt --from` transfers all open tasks or limits named task IDs; `--force` also permits transfer from an alive/unknown owner and notifies it.
 
 ## Desktop entry
 
@@ -104,13 +118,13 @@ Quote text containing spaces. Report evidence defaults to an empty string; suppl
 ### Restart the Desktop-bound Orch
 
 ```sh
-orchd orch-restart --dry-run
-orchd orch-restart
+orchd orch restart --dry-run
+orchd orch restart
 ```
 
-Restart already stops the old Orch, confirms death using fresh runtime/socket probes, starts the replacement, adopts open tasks and rebinds Desktop when it was bound to the old Orch. You do not need a separate `binding` command. It leaves the daemon and task workers running. The model defaults to the old Orch's model; use `orchd orch-restart OLD_ID --model sonnet` to select explicitly. Without OLD_ID, a missing/stale Desktop binding prints candidates and stops for selection.
+Restart already stops the old Orch, confirms death using fresh runtime/socket probes, starts the replacement, adopts open tasks and rebinds Desktop when it was bound to the old Orch. You do not need a separate `binding` command. It leaves the daemon and task workers running. The model defaults to the old Orch's model; use `orchd orch restart OLD_ID --model sonnet` to select explicitly. Without OLD_ID, a missing/stale Desktop binding prints candidates and stops for selection.
 
-After success, use the printed new Orch ID and first prompt `盤點上次` (take stock of previous work). If any step fails or is uncertain, follow the printed recovery commands and inspect task ownership before retrying: adopt can be committed even if notifications fail. An explicitly selected Orch that was not Desktop-bound leaves Desktop binding alone; use `orchd attach NEW_ID` to talk to it.
+After success, use the printed new Orch ID and first prompt `盤點上次` (take stock of previous work). If any step fails or is uncertain, follow the printed recovery commands and inspect task ownership before retrying: adopt can be committed even if notifications fail. An explicitly selected Orch that was not Desktop-bound leaves Desktop binding alone; use `orchd orch attach NEW_ID` to talk to it.
 
 ### Set up a new computer
 

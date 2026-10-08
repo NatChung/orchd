@@ -8,10 +8,24 @@
 
 | 指令 | 用途 |
 | --- | --- |
-| `orchd orch-restart` | 重開目前 Desktop 綁定的 Orch，接手未結任務並重新 bind。 |
+| `orchd orch restart` | 重開目前 Desktop 綁定的 Orch，接手未結任務並重新 bind。 |
 | `orchd list` | 查看未結任務與健康狀態。 |
 | `orchd doctor` | 檢查機器就緒狀態。 |
 | `orchd upgrade` | 更新 uv 安裝的程式。 |
+
+## BREAKING CHANGE：升級指令
+
+Orch 指令現在必須明確使用 `orch start|stop|restart|list|attach`。舊入口已移除，不保留 alias；請依下表更新腳本、shell alias、操作手冊與交接文件。既有旗標和動作語意維持不變。
+
+| 升級前（已移除） | 升級後 |
+| --- | --- |
+| `orchd orch [--model ...] [--no-attach]` | `orchd orch start [--model ...] [--no-attach]` |
+| `orchd orch-stop ID` | `orchd orch stop ID` |
+| `orchd orch-restart [ID]` | `orchd orch restart [ID]` |
+| `orchd orchs` | `orchd orch list` |
+| `orchd attach ID` | `orchd orch attach ID` |
+
+呼叫已移除的入口會回傳 exit code 2 並提示新名稱。未指定子指令時會印出 Orch 子指令說明並回傳 2，不會啟動 Orch；`--help` 仍回傳 0。
 
 ## 安裝與維護
 
@@ -27,14 +41,14 @@
 
 | 指令與完整參數 | 說明 | 常用範例 |
 | --- | --- | --- |
-| `orchd orch [--model sonnet\|opus] [--no-attach]` | 啟動 Claude Orch，預設直接 attach。 | `orchd orch --model sonnet` |
-| `orchd orch-stop ORCH_ID` | 停止指定的 Claude Orch。 | `orchd orch-stop ORCH_ID` |
-| `orchd orch-restart [OLD_ID] [--model sonnet\|opus] [--dry-run]` | 換新 Orch、接手未結任務，並重新綁定原有 Desktop 入口。 | `orchd orch-restart` |
-| `orchd orchs [--all] [--json] [--restore ORCH_ID]` | 列出存活／可恢復的 Orch；restore 清除封存並重設死亡觀察期。 | `orchd orchs` |
-| `orchd attach ORCH_ID [--viewer]` | 連入既有 Orch，閒置時恢復對話。 | `orchd attach ORCH_ID` |
+| `orchd orch start [--model sonnet\|opus] [--no-attach]` | 啟動 Claude Orch，預設直接 attach。 | `orchd orch start --model sonnet` |
+| `orchd orch stop ORCH_ID` | 停止指定的 Claude Orch。 | `orchd orch stop ORCH_ID` |
+| `orchd orch restart [OLD_ID] [--model sonnet\|opus] [--dry-run]` | 換新 Orch、接手未結任務，並重新綁定原有 Desktop 入口。 | `orchd orch restart` |
+| `orchd orch list [--all] [--json] [--restore ORCH_ID]` | 列出存活／可恢復的 Orch；restore 清除封存並重設死亡觀察期。 | `orchd orch list` |
+| `orchd orch attach ORCH_ID [--viewer]` | 連入既有 Orch，閒置時恢復對話。 | `orchd orch attach ORCH_ID` |
 | `orchd adopt NEW_ORCH (TASK_ID ... [--from OLD_ORCH] \| --from OLD_ORCH) [--force]` | Operator：將未結任務移交給另一個 Orch。 | `orchd adopt NEW_ORCH --from OLD_ORCH` |
 
-`orch` 預設 model 為 opus；`--no-attach` 只啟動。`orchs` 預設隱藏死亡、未知與封存的 Orch；`--all` 顯示全部，`--json` 輸出完整 inventory。`attach --viewer` 開 Ghostty。`NEW_ORCH` 後必須至少給一個 `TASK_ID` 或 `--from OLD_ORCH`，也可兩者一起使用。`adopt --from` 可移交全部未結任務或限制指定 task ID；`--force` 也允許從存活或未知的 owner 移交並通知它。
+`orch start` 預設 model 為 opus；`--no-attach` 只啟動。`orch list` 預設隱藏死亡、未知與封存的 Orch；`--all` 顯示全部，`--json` 輸出完整 inventory。`orch attach --viewer` 開 Ghostty。`NEW_ORCH` 後必須至少給一個 `TASK_ID` 或 `--from OLD_ORCH`，也可兩者一起使用。`adopt --from` 可移交全部未結任務或限制指定 task ID；`--force` 也允許從存活或未知的 owner 移交並通知它。
 
 ## Desktop 入口
 
@@ -104,13 +118,13 @@
 ### 重開 Desktop 綁定的 Orch
 
 ```sh
-orchd orch-restart --dry-run
-orchd orch-restart
+orchd orch restart --dry-run
+orchd orch restart
 ```
 
-restart 已包含停舊 Orch、用新的 runtime／socket 查詢確認死亡、開新 Orch、adopt 未結任務，以及重新 bind 原本綁著舊 Orch 的 Desktop，**不用另外執行 binding**。daemon 與任務 worker 繼續執行。預設沿用舊 model；可用 `orchd orch-restart OLD_ID --model sonnet` 明確指定。省略 OLD_ID 時，若 Desktop binding 不存在或過時，就列出候選並停止，讓你選擇。
+restart 已包含停舊 Orch、用新的 runtime／socket 查詢確認死亡、開新 Orch、adopt 未結任務，以及重新 bind 原本綁著舊 Orch 的 Desktop，**不用另外執行 binding**。daemon 與任務 worker 繼續執行。預設沿用舊 model；可用 `orchd orch restart OLD_ID --model sonnet` 明確指定。省略 OLD_ID 時，若 Desktop binding 不存在或過時，就列出候選並停止，讓你選擇。
 
-成功後使用輸出的新 Orch ID，第一句提示為 `盤點上次`。任何步驟失敗或無法確認，都依輸出的補救指令處理，重試前核對任務 owner：adopt 可能已提交但通知失敗。若明確指定的 Orch 原本沒有綁 Desktop，Desktop binding 保持原狀，可用 `orchd attach NEW_ID` 對話。
+成功後使用輸出的新 Orch ID，第一句提示為 `盤點上次`。任何步驟失敗或無法確認，都依輸出的補救指令處理，重試前核對任務 owner：adopt 可能已提交但通知失敗。若明確指定的 Orch 原本沒有綁 Desktop，Desktop binding 保持原狀，可用 `orchd orch attach NEW_ID` 對話。
 
 ### 換新電腦
 
