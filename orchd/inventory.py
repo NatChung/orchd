@@ -102,7 +102,7 @@ def render(report, *, all=False):
             lines.append(f"{dead} dead Orch(s) still have tasks, notifications, questions or bindings → orchd adopt")
         unknown = report["counts"]["unknown"]
         if unknown:
-            lines.append(f"{unknown} Orch(s) have unknown health (including unverified Codex) → orchd orchs --all")
+            lines.append(f"{unknown} Orch(s) have unknown health (including unverified Codex) → orchd orch list --all")
     return "\n".join(lines)
 
 

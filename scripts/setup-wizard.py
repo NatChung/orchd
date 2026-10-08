@@ -480,7 +480,7 @@ def generic_steps(env):
              else (UNKNOWN, f"{NO_TOMLLIB}; ~/.codex/config.toml not checked") if tomllib is None
              else (UNKNOWN, "CODEX_HOME is set, so Codex does not read ~/.codex/config.toml; not checked") if "CODEX_HOME" in env.environ
              else (UNKNOWN, "~/.codex/config.toml unreadable") if not present
-             else (MISSING, "no [mcp_servers.orchd] in ~/.codex/config.toml (needed for the Codex/Astra Orch; the Claude Orch gets its MCP config from `orchd orch`)"))
+             else (MISSING, "no [mcp_servers.orchd] in ~/.codex/config.toml (needed for the Codex/Astra Orch; the Claude Orch gets its MCP config from `orchd orch start`)"))
     steps.append(Step("mcp-orchd-codex", "generic", "orchd MCP registered in Codex", who, st, d, "~/.codex/config.toml mcp_servers.orchd",
                       [f"codex mcp add orchd -- python3 {q(env.checkout / 'bin' / 'orchd')} mcp   # check `codex mcp add --help` for the exact form first"],
                       "new Codex session lists the `orchd` tools"))

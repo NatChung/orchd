@@ -100,11 +100,25 @@ Accept Claude trust manually in `~/orch/home`, then open `~/orch/interface` in C
 
 `binding` requires `init` first. It starts an Orch when no binding exists; an offline bound Orch causes an error and requires `orchd binding --new` to start a replacement and rebind. A session retired by Claude for idling can resume in place.
 
-`orchd orch-restart --dry-run` only reads and prints the plan; it does not execute it.
+`orchd orch restart --dry-run` only reads and prints the plan; it does not execute it.
 
-For daily use, remember `orch-restart` (replace an Orch, including adopt and rebinding its existing Desktop entry), `list` (tasks), `doctor` (checks), and `upgrade` (updates). See the [grouped command reference](docs/commands.md) for every command and flag, worker reporting, and restart/new-computer/upgrade workflows. A worker report marked done still awaits verification; deployment and acceptance are separate decisions.
+For daily use, remember `orch restart` (replace an Orch, including adopt and rebinding its existing Desktop entry), `list` (tasks), `doctor` (checks), and `upgrade` (updates). See the [grouped command reference](docs/commands.md) for every command and flag, worker reporting, and restart/new-computer/upgrade workflows. A worker report marked done still awaits verification; deployment and acceptance are separate decisions.
 
 See also [CONTEXT.md](CONTEXT.md), [architecture decisions](docs/adr/), [entry](docs/entry.md), [permissions](docs/orch-permissions.md), [goals and board](docs/goals-board.md), and [review/merge policy](docs/review-merge-policy.md).
+
+## BREAKING CHANGE: upgrade commands
+
+Orch commands now require an explicit `orch start|stop|restart|list|attach` action. The old entry points were removed; there are no aliases. Update scripts, shell aliases, runbooks and handoff notes using this table. Existing flags and action behavior stay the same.
+
+| Before upgrade (removed) | After upgrade |
+| --- | --- |
+| `orchd orch [--model ...] [--no-attach]` | `orchd orch start [--model ...] [--no-attach]` |
+| `orchd orch-stop ID` | `orchd orch stop ID` |
+| `orchd orch-restart [ID]` | `orchd orch restart [ID]` |
+| `orchd orchs` | `orchd orch list` |
+| `orchd attach ID` | `orchd orch attach ID` |
+
+Removed entry points exit with code 2 and point to the new command. Without a subcommand, the Orch command prints its action help and exits with code 2; it does not start an Orch. `--help` still exits with code 0.
 
 ## Development and checks
 

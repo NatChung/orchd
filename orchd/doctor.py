@@ -140,10 +140,10 @@ class Doctor:
                 if "--messaging-socket-path" in out:
                     self.add("claude --messaging-socket-path", REQUIRED, PASS, "listed in --help")
                 else:  # hidden flag, and the CLI silently accepts unknown flags: cannot be confirmed offline.
-                    # Optional so a healthy machine is not reported as unknown forever; `orchd orch` proves it.
+                    # Optional so a healthy machine is not reported as unknown forever; `orchd orch start` proves it.
                     self.add("claude --messaging-socket-path", OPTIONAL, UNKNOWN,
                              "hidden flag; not verifiable without starting a session. "
-                             "Confirmed only by the pilot task (`orchd orch`).")
+                             "Confirmed only by the pilot task (`orchd orch start`).")
         self._cli("codex", self.codex, OPTIONAL, "Only needed for Codex workers / Astra: install Codex CLI.")
 
     def check_auth(self):

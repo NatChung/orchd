@@ -225,7 +225,7 @@ class LifecycleTest(unittest.TestCase):
                 name='list_orchs', arguments={})), self.con, self.rt)['result']
             with patch.object(cli.store, 'home', return_value=Path(self.tmp.name)), patch.object(
                     cli, 'Runtime', return_value=self.rt), contextlib.redirect_stdout(io.StringIO()) as output:
-                self.assertEqual(cli.main(['orchs', '--json']), 0)
+                self.assertEqual(cli.main(['orch', 'list', '--json']), 0)
         self.assertEqual(output.getvalue().rstrip('\n'), reply['content'][0]['text'])
         report = json.loads(output.getvalue())
         self.assertEqual(report, reply['structuredContent'])
@@ -321,13 +321,13 @@ class LifecycleTest(unittest.TestCase):
         self.live()
         self.con.execute("UPDATE orchs SET archived_at=1 WHERE id='orch'")
         connection_factory = store.connect
-        for args in (['orchs', '--all'], ['orchs', '--restore', 'orch'], ['attach', 'orch', '--viewer']):
+        for args in (['orch', 'list', '--all'], ['orch', 'list', '--restore', 'orch'], ['orch', 'attach', 'orch', '--viewer']):
             with patch.object(store, 'home', return_value=Path(self.tmp.name)), \
                     patch.object(store, 'connect', side_effect=lambda: connection_factory(Path(self.tmp.name) / 'orchd.db')), \
                     patch.object(cli, 'Runtime', return_value=self.rt), \
                     contextlib.redirect_stdout(io.StringIO()) as out:
                 self.assertEqual(cli.main(args), 0)
-            if args[0] == 'attach':
+            if args[1] == 'attach':
                 self.assertEqual(self.rt.viewed, ['orchjob'])
             elif '--restore' in args:
                 self.assertIn('Restored orch', out.getvalue())

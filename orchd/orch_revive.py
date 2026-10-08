@@ -1,7 +1,7 @@
 """Bring back a Claude Orch that Claude Code's daemon retired for idling (#72).
 
 The daemon retires a background session after about an hour at an idle prompt, and its socket goes with it.
-Retired is not stopped: `stopped_at` is set only by `orchd orch-stop`, and a stopped Orch is never revived.
+Retired is not stopped: `stopped_at` is set only by `orchd orch stop`, and a stopped Orch is never revived.
 A revive resumes the same conversation (`claude --bg --resume`). Claude runs it as a new job and session, so
 the row's job_id and session_id change; the orch_id, socket path and Desktop binding stay.
 """
@@ -39,7 +39,7 @@ def revive(con, rt, orch_id, seen_job=None):
     with store.task_delivery(con, [f"orch:{orch_id}"]):
         orch = store.get_orch(con, orch_id)
         if not revivable(orch):
-            why = ("is not registered" if orch is None else "was stopped with `orchd orch-stop`"
+            why = ("is not registered" if orch is None else "was stopped with `orchd orch stop`"
                    if orch["stopped_at"] is not None else "is not a Claude Orch with a session")
             raise ValueError(f"orch {orch_id} {why}; it is not revived")
         if seen_job is not None:

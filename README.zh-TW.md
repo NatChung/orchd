@@ -102,11 +102,25 @@ orchd list
 
 `binding` 必須先跑 `init`；尚無綁定時會啟動 Orch，已有綁定但 Orch 離線時會報錯，需明確用 `orchd binding --new` 開新 Orch 並重新綁定。Claude 因閒置退出的 session 可原地 resume。
 
-`orchd orch-restart --dry-run` 只讀取並列出計畫，不實際執行。
+`orchd orch restart --dry-run` 只讀取並列出計畫，不實際執行。
 
-日常記住 `orch-restart`（重開 Orch，包含 adopt 與原有 Desktop 重新 bind）、`list`（任務）、`doctor`（檢查）與 `upgrade`（更新）即可。完整指令、全部旗標、worker 回報與重開／換電腦／升級流程，見[分組指令參考](docs/commands.zh-TW.md)。Worker 回報 done 仍待核對，部署與驗收另行確認。
+日常記住 `orch restart`（重開 Orch，包含 adopt 與原有 Desktop 重新 bind）、`list`（任務）、`doctor`（檢查）與 `upgrade`（更新）即可。完整指令、全部旗標、worker 回報與重開／換電腦／升級流程，見[分組指令參考](docs/commands.zh-TW.md)。Worker 回報 done 仍待核對，部署與驗收另行確認。
 
 另見 [CONTEXT.md](CONTEXT.md)、[架構決策](docs/adr/)、[入口](docs/entry.md)、[權限](docs/orch-permissions.md)、[目標與看板](docs/goals-board.md)與 [review／merge](docs/review-merge-policy.md)。
+
+## BREAKING CHANGE：升級指令
+
+Orch 指令現在必須明確使用 `orch start|stop|restart|list|attach`。舊入口已移除，不保留 alias；請依下表更新腳本、shell alias、操作手冊與交接文件。既有旗標和動作語意維持不變。
+
+| 升級前（已移除） | 升級後 |
+| --- | --- |
+| `orchd orch [--model ...] [--no-attach]` | `orchd orch start [--model ...] [--no-attach]` |
+| `orchd orch-stop ID` | `orchd orch stop ID` |
+| `orchd orch-restart [ID]` | `orchd orch restart [ID]` |
+| `orchd orchs` | `orchd orch list` |
+| `orchd attach ID` | `orchd orch attach ID` |
+
+呼叫已移除的入口會回傳 exit code 2 並提示新名稱。未指定子指令時會印出 Orch 子指令說明並回傳 2，不會啟動 Orch；`--help` 仍回傳 0。
 
 ## 開發與檢查
 
