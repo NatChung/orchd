@@ -55,7 +55,7 @@ class ReviveTest(unittest.TestCase):
         self.rt.gone = 1
         with self.assertRaises(FileNotFoundError):
             orch_revive.send(self.con, self.rt, self.orch, "hi")
-        with self.assertRaisesRegex(ValueError, "orch-stop"):
+        with self.assertRaisesRegex(ValueError, "orch stop"):
             orch_revive.revive(self.con, self.rt, self.orch, seen_job="orchjob")
         self.assertFalse(getattr(self.rt, "resumed_orchs", []))
 

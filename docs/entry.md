@@ -24,7 +24,7 @@ orchd binding      # 沿用已綁定且在線的 Claude Orch；沒有就開一�
 
 1. 在 Desktop 打開 `~/orch/interface`，權限選 **`interface`**（init 寫好的權限設定），不要用完整存取權。
 2. 綁定的 Orch 閒置被 Claude 收掉時，送訊息或跑 `orchd binding` 會原地接回同一個 Orch（#72）。
-   用 `orchd orch-stop` 停掉、或接回失敗時不會自己替換；確定要換用 `orchd binding --new`（舊 Orch 的未答問題留在舊 Orch）。
+   用 `orchd orch stop` 停掉、或接回失敗時不會自己替換；確定要換用 `orchd binding --new`（舊 Orch 的未答問題留在舊 Orch）。
    綁到指定的 Orch 用 `orchd binding --to <orch_id>`，`orchd binding --status` 唯讀查看。
 
 入口模型用 `gpt-6.1-sol`（理由見下方「入口模型」）。未 live 驗證：Native Desktop 是否套用這份權限、
@@ -52,7 +52,7 @@ orchd 的 MCP server 在 Native 是否也不受這份權限限制（它要寫 `O
 也不接受 command、path、socket、URL 或其他參數。Orch 預設為本入口綁定的那一個；task 必須存在且目前屬於
 本入口綁定的 Orch（採用後以目前 owner 為準）。
 
-Orch 沿用 `orchd attach ORCH_ID --viewer`：健康檢查、閒置／被 daemon 收掉時接回同一段對話，再 attach。
+Orch 沿用 `orchd orch attach ORCH_ID --viewer`：健康檢查、閒置／被 daemon 收掉時接回同一段對話，再 attach。
 worker 沿用 `view_worker`：Claude 用 `claude attach JOB`；app-server Sol 用 native remote TUI，忙碌時也能 attach；
 exec Sol 忙碌時明確拒絕，回合之間用 `codex resume`。沒有 watch-only 模式，也沒有 takeover lease。
 每次呼叫都要求開新的 Ghostty 視窗；重用或 focus 既有視窗不在範圍內。

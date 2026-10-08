@@ -6,7 +6,7 @@ from .runtime import ORCH_MODELS
 
 def restart(con, rt, old_id=None, model=None, dry_run=False):
     result = dict(status="failed", step="select", old_orch=old_id, new_orch=None, steps=[])
-    remedy = "orchd orchs --all; orchd orch-restart OLD_ID --dry-run"
+    remedy = "orchd orch list --all; orchd orch restart OLD_ID --dry-run"
     try:
         bound = con.execute("SELECT orch_id FROM entries WHERE id='desktop'").fetchone()
         if old_id is None:
@@ -26,9 +26,9 @@ def restart(con, rt, old_id=None, model=None, dry_run=False):
         result.update(model=model, open_tasks=tasks, rebind_desktop=rebind)
         if dry_run:
             result.update(status="dry-run", step="plan", plan=[
-                f"orchd orch-stop {old_id}",
+                f"orchd orch stop {old_id}",
                 "confirm old job is dead with a fresh runtime and socket probe; stop if uncertain",
-                f"orchd orch --model {model} --no-attach",
+                f"orchd orch start --model {model} --no-attach",
                 f"orchd adopt NEW_ID --from {old_id}; check committed and notification errors"
                 if tasks else "skip adopt if there are still no open tasks",
                 "orchd binding --to NEW_ID; orchd binding --status" if rebind else "leave Desktop binding alone",
@@ -36,7 +36,7 @@ def restart(con, rt, old_id=None, model=None, dry_run=False):
             return result
 
         result["step"] = "stop"
-        remedy = f"orchd orchs --all; orchd orch-stop {old_id}"
+        remedy = f"orchd orch list --all; orchd orch stop {old_id}"
         core.stop_orch(con, rt, old_id)
         result["steps"].append(dict(step="stop", status="requested"))
 
@@ -54,7 +54,7 @@ def restart(con, rt, old_id=None, model=None, dry_run=False):
         result["steps"].append(dict(step="confirm-dead", status="dead"))
 
         result["step"] = "start"
-        remedy = f"orchd orchs --all; orchd orch --model {model} --no-attach"
+        remedy = f"orchd orch list --all; orchd orch start --model {model} --no-attach"
         new = core.start_orch(con, rt, model)
         new_id = new["id"]
         result["new_orch"] = new_id
@@ -73,7 +73,7 @@ def restart(con, rt, old_id=None, model=None, dry_run=False):
             if (adoption.get("notification_errors") or adoption.get("new_owner_error")
                     or adoption.get("error_recording_failures") or adoption.get("superseded")
                     or set(adoption.get("adopted", [])) != set(tasks)):
-                remedy = (f"orchd list; orchd attach {new_id}; tell the new Orch to read inbox; "
+                remedy = (f"orchd list; orchd orch attach {new_id}; tell the new Orch to read inbox; "
                           "check current task owners before retrying adopt (the move already committed)")
                 raise ValueError("adopt committed with notification errors or changed task ownership")
         else:

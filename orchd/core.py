@@ -831,7 +831,7 @@ def start_orch(con, rt, model_key=DEFAULT_ORCH_MODEL):
     home = orch_home()
     if not rt.claude_trusted(home):
         raise ValueError(f"Claude has not trusted {home}. Run `claude` in that directory once and accept "
-                         "the trust prompt, then run `orchd orch` again.")
+                         "the trust prompt, then run `orchd orch start` again.")
     orch_id = "o" + uuid.uuid4().hex[:7]
     sock, job, session = rt.start_orch(orch_id, ORCH_MODELS[model_key], home)
     return store.register_orch(con, orch_id, "claude", model=ORCH_MODELS[model_key], socket=sock,

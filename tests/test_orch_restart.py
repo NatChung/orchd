@@ -141,7 +141,7 @@ class RestartTest(unittest.TestCase):
         before = list(self.con.iterdump())
         out = self.run_restart(dry_run=True)
         self.assertEqual(out["status"], "dry-run")
-        self.assertIn("orchd orch --model sonnet --no-attach", out["plan"])
+        self.assertIn("orchd orch start --model sonnet --no-attach", out["plan"])
         self.assertEqual(list(self.con.iterdump()), before)
         self.rt.stop_worker.assert_not_called()
         self.rt.start_orch.assert_not_called()
@@ -150,7 +150,7 @@ class RestartTest(unittest.TestCase):
         before = list(self.con.iterdump())
         with patch.dict(os.environ, ORCHD_HOME=self.tmp.name), patch.object(cli, "Runtime", return_value=self.rt), \
                 contextlib.redirect_stdout(io.StringIO()) as output:
-            self.assertEqual(cli.main(["orch-restart", "--dry-run"]), 0)
+            self.assertEqual(cli.main(["orch", "restart", "--dry-run"]), 0)
         self.assertIn('"status": "dry-run"', output.getvalue())
         self.assertEqual(list(self.con.iterdump()), before)
         self.rt.stop_worker.assert_not_called()
@@ -159,7 +159,7 @@ class RestartTest(unittest.TestCase):
     def test_cli_success_prints_new_id_and_prompt_on_last_line(self):
         with patch.dict(os.environ, ORCHD_HOME=self.tmp.name), patch.object(cli, "Runtime", return_value=self.rt), \
                 contextlib.redirect_stdout(io.StringIO()) as output:
-            self.assertEqual(cli.main(["orch-restart"]), 0)
+            self.assertEqual(cli.main(["orch", "restart"]), 0)
         new_id = entry.get_entry(self.con, "desktop")["orch_id"]
         self.assertEqual(output.getvalue().splitlines()[-1], f"New Orch: {new_id}; first prompt: 盤點上次")
 
@@ -167,7 +167,7 @@ class RestartTest(unittest.TestCase):
         self.rt.stop_worker.side_effect = None
         with patch.dict(os.environ, ORCHD_HOME=self.tmp.name), patch.object(cli, "Runtime", return_value=self.rt), \
                 contextlib.redirect_stdout(io.StringIO()) as output:
-            self.assertEqual(cli.main(["orch-restart"]), 1)
+            self.assertEqual(cli.main(["orch", "restart"]), 1)
         self.assertIn('"step": "confirm-dead"', output.getvalue())
         self.rt.start_orch.assert_not_called()
 
@@ -179,7 +179,7 @@ class RestartTest(unittest.TestCase):
         out = self.run_restart()
         self.assertEqual(out["step"], "start")
         self.assertEqual(out["status"], "failed")
-        self.assertIn("orchd orch --model sonnet --no-attach", out["manual_recovery"])
+        self.assertIn("orchd orch start --model sonnet --no-attach", out["manual_recovery"])
 
     def test_binding_failure_and_readback_failure_are_reported(self):
         with patch.object(entry, "bind", side_effect=OSError("bind failed")):

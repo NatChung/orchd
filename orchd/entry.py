@@ -61,10 +61,10 @@ def bind(con, rt, orch_id, entry_id=DEFAULT_ENTRY, force=False):
     if orch is None:
         raise ValueError(f"unknown orch {orch_id}")
     if orch["kind"] != "claude":
-        raise ValueError(f"orch {orch_id} is {orch['kind']}; the entry binds only a Claude Orch started by `orchd orch`")
+        raise ValueError(f"orch {orch_id} is {orch['kind']}; the entry binds only a Claude Orch started by `orchd orch start`")
     health = reachability(con, rt, orch_id)
     if health["state"] == "dead":
-        raise ValueError(f"orch {orch_id} is offline ({health['reason']}); start one with `orchd orch` first")
+        raise ValueError(f"orch {orch_id} is offline ({health['reason']}); start one with `orchd orch start` first")
     now = time.time()
     with store.immediate(con):
         row = con.execute("SELECT * FROM entries WHERE id=?", (entry_id,)).fetchone()

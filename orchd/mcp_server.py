@@ -1,7 +1,7 @@
 """Line-delimited JSON-RPC MCP server for the Orch session (stdio).
 
 The caller's id is `ORCHD_ORCH_ID` from the environment when set (a Claude Orch started by
-`orchd orch`; Claude Code sends no thread id). Otherwise it is `params._meta.threadId`, which both
+`orchd orch start`; Claude Code sends no thread id). Otherwise it is `params._meta.threadId`, which both
 codex exec and the Desktop app send on every tools/call (verified 2026-09-29); such a Codex thread is
 registered as a codex Orch on its first call other than the read-only `list_orchs`.
 

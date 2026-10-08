@@ -97,7 +97,7 @@ class InventoryTest(unittest.TestCase):
         output = io.StringIO()
         with patch.dict(os.environ, {"ORCHD_HOME": self.tmp.name}), patch(
                 "orchd.runtime.Runtime.live_jobs", return_value={"claude-job": {"pid": 4242, "status": "idle"}}), contextlib.redirect_stdout(output):
-            self.assertEqual(cli["main"](["orchs"]), 0)
+            self.assertEqual(cli["main"](["orch", "list"]), 0)
         self.assertIn("claude  claude  alive", output.getvalue())
         self.assertNotIn("codex  codex", output.getvalue())
         self.assertIn("unknown health", output.getvalue())
@@ -107,5 +107,5 @@ class InventoryTest(unittest.TestCase):
         cli = runpy.run_path(str(Path(__file__).resolve().parents[1] / "bin/orchd"))
         missing = Path(self.tmp.name) / "absent"
         with patch.dict(os.environ, {"ORCHD_HOME": str(missing)}), contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(cli["main"](["orchs"]), 1)
+            self.assertEqual(cli["main"](["orch", "list"]), 1)
         self.assertFalse(missing.exists())

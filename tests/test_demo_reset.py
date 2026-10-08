@@ -114,14 +114,14 @@ class DemoResetTest(unittest.TestCase):
                 demo_reset.subprocess, "run", wraps=subprocess.run) as run:
             code, out = self.run_reset("--apply")
         self.assertEqual(code, 0, out)
-        self.assertFalse(any("orch-stop" in call.args[0] for call in run.call_args_list))
+        self.assertFalse(any(call.args[0][1:3] == ["orch", "stop"] for call in run.call_args_list))
         self.assertIn("0 extra worktree(s)", out)
 
     def test_only_allowlisted_orchs_are_stopped(self):
         real_run = subprocess.run
         stopped = []
         def run(cmd, **kwargs):
-            if "orch-stop" in cmd:
+            if cmd[1:3] == ["orch", "stop"]:
                 stopped.append((cmd[-1], kwargs["env"]["ORCHD_HOME"]))
                 return subprocess.CompletedProcess(cmd, 0)
             return real_run(cmd, **kwargs)
@@ -136,13 +136,13 @@ class DemoResetTest(unittest.TestCase):
             code, out = self.run_reset("--stop-orch", "abcd1234")
         self.assertEqual(code, 0, out)
         self.assertIn("would stop Orch abcd1234", out)
-        self.assertFalse(any("orch-stop" in call.args[0] for call in run.call_args_list))
+        self.assertFalse(any(call.args[0][1:3] == ["orch", "stop"] for call in run.call_args_list))
 
     def test_failed_orch_stop_refuses_removal(self):
         _, wt, _ = self.make_task()
         real_run = subprocess.run
         def run(cmd, **kwargs):
-            if "orch-stop" in cmd:
+            if cmd[1:3] == ["orch", "stop"]:
                 raise subprocess.CalledProcessError(1, cmd)
             return real_run(cmd, **kwargs)
         with patch.object(demo_reset.subprocess, "run", side_effect=run):
@@ -155,7 +155,7 @@ class DemoResetTest(unittest.TestCase):
         with patch.object(demo_reset.subprocess, "run", wraps=subprocess.run) as run:
             code, out = self.run_reset("--apply", "--stop-orch", "abcd1234", "--stop-orch", "invalid")
         self.assertEqual(code, 2, out)
-        self.assertFalse(any("orch-stop" in call.args[0] for call in run.call_args_list))
+        self.assertFalse(any(call.args[0][1:3] == ["orch", "stop"] for call in run.call_args_list))
 
     def test_missing_seed_refuses(self):
         out = io.StringIO()

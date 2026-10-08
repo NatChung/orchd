@@ -606,7 +606,7 @@ def stop_orchs(args):
             print(f"  would stop Orch {oid} (explicit allowlist)")
             continue
         try:
-            subprocess.run([str(Path(__file__).resolve().parents[1] / "bin/orchd"), "orch-stop", oid],
+            subprocess.run([str(Path(__file__).resolve().parents[1] / "bin/orchd"), "orch", "stop", oid],
                            env={**os.environ, "ORCHD_HOME": str(args.home)}, check=True, timeout=30)
         except (OSError, subprocess.SubprocessError) as e:
             raise Fatal(f"cannot stop allowlisted Orch {oid}: {e}")

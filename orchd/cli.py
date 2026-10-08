@@ -1,9 +1,9 @@
 """orchd: Orch MCP server and the worker/operator command line.
 
   orchd mcp [--role orch|entry] [--entry NAME]   run the MCP server for an Orch session, or for the Desktop entry (stdio)
-  orchd orch [--model opus|sonnet] [--no-attach]   start a Claude Orch, then attach to it
-  orchd orch-stop ID                          stop a Claude Orch
-  orchd orch-restart [OLD_ID] [--model opus|sonnet] [--dry-run]
+  orchd orch start [--model opus|sonnet] [--no-attach]   start a Claude Orch, then attach to it
+  orchd orch stop ID                          stop a Claude Orch
+  orchd orch restart [OLD_ID] [--model opus|sonnet] [--dry-run]
                                               stop, confirm death, start, adopt, and rebind Desktop
   orchd init [--from OLD_ORCH_HOME] [--no-trust]   create ~/orch/home and ~/orch/interface, trust them in Codex
   orchd upgrade                               reinstall the uv-installed orchd at its source's newest commit
@@ -16,8 +16,8 @@
   orchd flush ID [--after-pid PID]            run by a Codex turn's shell when codex exits: send answers queued meanwhile
   orchd ask ID "question with full preview"   worker: ask Orch/Operator and wait for an answer
   orchd verify ID [--timeout S]               verifier worker: rerun the verified task's locked command at its locked SHA
-  orchd orchs [--all] [--json] [--restore ID]          live/resumable Orchs; --all includes archived/unknown
-  orchd attach ID [--viewer]                  attach an existing Claude Orch (resume its conversation if idle)
+  orchd orch list [--all] [--json] [--restore ID]          live/resumable Orchs; --all includes archived/unknown
+  orchd orch attach ID [--viewer]                  attach an existing Claude Orch (resume its conversation if idle)
   orchd list                                  open tasks, worker/Orch health, unread notification failures
   orchd goal add|set|show|list|export --md      central goals, audit history, markdown snapshot
   orchd board --html PATH                     private static project board, no inbox consumption
@@ -27,6 +27,8 @@
   orchd doctor [--profile example] [--json]       read-only machine check; exit 1 required fail, 2 required unknown
   orchd adopt NEW_ORCH [TASK_ID...] [--from OLD_ORCH] [--force]   move open tasks to another Orch (operator only)
   orchd close ID                              stop a task's worker and clean its worktree if safe
+
+Orch actions require an explicit subcommand; see `orchd orch --help`.
 """
 import argparse
 import getpass
@@ -39,22 +41,61 @@ from orchd import core, store
 from orchd.runtime import DEFAULT_ORCH_MODEL, ORCH_MODELS, Runtime
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(prog="orchd", description=__doc__,
+class CommandParser(argparse.ArgumentParser):
+    def error(self, message):
+        if self.prog == "orchd":
+            replacements = {"orch-stop": "orch stop", "orch-restart": "orch restart",
+                            "orchs": "orch list", "attach": "orch attach"}
+            for old, new in replacements.items():
+                if f"invalid choice: '{old}'" in message:
+                    message += f"; `orchd {old}` was removed; use `orchd {new}` instead"
+                    break
+        elif self.prog == "orchd orch":
+            self.print_help(sys.stderr)
+            message += "; choose start|stop|restart|list|attach; to start, use `orchd orch start`"
+        super().error(message)
+
+
+def build_parser():
+    parser = CommandParser(prog="orchd", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
     mcp = sub.add_parser("mcp")
     mcp.add_argument("--role", choices=["orch", "entry"], default="orch")
     mcp.add_argument("--entry", default="desktop", help="entry name (with --role entry)")
-    orch = sub.add_parser("orch")
-    orch.add_argument("--model", default=DEFAULT_ORCH_MODEL,
-                      choices=list(ORCH_MODELS))
-    orch.add_argument("--no-attach", action="store_true")
-    sub.add_parser("orch-stop").add_argument("orch_id")
-    restart = sub.add_parser("orch-restart", help="replace an Orch and adopt its open tasks")
-    restart.add_argument("old_id", nargs="?", help="defaults to the Desktop binding's Orch")
-    restart.add_argument("--model", choices=list(ORCH_MODELS), help="defaults to the old Orch's model")
-    restart.add_argument("--dry-run", action="store_true", help="read-only plan; no stop, start, adopt or rebind")
+    orch = sub.add_parser("orch", help="start, stop, restart, list or attach an Orch")
+    def start_options(command):
+        command.add_argument("--model", default=DEFAULT_ORCH_MODEL,
+                             choices=list(ORCH_MODELS))
+        command.add_argument("--no-attach", action="store_true",
+                             default=False)
+
+    def restart_options(command):
+        command.add_argument("old_id", nargs="?", help="defaults to the Desktop binding's Orch")
+        command.add_argument("--model", choices=list(ORCH_MODELS), help="defaults to the old Orch's model")
+        command.add_argument("--dry-run", action="store_true", help="read-only plan; no stop, start, adopt or rebind")
+
+    def list_options(command):
+        command.add_argument("--json", action="store_true", help="output the complete MCP inventory JSON")
+        command.add_argument("--all", action="store_true", help="include dead, unknown and archived Orchs")
+        command.add_argument("--restore", metavar="ORCH_ID", help="clear archival and restart the death observation window")
+
+    def attach_options(command):
+        command.add_argument("orch_id")
+        command.add_argument("--viewer", action="store_true", help="open Ghostty instead of attaching in this terminal")
+
+    actions = orch.add_subparsers(dest="orch_action", required=True)
+    start = actions.add_parser("start", help="start a Claude Orch, then attach to it")
+    start_options(start)
+    stop = actions.add_parser("stop", help="stop a Claude Orch")
+    stop.add_argument("orch_id")
+    restart = actions.add_parser("restart", help="replace an Orch and adopt its open tasks")
+    restart_options(restart)
+    listing = actions.add_parser("list", help="list live/resumable Orchs")
+    list_options(listing)
+    attachment = actions.add_parser("attach", help="attach an existing Claude Orch")
+    attach_options(attachment)
+
     init = sub.add_parser("init")
     init.add_argument("--from", dest="source", help="copy what an old Orch home kept (e.g. ~/projects/orch); never overwrites")
     init.add_argument("--no-trust", action="store_true", help="do not write Codex trust or check Claude trust")
@@ -109,13 +150,6 @@ def main(argv=None):
     export.add_argument("--repo")
     board = sub.add_parser("board", help="render a private static snapshot, without consuming inbox")
     board.add_argument("--html", required=True, type=Path)
-    orchs = sub.add_parser("orchs")
-    orchs.add_argument("--json", action="store_true", help="output the complete MCP inventory JSON")
-    orchs.add_argument("--all", action="store_true", help="include dead, unknown and archived Orchs")
-    orchs.add_argument("--restore", metavar="ORCH_ID", help="clear archival and restart the death observation window")
-    attach = sub.add_parser("attach")
-    attach.add_argument("orch_id")
-    attach.add_argument("--viewer", action="store_true", help="open Ghostty instead of attaching in this terminal")
     for name in ("watch", "summary"):
         sub.add_parser(name).add_argument("--since", help="HH:MM today (default: last 30 minutes for watch, all for summary)")
     stats_p = sub.add_parser("stats")
@@ -130,10 +164,16 @@ def main(argv=None):
     doc = sub.add_parser("doctor")
     doc.add_argument("--profile", choices=["example"], help="also check a configurable example layout (accounts, SSH aliases, connectors)")
     doc.add_argument("--json", action="store_true")
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    if args.cmd == "orch":
+        args.cmd = f"orch {args.orch_action}"
 
     if args.cmd in ("goal", "board"):
-        from orchd import board as board_module, stats
+        from orchd import board as board_module, goals, stats
         # Read operations use a private DB+WAL copy. Migrate only that copy so old DBs render too.
         read_only = args.cmd == "board" or args.goal_cmd in ("show", "list", "export")
         snap = con = None
@@ -214,14 +254,14 @@ def main(argv=None):
             return 1
         print(json.dumps(report, ensure_ascii=False, indent=1) if args.json else stats.format_table(report))
         return 0
-    if args.cmd in ("orchs", "attach"):
+    if args.cmd in ("orch list", "orch attach"):
         from orchd import inventory
         if not (store.home() / "orchd.db").exists():
             print("orchd: no registry DB", file=sys.stderr)
             return 1
         con = store.connect()
         try:
-            if args.cmd == "attach":
+            if args.cmd == "orch attach":
                 inventory.attach(con, Runtime(), args.orch_id, viewer=args.viewer)
             elif args.restore:
                 inventory.restore(con, args.restore)
@@ -236,7 +276,7 @@ def main(argv=None):
         finally:
             con.close()
         return 0
-    if args.cmd == "orch-restart":
+    if args.cmd == "orch restart":
         from orchd import orch_restart, stats
         con = snap = None
         try:
@@ -255,7 +295,7 @@ def main(argv=None):
                 print(f"New Orch: {result['new_orch']}; first prompt: {result['first_prompt']}")
             return 0 if result["status"] in ("done", "dry-run") else 1
         except (ValueError, OSError, stats.SnapshotError) as error:
-            print(f"orch-restart select: {error}; inspect with `orchd orchs --all`", file=sys.stderr)
+            print(f"orch restart select: {error}; inspect with `orchd orch list --all`", file=sys.stderr)
             return 1
         finally:
             if con is not None:
@@ -276,12 +316,12 @@ def main(argv=None):
         else:
             print(json.dumps(watch.summary(con, since or 0), ensure_ascii=False, indent=1))
         return 0
-    if args.cmd == "orch":
+    if args.cmd == "orch start":
         row = core.start_orch(con, rt, args.model)
         print(f"orch {row['id']} ({row['model']}) job {row['job_id']}", flush=True)
         if not args.no_attach:
             rt.attach(row["job_id"])
-    elif args.cmd == "orch-stop":
+    elif args.cmd == "orch stop":
         core.stop_orch(con, rt, args.orch_id)
         print(f"stopped {args.orch_id}")
     elif args.cmd == "binding":
