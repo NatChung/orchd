@@ -95,48 +95,14 @@ doctor 僅檢查 credential 檔案存在性；wizard 列出手動步驟，不執
 ```sh
 orchd init
 orchd binding
-orchd binding --status
 orchd list
-orchd watch
 ```
 
-init 建立 home 與 interface 範本，並備份後更新 Codex trust；既有使用者修改過的範本不會覆寫。Claude trust 需在 home 手動確認。之後可在 Codex Desktop 開啟 `~/orch/interface`，選擇 init 建立的 interface 權限，先要求呼叫 status，再交辦工作。也可用 `orchd orch` 開啟 Claude Orch，或在 `~/orch/home` 開 Codex Orch。
+在 `~/orch/home` 手動接受 Claude trust，再於 Codex Desktop 開啟 `~/orch/interface`、選擇 init 建立的 interface 權限，先要求 status，再交辦工作。
 
-單獨啟動 Orch 可用 `orchd orch --model opus --no-attach`。要用一個指令換新 Orch：
+日常記住 `orch-restart`（重開 Orch，包含 adopt 與原有 Desktop 重新 bind）、`list`（任務）、`doctor`（檢查）與 `upgrade`（更新）即可。完整指令、全部旗標、worker 回報與重開／換電腦／升級流程，見[分組指令參考](docs/commands.zh-TW.md)。Worker 回報 done 仍待核對，部署與驗收另行確認。
 
-```sh
-orchd orch-restart --dry-run
-orchd orch-restart
-orchd orch-restart OLD_ID --model sonnet
-```
-
-省略 `OLD_ID` 時使用 Desktop binding 指向的 Orch；binding 不存在或指向未登記的 Orch，就列出候選並停止，讓你指定 ID。預設沿用舊 Orch 的 model，`--model` 可覆寫。`--dry-run` 只讀取並列出計畫，不實際執行。
-
-restart 只停止舊 Orch，用新的 runtime 與 socket 查詢確認已死，再開新 Orch、adopt 舊 Orch 的所有未結任務；沒有未結任務就跳過 adopt。輸出會列出 adopt 的 committed 與通知結果。如果 Desktop 原本綁著舊 Orch，就改綁新 Orch 並讀回 `binding --status`。不重啟 daemon，也不停任務的 worker。
-
-任何步驟失敗或無法確認，就停在該步並列出已執行步驟、已知狀態及手動補救指令。adopt 已提交但通知失敗也會回報失敗；任務已轉移，重試前先核對目前 owner。成功時最後一行列出新 Orch ID 與第一句提示：`盤點上次`。若指定的舊 Orch 原本沒有綁 Desktop，就保留 Desktop binding；可用 `orchd attach NEW_ID` 和新 Orch 對話。
-
-Orch 使用 `orchd mcp` 提供的工具派工；worker 在指定 worktree 執行並回報。每個任務的流程是：
-
-```sh
-orchd ack TASK_ID
-orchd progress TASK_ID "目前進度"
-orchd ask TASK_ID "待確認的問題或完整操作預覽"
-orchd report TASK_ID --status done --summary "完成內容" --evidence "commit、測試與未驗證事項"
-```
-
-ask 提交後等待回答；對外發送、repo 建立與合併等操作先提供完整預覽並取得明確授權。Worker 回報 done 是待核對的交付，部署與驗收另行確認。
-
-```sh
-orchd orchs
-orchd attach ORCH_ID
-orchd summary
-orchd goal list
-orchd board --html /tmp/orchd-board.html
-orchd --help
-```
-
-board 是本機唯讀 HTML 快照，重新執行才更新。完整 terminology 與 architecture 請見 [CONTEXT.md](CONTEXT.md)、[docs/adr](docs/adr)、[入口](docs/entry.md)、[權限](docs/orch-permissions.md)、[目標與看板](docs/goals-board.md)、[review／merge](docs/review-merge-policy.md)。
+另見 [CONTEXT.md](CONTEXT.md)、[架構決策](docs/adr/)、[入口](docs/entry.md)、[權限](docs/orch-permissions.md)、[目標與看板](docs/goals-board.md)與 [review／merge](docs/review-merge-policy.md)。
 
 ## 開發與檢查
 
