@@ -102,6 +102,20 @@ orchd watch
 
 init 建立 home 與 interface 範本，並備份後更新 Codex trust；既有使用者修改過的範本不會覆寫。Claude trust 需在 home 手動確認。之後可在 Codex Desktop 開啟 `~/orch/interface`，選擇 init 建立的 interface 權限，先要求呼叫 status，再交辦工作。也可用 `orchd orch` 開啟 Claude Orch，或在 `~/orch/home` 開 Codex Orch。
 
+單獨啟動 Orch 可用 `orchd orch --model opus --no-attach`。要用一個指令換新 Orch：
+
+```sh
+orchd orch-restart --dry-run
+orchd orch-restart
+orchd orch-restart OLD_ID --model sonnet
+```
+
+省略 `OLD_ID` 時使用 Desktop binding 指向的 Orch；binding 不存在或指向未登記的 Orch，就列出候選並停止，讓你指定 ID。預設沿用舊 Orch 的 model，`--model` 可覆寫。`--dry-run` 只讀取並列出計畫，不實際執行。
+
+restart 只停止舊 Orch，用新的 runtime 與 socket 查詢確認已死，再開新 Orch、adopt 舊 Orch 的所有未結任務；沒有未結任務就跳過 adopt。輸出會列出 adopt 的 committed 與通知結果。如果 Desktop 原本綁著舊 Orch，就改綁新 Orch 並讀回 `binding --status`。不重啟 daemon，也不停任務的 worker。
+
+任何步驟失敗或無法確認，就停在該步並列出已執行步驟、已知狀態及手動補救指令。adopt 已提交但通知失敗也會回報失敗；任務已轉移，重試前先核對目前 owner。成功時最後一行列出新 Orch ID 與第一句提示：`盤點上次`。若指定的舊 Orch 原本沒有綁 Desktop，就保留 Desktop binding；可用 `orchd attach NEW_ID` 和新 Orch 對話。
+
 Orch 使用 `orchd mcp` 提供的工具派工；worker 在指定 worktree 執行並回報。每個任務的流程是：
 
 ```sh

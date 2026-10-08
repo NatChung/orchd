@@ -100,6 +100,20 @@ orchd watch
 
 Init creates the home and interface templates and backs up Codex configuration before updating trust. It preserves existing templates you have changed. Accept Claude trust manually in the home. Then open `~/orch/interface` in Codex Desktop, select the interface permissions created by init, request status first, and describe your work. You can also start a Claude Orch with `orchd orch` or open a Codex Orch in `~/orch/home`.
 
+To start a standalone Orch, use `orchd orch --model opus --no-attach`. To replace an existing Orch in one command:
+
+```sh
+orchd orch-restart --dry-run
+orchd orch-restart
+orchd orch-restart OLD_ID --model sonnet
+```
+
+Without `OLD_ID`, restart uses the Orch in the Desktop binding. If that binding is missing or stale, it lists candidates and stops so you can choose an ID. The model defaults to the old Orch's model. `--dry-run` prints a read-only plan.
+
+Restart stops only the old Orch, confirms death with fresh runtime and socket probes, starts a replacement, and adopts all of the old Orch's open tasks (or skips adopt if there are none). It prints the adopt commit and notification results. If Desktop was bound to the old Orch, it rebinds and reads back `binding --status`. It does not restart the daemon or stop task workers.
+
+Any failed or uncertain step stops the sequence and prints the completed steps, known state, and manual recovery commands. A committed adopt with failed notifications is reported as a failure; inspect ownership before retrying, since tasks have already moved. On success, the last line gives the new Orch ID and a first prompt: `盤點上次` (take stock of the previous work). Restarting an explicitly named Orch that was not bound to Desktop leaves Desktop's binding alone; use `orchd attach NEW_ID` to talk to it.
+
 The Orch dispatches through tools provided by `orchd mcp`. Workers execute in their assigned worktrees and report with:
 
 ```sh
