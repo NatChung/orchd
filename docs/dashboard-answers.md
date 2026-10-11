@@ -127,7 +127,8 @@ opt-in v2 only; default callers keep their existing contract.
 unread Orch triage meaning. The new collection uses message ID order, includes every
 `store.OPEN` task, and never limits rows with `answered_limit` or owner bindings.
 Each row has `id` (question message ID), `task_id`, `body`, `created_at`,
-`task` (`repo`, `title`, `status`, `owner` = persisted `orch_thread`), `processing`
+`task` (persisted metadata including `id`, `repo`, `title`, `status`, `orch_thread`,
+plus `owner` as an alias of `orch_thread`), `task_open=true`, `processing`
 and `evidence`. `processing` is:
 
 - `awaiting_decision`: no subsequent answer or accepted followup evidence.
@@ -146,6 +147,12 @@ failure without a queue stays awaiting decision. Malformed and unstructured
 followup events do not resolve it. Followup
 instruction transport rows are excluded from ordinary answer evidence. A newer
 question starts a new decision even if an older question was answered.
+
+New followup queue and delivery rows persist their acceptance event's integer ID
+in `messages.evidence.followup_id`. Matching uses this ID, never instruction text.
+`FOLLOWUP_HEAD` is imported from core. Legacy unlinked transport rows do not prove
+delivery of a particular followup, even with identical text; a legacy structured
+queued followup therefore remains saved awaiting delivery without an exact receipt.
 
 `evidence` includes `latest_question_id`, persisted `question_read_at`,
 `read_at_affects_pending=false`, `reason`, and `resolutions` containing message IDs,
@@ -200,8 +207,35 @@ This guarantees submission idempotency, not exactly-once execution by the worker
 `task_question_answer` events contain the actor and receipt in the owner's inbox.
 `list_open.latest_question_answer` exposes the latest accepted submission's actor,
 question/answer message IDs, creation time and persisted receipt, even after the
-inbox is read. This command adds a `task_question_answers` receipt table via the
-existing store bootstrap; deployment/migration of a real store is outside this task.
+inbox is read. Both the provisional/final answer receipt and its idempotency key
+are stored in the existing event message body. No table, column, index or migration
+is added. Messages indexing remains separate work.
+
+### Dismiss an expired worker decision
+
+```sh
+orchd task-question dismiss --task TASK_ID --question-id MESSAGE_ID \
+  --reason 'Decision expired; no answer needed' --idempotency-key UNIQUE_KEY \
+  --actor operator
+```
+
+Dismiss requires the same latest unanswered question and open-task checks under
+the same task lock as answer. It returns a JSON `status="dismissed"` receipt with
+the event/message ID, question/task IDs, actor, Unix timestamp, reason and worker
+queue count. It sends nothing to the worker, queues no answer and leaves the task
+status unchanged. The `question_dismissed` message is the durable audit and owner
+inbox notification; Orch decides whether to close, abandon or follow up.
+
+Dismissed questions are removed from `pending_worker_questions`. Snapshot v2's
+`worker_question_resolutions` retains all valid dismissal audit rows (`id`,
+`task_id`, `question_id`, `actor`, `reason`, `created_at`, `resolution="dismissed"`),
+including after an inbox read, newer question or task close. V1 and legacy unread
+`worker_questions` keep their meanings. A newer question starts a new decision.
+
+Answer and dismiss share the task-scoped idempotency key namespace. Identical
+retries recover their original receipt without a second audit or transport;
+changing action, question, actor or payload conflicts. A new key cannot re-dismiss
+or answer a dismissed question. Exact replay still recovers history after close.
 
 ## Remaining follow-ups
 

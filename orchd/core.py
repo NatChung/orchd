@@ -289,7 +289,7 @@ class _ToClaude(Exception):
     pass
 
 
-def _deliver_to_claude(con, rt, task, text, keep_sent=False, entry_reply_id=None):
+def _deliver_to_claude(con, rt, task, text, keep_sent=False, entry_reply_id=None, followup_id=None):
     """Caller holds the task lock. Queued answers left from a Codex worker go first, oldest first, then `text`,
     all in one message; the receipt (read_at + one `answer` row each) is written only after the send succeeded.
     A receipt that fails after a successful send raises, unless `keep_sent` (followup): then the result stays
@@ -307,8 +307,10 @@ def _deliver_to_claude(con, rt, task, text, keep_sent=False, entry_reply_id=None
         with store.immediate(con):
             store.mark_read(con, [row["id"] for row in pending])
             links = [row["entry_reply_id"] for row in pending] + ([entry_reply_id] if text is not None else [])
-            for body, link in zip(bodies, links):
-                store.add_message(con, task_id, "answer", body, entry_reply_id=link)
+            evidence = [row["evidence"] for row in pending] + ([json.dumps(dict(followup_id=followup_id))
+                        if followup_id is not None else None] if text is not None else [])
+            for body, link, proof in zip(bodies, links, evidence):
+                store.add_message(con, task_id, "answer", body, evidence=proof, entry_reply_id=link)
             store.update_task(con, task_id, status="acked")
     except Exception as error:
         if not keep_sent:
@@ -333,8 +335,9 @@ def _queue_answer(con, task_id, text, accept, entry_reply_id=None):
         task = store.get_task(con, task_id)
         if task["status"] == "closed":
             raise ValueError(f"task {task_id} is closed")
-        accept(task)
-        store.add_message(con, task_id, store.QUEUED, text, entry_reply_id=entry_reply_id)
+        event_id = accept(task)
+        store.add_message(con, task_id, store.QUEUED, text, evidence=json.dumps(dict(followup_id=event_id)),
+                          entry_reply_id=entry_reply_id)
 
 
 def answer(con, rt, task_id, text=None, flush=False, *, entry_reply_id=None, orch_id=None):
@@ -387,11 +390,14 @@ def _answer(con, rt, task_id, text=None, flush=False, accept=None, finished_pid=
                 if task["status"] == "closed":
                     raise ValueError(f"task {task_id} is closed")
                 if accept is not None:  # followup: record acceptance under this lock, after the re-check, before any send
-                    accept(task)
+                    event_id = accept(task)
                 if worker_kind(task["model"]) == "claude":
-                    return _deliver_to_claude(con, rt, task, text, keep_sent=accept is not None, entry_reply_id=entry_reply_id)
+                    return _deliver_to_claude(con, rt, task, text, keep_sent=accept is not None, entry_reply_id=entry_reply_id,
+                                              followup_id=event_id if accept is not None else None)
                 if text is not None:  # a retry switched it to Codex meanwhile: queue it for that worker's next turn
-                    store.add_message(con, task_id, store.QUEUED, text, entry_reply_id=entry_reply_id)
+                    store.add_message(con, task_id, store.QUEUED, text,
+                                      evidence=json.dumps(dict(followup_id=event_id)) if accept is not None else None,
+                                      entry_reply_id=entry_reply_id)
                 return dict(status="queued", delivered=0, pending=len(store.pending_answers(con, task_id)))
         except TimeoutError:  # a retry or close holds the task: keep the answer for the next answer or flush
             if accept is not None:  # followup: acceptance needs the lock; busy means not accepted
@@ -611,7 +617,8 @@ def _commit_resume(con, rt, task, pending, job):
                 raise _Superseded("its queued answers were marked delivered by another call during the resume")
             store.mark_read(con, sent)
             for row in pending:
-                store.add_message(con, task_id, "answer", row["body"], entry_reply_id=row["entry_reply_id"])
+                store.add_message(con, task_id, "answer", row["body"], evidence=row["evidence"],
+                                  entry_reply_id=row["entry_reply_id"])
     except Exception as error:
         detail = f"{type(error).__name__}: {error}"
         not_stopped = _stop_confirmed(rt, "codex", job, (task["worktree"], task["session_id"]))
@@ -660,11 +667,12 @@ def followup(con, rt, task_id, message):
 
     def accept(locked_task):
         if accepted:  # a timeout fallback after the lock section already accepted it
-            return
+            return accepted["id"]
         event.update(from_status=locked_task["status"], model=locked_task["model"],
                      session_id=locked_task["session_id"], status="accepted")
         body = json.dumps(event, ensure_ascii=False)
         accepted.update(id=store.add_message(con, task_id, "followup", body), body=body)
+        return accepted["id"]
 
     def record():
         """Compare-and-set on the committed acceptance row: the same id, task, kind and exact body (with its
@@ -1046,7 +1054,8 @@ def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT, backend=No
                                   active_turn=None, turn_state=None, last_completed_turn=None)
                 store.mark_read(con, [row["id"] for row in pending])  # the same receipt an answer flush writes
                 for row in pending:
-                    store.add_message(con, task_id, "answer", row["body"], entry_reply_id=row["entry_reply_id"])
+                    store.add_message(con, task_id, "answer", row["body"], evidence=row["evidence"],
+                                      entry_reply_id=row["entry_reply_id"])
                 store.add_message(con, task_id, "retry", json.dumps(
                     dict(from_model=from_model, to_model=to_model, reason=reason, new_job_id=new["job_id"],
                          new_session_id=new["session_id"], answers_delivered=len(pending), **old),

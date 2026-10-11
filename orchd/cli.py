@@ -137,6 +137,12 @@ def build_parser():
     task_answer.add_argument("--text-file", required=True, type=Path)
     task_answer.add_argument("--idempotency-key", required=True)
     task_answer.add_argument("--actor", choices=("dashboard", "operator"), default="dashboard")
+    task_dismiss = task_question_actions.add_parser("dismiss", description="Dismiss a decision; prints a JSON receipt.")
+    task_dismiss.add_argument("--task", required=True)
+    task_dismiss.add_argument("--question-id", required=True, type=int)
+    task_dismiss.add_argument("--reason", required=True)
+    task_dismiss.add_argument("--idempotency-key", required=True)
+    task_dismiss.add_argument("--actor", choices=("dashboard", "operator"), default="dashboard")
     sub.add_parser("ack").add_argument("task_id")
     rep = sub.add_parser("report")
     rep.add_argument("task_id")
@@ -357,9 +363,13 @@ def main(argv=None):
         con = None
         try:
             con = store.connect()
-            text = args.text_file.read_text(encoding="utf-8")
-            result = task_question_answers.submit(con, Runtime(), args.task, args.question_id, text,
-                                                   args.idempotency_key, actor=args.actor)
+            if args.task_question_action == "dismiss":
+                result = task_question_answers.dismiss(con, args.task, args.question_id, args.reason,
+                                                       args.idempotency_key, actor=args.actor)
+            else:
+                text = args.text_file.read_text(encoding="utf-8")
+                result = task_question_answers.submit(con, Runtime(), args.task, args.question_id, text,
+                                                     args.idempotency_key, actor=args.actor)
         except (ValueError, KeyError, RuntimeError, OSError, sqlite3.Error) as error:
             result = dict(status="failed", delivered=0,
                           pending=store.pending_answer_count(con, args.task) if con else None,

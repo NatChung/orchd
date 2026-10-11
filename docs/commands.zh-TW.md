@@ -68,6 +68,7 @@ Orch 指令現在必須明確使用 `orch start|stop|restart|list|attach`。舊�
 | `orchd board --html PATH` | 輸出私人靜態 HTML 快照，不消耗 inbox。 | `orchd board --html /tmp/orchd-board.html` |
 | `orchd snapshot --json [--schema-version 1|2] [--answered-limit N]` | 從私人 DB／WAL 副本讀取看板 JSON，不遷移或消耗 inbox。 | `orchd snapshot --json --answered-limit 100` |
 | `orchd task-question answer --task ID --question-id ID --text-file PATH --idempotency-key KEY [--actor dashboard\|operator]` | 直接回答最新待答 worker 問題，持久化冪等，輸出 JSON 收據。 | `orchd task-question answer --task abc --question-id 42 --text-file /tmp/answer.txt --idempotency-key dashboard-42` |
+| `orchd task-question dismiss --task ID --question-id ID --reason TEXT --idempotency-key KEY [--actor dashboard\|operator]` | 將過期決定 dismiss，保存稽核並通知 Orch inbox，不送 worker、不 close 任務。 | `orchd task-question dismiss --task abc --question-id 42 --reason expired --idempotency-key dismiss-42` |
 | `orchd goal add\|set\|show\|list\|export` | 透過下列五個子指令管理中央目標。 | `orchd goal list` |
 | `orchd goal add REPO [GOAL_OPTIONS]` | 為 repo 建立目標並記錄稽核 actor。 | `orchd goal add example --type goal --intent "交付經審閱的修改"` |
 | `orchd goal set GOAL_ID [GOAL_OPTIONS]` | 更新目標與稽核歷史。 | `orchd goal set GOAL_ID --status waiting --ball Operator` |

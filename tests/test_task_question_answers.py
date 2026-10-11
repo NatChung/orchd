@@ -214,12 +214,12 @@ class TaskQuestionAnswerTests(unittest.TestCase):
         receipt = self.submit(actor="operator")
         rows = core.inbox(self.con, "synthetic-orch")
         event, = [r for r in rows if r["kind"] == "task_question_answer"]
-        self.assertEqual(json.loads(event["body"]), receipt)
+        self.assertEqual(json.loads(event["body"])["receipt"], receipt)
         task, = core.list_open(self.con, self.rt)
         self.assertEqual(task["latest_question_answer"]["actor"], "operator")
         self.assertEqual(task["latest_question_answer"]["receipt"], receipt)
         self.assertEqual(core.answer(self.con, self.rt, "task", text="ordinary MCP answer")["status"], "delivered")
-        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM task_question_answers").fetchone()[0], 1)
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM messages WHERE kind='task_question_answer'").fetchone()[0], 1)
 
     def test_cli_text_file_json_receipts_and_errors(self):
         text = Path(self.temp.name) / "answer.txt"
@@ -248,6 +248,110 @@ class TaskQuestionAnswerTests(unittest.TestCase):
         self.submit(question_id=new_question, idempotency_key="queued-key")
         failed = run(args)[1]
         self.assertEqual((failed["status"], failed["pending"]), ("failed", 1))
+
+    def dismiss(self, **kw):
+        args = dict(task_id="task", question_id=self.qid, reason="Decision expired", idempotency_key="dismiss-key")
+        args.update(kw)
+        return task_question_answers.dismiss(self.con, **args)
+
+    def test_dismiss_removes_pending_preserves_audit_and_notifies_orch_without_worker_send(self):
+        before_schema = self.con.execute("SELECT sql FROM sqlite_master ORDER BY name").fetchall()
+        receipt = self.dismiss(actor="operator")
+        data = snapshot.read(self.path, schema_version=2)
+        self.assertEqual(data["pending_worker_questions"], [])
+        audit, = data["worker_question_resolutions"]
+        self.assertEqual((audit["question_id"], audit["actor"], audit["reason"]),
+                         (self.qid, "operator", "Decision expired"))
+        self.assertGreater(audit["created_at"], 0)
+        self.assertEqual(receipt["status"], "dismissed")
+        self.assertEqual(store.get_task(self.con, "task")["status"], "question")
+        self.assertEqual((self.rt.sent, self.rt.resumed, store.pending_answer_count(self.con, "task")), ([], [], 0))
+        event, = [r for r in core.inbox(self.con, "synthetic-orch") if r["kind"] == "question_dismissed"]
+        self.assertEqual(json.loads(event["body"])["receipt"], receipt)
+        self.assertEqual(self.con.execute("SELECT sql FROM sqlite_master ORDER BY name").fetchall(), before_schema)
+        self.assertIsNone(self.con.execute("SELECT 1 FROM sqlite_master WHERE name='task_question_answers'").fetchone())
+        self.assertNotIn("worker_question_resolutions", snapshot.read(self.path, schema_version=1))
+        with self.assertRaisesRegex(ValueError, "stale"):
+            self.submit()
+
+    def test_dismiss_stale_closed_and_already_answered_rejected(self):
+        for status in ("stale", "closed", "answered", "queued", "wrong-task"):
+            with self.subTest(status=status):
+                self.task(status)
+                qid = store.add_message(self.con, status, "question", "question")
+                if status == "closed":
+                    store.update_task(self.con, status, status="closed")
+                elif status == "stale":
+                    store.add_message(self.con, status, "question", "newer")
+                elif status in ("answered", "queued"):
+                    store.add_message(self.con, status, "answer" if status == "answered" else "answer_queued", "answer")
+                else:
+                    qid = self.qid
+                with self.assertRaisesRegex(ValueError, "closed" if status == "closed" else "stale"):
+                    self.dismiss(task_id=status, question_id=qid)
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM messages WHERE kind='question_dismissed'").fetchone()[0], 0)
+
+    def test_dismiss_replay_after_reconnect_and_new_question_key_conflicts(self):
+        receipt = self.dismiss()
+        self.con.close()
+        self.con = store.connect(self.path)
+        self.addCleanup(self.con.close)
+        new = store.add_message(self.con, "task", "question", "newer")
+        self.assertEqual(self.dismiss(), receipt)
+        self.assertEqual(snapshot.read(self.path, schema_version=2)["pending_worker_questions"][0]["id"], new)
+        for changes in (dict(reason="other"), dict(actor="operator"), dict(question_id=new)):
+            with self.assertRaisesRegex(ValueError, "idempotency conflict"):
+                self.dismiss(**changes)
+        with self.assertRaisesRegex(ValueError, "idempotency conflict"):
+            self.submit(idempotency_key="dismiss-key")
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM messages WHERE kind='question_dismissed'").fetchone()[0], 1)
+
+    def test_dismiss_rechecks_closed_under_lock(self):
+        original = store.task_delivery
+        @contextlib.contextmanager
+        def closing_lock(con, ids, **kw):
+            with original(con, ids, **kw):
+                if ids == ["task"]:
+                    store.update_task(con, "task", status="closed")
+                yield
+        with patch("orchd.store.task_delivery", side_effect=closing_lock):
+            with self.assertRaisesRegex(ValueError, "closed"):
+                self.dismiss()
+
+    def test_dismiss_cli_json_and_duplicate_no_runtime_created(self):
+        args = ["task-question", "dismiss", "--task", "task", "--question-id", str(self.qid),
+                "--reason", "Expired decision", "--idempotency-key", "dismiss-cli", "--actor", "operator"]
+        outputs = []
+        for _ in range(2):
+            out = io.StringIO()
+            with patch.dict(os.environ, ORCHD_HOME=self.temp.name), \
+                    patch("orchd.cli.Runtime", side_effect=AssertionError("dismiss must not create runtime")), \
+                    contextlib.redirect_stdout(out):
+                self.assertEqual(cli.main(args), 0)
+            outputs.append(json.loads(out.getvalue()))
+        self.assertEqual(outputs[0], outputs[1])
+        self.assertEqual(outputs[0]["status"], "dismissed")
+
+    def test_followup_failed_resume_queue_and_later_delivery_use_exact_event_id(self):
+        with patch.object(self.rt, "resume_codex_worker", side_effect=OSError("synthetic resume failure")):
+            result = core.followup(self.con, self.rt, "task", "same text")
+        self.assertEqual(result["status"], "failed")
+        fid = self.con.execute("SELECT id FROM messages WHERE kind='followup'").fetchone()[0]
+        queued, = store.pending_answers(self.con, "task")
+        self.assertEqual(json.loads(queued["evidence"])["followup_id"], fid)
+        self.assertEqual(snapshot.read(self.path, schema_version=2)["pending_worker_questions"][0]["processing"],
+                         "saved_pending_delivery")
+        core.answer(self.con, self.rt, "task", flush=True)
+        delivered = self.con.execute("SELECT evidence FROM messages WHERE kind='answer'").fetchone()[0]
+        self.assertEqual(json.loads(delivered)["followup_id"], fid)
+        self.assertEqual(snapshot.read(self.path, schema_version=2)["pending_worker_questions"], [])
+
+    def test_claude_followup_delivery_receipt_links_event_id(self):
+        store.update_task(self.con, "task", model="claude-test")
+        self.assertEqual(core.followup(self.con, self.rt, "task", "same text")["status"], "delivered")
+        fid = self.con.execute("SELECT id FROM messages WHERE kind='followup'").fetchone()[0]
+        delivered = self.con.execute("SELECT evidence FROM messages WHERE kind='answer'").fetchone()[0]
+        self.assertEqual(json.loads(delivered)["followup_id"], fid)
 
 
 if __name__ == "__main__":

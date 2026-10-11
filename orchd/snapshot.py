@@ -124,6 +124,7 @@ def read(path, *, answered_limit=100, schema_version=1):
                     entry_messages=entry_messages, replies=replies, worker_questions=worker_questions,
                     worker_answers=worker_answers, worker_deliveries=deliveries,
                     **(dict(pending_worker_questions=task_questions.pending(con, task_rows.values()),
+                            worker_question_resolutions=task_questions.dismissals(con),
                             binding_counts=[dict(entry_id=eid, orch_id=oid, **entry.message_counts(con, eid, oid))
                                             for eid, oid in sorted(bindings.items())])
                        if schema_version == 2 else {}))
