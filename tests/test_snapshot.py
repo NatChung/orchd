@@ -63,6 +63,20 @@ class SnapshotTests(unittest.TestCase):
             code = cli.main(["snapshot", "--json", "--schema-version", "2", *args])
         return code, out.getvalue(), err.getvalue()
 
+    def test_v2_binding_counts_split_current_and_history_without_writing_source(self):
+        before = fingerprints(self.path)
+        data = snapshot.read(self.path, schema_version=2)
+        binding, = data["binding_counts"]
+        self.assertEqual((binding["entry_id"], binding["orch_id"]), ("synthetic-entry", "orch-current"))
+        self.assertEqual(sum(r["n"] for r in binding["counts"]), 6)
+        self.assertEqual(sum(r["n"] for r in binding["current_counts"]), 5)
+        self.assertEqual(binding["historical_counts"],
+                         [{"direction": "out", "kind": "question", "state": "delivered", "n": 1}])
+        self.assertIn({"direction": "in", "kind": "reply", "state": "uncertain", "n": 1},
+                      binding["current_counts"])
+        self.assertEqual(fingerprints(self.path), before)
+        self.assertNotIn("binding_counts", snapshot.read(self.path, schema_version=1))
+
     def assert_cli_success(self, code, err):
         self.assertEqual(code, 0, err)
         self.assertFalse(any(line.startswith("orchd snapshot:") for line in err.splitlines()), err)

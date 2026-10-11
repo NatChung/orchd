@@ -1,5 +1,18 @@
 # Dashboard answers and snapshot v2
 
+Snapshot v2 adds `binding_counts`, one item per entry with its current `orch_id`.
+Each item contains `counts` (all owners), `current_counts` (the bound owner), and
+`historical_counts` (other owners), grouped by direction, kind, and delivery state.
+These count all stored messages, including terminal rows; `sending` is shown as
+`uncertain`. Existing v2 fields and the v1 contract keep their meanings.
+
+`orchd binding --status` retains its all-owner `counts` and adds the same
+`current_counts` / `historical_counts` split. Entry MCP `status` instead reports
+only unread, nonterminal inbound messages for the bound owner in
+`not_yet_delivered_to_orch`; delivered, skipped, cancelled, and superseded rows
+are excluded. `historical_undelivered` gives the count and per-owner counts for
+other owners using the same filter. Entry does not announce history on opening.
+
 All examples use synthetic data. These commands operate on the configured orchd
 store; a dashboard must use the CLI rather than writing SQLite itself. The local
 dashboard server remains responsible for loopback/session/origin validation.

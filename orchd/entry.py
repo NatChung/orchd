@@ -581,13 +581,21 @@ def status(con, rt, entry_id, thread):
         con.executemany("UPDATE entry_messages SET delivery='delivered', delivered_at=?, recipient=? WHERE id=?",
                         [(time.time(), f"status:{thread}", i) for i in handed])
     current = current_question(con, entry)
-    inbound = con.execute("SELECT * FROM entry_messages WHERE entry_id=? AND direction='in' AND read_at IS NULL "
-                          "AND delivery<>'delivered' ORDER BY id", (entry_id,)).fetchall()
+    inbound = con.execute("SELECT * FROM entry_messages WHERE entry_id=? AND orch_id=? "
+                          "AND direction='in' AND read_at IS NULL "
+                          "AND delivery NOT IN ('delivered','skipped','cancelled','superseded') ORDER BY id",
+                          (entry_id, entry["orch_id"])).fetchall()
+    historical = con.execute("SELECT orch_id, COUNT(*) AS count FROM entry_messages "
+                             "WHERE entry_id=? AND orch_id<>? AND direction='in' AND read_at IS NULL "
+                             "AND delivery NOT IN ('delivered','skipped','cancelled','superseded') "
+                             "GROUP BY orch_id ORDER BY orch_id", (entry_id, entry["orch_id"])).fetchall()
     return dict(entry_id=entry_id, orch_id=entry["orch_id"], orch_health=reachability(con, rt, entry["orch_id"]),
                 resumed=resumed,
                 current_question=dict(_public(current, body=True), wire_text=current["wire_text"]) if current else None,
                 queued_questions=len(queued_questions(con, entry)),
                 not_yet_delivered_to_orch=[_public(r) for r in inbound],
+                historical_undelivered=dict(count=sum(r["count"] for r in historical),
+                                            owners=[dict(r) for r in historical]),
                 from_orch=[dict(_public(r, body=True), wire_text=r["wire_text"]) for r in undelivered])
 
 
@@ -729,15 +737,30 @@ def reply_text(con, orch_id, reply_id, task_id):
     return row["body"]
 
 
+def message_counts(con, entry_id, orch_id):
+    """Read-only counts: retain all-owner totals and add the current/history split."""
+    rows = con.execute("SELECT orch_id, direction, kind, "
+                       "CASE WHEN delivery='sending' THEN 'uncertain' ELSE delivery END AS state, COUNT(*) AS n "
+                       "FROM entry_messages WHERE entry_id=? GROUP BY 1,2,3,4 ORDER BY 1,2,3,4",
+                       (entry_id,)).fetchall()
+
+    def grouped(selected):
+        totals = {}
+        for row in selected:
+            key = (row["direction"], row["kind"], row["state"])
+            totals[key] = totals.get(key, 0) + row["n"]
+        return [dict(direction=d, kind=k, state=s, n=n) for (d, k, s), n in sorted(totals.items())]
+
+    return dict(counts=grouped(rows), current_counts=grouped(r for r in rows if r["orch_id"] == orch_id),
+                historical_counts=grouped(r for r in rows if r["orch_id"] != orch_id))
+
+
 def snapshot(con, rt, entry_id=DEFAULT_ENTRY):
     """Read-only operator view (CLI): no delivery, no thread update, no bodies."""
     entry = get_entry(con, entry_id)
-    counts = con.execute("SELECT direction, kind, CASE WHEN delivery='sending' THEN 'uncertain' ELSE delivery END AS "
-                         "state, COUNT(*) AS n FROM entry_messages WHERE entry_id=? GROUP BY 1,2,3",
-                         (entry_id,)).fetchall()
     return dict(entry_id=entry_id, orch_id=entry["orch_id"], thread_id=entry["thread_id"],
                 orch_health=reachability(con, rt, entry["orch_id"]), **_questions(con, entry),
-                counts=[dict(r) for r in counts])
+                **message_counts(con, entry_id, entry["orch_id"]))
 
 
 # -- binding: the Desktop entry folder (`orchd init` creates it, `orchd binding` binds it) --------------------

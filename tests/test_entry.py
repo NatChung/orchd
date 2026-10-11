@@ -140,6 +140,42 @@ class EntryTest(unittest.TestCase):
         self.assertEqual(self.relay()["status"], "not_delivered")
         self.assertFalse(getattr(self.rt, "resumed_orchs", []))
 
+    def test_rebind_separates_old_pending_from_current_status_and_counts(self):
+        old_orch = self.orch
+        core.stop_orch(self.con, self.rt, old_orch)
+        self.rt.nat_says("desk-1", "old pending")
+        old = self.relay()
+        self.assertEqual(old["status"], "not_delivered")
+        new_orch = core.start_orch(self.con, self.rt, "opus")["id"]
+        entry.bind(self.con, self.rt, new_orch, force=True)
+        core.stop_orch(self.con, self.rt, new_orch)
+        self.rt.nat_says("desk-1", "current pending", turn="turn-2")
+        new = self.relay()
+        before = [dict(r) for r in self.con.execute("SELECT * FROM entry_messages ORDER BY id")]
+        result = entry.status(self.con, self.rt, "desktop", "desk-1")
+        self.assertEqual([r["message_id"] for r in result["not_yet_delivered_to_orch"]], [new["message_id"]])
+        self.assertEqual(result["historical_undelivered"],
+                         {"count": 1, "owners": [{"orch_id": old_orch, "count": 1}]})
+        view = entry.snapshot(self.con, self.rt)
+        self.assertEqual(view["counts"], [{"direction": "in", "kind": "message", "state": "pending", "n": 2}])
+        for key in ("current_counts", "historical_counts"):
+            self.assertEqual(view[key], [{"direction": "in", "kind": "message", "state": "pending", "n": 1}])
+        self.assertEqual([dict(r) for r in self.con.execute("SELECT * FROM entry_messages ORDER BY id")], before)
+
+    def test_status_excludes_unread_skipped_and_terminal_rows_for_both_owners(self):
+        self.rt.nat_says("desk-1", "terminal fixture")
+        message = self.relay()["message_id"]
+        for state in ("skipped", "cancelled", "superseded", "delivered"):
+            for owner in (self.orch, "synthetic-old-owner"):
+                with self.subTest(state=state, owner=owner):
+                    self.con.execute("UPDATE entry_messages SET orch_id=?,delivery=?,read_at=NULL WHERE id=?",
+                                     (owner, state, message))
+                    result = entry.status(self.con, self.rt, "desktop", "desk-1")
+                    self.assertEqual(result["not_yet_delivered_to_orch"], [])
+                    self.assertEqual(result["historical_undelivered"], {"count": 0, "owners": []})
+                    self.assertEqual(self.con.execute("SELECT delivery FROM entry_messages WHERE id=?",
+                                                      (message,)).fetchone()[0], state)
+
     def test_socket_failure_is_kept_and_retried_in_order(self):
         self.rt.uds_fails = True
         self.rt.nat_says("desk-1", "one")

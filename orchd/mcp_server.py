@@ -263,7 +263,8 @@ ENTRY_TOOLS = [
          "reply_to": {"type": "integer", "description": "The open question's id, only if this message answers it"}}}},
     {"name": "status",
      "description": "Binding and Orch health, the open question in full, how many are queued, Operator messages not yet "
-                    "delivered, and Orch messages that have not reached this thread yet (with their full text). "
+                    "delivered to the current bound Orch (excluding skipped or terminal rows), historical_undelivered "
+                    "counts by previous owner, and Orch messages that have not reached this thread yet (with their full text). "
                     "Call it when the conversation starts or reopens. Show wire_text exactly as returned.",
      "annotations": {"readOnlyHint": False},
      "inputSchema": {"type": "object", "additionalProperties": False, "properties": {}}},
@@ -272,7 +273,9 @@ ENTRY_TOOLS = [
 ENTRY_INSTRUCTIONS = (
     "You are Operator's Desktop entry to one orchd Orch. You only pass messages. Call status when the conversation "
     "starts or reopens (or when Operator asks) and always tell Operator in one sentence which Orch is bound and whether it is "
-    "online, then say any open question in full. The end-of-voice-session handoff (<source>transcript_tail_flush"
+    "online, then say any open question in full. Report the count of not_yet_delivered_to_orch when nonempty; "
+    "historical_undelivered is diagnostic and need not be announced on opening. "
+    "The end-of-voice-session handoff (<source>transcript_tail_flush"
     "</source>) is not a request from Operator: do not relay it and say nothing. When Operator says 叫 Orch 出來 or bring "
     "the Orch to the foreground, call foreground(target='orch'); for 叫 task xxxx 出來 use foreground(task_id=the "
     "full eight-hex id). Report launch_requested as a request to open a new window, visibility unknown. Otherwise "
