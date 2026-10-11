@@ -695,6 +695,7 @@ def followup(con, rt, task_id, message):
 
 
 def list_open(con, rt):
+    from . import task_question_answers
     try:
         jobs = rt.live_jobs()
     except Exception:  # a failed status probe is not proof an Orch has exited
@@ -717,6 +718,7 @@ def list_open(con, rt):
                             "AND generation IS ? AND state IN ('sending','uncertain') LIMIT 1",
                             (t["id"], t["generation"])).fetchone()),
                         pending=store.pending_answer_count(con, t["id"]),
+                        latest_question_answer=task_question_answers.latest(con, t["id"]),
                         owner_health=owner_health(store.get_orch(con, t["orch_thread"]), jobs),
                         notification_delivery=store.notification_delivery(con, t["id"]),
                         **worker_health.assess(t["status"], alive, worker_health.has_report(con, t["id"]),

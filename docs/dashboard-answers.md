@@ -162,6 +162,47 @@ The [synthetic snapshot example](examples/dashboard-snapshot-v2.json) shows five
 replies: saved/pending Orch, notified, read by Orch, queued for worker and transport
 accepted by worker. No real store, transcript, credential or project content is used.
 
+## Answer worker questions directly
+
+```sh
+orchd task-question answer --task TASK_ID --question-id MESSAGE_ID \
+  --text-file /path/to/answer.txt --idempotency-key UNIQUE_KEY --actor dashboard
+```
+
+Use the `id` from an `awaiting_decision` row in `pending_worker_questions`.
+The UTF-8 file is sent verbatim. `--actor` is `dashboard` (default) or `operator`.
+Each call prints a JSON receipt with `status` (`delivered`, `queued`, `failed`),
+`delivered`, `pending` (queued worker answer count), plus task/question/queued-message
+IDs and actor when accepted. A failed validation exits 1 and sends nothing.
+
+Under the shared task delivery lock, a new submission requires an open task and
+its latest unanswered question. Older questions, another task's question, missing
+questions and already saved/resolved questions are stale. A new key cannot answer
+a closed task. Question validation, answer queue, actor event and durable receipt
+are committed together in the orchestrator DB. Delivery then uses
+`core.answer(..., flush=True)`, including its existing Codex, Claude and app paths.
+MCP `answer` retains its current API and behavior.
+
+The key is scoped to the task. Identical key/question/text/actor retries return the
+same persisted receipt without queueing or flushing again, including after a
+restart, close, or newer question. Reusing a key with different input is an
+idempotency conflict. A separate cross-process submission lock serializes retries
+through final receipt publication; no SQLite write transaction spans a transport
+call. The existing queue and task delivery lock still serialize transports.
+
+If a process dies after accepting the queue but before saving the transport
+result, its provisional `queued` receipt remains recoverable. Retrying the key
+does not attempt another send. Check current worker/queue evidence before manually
+flushing after an uncertain send. Later ordinary answer/auto-flush operations can
+deliver queued rows; they do not rewrite this historical submission receipt.
+This guarantees submission idempotency, not exactly-once execution by the worker.
+
+`task_question_answer` events contain the actor and receipt in the owner's inbox.
+`list_open.latest_question_answer` exposes the latest accepted submission's actor,
+question/answer message IDs, creation time and persisted receipt, even after the
+inbox is read. This command adds a `task_question_answers` receipt table via the
+existing store bootstrap; deployment/migration of a real store is outside this task.
+
 ## Remaining follow-ups
 
 This implements #18 review's un-snooze and superseding queue-count correction.

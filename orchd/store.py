@@ -146,6 +146,18 @@ CREATE TABLE IF NOT EXISTS entry_answer_submissions(
     reply_id INTEGER NOT NULL REFERENCES entry_messages(id),
     PRIMARY KEY(entry_id, idempotency_key)
 );
+CREATE TABLE IF NOT EXISTS task_question_answers(
+    task_id TEXT NOT NULL REFERENCES tasks(id),
+    idempotency_key TEXT NOT NULL,
+    question_id INTEGER NOT NULL REFERENCES messages(id),
+    answer_message_id INTEGER NOT NULL REFERENCES messages(id),
+    actor TEXT NOT NULL,
+    body_sha256 TEXT NOT NULL,
+    receipt TEXT NOT NULL,
+    event_id INTEGER NOT NULL REFERENCES messages(id),
+    created_at REAL NOT NULL,
+    PRIMARY KEY(task_id, idempotency_key)
+);
 """
 
 # Columns added after v1. Nullable so old rows and old code keep working against the same DB.
@@ -168,7 +180,7 @@ ENTRY_MESSAGE_COLUMNS = ("body_bytes INTEGER", "body_sha256 TEXT", "wire_text TE
                          "note TEXT", "reason TEXT", "queue_order INTEGER", "notified_at REAL")
 
 # Message kinds the Orch reads in its inbox; the rest (dispatch, answer, close, usage) are the event log.
-ORCH_KINDS = ("ack", "progress", "report", "question", "adopt")
+ORCH_KINDS = ("ack", "progress", "report", "question", "adopt", "task_question_answer")
 
 # starting -> running -> acked -> done|blocked|question -> closed; failed if launch breaks.
 OPEN = ("starting", "running", "acked", "done", "blocked", "question", "failed")
