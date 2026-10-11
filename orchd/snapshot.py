@@ -12,7 +12,7 @@ import json
 import time
 from pathlib import Path
 
-from . import entry, goals, stats, store
+from . import entry, goals, stats, store, task_questions
 
 
 def _metadata(row):
@@ -123,6 +123,7 @@ def read(path, *, answered_limit=100, schema_version=1):
                     answered_limit=answered_limit, goals=goal_rows, tasks=tasks,
                     entry_messages=entry_messages, replies=replies, worker_questions=worker_questions,
                     worker_answers=worker_answers, worker_deliveries=deliveries,
-                    **(dict(binding_counts=[dict(entry_id=eid, orch_id=oid, **entry.message_counts(con, eid, oid))
+                    **(dict(pending_worker_questions=task_questions.pending(con, task_rows.values()),
+                            binding_counts=[dict(entry_id=eid, orch_id=oid, **entry.message_counts(con, eid, oid))
                                             for eid, oid in sorted(bindings.items())])
                        if schema_version == 2 else {}))
