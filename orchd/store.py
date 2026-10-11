@@ -127,6 +127,17 @@ CREATE TABLE IF NOT EXISTS entry_messages(
     delivered_at REAL,
     read_at REAL
 );
+CREATE TABLE IF NOT EXISTS entry_question_history(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    question_id INTEGER NOT NULL REFERENCES entry_messages(id),
+    version INTEGER NOT NULL DEFAULT 1,
+    from_state TEXT,
+    to_state TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS entry_question_history_question ON entry_question_history(question_id, id);
 """
 
 # Columns added after v1. Nullable so old rows and old code keep working against the same DB.
@@ -141,7 +152,10 @@ MESSAGE_COLUMNS = ("recipient_orch TEXT", "notice_error TEXT", "notice_recipient
 ORCH_COLUMNS = ("first_seen_dead REAL", "last_verified_dead REAL", "archived_at REAL")
 # entry_messages columns a DB created from an early #37 draft lacks (nullable: ALTER cannot add NOT NULL).
 ENTRY_MESSAGE_COLUMNS = ("body_bytes INTEGER", "body_sha256 TEXT", "wire_text TEXT", "source_thread TEXT",
-                         "source_item_id TEXT", "source_raw TEXT", "source_turn TEXT")
+                         "source_item_id TEXT", "source_raw TEXT", "source_turn TEXT",
+                         "version INTEGER NOT NULL DEFAULT 1", "supersedes INTEGER REFERENCES entry_messages(id)",
+                         "superseded_by INTEGER REFERENCES entry_messages(id)", "revisit_at REAL",
+                         "note TEXT", "reason TEXT")
 
 # Message kinds the Orch reads in its inbox; the rest (dispatch, answer, close, usage) are the event log.
 ORCH_KINDS = ("ack", "progress", "report", "question", "adopt")

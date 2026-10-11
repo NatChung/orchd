@@ -192,8 +192,27 @@ TOOLS += [
      "inputSchema": {"type": "object", "properties": {
          "text": {"type": "string", "description": "Your question; optional with quote_worker_question"},
          "task_id": {"type": "string"},
-         "quote_worker_question": {"type": "boolean"}}}},
+         "quote_worker_question": {"type": "boolean"},
+         "supersedes": {"type": "integer", "description": "Old question id; requires expected_version, expected_state and reason. Creates a new version without reusing answers."},
+         "expected_version": {"type": "integer", "minimum": 1},
+         "expected_state": {"type": "string"},
+         "reason": {"type": "string"}}}},
 ]
+
+for action in ("snooze", "cancel"):
+    properties = {"question_id": {"type": "integer"}, "expected_version": {"type": "integer", "minimum": 1},
+                  "expected_state": {"type": "string"}}
+    properties.update({"revisit_at": {"type": "number", "description": "Unix timestamp; due does not auto-promote"},
+                       "note": {"type": "string"}} if action == "snooze" else {"reason": {"type": "string"}})
+    TOOLS.append({"name": f"entry_question_{action}",
+                  "description": f"{action.capitalize()} a question on your bound entry, record history and promote the earliest queued question if needed.",
+                  "inputSchema": {"type": "object", "properties": properties,
+                                  "required": ["question_id", "expected_version", "expected_state",
+                                               "revisit_at" if action == "snooze" else "reason"]}})
+
+TOOLS.append({"name": "entry_question_show", "description": "Read a question's version, lifecycle metadata and history on your bound entry.",
+              "inputSchema": {"type": "object", "properties": {"question_id": {"type": "integer"}},
+                              "required": ["question_id"]}})
 
 GOAL_PROPERTIES = {key: {"type": "string"} for key in goals.TEXT_FIELDS}
 GOAL_PROPERTIES.update({key: {"type": ["string", "null"], "description": "YYYY-MM-DD or null"}
@@ -309,7 +328,17 @@ def call(name, args, thread, con, rt):
         return entry.send_to_nat(con, rt, thread, args.get("text"))
     if name == "ask_nat":
         return entry.ask_nat(con, rt, thread, args.get("text"), args.get("task_id"),
-                             bool(args.get("quote_worker_question")))
+                             bool(args.get("quote_worker_question")), supersedes=args.get("supersedes"),
+                             expected_version=args.get("expected_version"), expected_state=args.get("expected_state"),
+                             reason=args.get("reason"))
+    if name in ("entry_question_show", "entry_question_snooze", "entry_question_cancel"):
+        bound = entry._entry_of(con, thread)
+        if name == "entry_question_show":
+            return entry.question_show(con, bound["id"], args["question_id"])
+        return entry.question_transition(
+            con, rt, bound["id"], args["question_id"], args.get("expected_version"), args.get("expected_state"),
+            "snoozed" if name == "entry_question_snooze" else "cancelled", actor=f"orch:{thread}",
+            orch_id=thread, reason=args.get("reason"), revisit_at=args.get("revisit_at"), note=args.get("note"))
     if name == "lock_verify":
         return verification.lock(con, args["task_id"], args.get("paths"), args.get("command"), orch_thread=thread)
     if name == "close":
