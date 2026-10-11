@@ -168,7 +168,7 @@ ENTRY_MESSAGE_COLUMNS = ("body_bytes INTEGER", "body_sha256 TEXT", "wire_text TE
                          "note TEXT", "reason TEXT", "queue_order INTEGER", "notified_at REAL")
 
 # Message kinds the Orch reads in its inbox; the rest (dispatch, answer, close, usage) are the event log.
-ORCH_KINDS = ("ack", "progress", "report", "question", "adopt")
+ORCH_KINDS = ("ack", "progress", "report", "question", "adopt", "task_question_answer", "question_dismissed")
 
 # starting -> running -> acked -> done|blocked|question -> closed; failed if launch breaks.
 OPEN = ("starting", "running", "acked", "done", "blocked", "question", "failed")

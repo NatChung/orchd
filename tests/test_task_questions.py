@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from orchd import snapshot, store, task_questions
+from orchd import core, snapshot, store, task_questions
 
 
 class PendingWorkerQuestionsTests(unittest.TestCase):
@@ -21,8 +21,9 @@ class PendingWorkerQuestionsTests(unittest.TestCase):
                           "codex", status, 1, 2))
         return store.get_task(self.con, tid)
 
-    def message(self, tid, kind="question", body="Synthetic question", read_at=None):
-        mid = store.add_message(self.con, tid, kind, body)
+    def message(self, tid, kind="question", body="Synthetic question", read_at=None, followup_id=None):
+        mid = store.add_message(self.con, tid, kind, body,
+                                evidence=json.dumps(dict(followup_id=followup_id)) if followup_id else None)
         self.con.execute("UPDATE messages SET read_at=? WHERE id=?", (read_at, mid))
         return mid
 
@@ -43,6 +44,9 @@ class PendingWorkerQuestionsTests(unittest.TestCase):
             self.assertEqual(row["body"], "Synthetic question")
             self.assertEqual(row["processing"], "awaiting_decision")
             self.assertFalse(row["evidence"]["read_at_affects_pending"])
+            self.assertTrue(row["task_open"])
+            self.assertEqual(row["task"]["id"], row["task_id"])
+            self.assertEqual(row["task"]["orch_thread"], row["task"]["owner"])
         data = snapshot.read(self.path, schema_version=2)
         self.assertEqual(len(data["worker_questions"]), 12)
         self.assertNotIn("pending_worker_questions", snapshot.read(self.path, schema_version=1))
@@ -77,7 +81,7 @@ class PendingWorkerQuestionsTests(unittest.TestCase):
             self.message(status, "followup", "not json" if status == "invalid" else json.dumps(event))
             # Followup's answer transport must not disguise a failed/unstructured event as an answer.
             self.message(status, "answer_queued",
-                         "[followup] New instruction for this same task, not an answer to a question.\nSynthetic")
+                         core.FOLLOWUP_HEAD + "\n\nSynthetic")
             state = task_questions.question_state(self.con, task)
             self.assertEqual(state["processing"], "resolved" if status in ("accepted", "delivered") else
                              "saved_pending_delivery" if status == "queued" else "awaiting_decision")
@@ -94,12 +98,32 @@ class PendingWorkerQuestionsTests(unittest.TestCase):
     def test_queued_followup_consumed_later_is_resolved(self):
         self.task()
         self.message("task")
-        self.message("task", "followup", json.dumps(dict(status="queued", token="token", message="instruction")))
+        fid = self.message("task", "followup", json.dumps(dict(status="queued", token="token", message="instruction")))
         mid = self.message("task", "answer_queued",
-                           "[followup] New instruction for this same task, not an answer to a question.\n\ninstruction")
+                           core.FOLLOWUP_HEAD + "\n\ninstruction", followup_id=fid)
         self.assertEqual(self.rows()[0]["processing"], "saved_pending_delivery")
         self.con.execute("UPDATE messages SET read_at=30 WHERE id=?", (mid,))
         self.assertEqual(self.rows(), [])
+
+    def test_failed_followup_requires_real_queue_or_later_delivery_receipt(self):
+        self.task()
+        self.message("task")
+        fid = self.message("task", "followup", json.dumps(dict(status="failed", token="token", message="instruction")))
+        self.assertEqual(self.rows()[0]["processing"], "awaiting_decision")
+        mid = self.message("task", "answer_queued",
+                           core.FOLLOWUP_HEAD + "\n\ninstruction", followup_id=fid)
+        row, = self.rows()
+        self.assertEqual(row["processing"], "saved_pending_delivery")
+        self.assertIn(mid, [e["message_id"] for e in row["evidence"]["resolutions"]])
+        self.con.execute("UPDATE messages SET read_at=30 WHERE id=?", (mid,))
+        self.assertEqual(self.rows(), [])
+
+    def test_same_followup_text_without_id_link_never_proves_delivery(self):
+        self.task()
+        self.message("task")
+        self.message("task", "followup", json.dumps(dict(status="queued", token="token", message="instruction")))
+        self.message("task", "answer", core.FOLLOWUP_HEAD + "\n\ninstruction")
+        self.assertEqual(self.rows()[0]["processing"], "saved_pending_delivery")
 
 
 if __name__ == "__main__":

@@ -67,6 +67,8 @@ Run `orchd init` first to create the interface configuration. `binding` defaults
 | `orchd summary [--since HH:MM]` | Summarize workers, models, questions, parallelism and tokens per Orch. | `orchd summary` |
 | `orchd board --html PATH` | Write a private static HTML snapshot without consuming inbox. | `orchd board --html /tmp/orchd-board.html` |
 | `orchd snapshot --json [--schema-version 1|2] [--answered-limit N]` | Read dashboard JSON from a private DB/WAL copy without migrations or inbox consumption. | `orchd snapshot --json --answered-limit 100` |
+| `orchd task-question answer --task ID --question-id ID --text-file PATH --idempotency-key KEY [--actor dashboard\|operator]` | Answer the latest pending worker question with durable idempotency; prints a JSON receipt. | `orchd task-question answer --task abc --question-id 42 --text-file /tmp/answer.txt --idempotency-key dashboard-42` |
+| `orchd task-question dismiss --task ID --question-id ID --reason TEXT --idempotency-key KEY [--actor dashboard\|operator]` | Dismiss an expired decision with a durable audit and Orch inbox event; sends nothing to the worker. | `orchd task-question dismiss --task abc --question-id 42 --reason expired --idempotency-key dismiss-42` |
 | `orchd goal add\|set\|show\|list\|export` | Manage central goals through the five subcommands below. | `orchd goal list` |
 | `orchd goal add REPO [GOAL_OPTIONS]` | Create a goal for a repository and record its audit actor. | `orchd goal add example --type goal --intent "Ship a reviewed change"` |
 | `orchd goal set GOAL_ID [GOAL_OPTIONS]` | Update a goal and its audit history. | `orchd goal set GOAL_ID --status waiting --ball Operator` |

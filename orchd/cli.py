@@ -129,6 +129,20 @@ def build_parser():
         if action == "supersede":
             command.add_argument("--text", required=True, help="new question; old answers are not reused")
             command.add_argument("--task-id", help="explicit task link for the new question")
+    task_questions = sub.add_parser("task-question", help="answer the latest pending worker question directly")
+    task_question_actions = task_questions.add_subparsers(dest="task_question_action", required=True)
+    task_answer = task_question_actions.add_parser("answer", description="Always prints a JSON receipt.")
+    task_answer.add_argument("--task", required=True)
+    task_answer.add_argument("--question-id", required=True, type=int)
+    task_answer.add_argument("--text-file", required=True, type=Path)
+    task_answer.add_argument("--idempotency-key", required=True)
+    task_answer.add_argument("--actor", choices=("dashboard", "operator"), default="dashboard")
+    task_dismiss = task_question_actions.add_parser("dismiss", description="Dismiss a decision; prints a JSON receipt.")
+    task_dismiss.add_argument("--task", required=True)
+    task_dismiss.add_argument("--question-id", required=True, type=int)
+    task_dismiss.add_argument("--reason", required=True)
+    task_dismiss.add_argument("--idempotency-key", required=True)
+    task_dismiss.add_argument("--actor", choices=("dashboard", "operator"), default="dashboard")
     sub.add_parser("ack").add_argument("task_id")
     rep = sub.add_parser("report")
     rep.add_argument("task_id")
@@ -343,6 +357,29 @@ def main(argv=None):
                 con.close()
             if snap is not None:
                 snap.close()
+    if args.cmd == "task-question":
+        import sqlite3
+        from orchd import task_question_answers
+        con = None
+        try:
+            con = store.connect()
+            if args.task_question_action == "dismiss":
+                result = task_question_answers.dismiss(con, args.task, args.question_id, args.reason,
+                                                       args.idempotency_key, actor=args.actor)
+            else:
+                text = args.text_file.read_text(encoding="utf-8")
+                result = task_question_answers.submit(con, Runtime(), args.task, args.question_id, text,
+                                                     args.idempotency_key, actor=args.actor)
+        except (ValueError, KeyError, RuntimeError, OSError, sqlite3.Error) as error:
+            result = dict(status="failed", delivered=0,
+                          pending=store.pending_answer_count(con, args.task) if con else None,
+                          error=str(error))
+        finally:
+            if con is not None:
+                con.close()
+        print(json.dumps(result, ensure_ascii=False, indent=1))
+        return 1 if result["status"] == "failed" else 0
+
     con, rt = store.connect(), Runtime()
     if args.cmd in ("watch", "summary"):
         from orchd import watch
