@@ -139,8 +139,11 @@ and `evidence`. `processing` is:
 A subsequent `answer`, consumed `answer_queued`, or structured followup with a
 committed token/message and status `accepted` or `delivered` resolves the latest
 question and removes it. A followup with status `queued` is saved awaiting delivery.
-Its matching consumed queue or answer receipt resolves it after a later flush.
-Malformed, unstructured, and failed followup events do not resolve it. Followup
+Matching transport row IDs are included in evidence. A matching consumed queue or
+answer receipt resolves it after a later flush, even if the original attempt failed.
+A failed followup with a committed unread queue stays saved awaiting delivery;
+failure without a queue stays awaiting decision. Malformed and unstructured
+followup events do not resolve it. Followup
 instruction transport rows are excluded from ordinary answer evidence. A newer
 question starts a new decision even if an older question was answered.
 
