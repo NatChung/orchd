@@ -28,17 +28,23 @@ def question_state(con, task):
             if not isinstance(event, dict) or not event.get("token") or not event.get("message"):
                 continue
             status = event.get("status")
-            if status not in ("accepted", "queued", "delivered"):
-                continue
-            resolution = "saved_pending_delivery" if status == "queued" else "resolved"
-            # A queued followup's event is not rewritten by a later answer flush.
-            # Its consumed queue/answer receipt proves it left the queue.
-            if status == "queued" and any(
+            # A failed/queued followup event is not rewritten by a later flush.
+            # Match transport rows to a structured acceptance event; arbitrary
+            # followups and their failed delivery alone never resolve a question.
+            transport = [r for r in rows if
                     r["id"] > row["id"] and r["kind"] in ("answer", "answer_queued")
                     and r["body"].startswith("[followup] New instruction for this same task, not an answer to a question.")
-                    and r["body"].partition("\n\n")[2] == event["message"]
-                    and (r["kind"] == "answer" or r["read_at"] is not None) for r in rows):
+                    and r["body"].partition("\n\n")[2] == event["message"]]
+            delivered = [r for r in transport if r["kind"] == "answer" or r["read_at"] is not None]
+            if status in ("accepted", "delivered") or delivered:
                 resolution = "resolved"
+            elif status == "queued" or transport:
+                resolution = "saved_pending_delivery"
+            else:
+                continue
+            evidence.extend(dict(message_id=r["id"], kind=r["kind"], created_at=r["created_at"],
+                                 read_at=r["read_at"], resolution="resolved" if r in delivered else
+                                 "saved_pending_delivery") for r in transport)
         else:
             if row["body"].startswith("[followup] New instruction for this same task, not an answer to a question."):
                 continue

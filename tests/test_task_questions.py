@@ -101,6 +101,19 @@ class PendingWorkerQuestionsTests(unittest.TestCase):
         self.con.execute("UPDATE messages SET read_at=30 WHERE id=?", (mid,))
         self.assertEqual(self.rows(), [])
 
+    def test_failed_followup_requires_real_queue_or_later_delivery_receipt(self):
+        self.task()
+        self.message("task")
+        self.message("task", "followup", json.dumps(dict(status="failed", token="token", message="instruction")))
+        self.assertEqual(self.rows()[0]["processing"], "awaiting_decision")
+        mid = self.message("task", "answer_queued",
+                           "[followup] New instruction for this same task, not an answer to a question.\n\ninstruction")
+        row, = self.rows()
+        self.assertEqual(row["processing"], "saved_pending_delivery")
+        self.assertIn(mid, [e["message_id"] for e in row["evidence"]["resolutions"]])
+        self.con.execute("UPDATE messages SET read_at=30 WHERE id=?", (mid,))
+        self.assertEqual(self.rows(), [])
+
 
 if __name__ == "__main__":
     unittest.main()
