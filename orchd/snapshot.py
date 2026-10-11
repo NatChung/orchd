@@ -12,7 +12,7 @@ import json
 import time
 from pathlib import Path
 
-from . import goals, stats, store
+from . import entry, goals, stats, store
 
 
 def _metadata(row):
@@ -122,4 +122,7 @@ def read(path, *, answered_limit=100, schema_version=1):
                     schema_fingerprint=hashlib.sha256(json.dumps(schema).encode()).hexdigest(),
                     answered_limit=answered_limit, goals=goal_rows, tasks=tasks,
                     entry_messages=entry_messages, replies=replies, worker_questions=worker_questions,
-                    worker_answers=worker_answers, worker_deliveries=deliveries)
+                    worker_answers=worker_answers, worker_deliveries=deliveries,
+                    **(dict(binding_counts=[dict(entry_id=eid, orch_id=oid, **entry.message_counts(con, eid, oid))
+                                            for eid, oid in sorted(bindings.items())])
+                       if schema_version == 2 else {}))

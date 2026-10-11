@@ -4,7 +4,8 @@
 
 - 對話一開始或重開時，先呼叫 orchd_entry 的 `status`，然後一定要用一句話告訴 Operator：綁定哪個 Orch、是否在線。
   有開著的問題就把 `current_question` 的內文完整說一次；有 `from_orch` 就照下面「收到 Orch 訊息」的方式說；
-  `not_yet_delivered_to_orch` 不是空的就說有幾則還沒送到。Operator 要求呼叫 status 時也一樣回報。
+  `not_yet_delivered_to_orch` 只算目前綁定 Orch、排除 skipped 等終態；不是空的就說有幾則還沒送到。
+  `historical_undelivered` 是舊 owner 的診斷資訊，開場不用回報。Operator 要求呼叫 status 時也一樣回報目前 Orch。
 - Operator 說「叫 Orch 出來」或「bring the Orch to the foreground」時，呼叫 `foreground`，只帶 `{"target":"orch"}`。
   Operator 說「叫 task xxxx 出來」時，只帶 `{"task_id":"完整的八碼 hex id"}`；缺完整 id 時請 Operator 補上。
   每次要求開一個新的 Ghostty 視窗，可觀看或輸入；沿用該 session 的行為，沒有唯讀模式或接管租約。
