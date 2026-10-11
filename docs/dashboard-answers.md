@@ -119,6 +119,36 @@ opt-in v2 only; default callers keep their existing contract.
 | worker_forwarded / worker_answer_ids | null without an exact link; pending for linked unsent queue rows; transport_accepted for linked answer/consumed queue receipt; IDs of the linked worker rows |
 | worker_confirmed / worker_executed | Always unknown; no per-answer confirmation or execution evidence exists |
 | worker_answers.entry_reply_id / reply_id | Persisted link (both names), or null for legacy/unlinked rows |
+| pending_worker_questions | Latest unresolved worker question per open task, across all owners and independent of inbox read_at; includes saved answers awaiting delivery and missing-message diagnostics |
+
+### Pending worker question contract
+
+`pending_worker_questions` is additive in v2 only. `worker_questions` retains its
+unread Orch triage meaning. The new collection uses message ID order, includes every
+`store.OPEN` task, and never limits rows with `answered_limit` or owner bindings.
+Each row has `id` (question message ID), `task_id`, `body`, `created_at`,
+`task` (`repo`, `title`, `status`, `owner` = persisted `orch_thread`), `processing`
+and `evidence`. `processing` is:
+
+- `awaiting_decision`: no subsequent answer or accepted followup evidence.
+- `saved_pending_delivery`: a subsequent unread `answer_queued` or queued followup
+  receipt exists. Display as saved awaiting delivery, outside the decision queue.
+- `insufficient_data`: task status is `question`, but no question message exists.
+  `id`, `body`, and `created_at` are null; never invent question text.
+
+A subsequent `answer`, consumed `answer_queued`, or structured followup with a
+committed token/message and status `accepted` or `delivered` resolves the latest
+question and removes it. A followup with status `queued` is saved awaiting delivery.
+Its matching consumed queue or answer receipt resolves it after a later flush.
+Malformed, unstructured, and failed followup events do not resolve it. Followup
+instruction transport rows are excluded from ordinary answer evidence. A newer
+question starts a new decision even if an older question was answered.
+
+`evidence` includes `latest_question_id`, persisted `question_read_at`,
+`read_at_affects_pending=false`, `reason`, and `resolutions` containing message IDs,
+kinds, timestamps, read times, and computed resolution states. These are storage
+and transport facts, not worker execution acknowledgement. Snapshot still performs
+only SELECTs on a private copy, with no schema changes or runtime calls.
 
 Compared with v1, `worker_forwarded` is now nullable/evidence-based rather than
 always `unknown`; unknown notification values are null. Other stages do not imply
