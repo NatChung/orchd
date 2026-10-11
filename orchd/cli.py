@@ -106,6 +106,25 @@ def build_parser():
     how.add_argument("--new", action="store_true", help="start a new Claude Orch and bind the interface to it")
     how.add_argument("--to", metavar="ORCH_ID", help="bind the interface to this live Claude Orch")
     how.add_argument("--status", action="store_true", help="read-only: binding, Orch health, questions, delivery")
+    questions = sub.add_parser("entry-question", help="explicit question lifecycle and history")
+    question_actions = questions.add_subparsers(dest="question_action", required=True)
+    for action in ("show", "snooze", "cancel", "supersede"):
+        command = question_actions.add_parser(action)
+        command.add_argument("question_id", type=int)
+        command.add_argument("--entry", default="desktop")
+        if action == "show":
+            continue
+        command.add_argument("--expected-version", type=int, required=True)
+        command.add_argument("--expected-state", required=True,
+                             choices=["current", "queued", "answered", "snoozed", "cancelled", "superseded"])
+        if action == "snooze":
+            command.add_argument("--revisit-at", type=float, required=True, help="Unix timestamp; due never auto-promotes")
+            command.add_argument("--note")
+        else:
+            command.add_argument("--reason", required=True)
+        if action == "supersede":
+            command.add_argument("--text", required=True, help="new question; old answers are not reused")
+            command.add_argument("--task-id", help="explicit task link for the new question")
     sub.add_parser("ack").add_argument("task_id")
     rep = sub.add_parser("report")
     rep.add_argument("task_id")
@@ -351,6 +370,29 @@ def main(argv=None):
         except (ValueError, RuntimeError, OSError) as error:
             print(f"binding: {error}", file=sys.stderr)
             return 1
+        print(json.dumps(result, ensure_ascii=False, indent=1))
+    elif args.cmd == "entry-question":
+        from orchd import entry
+        try:
+            if args.question_action == "show":
+                result = entry.question_show(con, args.entry, args.question_id)
+            elif args.question_action == "supersede":
+                bound = entry.get_entry(con, args.entry)
+                result = entry.ask_nat(con, rt, bound["orch_id"], args.text, args.task_id,
+                                       supersedes=args.question_id, expected_version=args.expected_version,
+                                       expected_state=args.expected_state, reason=args.reason,
+                                       actor=f"operator:{getpass.getuser()}")
+            else:
+                result = entry.question_transition(
+                    con, rt, args.entry, args.question_id, args.expected_version, args.expected_state,
+                    "snoozed" if args.question_action == "snooze" else "cancelled",
+                    actor=f"operator:{getpass.getuser()}", reason=getattr(args, "reason", None),
+                    revisit_at=getattr(args, "revisit_at", None), note=getattr(args, "note", None))
+        except (ValueError, RuntimeError, OSError) as error:
+            print(f"entry-question: {error}", file=sys.stderr)
+            return 1
+        finally:
+            con.close()
         print(json.dumps(result, ensure_ascii=False, indent=1))
     elif args.cmd == "ack":
         core.ack(con, args.task_id)
