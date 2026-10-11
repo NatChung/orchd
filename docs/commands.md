@@ -154,3 +154,6 @@ orchd doctor
 Upgrade installs the newest default-branch commit from uv's recorded source, dropping branch pins while keeping database/personal settings. Check the reported commit; the package version can remain unchanged. Existing sessions, daemon and MCP processes are not restarted and may keep old code. Finish active work and start new sessions/MCP processes with the new program; use the restart workflow when replacing an Orch.
 
 For an archive/legacy install, reinstall from the public HTTPS source first; see [migration](../README.md#migrating-from-the-private-repository). Checkout installs must be updated in their own checkout.
+
+See [dashboard answers and snapshot v2](dashboard-answers.md) for `entry-question answer`,
+`entry-question un-snooze`, lifecycle fields and exact reply-to-worker receipts.

@@ -8,6 +8,7 @@ queue or history. Operations apply only to the current entry binding.
 | Operation | Allowed old states | Result |
 | --- | --- | --- |
 | snooze | current, queued, snoozed | snoozed, required `revisit_at`, optional `note` |
+| un-snooze | snoozed | queued at the tail; current if there is no current question |
 | cancel | current, queued, snoozed | cancelled, required `reason` |
 | supersede | current, queued, snoozed, cancelled, answered | superseded with `superseded_by`; new question has `supersedes` and version + 1 |
 
@@ -23,7 +24,8 @@ answered question that was subsequently superseded cannot be forwarded through
 `entry-question show` returns `revisit_due` for a snoozed question whose date has arrived;
 reading or reaching that date never restores, cancels or answers the question.
 There is no automatic expiry, cancellation or response. Reopen a cancelled or snoozed
-question by creating a linked revision with `supersedes`.
+question by creating a linked revision with `supersedes`; a snoozed question can
+also be restored with `un-snooze`.
 
 ## CLI
 
@@ -79,6 +81,5 @@ Snoozed, cancelled and superseded questions retain their transport receipts. Del
 exclude them, so a previous pending/failed delivery cannot reintroduce a withdrawn question.
 Already delivered Desktop text is not retracted; stale reply IDs are rejected in the store.
 
-This change does not add dashboard answer submission, answer receipts, automatic responses,
-or snapshot JSON integration. The snapshot extension is deferred until its separate
-read-only contract is merged and this branch can be rebased onto it.
+Dashboard reply submission, exact forwarding receipts and snapshot v2 are documented
+in [dashboard answers](dashboard-answers.md). No automatic responses are added.

@@ -289,7 +289,7 @@ class _ToClaude(Exception):
     pass
 
 
-def _deliver_to_claude(con, rt, task, text, keep_sent=False):
+def _deliver_to_claude(con, rt, task, text, keep_sent=False, entry_reply_id=None):
     """Caller holds the task lock. Queued answers left from a Codex worker go first, oldest first, then `text`,
     all in one message; the receipt (read_at + one `answer` row each) is written only after the send succeeded.
     A receipt that fails after a successful send raises, unless `keep_sent` (followup): then the result stays
@@ -306,8 +306,9 @@ def _deliver_to_claude(con, rt, task, text, keep_sent=False):
     try:
         with store.immediate(con):
             store.mark_read(con, [row["id"] for row in pending])
-            for body in bodies:
-                store.add_message(con, task_id, "answer", body)
+            links = [row["entry_reply_id"] for row in pending] + ([entry_reply_id] if text is not None else [])
+            for body, link in zip(bodies, links):
+                store.add_message(con, task_id, "answer", body, entry_reply_id=link)
             store.update_task(con, task_id, status="acked")
     except Exception as error:
         if not keep_sent:
@@ -320,27 +321,33 @@ def _deliver_to_claude(con, rt, task, text, keep_sent=False):
     return dict(status="delivered", delivered=len(bodies), pending=0)
 
 
-def _queue_answer(con, task_id, text, accept):
+def _queue_answer(con, task_id, text, accept, entry_reply_id=None):
     """Store `text` as a queued answer. With `accept` (followup) the closed re-check, the acceptance record and the
     queue row happen together under the task's delivery lock (TimeoutError if it stays busy: nothing accepted,
     nothing queued) inside a short write transaction, never across a network wait. The lock is released before any
     delivery attempt, which takes it again; it is never nested."""
     if accept is None:
-        store.add_message(con, task_id, store.QUEUED, text)
+        store.add_message(con, task_id, store.QUEUED, text, entry_reply_id=entry_reply_id)
         return
     with store.task_delivery(con, [task_id]), store.immediate(con):
         task = store.get_task(con, task_id)
         if task["status"] == "closed":
             raise ValueError(f"task {task_id} is closed")
         accept(task)
-        store.add_message(con, task_id, store.QUEUED, text)
+        store.add_message(con, task_id, store.QUEUED, text, entry_reply_id=entry_reply_id)
 
 
-def answer(con, rt, task_id, text=None, flush=False):
-    return _answer(con, rt, task_id, text, flush)
+def answer(con, rt, task_id, text=None, flush=False, *, entry_reply_id=None):
+    if entry_reply_id is not None:
+        if text is not None:
+            raise ValueError("pass text or entry_reply_id, not both")
+        from . import entry
+        task = store.get_task(con, task_id)
+        text = entry.reply_text(con, task["orch_thread"], entry_reply_id, task_id)
+    return _answer(con, rt, task_id, text, flush, entry_reply_id=entry_reply_id)
 
 
-def _answer(con, rt, task_id, text=None, flush=False, accept=None, finished_pid=None):
+def _answer(con, rt, task_id, text=None, flush=False, accept=None, finished_pid=None, entry_reply_id=None):
     """`answer`, plus the private `accept(task)` hook used only by followup: called under the task lock after its
     closed re-check and before anything is queued or sent. With a hook, a task lock that cannot be taken raises
     TimeoutError and accepts/queues/sends nothing (the caller may retry later). Without one, behavior is `answer`'s.
@@ -365,7 +372,7 @@ def _answer(con, rt, task_id, text=None, flush=False, accept=None, finished_pid=
         raise ValueError("answer needs text, or flush=true to send queued answers")
     if app_worker.enabled(task):
         if text is not None:
-            _queue_answer(con, task_id, text, accept)
+            _queue_answer(con, task_id, text, accept, entry_reply_id)
         try:
             return app_worker.control(store.get_task(con, task_id), "flush")
         except Exception as exc:
@@ -380,21 +387,21 @@ def _answer(con, rt, task_id, text=None, flush=False, accept=None, finished_pid=
                 if accept is not None:  # followup: record acceptance under this lock, after the re-check, before any send
                     accept(task)
                 if worker_kind(task["model"]) == "claude":
-                    return _deliver_to_claude(con, rt, task, text, keep_sent=accept is not None)
+                    return _deliver_to_claude(con, rt, task, text, keep_sent=accept is not None, entry_reply_id=entry_reply_id)
                 if text is not None:  # a retry switched it to Codex meanwhile: queue it for that worker's next turn
-                    store.add_message(con, task_id, store.QUEUED, text)
+                    store.add_message(con, task_id, store.QUEUED, text, entry_reply_id=entry_reply_id)
                 return dict(status="queued", delivered=0, pending=len(store.pending_answers(con, task_id)))
         except TimeoutError:  # a retry or close holds the task: keep the answer for the next answer or flush
             if accept is not None:  # followup: acceptance needs the lock; busy means not accepted
                 raise
             if text is not None:
-                store.add_message(con, task_id, store.QUEUED, text)
+                store.add_message(con, task_id, store.QUEUED, text, entry_reply_id=entry_reply_id)
             return dict(status="queued", delivered=0, pending=len(store.pending_answers(con, task_id)),
                         error="task busy (retry or close in progress); flush again once it finishes")
     if not task["session_id"] or not task["worktree"]:
         raise ValueError(f"task {task_id} has no codex thread")
     if text is not None:  # stored before any attempt, so a busy turn or a failed resume loses nothing
-        _queue_answer(con, task_id, text, accept)
+        _queue_answer(con, task_id, text, accept, entry_reply_id)
     for _ in range(120):  # `orchd ask` wakes the Orch before the worker's turn has finished exiting
         if not running(task):
             break
@@ -602,7 +609,7 @@ def _commit_resume(con, rt, task, pending, job):
                 raise _Superseded("its queued answers were marked delivered by another call during the resume")
             store.mark_read(con, sent)
             for row in pending:
-                store.add_message(con, task_id, "answer", row["body"])
+                store.add_message(con, task_id, "answer", row["body"], entry_reply_id=row["entry_reply_id"])
     except Exception as error:
         detail = f"{type(error).__name__}: {error}"
         not_stopped = _stop_confirmed(rt, "codex", job, (task["worktree"], task["session_id"]))
@@ -1035,7 +1042,7 @@ def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT, backend=No
                                   active_turn=None, turn_state=None, last_completed_turn=None)
                 store.mark_read(con, [row["id"] for row in pending])  # the same receipt an answer flush writes
                 for row in pending:
-                    store.add_message(con, task_id, "answer", row["body"])
+                    store.add_message(con, task_id, "answer", row["body"], entry_reply_id=row["entry_reply_id"])
                 store.add_message(con, task_id, "retry", json.dumps(
                     dict(from_model=from_model, to_model=to_model, reason=reason, new_job_id=new["job_id"],
                          new_session_id=new["session_id"], answers_delivered=len(pending), **old),

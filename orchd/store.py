@@ -138,6 +138,14 @@ CREATE TABLE IF NOT EXISTS entry_question_history(
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS entry_question_history_question ON entry_question_history(question_id, id);
+CREATE TABLE IF NOT EXISTS entry_answer_submissions(
+    entry_id TEXT NOT NULL REFERENCES entries(id),
+    idempotency_key TEXT NOT NULL,
+    question_id INTEGER NOT NULL REFERENCES entry_messages(id),
+    version INTEGER NOT NULL,
+    reply_id INTEGER NOT NULL REFERENCES entry_messages(id),
+    PRIMARY KEY(entry_id, idempotency_key)
+);
 """
 
 # Columns added after v1. Nullable so old rows and old code keep working against the same DB.
@@ -148,14 +156,15 @@ TASK_COLUMNS = ("goal_id TEXT REFERENCES goals(id)", "goal_critical INTEGER CHEC
                 "backend TEXT NOT NULL DEFAULT 'exec'", "generation TEXT", "endpoint TEXT",
                 "control_endpoint TEXT", "supervisor_identity TEXT", "server_identity TEXT",
                 "active_turn TEXT", "turn_state TEXT", "last_completed_turn TEXT")
-MESSAGE_COLUMNS = ("recipient_orch TEXT", "notice_error TEXT", "notice_recipient TEXT")
+MESSAGE_COLUMNS = ("recipient_orch TEXT", "notice_error TEXT", "notice_recipient TEXT",
+                   "entry_reply_id INTEGER REFERENCES entry_messages(id)")
 ORCH_COLUMNS = ("first_seen_dead REAL", "last_verified_dead REAL", "archived_at REAL")
 # entry_messages columns a DB created from an early #37 draft lacks (nullable: ALTER cannot add NOT NULL).
 ENTRY_MESSAGE_COLUMNS = ("body_bytes INTEGER", "body_sha256 TEXT", "wire_text TEXT", "source_thread TEXT",
                          "source_item_id TEXT", "source_raw TEXT", "source_turn TEXT",
                          "version INTEGER NOT NULL DEFAULT 1", "supersedes INTEGER REFERENCES entry_messages(id)",
                          "superseded_by INTEGER REFERENCES entry_messages(id)", "revisit_at REAL",
-                         "note TEXT", "reason TEXT")
+                         "note TEXT", "reason TEXT", "queue_order INTEGER", "notified_at REAL")
 
 # Message kinds the Orch reads in its inbox; the rest (dispatch, answer, close, usage) are the event log.
 ORCH_KINDS = ("ack", "progress", "report", "question", "adopt")
@@ -295,9 +304,9 @@ def stop_orch(con, orch_id):
     con.execute("UPDATE orchs SET stopped_at=? WHERE id=?", (time.time(), orch_id))
 
 
-def add_message(con, task_id, kind, body, evidence=None):
-    cur = con.execute("INSERT INTO messages(task_id,kind,body,evidence,created_at) VALUES(?,?,?,?,?)",
-                      (task_id, kind, body, evidence, time.time()))
+def add_message(con, task_id, kind, body, evidence=None, *, entry_reply_id=None):
+    cur = con.execute("INSERT INTO messages(task_id,kind,body,evidence,created_at,entry_reply_id) VALUES(?,?,?,?,?,?)",
+                      (task_id, kind, body, evidence, time.time(), entry_reply_id))
     return cur.lastrowid
 
 

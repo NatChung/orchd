@@ -353,8 +353,8 @@ class FollowupReceiptBoundaryTest(unittest.TestCase):
                          "BEGIN SELECT RAISE(ABORT,'injected queue failure'); END")
         real_immediate, real_add, staged, reused = store.immediate, store.add_message, [], []
 
-        def add(c, task_id, kind, body, evidence=None):
-            row_id = real_add(c, task_id, kind, body, evidence)
+        def add(c, task_id, kind, body, evidence=None, **kwargs):
+            row_id = real_add(c, task_id, kind, body, evidence, **kwargs)
             if kind == "followup":
                 staged.append(row_id)
             return row_id

@@ -76,7 +76,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(fingerprints(self.path), before)
         data = json.loads(out)
         self.assertEqual(data["source_db"], str(self.path.resolve()))
-        self.assertEqual(data["schema_version"], 1)
+        self.assertEqual(data["schema_version"], 2)
         self.assertEqual(len(data["schema_fingerprint"]), 64)
         self.assertGreater(data["generated_at"], 0)
         self.assertEqual(len(data["goals"][0]["history"]), 1)
@@ -108,9 +108,11 @@ class SnapshotTests(unittest.TestCase):
 
     def test_reply_stages_and_task_scoped_worker_evidence(self):
         for delivery, expected in (("pending", "pending"), ("failed", "failed"),
-                                   ("sending", "uncertain"), ("delivered", "notified"), ("other", "unknown")):
+                                   ("sending", "uncertain"), ("delivered", "notified"), ("other", None)):
             self.con.execute("UPDATE entry_messages SET delivery=?,read_at=9,delivered_at=8,recipient='orch-current' "
                              "WHERE kind='reply'", (delivery,))
+            self.con.execute("UPDATE entry_messages SET notified_at=? WHERE kind='reply'",
+                             (8 if delivery == "delivered" else None,))
             data = snapshot.read(self.path)
             reply = data["replies"][0]
             self.assertEqual(reply["processing"]["orch_notification"], expected)
@@ -118,7 +120,8 @@ class SnapshotTests(unittest.TestCase):
             self.assertEqual(reply["delivered_at"], 8)
             self.assertEqual(reply["recipient"], "orch-current")
             self.assertTrue(reply["processing"]["saved"])
-            for field in ("worker_forwarded", "worker_confirmed", "worker_executed"):
+            self.assertIsNone(reply["processing"]["worker_forwarded"])
+            for field in ("worker_confirmed", "worker_executed"):
                 self.assertEqual(reply["processing"][field], "unknown")
             self.assertEqual([a["processing"] for a in data["worker_answers"]],
                              ["pending", "transport_accepted", "transport_accepted"])
@@ -130,6 +133,19 @@ class SnapshotTests(unittest.TestCase):
             self.assert_cli_success(code, err)
             self.assertEqual([q["id"] for q in json.loads(out)["entry_messages"]], expected)
         self.assertNotEqual(self.run_cli("--answered-limit", "-1")[0], 0)
+
+    def test_pre_lifecycle_database_reads_without_migration_or_invented_evidence(self):
+        self.con.execute("DROP TABLE entry_question_history")
+        for column in ("version", "supersedes", "superseded_by", "revisit_at", "note", "reason", "queue_order", "notified_at"):
+            self.con.execute(f"ALTER TABLE entry_messages DROP COLUMN {column}")
+        self.con.execute("ALTER TABLE messages DROP COLUMN entry_reply_id")
+        before = fingerprints(self.path)
+        data = snapshot.read(self.path)
+        self.assertEqual(fingerprints(self.path), before)
+        self.assertEqual(data["schema_version"], 2)
+        self.assertEqual(data["entry_messages"][0]["version"], 1)
+        self.assertEqual(data["entry_messages"][0]["history"], [])
+        self.assertIsNone(data["replies"][0]["processing"]["worker_forwarded"])
 
     def test_missing_corrupt_or_incomplete_db_fails_without_empty_json(self):
         self.con.close()
@@ -180,4 +196,4 @@ class SnapshotTests(unittest.TestCase):
             code, out, err = self.run_cli()
         self.assert_cli_success(code, err)
         self.assertIn("ResourceWarning:", err)
-        self.assertEqual(json.loads(out)["schema_version"], 1)
+        self.assertEqual(json.loads(out)["schema_version"], 2)

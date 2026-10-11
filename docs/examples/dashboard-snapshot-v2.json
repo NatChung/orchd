@@ -1,0 +1,824 @@
+{
+  "generated_at": 2004,
+  "source_db": "/synthetic/orchd.db",
+  "schema_version": 2,
+  "schema_fingerprint": "d967ff238df1923e17496bd0fccf506d306d3dbff0d6d43bdbdb242bf43b7a95",
+  "answered_limit": 100,
+  "goals": [
+    {
+      "id": "754c77d87022",
+      "repo": "synthetic",
+      "type": "goal",
+      "intent": "",
+      "pg": "Synthetic dashboard goal",
+      "sprint_goal": "",
+      "sprint_start": null,
+      "sprint_end": null,
+      "done_when": "",
+      "evidence": "",
+      "authority": "",
+      "status": "active",
+      "ball": "",
+      "blocker": "",
+      "follow_up_date": null,
+      "source": "",
+      "last_confirmed_date": null,
+      "companies": [],
+      "plan": "",
+      "v": null,
+      "j": 1,
+      "deadline": null,
+      "last_progress_date": "2026-10-12",
+      "waiting_nat_since": null,
+      "created_at": 1999,
+      "updated_at": 2000,
+      "linked_tasks": [
+        {
+          "task_id": "2f7013c3",
+          "title": "Synthetic stage 1",
+          "status": "running",
+          "goal_critical": null
+        },
+        {
+          "task_id": "cfa69185",
+          "title": "Synthetic stage 2",
+          "status": "running",
+          "goal_critical": null
+        },
+        {
+          "task_id": "dbd8497f",
+          "title": "Synthetic stage 3",
+          "status": "running",
+          "goal_critical": null
+        },
+        {
+          "task_id": "e512ba0f",
+          "title": "Synthetic stage 4",
+          "status": "running",
+          "goal_critical": null
+        },
+        {
+          "task_id": "7084491c",
+          "title": "Synthetic stage 5",
+          "status": "acked",
+          "goal_critical": null
+        }
+      ],
+      "history": [
+        {
+          "id": 1,
+          "actor": "synthetic-operator",
+          "created_at": 1999,
+          "changes": {
+            "repo": {
+              "before": null,
+              "after": "synthetic"
+            },
+            "type": {
+              "before": null,
+              "after": "goal"
+            },
+            "intent": {
+              "before": null,
+              "after": ""
+            },
+            "pg": {
+              "before": null,
+              "after": "Synthetic dashboard goal"
+            },
+            "sprint_goal": {
+              "before": null,
+              "after": ""
+            },
+            "done_when": {
+              "before": null,
+              "after": ""
+            },
+            "evidence": {
+              "before": null,
+              "after": ""
+            },
+            "authority": {
+              "before": null,
+              "after": ""
+            },
+            "status": {
+              "before": null,
+              "after": "active"
+            },
+            "ball": {
+              "before": null,
+              "after": ""
+            },
+            "blocker": {
+              "before": null,
+              "after": ""
+            },
+            "source": {
+              "before": null,
+              "after": ""
+            },
+            "plan": {
+              "before": null,
+              "after": ""
+            },
+            "sprint_start": {
+              "before": null,
+              "after": null
+            },
+            "sprint_end": {
+              "before": null,
+              "after": null
+            },
+            "follow_up_date": {
+              "before": null,
+              "after": null
+            },
+            "last_confirmed_date": {
+              "before": null,
+              "after": null
+            },
+            "deadline": {
+              "before": null,
+              "after": null
+            },
+            "last_progress_date": {
+              "before": null,
+              "after": "2026-10-12"
+            },
+            "waiting_nat_since": {
+              "before": null,
+              "after": null
+            },
+            "companies": {
+              "before": null,
+              "after": []
+            },
+            "v": {
+              "before": null,
+              "after": null
+            },
+            "j": {
+              "before": null,
+              "after": 1
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "tasks": [
+    {
+      "id": "2f7013c3",
+      "title": "Synthetic stage 1",
+      "status": "running",
+      "repo": "synthetic",
+      "goal_id": "754c77d87022",
+      "orch_thread": "o4aede3e",
+      "created_at": 2000,
+      "updated_at": 2003,
+      "latest_progress": null,
+      "latest_report": null
+    },
+    {
+      "id": "cfa69185",
+      "title": "Synthetic stage 2",
+      "status": "running",
+      "repo": "synthetic",
+      "goal_id": "754c77d87022",
+      "orch_thread": "o4aede3e",
+      "created_at": 2000,
+      "updated_at": 2003,
+      "latest_progress": null,
+      "latest_report": null
+    },
+    {
+      "id": "dbd8497f",
+      "title": "Synthetic stage 3",
+      "status": "running",
+      "repo": "synthetic",
+      "goal_id": "754c77d87022",
+      "orch_thread": "o4aede3e",
+      "created_at": 2000,
+      "updated_at": 2003,
+      "latest_progress": null,
+      "latest_report": null
+    },
+    {
+      "id": "e512ba0f",
+      "title": "Synthetic stage 4",
+      "status": "running",
+      "repo": "synthetic",
+      "goal_id": "754c77d87022",
+      "orch_thread": "o4aede3e",
+      "created_at": 2000,
+      "updated_at": 2003,
+      "latest_progress": null,
+      "latest_report": null
+    },
+    {
+      "id": "7084491c",
+      "title": "Synthetic stage 5",
+      "status": "acked",
+      "repo": "synthetic",
+      "goal_id": "754c77d87022",
+      "orch_thread": "o4aede3e",
+      "created_at": 2000,
+      "updated_at": 2003,
+      "latest_progress": null,
+      "latest_report": null
+    }
+  ],
+  "entry_messages": [
+    {
+      "id": 9,
+      "entry_id": "desktop",
+      "orch_id": "o4aede3e",
+      "direction": "out",
+      "kind": "question",
+      "body_bytes": 18,
+      "body_sha256": "3adb2893b6b501367d9129f80767e6bdc7b50a983d1aa056037f4e2d711275e5",
+      "source_turn": null,
+      "source_thread": null,
+      "source_item_id": null,
+      "task_id": "7084491c",
+      "source_message_id": null,
+      "reply_to": null,
+      "question_state": "answered",
+      "delivery": "delivered",
+      "delivery_error": null,
+      "recipient": "synthetic-desktop",
+      "attempts": 1,
+      "created_at": 2000,
+      "delivered_at": 2001,
+      "read_at": null,
+      "version": 1,
+      "supersedes": null,
+      "superseded_by": null,
+      "revisit_at": null,
+      "note": null,
+      "reason": null,
+      "queue_order": 9,
+      "revisit_due": false,
+      "history": [
+        {
+          "id": 9,
+          "question_id": 9,
+          "version": 1,
+          "from_state": null,
+          "to_state": "current",
+          "actor": "orch:o4aede3e",
+          "reason": "ask_nat",
+          "created_at": 1999
+        },
+        {
+          "id": 10,
+          "question_id": 9,
+          "version": 1,
+          "from_state": "current",
+          "to_state": "answered",
+          "actor": "operator:dashboard",
+          "reason": "reply_to",
+          "created_at": 1999
+        }
+      ],
+      "body": "Synthetic question",
+      "binding_current": true,
+      "task_open": true,
+      "task": {
+        "id": "7084491c",
+        "title": "Synthetic stage 5",
+        "status": "acked",
+        "repo": "synthetic",
+        "goal_id": "754c77d87022",
+        "orch_thread": "o4aede3e",
+        "created_at": 1999,
+        "updated_at": 2000
+      },
+      "audience": "nat",
+      "notified_at": null
+    },
+    {
+      "id": 7,
+      "entry_id": "desktop",
+      "orch_id": "o4aede3e",
+      "direction": "out",
+      "kind": "question",
+      "body_bytes": 18,
+      "body_sha256": "3adb2893b6b501367d9129f80767e6bdc7b50a983d1aa056037f4e2d711275e5",
+      "source_turn": null,
+      "source_thread": null,
+      "source_item_id": null,
+      "task_id": "e512ba0f",
+      "source_message_id": null,
+      "reply_to": null,
+      "question_state": "answered",
+      "delivery": "delivered",
+      "delivery_error": null,
+      "recipient": "synthetic-desktop",
+      "attempts": 1,
+      "created_at": 2000,
+      "delivered_at": 2001,
+      "read_at": null,
+      "version": 1,
+      "supersedes": null,
+      "superseded_by": null,
+      "revisit_at": null,
+      "note": null,
+      "reason": null,
+      "queue_order": 7,
+      "revisit_due": false,
+      "history": [
+        {
+          "id": 7,
+          "question_id": 7,
+          "version": 1,
+          "from_state": null,
+          "to_state": "current",
+          "actor": "orch:o4aede3e",
+          "reason": "ask_nat",
+          "created_at": 1999
+        },
+        {
+          "id": 8,
+          "question_id": 7,
+          "version": 1,
+          "from_state": "current",
+          "to_state": "answered",
+          "actor": "operator:dashboard",
+          "reason": "reply_to",
+          "created_at": 1999
+        }
+      ],
+      "body": "Synthetic question",
+      "binding_current": true,
+      "task_open": true,
+      "task": {
+        "id": "e512ba0f",
+        "title": "Synthetic stage 4",
+        "status": "running",
+        "repo": "synthetic",
+        "goal_id": "754c77d87022",
+        "orch_thread": "o4aede3e",
+        "created_at": 1999,
+        "updated_at": 2000
+      },
+      "audience": "nat",
+      "notified_at": null
+    },
+    {
+      "id": 5,
+      "entry_id": "desktop",
+      "orch_id": "o4aede3e",
+      "direction": "out",
+      "kind": "question",
+      "body_bytes": 18,
+      "body_sha256": "3adb2893b6b501367d9129f80767e6bdc7b50a983d1aa056037f4e2d711275e5",
+      "source_turn": null,
+      "source_thread": null,
+      "source_item_id": null,
+      "task_id": "dbd8497f",
+      "source_message_id": null,
+      "reply_to": null,
+      "question_state": "answered",
+      "delivery": "delivered",
+      "delivery_error": null,
+      "recipient": "synthetic-desktop",
+      "attempts": 1,
+      "created_at": 2000,
+      "delivered_at": 2001,
+      "read_at": null,
+      "version": 1,
+      "supersedes": null,
+      "superseded_by": null,
+      "revisit_at": null,
+      "note": null,
+      "reason": null,
+      "queue_order": 5,
+      "revisit_due": false,
+      "history": [
+        {
+          "id": 5,
+          "question_id": 5,
+          "version": 1,
+          "from_state": null,
+          "to_state": "current",
+          "actor": "orch:o4aede3e",
+          "reason": "ask_nat",
+          "created_at": 1999
+        },
+        {
+          "id": 6,
+          "question_id": 5,
+          "version": 1,
+          "from_state": "current",
+          "to_state": "answered",
+          "actor": "operator:dashboard",
+          "reason": "reply_to",
+          "created_at": 1999
+        }
+      ],
+      "body": "Synthetic question",
+      "binding_current": true,
+      "task_open": true,
+      "task": {
+        "id": "dbd8497f",
+        "title": "Synthetic stage 3",
+        "status": "running",
+        "repo": "synthetic",
+        "goal_id": "754c77d87022",
+        "orch_thread": "o4aede3e",
+        "created_at": 1999,
+        "updated_at": 2000
+      },
+      "audience": "nat",
+      "notified_at": null
+    },
+    {
+      "id": 3,
+      "entry_id": "desktop",
+      "orch_id": "o4aede3e",
+      "direction": "out",
+      "kind": "question",
+      "body_bytes": 18,
+      "body_sha256": "3adb2893b6b501367d9129f80767e6bdc7b50a983d1aa056037f4e2d711275e5",
+      "source_turn": null,
+      "source_thread": null,
+      "source_item_id": null,
+      "task_id": "cfa69185",
+      "source_message_id": null,
+      "reply_to": null,
+      "question_state": "answered",
+      "delivery": "delivered",
+      "delivery_error": null,
+      "recipient": "synthetic-desktop",
+      "attempts": 1,
+      "created_at": 2000,
+      "delivered_at": 2001,
+      "read_at": null,
+      "version": 1,
+      "supersedes": null,
+      "superseded_by": null,
+      "revisit_at": null,
+      "note": null,
+      "reason": null,
+      "queue_order": 3,
+      "revisit_due": false,
+      "history": [
+        {
+          "id": 3,
+          "question_id": 3,
+          "version": 1,
+          "from_state": null,
+          "to_state": "current",
+          "actor": "orch:o4aede3e",
+          "reason": "ask_nat",
+          "created_at": 1999
+        },
+        {
+          "id": 4,
+          "question_id": 3,
+          "version": 1,
+          "from_state": "current",
+          "to_state": "answered",
+          "actor": "operator:dashboard",
+          "reason": "reply_to",
+          "created_at": 1999
+        }
+      ],
+      "body": "Synthetic question",
+      "binding_current": true,
+      "task_open": true,
+      "task": {
+        "id": "cfa69185",
+        "title": "Synthetic stage 2",
+        "status": "running",
+        "repo": "synthetic",
+        "goal_id": "754c77d87022",
+        "orch_thread": "o4aede3e",
+        "created_at": 1999,
+        "updated_at": 2000
+      },
+      "audience": "nat",
+      "notified_at": null
+    },
+    {
+      "id": 1,
+      "entry_id": "desktop",
+      "orch_id": "o4aede3e",
+      "direction": "out",
+      "kind": "question",
+      "body_bytes": 18,
+      "body_sha256": "3adb2893b6b501367d9129f80767e6bdc7b50a983d1aa056037f4e2d711275e5",
+      "source_turn": null,
+      "source_thread": null,
+      "source_item_id": null,
+      "task_id": "2f7013c3",
+      "source_message_id": null,
+      "reply_to": null,
+      "question_state": "answered",
+      "delivery": "delivered",
+      "delivery_error": null,
+      "recipient": "synthetic-desktop",
+      "attempts": 1,
+      "created_at": 2000,
+      "delivered_at": 2001,
+      "read_at": null,
+      "version": 1,
+      "supersedes": null,
+      "superseded_by": null,
+      "revisit_at": null,
+      "note": null,
+      "reason": null,
+      "queue_order": 1,
+      "revisit_due": false,
+      "history": [
+        {
+          "id": 1,
+          "question_id": 1,
+          "version": 1,
+          "from_state": null,
+          "to_state": "current",
+          "actor": "orch:o4aede3e",
+          "reason": "ask_nat",
+          "created_at": 1999
+        },
+        {
+          "id": 2,
+          "question_id": 1,
+          "version": 1,
+          "from_state": "current",
+          "to_state": "answered",
+          "actor": "operator:dashboard",
+          "reason": "reply_to",
+          "created_at": 1999
+        }
+      ],
+      "body": "Synthetic question",
+      "binding_current": true,
+      "task_open": true,
+      "task": {
+        "id": "2f7013c3",
+        "title": "Synthetic stage 1",
+        "status": "running",
+        "repo": "synthetic",
+        "goal_id": "754c77d87022",
+        "orch_thread": "o4aede3e",
+        "created_at": 1999,
+        "updated_at": 2000
+      },
+      "audience": "nat",
+      "notified_at": null
+    }
+  ],
+  "replies": [
+    {
+      "id": 2,
+      "entry_id": "desktop",
+      "orch_id": "o4aede3e",
+      "direction": "in",
+      "kind": "reply",
+      "body_bytes": 16,
+      "body_sha256": "789e8ab975a98abc599cf118ddfb8afd6317fdd6990cd8b612711a0a523738bc",
+      "source_turn": null,
+      "source_thread": null,
+      "source_item_id": null,
+      "task_id": "2f7013c3",
+      "source_message_id": null,
+      "reply_to": 1,
+      "question_state": null,
+      "delivery": "pending",
+      "delivery_error": null,
+      "recipient": null,
+      "attempts": 0,
+      "created_at": 2000,
+      "delivered_at": null,
+      "read_at": null,
+      "version": 1,
+      "supersedes": null,
+      "superseded_by": null,
+      "revisit_at": null,
+      "note": null,
+      "reason": null,
+      "queue_order": null,
+      "processing": {
+        "saved": true,
+        "saved_at": 2000,
+        "orch_notification": "pending",
+        "orch_notified_at": null,
+        "orch_read_at": null,
+        "worker_forwarded": null,
+        "worker_answer_ids": [],
+        "worker_confirmed": "unknown",
+        "worker_executed": "unknown"
+      },
+      "notified_at": null
+    },
+    {
+      "id": 4,
+      "entry_id": "desktop",
+      "orch_id": "o4aede3e",
+      "direction": "in",
+      "kind": "reply",
+      "body_bytes": 16,
+      "body_sha256": "789e8ab975a98abc599cf118ddfb8afd6317fdd6990cd8b612711a0a523738bc",
+      "source_turn": null,
+      "source_thread": null,
+      "source_item_id": null,
+      "task_id": "cfa69185",
+      "source_message_id": null,
+      "reply_to": 3,
+      "question_state": null,
+      "delivery": "delivered",
+      "delivery_error": null,
+      "recipient": "o4aede3e",
+      "attempts": 0,
+      "created_at": 2000,
+      "delivered_at": 2001,
+      "read_at": null,
+      "version": 1,
+      "supersedes": null,
+      "superseded_by": null,
+      "revisit_at": null,
+      "note": null,
+      "reason": null,
+      "queue_order": null,
+      "processing": {
+        "saved": true,
+        "saved_at": 2000,
+        "orch_notification": "notified",
+        "orch_notified_at": 2001,
+        "orch_read_at": null,
+        "worker_forwarded": null,
+        "worker_answer_ids": [],
+        "worker_confirmed": "unknown",
+        "worker_executed": "unknown"
+      },
+      "notified_at": 2001
+    },
+    {
+      "id": 6,
+      "entry_id": "desktop",
+      "orch_id": "o4aede3e",
+      "direction": "in",
+      "kind": "reply",
+      "body_bytes": 16,
+      "body_sha256": "789e8ab975a98abc599cf118ddfb8afd6317fdd6990cd8b612711a0a523738bc",
+      "source_turn": null,
+      "source_thread": null,
+      "source_item_id": null,
+      "task_id": "dbd8497f",
+      "source_message_id": null,
+      "reply_to": 5,
+      "question_state": null,
+      "delivery": "delivered",
+      "delivery_error": null,
+      "recipient": "o4aede3e",
+      "attempts": 0,
+      "created_at": 2000,
+      "delivered_at": 2001,
+      "read_at": 2002,
+      "version": 1,
+      "supersedes": null,
+      "superseded_by": null,
+      "revisit_at": null,
+      "note": null,
+      "reason": null,
+      "queue_order": null,
+      "processing": {
+        "saved": true,
+        "saved_at": 2000,
+        "orch_notification": "notified",
+        "orch_notified_at": 2001,
+        "orch_read_at": 2002,
+        "worker_forwarded": null,
+        "worker_answer_ids": [],
+        "worker_confirmed": "unknown",
+        "worker_executed": "unknown"
+      },
+      "notified_at": 2001
+    },
+    {
+      "id": 8,
+      "entry_id": "desktop",
+      "orch_id": "o4aede3e",
+      "direction": "in",
+      "kind": "reply",
+      "body_bytes": 16,
+      "body_sha256": "789e8ab975a98abc599cf118ddfb8afd6317fdd6990cd8b612711a0a523738bc",
+      "source_turn": null,
+      "source_thread": null,
+      "source_item_id": null,
+      "task_id": "e512ba0f",
+      "source_message_id": null,
+      "reply_to": 7,
+      "question_state": null,
+      "delivery": "delivered",
+      "delivery_error": null,
+      "recipient": "o4aede3e",
+      "attempts": 0,
+      "created_at": 2000,
+      "delivered_at": 2001,
+      "read_at": 2002,
+      "version": 1,
+      "supersedes": null,
+      "superseded_by": null,
+      "revisit_at": null,
+      "note": null,
+      "reason": null,
+      "queue_order": null,
+      "processing": {
+        "saved": true,
+        "saved_at": 2000,
+        "orch_notification": "notified",
+        "orch_notified_at": 2001,
+        "orch_read_at": 2002,
+        "worker_forwarded": "pending",
+        "worker_answer_ids": [
+          5
+        ],
+        "worker_confirmed": "unknown",
+        "worker_executed": "unknown"
+      },
+      "notified_at": 2001
+    },
+    {
+      "id": 10,
+      "entry_id": "desktop",
+      "orch_id": "o4aede3e",
+      "direction": "in",
+      "kind": "reply",
+      "body_bytes": 16,
+      "body_sha256": "789e8ab975a98abc599cf118ddfb8afd6317fdd6990cd8b612711a0a523738bc",
+      "source_turn": null,
+      "source_thread": null,
+      "source_item_id": null,
+      "task_id": "7084491c",
+      "source_message_id": null,
+      "reply_to": 9,
+      "question_state": null,
+      "delivery": "delivered",
+      "delivery_error": null,
+      "recipient": "o4aede3e",
+      "attempts": 0,
+      "created_at": 2000,
+      "delivered_at": 2001,
+      "read_at": 2002,
+      "version": 1,
+      "supersedes": null,
+      "superseded_by": null,
+      "revisit_at": null,
+      "note": null,
+      "reason": null,
+      "queue_order": null,
+      "processing": {
+        "saved": true,
+        "saved_at": 2000,
+        "orch_notification": "notified",
+        "orch_notified_at": 2001,
+        "orch_read_at": 2002,
+        "worker_forwarded": "transport_accepted",
+        "worker_answer_ids": [
+          7
+        ],
+        "worker_confirmed": "unknown",
+        "worker_executed": "unknown"
+      },
+      "notified_at": 2001
+    }
+  ],
+  "worker_questions": [],
+  "worker_answers": [
+    {
+      "id": 5,
+      "task_id": "e512ba0f",
+      "kind": "answer_queued",
+      "evidence": null,
+      "wake_error": null,
+      "created_at": 2000,
+      "read_at": null,
+      "recipient_orch": null,
+      "notice_error": null,
+      "notice_recipient": null,
+      "entry_reply_id": 8,
+      "processing": "pending",
+      "reply_id": 8
+    },
+    {
+      "id": 7,
+      "task_id": "7084491c",
+      "kind": "answer",
+      "evidence": null,
+      "wake_error": null,
+      "created_at": 2000,
+      "read_at": null,
+      "recipient_orch": null,
+      "notice_error": null,
+      "notice_recipient": null,
+      "entry_reply_id": 10,
+      "processing": "transport_accepted",
+      "reply_id": 10
+    }
+  ],
+  "worker_deliveries": []
+}

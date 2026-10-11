@@ -318,8 +318,9 @@ def call(name, args, thread, con, rt):
         if args.get("entry_reply_id") is not None:
             if text is not None:
                 raise ValueError("pass text or entry_reply_id, not both")
-            text = entry.reply_text(con, thread, args["entry_reply_id"], args["task_id"])
-        return core.answer(con, rt, args["task_id"], text, flush=bool(args.get("flush")))
+            entry.reply_text(con, thread, args["entry_reply_id"], args["task_id"])
+        return core.answer(con, rt, args["task_id"], text, flush=bool(args.get("flush")),
+                           entry_reply_id=args.get("entry_reply_id"))
     if name == "interrupt":
         return core.interrupt(con, rt, args["task_id"], args.get("text"))
     if name == "entry_inbox":

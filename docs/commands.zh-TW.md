@@ -154,3 +154,6 @@ orchd doctor
 upgrade 從 uv 記錄的來源安裝預設 branch 最新 commit，移除 branch pin，保留資料庫與個人設定。核對輸出的 commit；套件版本可能不變。既有 session、daemon 與 MCP process 不會重啟，可能仍使用舊程式。完成進行中的工作後，開始新 session／MCP process；換新 Orch 時使用上面的重開流程。
 
 若安裝來源為 archive／舊來源，先從公開 HTTPS 來源重新安裝，見[遷移說明](../README.zh-TW.md#從私人-repo-遷移)。Checkout 安裝需在自己的 checkout 更新。
+
+See [dashboard answers and snapshot v2](dashboard-answers.md) for `entry-question answer`,
+`entry-question un-snooze`, lifecycle fields and exact reply-to-worker receipts.
