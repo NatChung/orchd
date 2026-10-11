@@ -66,7 +66,7 @@ Orch 指令現在必須明確使用 `orch start|stop|restart|list|attach`。舊�
 | `orchd watch [--since HH:MM]` | 持續查看 Orch／worker 訊息時間軸。 | `orchd watch` |
 | `orchd summary [--since HH:MM]` | 按 Orch 彙整 worker、model、問題、並行與 token。 | `orchd summary` |
 | `orchd board --html PATH` | 輸出私人靜態 HTML 快照，不消耗 inbox。 | `orchd board --html /tmp/orchd-board.html` |
-| `orchd snapshot --json [--answered-limit N]` | 從私人 DB／WAL 副本讀取看板 JSON，不遷移或消耗 inbox。 | `orchd snapshot --json --answered-limit 100` |
+| `orchd snapshot --json [--schema-version 1|2] [--answered-limit N]` | 從私人 DB／WAL 副本讀取看板 JSON，不遷移或消耗 inbox。 | `orchd snapshot --json --answered-limit 100` |
 | `orchd goal add\|set\|show\|list\|export` | 透過下列五個子指令管理中央目標。 | `orchd goal list` |
 | `orchd goal add REPO [GOAL_OPTIONS]` | 為 repo 建立目標並記錄稽核 actor。 | `orchd goal add example --type goal --intent "交付經審閱的修改"` |
 | `orchd goal set GOAL_ID [GOAL_OPTIONS]` | 更新目標與稽核歷史。 | `orchd goal set GOAL_ID --status waiting --ball Operator` |
@@ -154,3 +154,9 @@ orchd doctor
 upgrade 從 uv 記錄的來源安裝預設 branch 最新 commit，移除 branch pin，保留資料庫與個人設定。核對輸出的 commit；套件版本可能不變。既有 session、daemon 與 MCP process 不會重啟，可能仍使用舊程式。完成進行中的工作後，開始新 session／MCP process；換新 Orch 時使用上面的重開流程。
 
 若安裝來源為 archive／舊來源，先從公開 HTTPS 來源重新安裝，見[遷移說明](../README.zh-TW.md#從私人-repo-遷移)。Checkout 安裝需在自己的 checkout 更新。
+
+看板回答的 `entry-question answer`、`entry-question un-snooze`、生命週期欄位與
+reply→worker 收據關聯，見[看板回答與 snapshot v2 說明](dashboard-answers.md)。
+`answer` 固定輸出 JSON，沒有 `--json` 旗標。
+`snapshot --json` 預設保留 v1 的欄位、值與列範圍；新增的生命週期與回答階段
+需明確使用 `snapshot --json --schema-version 2`，也可用 `--schema-version 1` 選擇舊契約。

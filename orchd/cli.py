@@ -108,8 +108,8 @@ def build_parser():
     how.add_argument("--status", action="store_true", help="read-only: binding, Orch health, questions, delivery")
     questions = sub.add_parser("entry-question", help="explicit question lifecycle and history")
     question_actions = questions.add_subparsers(dest="question_action", required=True)
-    for action in ("show", "snooze", "cancel", "supersede"):
-        command = question_actions.add_parser(action)
+    for action in ("show", "snooze", "un-snooze", "cancel", "supersede", "answer"):
+        command = question_actions.add_parser(action, description="Submit an answer; always prints a JSON receipt." if action == "answer" else None)
         command.add_argument("question_id", type=int)
         command.add_argument("--entry", default="desktop")
         if action == "show":
@@ -117,10 +117,14 @@ def build_parser():
         command.add_argument("--expected-version", type=int, required=True)
         command.add_argument("--expected-state", required=True,
                              choices=["current", "queued", "answered", "snoozed", "cancelled", "superseded"])
-        if action == "snooze":
+        if action == "answer":
+            command.add_argument("--text", required=True)
+            command.add_argument("--orch-id", required=True, help="expected responsible Orch binding")
+            command.add_argument("--idempotency-key", required=True)
+        elif action == "snooze":
             command.add_argument("--revisit-at", type=float, required=True, help="Unix timestamp; due never auto-promotes")
             command.add_argument("--note")
-        else:
+        elif action != "un-snooze":
             command.add_argument("--reason", required=True)
         if action == "supersede":
             command.add_argument("--text", required=True, help="new question; old answers are not reused")
@@ -171,6 +175,8 @@ def build_parser():
     board.add_argument("--html", required=True, type=Path)
     snapshot = sub.add_parser("snapshot", help="read-only dashboard JSON from a private DB/WAL copy")
     snapshot.add_argument("--json", action="store_true", required=True)
+    snapshot.add_argument("--schema-version", type=int, choices=(1, 2), default=1,
+                          help="output contract: 1 preserves legacy rows/values (default); 2 opts into lifecycle/receipts")
     snapshot.add_argument("--answered-limit", type=int, default=100,
                           help="newest answered questions to include (default: 100); current/queued are unlimited")
     for name in ("watch", "summary"):
@@ -199,7 +205,8 @@ def main(argv=None):
         import sqlite3
         from orchd import snapshot, stats
         try:
-            result = snapshot.read(store.home() / "orchd.db", answered_limit=args.answered_limit)
+            result = snapshot.read(store.home() / "orchd.db", answered_limit=args.answered_limit,
+                                   schema_version=args.schema_version)
         except (ValueError, OSError, sqlite3.Error, stats.SnapshotError) as error:
             print(f"orchd snapshot: {error}", file=sys.stderr)
             return 1
@@ -376,6 +383,9 @@ def main(argv=None):
         try:
             if args.question_action == "show":
                 result = entry.question_show(con, args.entry, args.question_id)
+            elif args.question_action == "answer":
+                result = entry.submit_answer(con, rt, args.entry, args.question_id, args.expected_version,
+                                             args.expected_state, args.text, args.idempotency_key, orch_id=args.orch_id)
             elif args.question_action == "supersede":
                 bound = entry.get_entry(con, args.entry)
                 result = entry.ask_nat(con, rt, bound["orch_id"], args.text, args.task_id,
@@ -385,7 +395,7 @@ def main(argv=None):
             else:
                 result = entry.question_transition(
                     con, rt, args.entry, args.question_id, args.expected_version, args.expected_state,
-                    "snoozed" if args.question_action == "snooze" else "cancelled",
+                    {"snooze": "snoozed", "un-snooze": "queued", "cancel": "cancelled"}[args.question_action],
                     actor=f"operator:{getpass.getuser()}", reason=getattr(args, "reason", None),
                     revisit_at=getattr(args, "revisit_at", None), note=getattr(args, "note", None))
         except (ValueError, RuntimeError, OSError) as error:

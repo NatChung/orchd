@@ -247,6 +247,11 @@ class AdditiveMigrationTest(unittest.TestCase):
             # SCHEMA's entry_messages definition is intentionally the pre-lifecycle shape.
             old.executescript(store.SCHEMA)
             old.execute("DROP TABLE entry_question_history")
+            old.execute("DROP TABLE entry_answer_submissions")
+            old.execute("INSERT INTO messages(task_id,kind,body,created_at) "
+                        "VALUES('synthetic-task','answer','Synthetic legacy answer',122)")
+            message_columns = [r[1] for r in old.execute("PRAGMA table_info(messages)")]
+            old_messages = old.execute("SELECT * FROM messages").fetchall()
             old.execute("INSERT INTO entries(id,orch_id,bound_at) VALUES('synthetic','orch-test',123)")
             old.execute("INSERT INTO entry_messages(entry_id,orch_id,direction,kind,body,body_bytes,body_sha256,"
                         "question_state,delivery,created_at) VALUES('synthetic','orch-test','out','question',"
@@ -269,8 +274,13 @@ class AdditiveMigrationTest(unittest.TestCase):
                 self.assertEqual(tuple(migrated.execute("SELECT * FROM entries").fetchone()), entries[0])
                 row = migrated.execute("SELECT * FROM entry_messages").fetchone()
                 self.assertEqual(row["version"], 1)
-                self.assertTrue(all(row[key] is None for key in ("supersedes", "superseded_by", "revisit_at", "note", "reason")))
+                self.assertTrue(all(row[key] is None for key in ("supersedes", "superseded_by", "revisit_at", "note", "reason", "queue_order", "notified_at")))
                 self.assertEqual(migrated.execute("SELECT COUNT(*) FROM entry_question_history").fetchone()[0], 0)
+                self.assertEqual(migrated.execute("SELECT COUNT(*) FROM entry_answer_submissions").fetchone()[0], 0)
+                self.assertIn("entry_reply_id", [r["name"] for r in migrated.execute("PRAGMA table_info(messages)")])
+                self.assertEqual([tuple(r) for r in migrated.execute(f"SELECT {','.join(message_columns)} FROM messages")],
+                                 old_messages)
+                self.assertIsNone(migrated.execute("SELECT entry_reply_id FROM messages").fetchone()[0])
                 migrated.close()
 
 

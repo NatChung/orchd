@@ -66,7 +66,7 @@ Run `orchd init` first to create the interface configuration. `binding` defaults
 | `orchd watch [--since HH:MM]` | Watch the live Orch/worker message timeline. | `orchd watch` |
 | `orchd summary [--since HH:MM]` | Summarize workers, models, questions, parallelism and tokens per Orch. | `orchd summary` |
 | `orchd board --html PATH` | Write a private static HTML snapshot without consuming inbox. | `orchd board --html /tmp/orchd-board.html` |
-| `orchd snapshot --json [--answered-limit N]` | Read dashboard JSON from a private DB/WAL copy without migrations or inbox consumption. | `orchd snapshot --json --answered-limit 100` |
+| `orchd snapshot --json [--schema-version 1|2] [--answered-limit N]` | Read dashboard JSON from a private DB/WAL copy without migrations or inbox consumption. | `orchd snapshot --json --answered-limit 100` |
 | `orchd goal add\|set\|show\|list\|export` | Manage central goals through the five subcommands below. | `orchd goal list` |
 | `orchd goal add REPO [GOAL_OPTIONS]` | Create a goal for a repository and record its audit actor. | `orchd goal add example --type goal --intent "Ship a reviewed change"` |
 | `orchd goal set GOAL_ID [GOAL_OPTIONS]` | Update a goal and its audit history. | `orchd goal set GOAL_ID --status waiting --ball Operator` |
@@ -154,3 +154,10 @@ orchd doctor
 Upgrade installs the newest default-branch commit from uv's recorded source, dropping branch pins while keeping database/personal settings. Check the reported commit; the package version can remain unchanged. Existing sessions, daemon and MCP processes are not restarted and may keep old code. Finish active work and start new sessions/MCP processes with the new program; use the restart workflow when replacing an Orch.
 
 For an archive/legacy install, reinstall from the public HTTPS source first; see [migration](../README.md#migrating-from-the-private-repository). Checkout installs must be updated in their own checkout.
+
+See [dashboard answers and snapshot v2](dashboard-answers.md) for `entry-question answer`,
+`entry-question un-snooze`, lifecycle fields and exact reply-to-worker receipts.
+
+`snapshot --json` defaults to the legacy v1 contract. Select the new lifecycle and
+reply receipt contract explicitly with `--schema-version 2`. `entry-question answer`
+always prints JSON; it has no `--json` flag.

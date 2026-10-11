@@ -380,7 +380,9 @@ class RetryReviewRegressionTest(unittest.TestCase):
     def test_queued_codex_answers_go_fifo_to_new_claude_worker_with_receipts(self):
         t = self.dispatch("sol")  # its turn is still running, so answers queue
         self.queue_two(t)
+        self.con.execute("UPDATE messages SET entry_reply_id=123 WHERE task_id=? AND kind=?", (t["id"], store.QUEUED))
         core.retry(self.con, self.rt, t["id"], "sonnet", "escalate")
+        self.assertEqual([r[0] for r in self.con.execute("SELECT entry_reply_id FROM messages WHERE task_id=? AND kind='answer' ORDER BY id", (t["id"],))], [123, 123])
         text = self.rt.sent[-1][2]
         self.assertLess(text.index("first: yes"), text.index("second: send it"))
         self.assertIn(f"[orchd answer {t['id']}]\nfirst: yes", text)

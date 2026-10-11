@@ -297,7 +297,7 @@ class Supervisor:
                                        (mid,self.task_id)).fetchone()
                 if row:
                     store.mark_read(self.con, [mid])
-                    store.add_message(self.con,self.task_id,'answer',row['body'])
+                    store.add_message(self.con,self.task_id,'answer',row['body'], entry_reply_id=row['entry_reply_id'])
             self.con.execute("UPDATE worker_deliveries SET state='delivered',turn_id=?,error=NULL WHERE id=?",
                              (turn_id,delivery_id))
             self.update(active_turn=turn_id, turn_state='active')

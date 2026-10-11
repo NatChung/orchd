@@ -118,7 +118,12 @@ def current_question(con, entry):
 
 def queued_questions(con, entry):
     return con.execute("SELECT * FROM entry_messages WHERE entry_id=? AND orch_id=? AND kind='question' "
-                       "AND question_state='queued' ORDER BY id", (entry["id"], entry["orch_id"])).fetchall()
+                       "AND question_state='queued' ORDER BY COALESCE(queue_order,id),id",
+                       (entry["id"], entry["orch_id"])).fetchall()
+
+
+def _queue_tail(con):
+    return con.execute("SELECT COALESCE(MAX(MAX(id,COALESCE(queue_order,id))),0)+1 FROM entry_messages").fetchone()[0]
 
 
 def question_wire(question_id, orch_id, body, task_id, queued):
@@ -193,6 +198,9 @@ def question_transition(con, rt, entry_id, question_id, expected_version, expect
             raise ValueError("snooze needs a finite Unix revisit_at timestamp and optional text note")
         allowed = ("current", "queued", "snoozed")
         reason = note or "snooze"
+    elif state == "queued":  # explicit un-snooze, behind every already queued question
+        allowed = ("snoozed",)
+        reason = reason or "un-snooze"
     elif state == "cancelled":
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("cancel needs a non-empty reason")
@@ -211,9 +219,70 @@ def question_transition(con, rt, entry_id, question_id, expected_version, expect
                      note if state == "snoozed" else row["note"], reason if state == "cancelled" else row["reason"],
                      question_id))
         _history(con, row, state, actor, reason)
+        if state == "queued":
+            con.execute("UPDATE entry_messages SET queue_order=?,delivery='held',revisit_at=NULL WHERE id=?",
+                        (_queue_tail(con), question_id))
         _promote(con, bound, actor, f"after {state} question {question_id}")
     deliver_outbound(con, rt, entry_id)
     return dict(question_show(con, entry_id, question_id), **_questions(con, bound))
+
+
+def _save_reply(con, bound, question, text, actor, **fields):
+    """Shared Desktop/dashboard completion and FIFO promotion; caller owns the transaction."""
+    con.execute("UPDATE entry_messages SET question_state='answered' WHERE id=?", (question["id"],))
+    _history(con, question, "answered", actor, "reply_to")
+    message_id = _insert(con, bound, "in", "reply", text, reply_to=question["id"],
+                         task_id=question["task_id"], source_message_id=question["source_message_id"], **fields)
+    _promote(con, bound, "orchd", "promote earliest queued question")
+    return message_id
+
+
+def submit_answer(con, rt, entry_id, question_id, expected_version, expected_state, text, idempotency_key,
+                  *, orch_id):
+    """Save a reply once; identical retries recover pending/failed wakes under existing delivery rules."""
+    if expected_state != "current":
+        raise ValueError("answer requires expected state current")
+    if not isinstance(text, str) or not text.strip() or not isinstance(idempotency_key, str) or not idempotency_key.strip():
+        raise ValueError("non-empty text and idempotency key are required")
+    duplicate = False
+    _, body_sha256 = digest(text)
+    with _lock(con, entry_id), store.immediate(con):
+        bound = get_entry(con, entry_id)
+        if bound["orch_id"] != orch_id:
+            raise ValueError("entry belongs to another Orch")
+        question = _row(con, question_id)
+        # Even a duplicate must still belong to the requested version and current binding.
+        if question is None:
+            raise ValueError("question does not exist")
+        _checked_question(con, bound, question_id, expected_version, question["question_state"])
+        keyed = con.execute("SELECT * FROM entry_answer_submissions WHERE entry_id=? AND idempotency_key=?",
+                            (entry_id, idempotency_key)).fetchone()
+        if keyed and (keyed["question_id"] != question_id or keyed["version"] != expected_version):
+            raise ValueError("idempotency key belongs to another question/version")
+        if keyed:
+            # Pre-hash submissions can only prove the payload of their stored reply.
+            original_hash = keyed["body_sha256"] or _row(con, keyed["reply_id"])["body_sha256"]
+            if original_hash != body_sha256:
+                raise ValueError("idempotency conflict: key was already used with a different payload")
+        existing = con.execute("SELECT * FROM entry_answer_submissions WHERE question_id=? AND version=? LIMIT 1",
+                               (question_id, expected_version)).fetchone()
+        if existing:
+            if question["question_state"] != "answered":
+                raise ValueError("question state mismatch; saved reply belongs to a withdrawn question")
+            message_id, duplicate = existing["reply_id"], True
+        else:
+            _checked_question(con, bound, question_id, expected_version, expected_state)
+            message_id = _save_reply(con, bound, question, text, "operator:dashboard")
+        if not keyed:
+            con.execute("INSERT INTO entry_answer_submissions "
+                        "(entry_id,idempotency_key,question_id,version,reply_id,body_sha256) VALUES(?,?,?,?,?,?)",
+                        (entry_id, idempotency_key, question_id, expected_version, message_id, body_sha256))
+    if not duplicate or _row(con, message_id)["delivery"] != "delivered":
+        deliver_inbound(con, rt, entry_id)
+    if not duplicate:
+        deliver_outbound(con, rt, entry_id)
+    row = _row(con, message_id)
+    return dict(_public(row), orch_id=orch_id, duplicate=duplicate, status=_state(row))
 
 
 def _send(con, rows, recipient, transport):
@@ -233,8 +302,10 @@ def _send(con, rows, recipient, transport):
                 result[row["id"]] = "uncertain"
             break
         try:
-            con.execute("UPDATE entry_messages SET delivery='delivered', delivered_at=? WHERE id=?",
-                        (time.time(), row["id"]))
+            now = time.time()
+            con.execute("UPDATE entry_messages SET delivery='delivered', delivered_at=?, "
+                        "notified_at=CASE WHEN direction='in' THEN ? ELSE notified_at END WHERE id=?",
+                        (now, now, row["id"]))
         except Exception:
             result[row["id"]] = "uncertain"
             break
@@ -464,14 +535,7 @@ def relay(con, rt, entry_id, thread, turn_id=None, reply_to=None):
                     if question["question_state"] in ("snoozed", "cancelled", "superseded"):
                         raise ValueError(f"question {reply_to} is {question['question_state']}; nothing was relayed")
                     raise ValueError(f"question {reply_to} has not been asked yet; nothing was relayed")
-                con.execute("UPDATE entry_messages SET question_state='answered' WHERE id=?", (reply_to,))
-                _history(con, question, "answered", f"operator:{thread}", "reply_to")
-                fields.update(reply_to=reply_to, task_id=question["task_id"],
-                              source_message_id=question["source_message_id"])
-                message_id = _insert(con, entry, "in", "reply", body, **fields)
-                following = queued_questions(con, entry)
-                if following:
-                    _make_current(con, entry, following[0])
+                message_id = _save_reply(con, entry, question, body, f"operator:{thread}", **fields)
             else:
                 message_id = _insert(con, entry, "in", "message", body, **fields)
                 current = current_question(con, entry)
@@ -623,6 +687,7 @@ def ask_nat(con, rt, orch_id, text=None, task_id=None, quote_worker_question=Fal
             _promote(con, entry, actor, f"after superseded question {supersedes}")
         busy = current_question(con, entry) is not None
         question_id = _insert(con, entry, "out", "question", body, task_id=task_id,
+                              queue_order=_queue_tail(con),
                               source_message_id=source_message_id,
                               version=old["version"] + 1 if old else 1, supersedes=supersedes,
                               question_state="queued" if busy else "current", delivery="held" if busy else "pending")
@@ -633,6 +698,12 @@ def ask_nat(con, rt, orch_id, text=None, task_id=None, quote_worker_question=Fal
             con.execute("UPDATE entry_messages SET superseded_by=? WHERE id=?", (question_id, supersedes))
         if not busy:
             _make_current(con, entry, _row(con, question_id))
+        elif old and old["question_state"] == "current":
+            current = current_question(con, entry)
+            # Promotion happened before the revised question joined the queue.
+            con.execute("UPDATE entry_messages SET wire_text=? WHERE id=?",
+                        (question_wire(current["id"], orch_id, current["body"], current["task_id"],
+                                       len(queued_questions(con, entry))), current["id"]))
     result = dict(_deliver_result(con, rt, entry, question_id), question_id=question_id,
                   state=_row(con, question_id)["question_state"], **_questions(con, entry))
     if busy:
