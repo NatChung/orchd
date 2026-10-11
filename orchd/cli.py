@@ -150,6 +150,10 @@ def build_parser():
     export.add_argument("--repo")
     board = sub.add_parser("board", help="render a private static snapshot, without consuming inbox")
     board.add_argument("--html", required=True, type=Path)
+    snapshot = sub.add_parser("snapshot", help="read-only dashboard JSON from a private DB/WAL copy")
+    snapshot.add_argument("--json", action="store_true", required=True)
+    snapshot.add_argument("--answered-limit", type=int, default=100,
+                          help="newest answered questions to include (default: 100); current/queued are unlimited")
     for name in ("watch", "summary"):
         sub.add_parser(name).add_argument("--since", help="HH:MM today (default: last 30 minutes for watch, all for summary)")
     stats_p = sub.add_parser("stats")
@@ -171,6 +175,17 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     if args.cmd == "orch":
         args.cmd = f"orch {args.orch_action}"
+
+    if args.cmd == "snapshot":
+        import sqlite3
+        from orchd import snapshot, stats
+        try:
+            result = snapshot.read(store.home() / "orchd.db", answered_limit=args.answered_limit)
+        except (ValueError, OSError, sqlite3.Error, stats.SnapshotError) as error:
+            print(f"orchd snapshot: {error}", file=sys.stderr)
+            return 1
+        print(json.dumps(result, ensure_ascii=False, indent=1))
+        return 0
 
     if args.cmd in ("goal", "board"):
         from orchd import board as board_module, goals, stats

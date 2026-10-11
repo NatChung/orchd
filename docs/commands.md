@@ -66,6 +66,7 @@ Run `orchd init` first to create the interface configuration. `binding` defaults
 | `orchd watch [--since HH:MM]` | Watch the live Orch/worker message timeline. | `orchd watch` |
 | `orchd summary [--since HH:MM]` | Summarize workers, models, questions, parallelism and tokens per Orch. | `orchd summary` |
 | `orchd board --html PATH` | Write a private static HTML snapshot without consuming inbox. | `orchd board --html /tmp/orchd-board.html` |
+| `orchd snapshot --json [--answered-limit N]` | Read dashboard JSON from a private DB/WAL copy without migrations or inbox consumption. | `orchd snapshot --json --answered-limit 100` |
 | `orchd goal add\|set\|show\|list\|export` | Manage central goals through the five subcommands below. | `orchd goal list` |
 | `orchd goal add REPO [GOAL_OPTIONS]` | Create a goal for a repository and record its audit actor. | `orchd goal add example --type goal --intent "Ship a reviewed change"` |
 | `orchd goal set GOAL_ID [GOAL_OPTIONS]` | Update a goal and its audit history. | `orchd goal set GOAL_ID --status waiting --ball Operator` |
@@ -74,6 +75,8 @@ Run `orchd init` first to create the interface configuration. `binding` defaults
 | `orchd goal export --md [--repo REPO]` | Print a Markdown snapshot of central goals. | `orchd goal export --md` |
 
 Both `--since` flags use local HH:MM today. `watch` starts after the last message ID whose timestamp is before the cutoff, then follows new messages; it defaults to the last 30 minutes. `summary` selects tasks created at or after the cutoff and summarizes all messages belonging to those tasks; it defaults to all tasks. Board writes a file; rerun to refresh it.
+
+`snapshot` requires `--json`. It includes goals/history, open tasks, entry questions/reply metadata and separate worker question/answer evidence. `--answered-limit` is non-negative and defaults to 100; it limits only recent answered entry questions, while current/queued questions (including held) remain unlimited. Historical bindings and closed task links stay visible. Worker questions await Orch triage; worker confirmation/execution remains unknown. The output includes `generated_at`, `source_db`, output contract `schema_version` and actual database `schema_fingerprint`. Missing, corrupt or incomplete databases produce an error and a non-zero exit code.
 
 ### GOAL_OPTIONS: every add/set flag
 
