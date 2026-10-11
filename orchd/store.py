@@ -159,6 +159,7 @@ TASK_COLUMNS = ("goal_id TEXT REFERENCES goals(id)", "goal_critical INTEGER CHEC
 MESSAGE_COLUMNS = ("recipient_orch TEXT", "notice_error TEXT", "notice_recipient TEXT",
                    "entry_reply_id INTEGER REFERENCES entry_messages(id)")
 ORCH_COLUMNS = ("first_seen_dead REAL", "last_verified_dead REAL", "archived_at REAL")
+SUBMISSION_COLUMNS = ("body_sha256 TEXT",)
 # entry_messages columns a DB created from an early #37 draft lacks (nullable: ALTER cannot add NOT NULL).
 ENTRY_MESSAGE_COLUMNS = ("body_bytes INTEGER", "body_sha256 TEXT", "wire_text TEXT", "source_thread TEXT",
                          "source_item_id TEXT", "source_raw TEXT", "source_turn TEXT",
@@ -191,7 +192,8 @@ def connect(path=None):
                 con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
             except sqlite3.OperationalError:  # another process added it first
                 pass
-    for table, columns in (("messages", MESSAGE_COLUMNS), ("entry_messages", ENTRY_MESSAGE_COLUMNS), ("orchs", ORCH_COLUMNS)):
+    for table, columns in (("messages", MESSAGE_COLUMNS), ("entry_messages", ENTRY_MESSAGE_COLUMNS),
+                           ("orchs", ORCH_COLUMNS), ("entry_answer_submissions", SUBMISSION_COLUMNS)):
         have = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
         for column in columns:
             if column.split()[0] not in have:

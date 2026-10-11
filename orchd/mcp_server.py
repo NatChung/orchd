@@ -315,12 +315,10 @@ def call(name, args, thread, con, rt):
         return core.list_open(con, rt)
     if name == "answer":
         text = args.get("text")
-        if args.get("entry_reply_id") is not None:
-            if text is not None:
-                raise ValueError("pass text or entry_reply_id, not both")
-            entry.reply_text(con, thread, args["entry_reply_id"], args["task_id"])
+        if args.get("entry_reply_id") is not None and not thread:
+            raise ValueError("answer with entry_reply_id needs the caller's Orch id")
         return core.answer(con, rt, args["task_id"], text, flush=bool(args.get("flush")),
-                           entry_reply_id=args.get("entry_reply_id"))
+                           entry_reply_id=args.get("entry_reply_id"), orch_id=thread)
     if name == "interrupt":
         return core.interrupt(con, rt, args["task_id"], args.get("text"))
     if name == "entry_inbox":

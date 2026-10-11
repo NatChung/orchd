@@ -42,7 +42,7 @@ class DashboardAnswersTest(unittest.TestCase):
         return entry.submit_answer(self.con, self.rt, "desktop", q, **args)
 
     def processing(self, reply):
-        return next(r["processing"] for r in snapshot.read(self.path)["replies"] if r["id"] == reply)
+        return next(r["processing"] for r in snapshot.read(self.path, schema_version=2)["replies"] if r["id"] == reply)
 
     def test_submit_promotes_wakes_only_orch_and_duplicates_have_no_side_effects(self):
         task = self.task()
@@ -61,7 +61,7 @@ class DashboardAnswersTest(unittest.TestCase):
         self.assertEqual(self.con.execute("SELECT COUNT(*) FROM messages WHERE kind LIKE 'answer%'").fetchone()[0], 0)
         before = len(self.rt.sent)
         for key in ("synthetic-key", "synthetic-new-key"):
-            again = self.submit(q, idempotency_key=key, text="Ignored retry text")
+            again = self.submit(q, idempotency_key=key)
             self.assertEqual(again["message_id"], rid)
             self.assertTrue(again["duplicate"])
         self.assertEqual(len(self.rt.sent), before)
@@ -86,6 +86,46 @@ class DashboardAnswersTest(unittest.TestCase):
         entry.bind(self.con, self.rt, other, force=True)
         with self.assertRaises(ValueError):
             self.submit(q, orch_id=other)
+
+    def test_same_key_different_payload_is_idempotency_conflict_without_writes(self):
+        q = self.ask()
+        first = self.submit(q)
+        before, sent = self.con.total_changes, len(self.rt.sent)
+        with self.assertRaisesRegex(ValueError, "idempotency conflict"):
+            self.submit(q, text="Different synthetic answer")
+        self.assertEqual(self.con.total_changes, before)
+        self.assertEqual(len(self.rt.sent), sent)
+        self.assertEqual(entry._row(self.con, first["message_id"])["body"], "Synthetic answer")
+        self.assertEqual(self.con.execute("SELECT body_sha256 FROM entry_answer_submissions").fetchone()[0],
+                         entry.digest("Synthetic answer")[1])
+        out, err = io.StringIO(), io.StringIO()
+        with patch.dict(os.environ, ORCHD_HOME=self.tmp.name), patch("orchd.cli.Runtime", return_value=self.rt), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(["entry-question", "answer", str(q), "--expected-version", "1", "--expected-state",
+                             "current", "--orch-id", self.orch, "--idempotency-key", "synthetic-key", "--text",
+                             "Different synthetic answer"])
+        self.assertEqual(code, 1)
+        self.assertIn("idempotency conflict", err.getvalue())
+        self.assertEqual(out.getvalue(), "")
+
+    def test_pre_hash_submission_migration_preserves_receipt_and_checks_saved_payload(self):
+        q = self.ask()
+        rid = self.submit(q)["message_id"]
+        self.con.execute("ALTER TABLE entry_answer_submissions DROP COLUMN body_sha256")
+        before = tuple(self.con.execute("SELECT * FROM entry_answer_submissions").fetchone())
+        for _ in range(2):
+            con = store.connect(self.path)
+            try:
+                row = con.execute("SELECT * FROM entry_answer_submissions").fetchone()
+                self.assertEqual(tuple(row)[:-1], before)
+                self.assertIsNone(row["body_sha256"])
+                self.assertEqual(entry.submit_answer(con, self.rt, "desktop", q, 1, "current", "Synthetic answer",
+                                                     "synthetic-key", orch_id=self.orch)["message_id"], rid)
+                with self.assertRaisesRegex(ValueError, "idempotency conflict"):
+                    entry.submit_answer(con, self.rt, "desktop", q, 1, "current", "Changed synthetic answer",
+                                        "synthetic-key", orch_id=self.orch)
+            finally:
+                con.close()
 
     def test_stale_second_connection_returns_original_receipt(self):
         q = self.ask()
@@ -154,7 +194,7 @@ class DashboardAnswersTest(unittest.TestCase):
         self.assertIsNone(processing["orch_notification"])
         self.assertIsNone(processing["orch_notified_at"])
 
-    def test_offline_and_failed_wake_preserve_reply_without_retry_wake(self):
+    def test_duplicate_retries_failed_or_offline_wake_without_new_reply(self):
         for failure in ("offline", "send"):
             with self.subTest(failure=failure):
                 q = self.ask()
@@ -165,12 +205,25 @@ class DashboardAnswersTest(unittest.TestCase):
                 rid = self.submit(q, idempotency_key=failure)["message_id"]
                 self.assertEqual(entry._row(self.con, rid)["delivery"], "pending" if failure == "offline" else "failed")
                 attempts = entry._row(self.con, rid)["attempts"]
-                self.submit(q, idempotency_key=failure)
-                self.assertEqual(entry._row(self.con, rid)["attempts"], attempts)
                 self.con.execute("UPDATE orchs SET stopped_at=NULL WHERE id=?", (self.orch,))
                 self.rt.uds_fails = False
-                entry.deliver_inbound(self.con, self.rt, "desktop")
+                result = self.submit(q, idempotency_key=failure)
+                self.assertTrue(result["duplicate"])
+                self.assertEqual(result["message_id"], rid)
                 self.assertEqual(entry._row(self.con, rid)["delivery"], "delivered")
+                self.assertEqual(entry._row(self.con, rid)["attempts"], attempts + 1)
+                self.assertEqual(self.con.execute("SELECT COUNT(*) FROM entry_messages WHERE reply_to=?", (q,)).fetchone()[0], 1)
+
+    def test_duplicate_uncertain_receipt_uses_existing_rule_without_resend(self):
+        q = self.ask()
+        rid = self.submit(q)["message_id"]
+        self.con.execute("UPDATE entry_messages SET delivery='sending',delivered_at=NULL,notified_at=NULL WHERE id=?",
+                         (rid,))
+        before, attempts = len(self.rt.sent), entry._row(self.con, rid)["attempts"]
+        result = self.submit(q)
+        self.assertEqual(result["status"], "uncertain")
+        self.assertTrue(result["duplicate"])
+        self.assertEqual((len(self.rt.sent), entry._row(self.con, rid)["attempts"]), (before, attempts))
 
     def test_mcp_claude_forwarding_persists_exact_link_and_unlinked_answer_stays_null(self):
         task = self.task()
@@ -184,6 +237,19 @@ class DashboardAnswersTest(unittest.TestCase):
         self.assertIsNone(store.latest_message(self.con, task, "answer")["entry_reply_id"])
         with self.assertRaises(ValueError):
             core.answer(self.con, self.rt, self.task(), entry_reply_id=rid)
+
+    def test_mcp_validates_reply_once_and_rejects_wrong_or_missing_caller(self):
+        task = self.task()
+        rid = self.submit(self.ask(task_id=task))["message_id"]
+        with patch("orchd.entry.reply_text", wraps=entry.reply_text) as validate:
+            result = mcp_server.call("answer", {"task_id": task, "entry_reply_id": rid}, self.orch, self.con, self.rt)
+            self.assertEqual(result["status"], "delivered")
+            validate.assert_called_once()
+        before = len(self.rt.sent)
+        for caller in ("other-orch", None):
+            with self.assertRaises(ValueError):
+                mcp_server.call("answer", {"task_id": task, "entry_reply_id": rid}, caller, self.con, self.rt)
+        self.assertEqual(len(self.rt.sent), before)
 
     def test_codex_queue_and_flush_retain_link_across_reconnect(self):
         task = self.task("sol")
@@ -209,7 +275,7 @@ class DashboardAnswersTest(unittest.TestCase):
         first, second, third = self.ask(), self.ask(), self.ask()
         entry.question_transition(self.con, self.rt, "desktop", first, 1, "current", "snoozed",
                                   actor="synthetic", revisit_at=0, note="Synthetic note")
-        data = snapshot.read(self.path)
+        data = snapshot.read(self.path, schema_version=2)
         snoozed = next(q for q in data["entry_messages"] if q["id"] == first)
         self.assertTrue(snoozed["revisit_due"])
         self.assertEqual(snoozed["note"], "Synthetic note")
@@ -246,7 +312,7 @@ class DashboardAnswersTest(unittest.TestCase):
                 contextlib.redirect_stdout(out):
             self.assertEqual(cli.main(["entry-question", "answer", str(q), "--expected-version", "1",
                                        "--expected-state", "current", "--text", "Synthetic CLI answer", "--orch-id",
-                                       self.orch, "--idempotency-key", "cli", "--json"]), 0)
+                                       self.orch, "--idempotency-key", "cli"]), 0)
         self.assertEqual(json.loads(out.getvalue())["reply_to"], q)
         snoozed = self.ask()
         entry.question_transition(self.con, self.rt, "desktop", snoozed, 1, "current", "snoozed",
@@ -257,9 +323,13 @@ class DashboardAnswersTest(unittest.TestCase):
                                        "--expected-state", "snoozed"]), 0)
         self.assertEqual(entry._row(self.con, snoozed)["question_state"], "current")
         for action in ("answer", "un-snooze"):
-            with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as caught:
+            help_out = io.StringIO()
+            with contextlib.redirect_stdout(help_out), self.assertRaises(SystemExit) as caught:
                 cli.build_parser().parse_args(["entry-question", action, "--help"])
             self.assertEqual(caught.exception.code, 0)
+            if action == "answer":
+                self.assertIn("always prints a JSON receipt", help_out.getvalue())
+                self.assertNotIn("--json", help_out.getvalue())
 
 
 if __name__ == "__main__":

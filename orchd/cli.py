@@ -109,7 +109,7 @@ def build_parser():
     questions = sub.add_parser("entry-question", help="explicit question lifecycle and history")
     question_actions = questions.add_subparsers(dest="question_action", required=True)
     for action in ("show", "snooze", "un-snooze", "cancel", "supersede", "answer"):
-        command = question_actions.add_parser(action)
+        command = question_actions.add_parser(action, description="Submit an answer; always prints a JSON receipt." if action == "answer" else None)
         command.add_argument("question_id", type=int)
         command.add_argument("--entry", default="desktop")
         if action == "show":
@@ -121,7 +121,6 @@ def build_parser():
             command.add_argument("--text", required=True)
             command.add_argument("--orch-id", required=True, help="expected responsible Orch binding")
             command.add_argument("--idempotency-key", required=True)
-            command.add_argument("--json", action="store_true", help="JSON receipt (also the default)")
         elif action == "snooze":
             command.add_argument("--revisit-at", type=float, required=True, help="Unix timestamp; due never auto-promotes")
             command.add_argument("--note")
@@ -176,6 +175,8 @@ def build_parser():
     board.add_argument("--html", required=True, type=Path)
     snapshot = sub.add_parser("snapshot", help="read-only dashboard JSON from a private DB/WAL copy")
     snapshot.add_argument("--json", action="store_true", required=True)
+    snapshot.add_argument("--schema-version", type=int, choices=(1, 2), default=1,
+                          help="output contract: 1 preserves legacy rows/values (default); 2 opts into lifecycle/receipts")
     snapshot.add_argument("--answered-limit", type=int, default=100,
                           help="newest answered questions to include (default: 100); current/queued are unlimited")
     for name in ("watch", "summary"):
@@ -204,7 +205,8 @@ def main(argv=None):
         import sqlite3
         from orchd import snapshot, stats
         try:
-            result = snapshot.read(store.home() / "orchd.db", answered_limit=args.answered_limit)
+            result = snapshot.read(store.home() / "orchd.db", answered_limit=args.answered_limit,
+                                   schema_version=args.schema_version)
         except (ValueError, OSError, sqlite3.Error, stats.SnapshotError) as error:
             print(f"orchd snapshot: {error}", file=sys.stderr)
             return 1

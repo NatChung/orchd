@@ -10,7 +10,7 @@ dashboard server remains responsible for loopback/session/origin validation.
 orchd entry-question answer --help
 orchd entry-question answer 101 --entry desktop --orch-id synthetic-orch \
   --expected-version 1 --expected-state current --text 'Synthetic answer' \
-  --idempotency-key synthetic-submission-1 --json
+  --idempotency-key synthetic-submission-1
 orchd entry-question un-snooze --help
 orchd entry-question un-snooze 102 --expected-version 1 --expected-state snoozed
 ```
@@ -19,7 +19,8 @@ orchd entry-question un-snooze 102 --expected-version 1 --expected-state snoozed
 the expected responsible Orch ID, non-empty text and a non-empty idempotency key.
 It rejects missing questions, mismatched versions/states, historical bindings,
 and a key already used for another question/version. It does not guess a recipient.
-The CLI returns JSON by default; `--json` makes that contract explicit. Its receipt
+The answer CLI always prints JSON (there is no `--json` flag). `answer --help`
+states this output format. Its receipt
 contains `message_id`, `reply_to`, `task_id`, `orch_id`, body byte count/hash,
 `delivery`, `status`, and `duplicate`. It does not print the answer body.
 
@@ -30,14 +31,20 @@ with metadata; the Orch reads the original answer through `entry_inbox`. No work
 is contacted by submission. Offline/failed notification preserves the reply and
 the existing entry retry path. `sending` is exposed as `uncertain`, never as success.
 
-The same key or question/version returns the original reply ID and its current
-receipt without saving or notifying again, even if retried with different text.
-New keys for that same question/version are retained as aliases of that receipt.
+An identical same-key payload returns the original reply ID and its current receipt.
+Each submission key stores the SHA-256 of the exact submitted text. Reusing a key
+with different text rejects with `idempotency conflict` and exit 1, without a write
+or delivery. Pre-hash keys use the saved reply body hash for comparison; migration
+does not invent historical submission payloads. Different keys for the same
+question/version remain aliases of the original reply rather than creating another
+reply; each alias retains its own submitted payload hash.
 Retries still require the original version, current binding and an answered
 question; a withdrawn/superseded question is rejected. A Desktop answer already
 saved without a dashboard submission is not replaced by a dashboard answer.
-Retrying submission does not retry notification: use the existing entry status/
-delivery recovery path. A database save failure rolls back question, history,
+An identical retry re-enters existing inbound delivery if the original reply is not
+delivered; delivered replies are not sent again. Existing FIFO ordering and offline/
+failed retry rules apply. A `sending`/uncertain receipt is never automatically resent,
+as before. No retry inserts a second reply. A database save failure rolls back question, history,
 promotion and submission key together. Transport and receipt failure retain the
 existing delivery semantics; transmission is not worker acknowledgement.
 
@@ -67,6 +74,8 @@ semantics: it records forwarding evidence, not an execution authorization.
   order. Only explicit un-snooze and newly created questions receive queue positions.
 - `entry_answer_submissions(entry_id, idempotency_key, question_id, version, reply_id)`
   with primary key `(entry_id, idempotency_key)` and references to entries/messages.
+  Nullable `body_sha256 TEXT` is added idempotently to record each key's submitted
+  payload hash; pre-hash records remain unchanged.
 
 There are no destructive migrations, renamed columns, historical backfills or
 rewritten old rows. Repeated ordinary store connections are idempotent. Snapshot
@@ -75,8 +84,15 @@ new columns/history table still yield null links/notification receipt, version 1
 
 ## Snapshot contract v2
 
-`orchd snapshot --json` keeps the v1 top-level arrays and read-only behavior and
-changes `schema_version` to **2**. Consumers must recognize the new version.
+`orchd snapshot --json` defaults to **v1**, matching #17's reader on the same DB:
+current/queued and bounded answered rows; legacy `unknown`/`notified` notification
+values; `worker_forwarded="unknown"`; `reply_id=null`. It adds no computed lifecycle
+or receipt fields in v1. Persisted metadata columns retain #17's SELECT-all behavior.
+
+Use `orchd snapshot --json --schema-version 2` to explicitly opt into **v2**, or
+`--schema-version 1` to select the legacy contract. Both versions remain read-only.
+`snapshot --help` documents the selector. All fields in the following table describe
+opt-in v2 only; default callers keep their existing contract.
 
 | Field | v2 meaning |
 | --- | --- |

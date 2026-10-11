@@ -1,6 +1,7 @@
 import contextlib
 import hashlib
 import io
+import importlib.util
 import json
 import os
 import sqlite3
@@ -59,12 +60,36 @@ class SnapshotTests(unittest.TestCase):
     def run_cli(self, *args):
         out, err = io.StringIO(), io.StringIO()
         with patch.dict(os.environ, ORCHD_HOME=self.temp.name), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = cli.main(["snapshot", "--json", *args])
+            code = cli.main(["snapshot", "--json", "--schema-version", "2", *args])
         return code, out.getvalue(), err.getvalue()
 
     def assert_cli_success(self, code, err):
         self.assertEqual(code, 0, err)
         self.assertFalse(any(line.startswith("orchd snapshot:") for line in err.splitlines()), err)
+
+    def test_default_snapshot_matches_frozen_v1_reader_on_same_database(self):
+        fixture = Path(__file__).parent / "fixtures" / "snapshot_v1.py"
+        spec = importlib.util.spec_from_file_location("orchd._snapshot_v1_fixture", fixture)
+        original = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(original)
+        # Exercise all reviewed incompatibilities: lifecycle rows, linked answer,
+        # unknown notification and legacy delivered without notified_at.
+        for state in ("snoozed", "cancelled", "superseded"):
+            self.con.execute("INSERT INTO entry_messages(entry_id,orch_id,direction,kind,body,body_bytes,body_sha256,"
+                             "question_state,delivery,created_at) VALUES('synthetic-entry','orch-current','out',"
+                             "'question','Synthetic lifecycle question',28,'synthetic-hash',?,'held',10)", (state,))
+        self.con.execute("UPDATE messages SET entry_reply_id=6 WHERE kind='answer'")
+        for delivery in ("other", "delivered"):
+            self.con.execute("UPDATE entry_messages SET delivery=? WHERE kind='reply'", (delivery,))
+            with patch("time.time", return_value=123456):
+                expected = original.read(self.path)
+                self.assertEqual(snapshot.read(self.path), expected)
+                out, err = io.StringIO(), io.StringIO()
+                with patch.dict(os.environ, ORCHD_HOME=self.temp.name), contextlib.redirect_stdout(out), \
+                        contextlib.redirect_stderr(err):
+                    code = cli.main(["snapshot", "--json"])
+                self.assert_cli_success(code, err.getvalue())
+                self.assertEqual(json.loads(out.getvalue()), expected)
 
     def test_cli_structure_and_source_db_wal_bytes_unchanged(self):
         before = fingerprints(self.path)
@@ -86,7 +111,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertNotIn("body", data["tasks"][0]["latest_progress"])
 
     def test_old_binding_closed_task_and_held_remain_identifiable(self):
-        data = snapshot.read(self.path)
+        data = snapshot.read(self.path, schema_version=2)
         questions = {q["id"]: q for q in data["entry_messages"]}
         self.assertTrue(questions[1]["binding_current"])
         self.assertTrue(questions[1]["task_open"])
@@ -99,7 +124,7 @@ class SnapshotTests(unittest.TestCase):
         self.assertIsNone(questions[5]["task"])
 
     def test_worker_questions_are_unread_orch_triage_not_nat_questions(self):
-        data = snapshot.read(self.path)
+        data = snapshot.read(self.path, schema_version=2)
         self.assertEqual(len(data["worker_questions"]), 1)
         question = data["worker_questions"][0]
         self.assertEqual(question["audience"], "orch")
@@ -113,7 +138,7 @@ class SnapshotTests(unittest.TestCase):
                              "WHERE kind='reply'", (delivery,))
             self.con.execute("UPDATE entry_messages SET notified_at=? WHERE kind='reply'",
                              (8 if delivery == "delivered" else None,))
-            data = snapshot.read(self.path)
+            data = snapshot.read(self.path, schema_version=2)
             reply = data["replies"][0]
             self.assertEqual(reply["processing"]["orch_notification"], expected)
             self.assertEqual(reply["read_at"], 9)
@@ -140,7 +165,7 @@ class SnapshotTests(unittest.TestCase):
             self.con.execute(f"ALTER TABLE entry_messages DROP COLUMN {column}")
         self.con.execute("ALTER TABLE messages DROP COLUMN entry_reply_id")
         before = fingerprints(self.path)
-        data = snapshot.read(self.path)
+        data = snapshot.read(self.path, schema_version=2)
         self.assertEqual(fingerprints(self.path), before)
         self.assertEqual(data["schema_version"], 2)
         self.assertEqual(data["entry_messages"][0]["version"], 1)

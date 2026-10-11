@@ -337,12 +337,14 @@ def _queue_answer(con, task_id, text, accept, entry_reply_id=None):
         store.add_message(con, task_id, store.QUEUED, text, entry_reply_id=entry_reply_id)
 
 
-def answer(con, rt, task_id, text=None, flush=False, *, entry_reply_id=None):
+def answer(con, rt, task_id, text=None, flush=False, *, entry_reply_id=None, orch_id=None):
     if entry_reply_id is not None:
         if text is not None:
             raise ValueError("pass text or entry_reply_id, not both")
         from . import entry
         task = store.get_task(con, task_id)
+        if orch_id is not None and orch_id != task["orch_thread"]:
+            raise ValueError("task belongs to another Orch")
         text = entry.reply_text(con, task["orch_thread"], entry_reply_id, task_id)
     return _answer(con, rt, task_id, text, flush, entry_reply_id=entry_reply_id)
 

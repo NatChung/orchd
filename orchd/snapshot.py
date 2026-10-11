@@ -1,4 +1,4 @@
-"""Dashboard contract v2. Only SELECTs on a private copy; no migrations or runtime calls.
+"""Dashboard contracts v1 (default) and opt-in v2. Only SELECTs on a private copy; no migrations or runtime calls.
 
 Entry questions are distinct from unread worker questions (awaiting Orch triage).
 Worker answer evidence links only through persisted entry_reply_id; missing links remain null.
@@ -20,7 +20,9 @@ def _metadata(row):
     return {key: value for key, value in dict(row).items() if key not in ("body", "wire_text", "source_raw")}
 
 
-def read(path, *, answered_limit=100):
+def read(path, *, answered_limit=100, schema_version=1):
+    if schema_version not in (1, 2):
+        raise ValueError("--schema-version must be 1 or 2")
     if answered_limit < 0:
         raise ValueError("--answered-limit must be non-negative")
     path = Path(path).expanduser().resolve()
@@ -43,8 +45,9 @@ def read(path, *, answered_limit=100):
                 task["latest_" + kind] = recent.get((task["id"], kind))
 
         bindings = {r["id"]: r["orch_id"] for r in con.execute("SELECT id,orch_id FROM entries")}
+        states = ("current", "queued") if schema_version == 1 else ("current", "queued", "snoozed", "cancelled", "superseded")
         questions = [dict(r) for r in con.execute(
-            "SELECT * FROM entry_messages WHERE kind='question' AND question_state IN ('current','queued','snoozed','cancelled','superseded') ORDER BY id")]
+            f"SELECT * FROM entry_messages WHERE kind='question' AND question_state IN ({','.join('?' * len(states))}) ORDER BY id", states)]
         questions += [dict(r) for r in con.execute(
             "SELECT * FROM entry_messages WHERE kind='question' AND question_state='answered' ORDER BY id DESC LIMIT ?",
             (answered_limit,))]
@@ -52,13 +55,14 @@ def read(path, *, answered_limit=100):
         for question in questions:
             task = task_rows.get(question["task_id"])
             item = _metadata(question)
-            item.update({key: question.get(key, 1 if key == "version" else None) for key in
-                         ("version", "supersedes", "superseded_by", "revisit_at", "note", "reason")})
-            item["revisit_due"] = (question["question_state"] == "snoozed" and item["revisit_at"] is not None
-                                    and item["revisit_at"] <= generated_at)
-            item["history"] = [dict(r) for r in con.execute(
-                "SELECT * FROM entry_question_history WHERE question_id=? ORDER BY id DESC LIMIT 10",
-                (question["id"],))][::-1] if "entry_question_history" in tables else []
+            if schema_version == 2:
+                item.update({key: question.get(key, 1 if key == "version" else None) for key in
+                             ("version", "supersedes", "superseded_by", "revisit_at", "note", "reason")})
+                item["revisit_due"] = (question["question_state"] == "snoozed" and item["revisit_at"] is not None
+                                        and item["revisit_at"] <= generated_at)
+                item["history"] = [dict(r) for r in con.execute(
+                    "SELECT * FROM entry_question_history WHERE question_id=? ORDER BY id DESC LIMIT 10",
+                    (question["id"],))][::-1] if "entry_question_history" in tables else []
             item.update(body=question["body"],
                         binding_current=(bindings[question["entry_id"]] == question["orch_id"]
                                          if question["entry_id"] in bindings else None),
@@ -70,10 +74,11 @@ def read(path, *, answered_limit=100):
             "SELECT * FROM messages WHERE kind IN ('answer_queued','answer') ORDER BY id")]
         linked = {}
         for answer in worker_answers:
-            answer.setdefault("entry_reply_id", None)
+            if schema_version == 2:
+                answer.setdefault("entry_reply_id", None)
             answer["processing"] = ("pending" if answer["kind"] == "answer_queued" and answer["read_at"] is None
                                     else "transport_accepted")
-            answer["reply_id"] = answer.get("entry_reply_id")
+            answer["reply_id"] = answer.get("entry_reply_id") if schema_version == 2 else None
             if answer["reply_id"] is not None:
                 linked.setdefault(answer["reply_id"], []).append(answer)
         question_ids = {q["id"] for q in questions}
@@ -85,14 +90,22 @@ def read(path, *, answered_limit=100):
             evidence = linked.get(row["id"], [])
             forwarded = ("transport_accepted" if any(a["processing"] == "transport_accepted" for a in evidence)
                          else "pending" if evidence else None)
-            item["processing"] = dict(
-                saved=True, saved_at=row["created_at"],
-                orch_notification={"pending": "pending", "failed": "failed", "sending": "uncertain",
-                                   "delivered": "notified" if item.get("notified_at") is not None else None}.get(row["delivery"], None),
-                orch_notified_at=item.get("notified_at"),
-                orch_read_at=row["read_at"],
-                worker_forwarded=forwarded, worker_answer_ids=[a["id"] for a in evidence],
-                worker_confirmed="unknown", worker_executed="unknown")
+            if schema_version == 1:
+                item["processing"] = dict(
+                    saved=True,
+                    orch_notification={"pending": "pending", "failed": "failed", "sending": "uncertain",
+                                       "delivered": "notified"}.get(row["delivery"], "unknown"),
+                    orch_read_at=row["read_at"],
+                    worker_forwarded="unknown", worker_confirmed="unknown", worker_executed="unknown")
+            else:
+                item["processing"] = dict(
+                    saved=True, saved_at=row["created_at"],
+                    orch_notification={"pending": "pending", "failed": "failed", "sending": "uncertain",
+                                       "delivered": "notified" if item.get("notified_at") is not None else None}.get(row["delivery"], None),
+                    orch_notified_at=item.get("notified_at"),
+                    orch_read_at=row["read_at"],
+                    worker_forwarded=forwarded, worker_answer_ids=[a["id"] for a in evidence],
+                    worker_confirmed="unknown", worker_executed="unknown")
             replies.append(item)
 
         worker_questions = []
@@ -105,7 +118,7 @@ def read(path, *, answered_limit=100):
         deliveries = [dict(r) for r in con.execute("SELECT * FROM worker_deliveries ORDER BY created_at,id")]
         goal_rows = [goals.get(con, r["id"], history=True) for r in con.execute(
             "SELECT id FROM goals ORDER BY repo,created_at,id")]
-        return dict(generated_at=generated_at, source_db=str(path), schema_version=2,
+        return dict(generated_at=generated_at, source_db=str(path), schema_version=schema_version,
                     schema_fingerprint=hashlib.sha256(json.dumps(schema).encode()).hexdigest(),
                     answered_limit=answered_limit, goals=goal_rows, tasks=tasks,
                     entry_messages=entry_messages, replies=replies, worker_questions=worker_questions,

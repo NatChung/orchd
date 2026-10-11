@@ -239,12 +239,13 @@ def _save_reply(con, bound, question, text, actor, **fields):
 
 def submit_answer(con, rt, entry_id, question_id, expected_version, expected_state, text, idempotency_key,
                   *, orch_id):
-    """Save a dashboard reply once. Retries return its receipt without another wake or delivery attempt."""
+    """Save a reply once; identical retries recover pending/failed wakes under existing delivery rules."""
     if expected_state != "current":
         raise ValueError("answer requires expected state current")
     if not isinstance(text, str) or not text.strip() or not isinstance(idempotency_key, str) or not idempotency_key.strip():
         raise ValueError("non-empty text and idempotency key are required")
     duplicate = False
+    _, body_sha256 = digest(text)
     with _lock(con, entry_id), store.immediate(con):
         bound = get_entry(con, entry_id)
         if bound["orch_id"] != orch_id:
@@ -258,6 +259,11 @@ def submit_answer(con, rt, entry_id, question_id, expected_version, expected_sta
                             (entry_id, idempotency_key)).fetchone()
         if keyed and (keyed["question_id"] != question_id or keyed["version"] != expected_version):
             raise ValueError("idempotency key belongs to another question/version")
+        if keyed:
+            # Pre-hash submissions can only prove the payload of their stored reply.
+            original_hash = keyed["body_sha256"] or _row(con, keyed["reply_id"])["body_sha256"]
+            if original_hash != body_sha256:
+                raise ValueError("idempotency conflict: key was already used with a different payload")
         existing = con.execute("SELECT * FROM entry_answer_submissions WHERE question_id=? AND version=? LIMIT 1",
                                (question_id, expected_version)).fetchone()
         if existing:
@@ -268,10 +274,12 @@ def submit_answer(con, rt, entry_id, question_id, expected_version, expected_sta
             _checked_question(con, bound, question_id, expected_version, expected_state)
             message_id = _save_reply(con, bound, question, text, "operator:dashboard")
         if not keyed:
-            con.execute("INSERT INTO entry_answer_submissions VALUES(?,?,?,?,?)",
-                        (entry_id, idempotency_key, question_id, expected_version, message_id))
-    if not duplicate:
+            con.execute("INSERT INTO entry_answer_submissions "
+                        "(entry_id,idempotency_key,question_id,version,reply_id,body_sha256) VALUES(?,?,?,?,?,?)",
+                        (entry_id, idempotency_key, question_id, expected_version, message_id, body_sha256))
+    if not duplicate or _row(con, message_id)["delivery"] != "delivered":
         deliver_inbound(con, rt, entry_id)
+    if not duplicate:
         deliver_outbound(con, rt, entry_id)
     row = _row(con, message_id)
     return dict(_public(row), orch_id=orch_id, duplicate=duplicate, status=_state(row))
