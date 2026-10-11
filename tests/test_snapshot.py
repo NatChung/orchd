@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -61,13 +62,17 @@ class SnapshotTests(unittest.TestCase):
             code = cli.main(["snapshot", "--json", *args])
         return code, out.getvalue(), err.getvalue()
 
+    def assert_cli_success(self, code, err):
+        self.assertEqual(code, 0, err)
+        self.assertFalse(any(line.startswith("orchd snapshot:") for line in err.splitlines()), err)
+
     def test_cli_structure_and_source_db_wal_bytes_unchanged(self):
         before = fingerprints(self.path)
         self.assertIn("-wal", before)
         with patch("orchd.store.connect", side_effect=AssertionError("must not migrate")), \
                 patch("orchd.cli.Runtime", side_effect=AssertionError("must not probe or deliver")):
             code, out, err = self.run_cli()
-        self.assertEqual((code, err), (0, ""))
+        self.assert_cli_success(code, err)
         self.assertEqual(fingerprints(self.path), before)
         data = json.loads(out)
         self.assertEqual(data["source_db"], str(self.path.resolve()))
@@ -115,14 +120,14 @@ class SnapshotTests(unittest.TestCase):
             self.assertTrue(reply["processing"]["saved"])
             for field in ("worker_forwarded", "worker_confirmed", "worker_executed"):
                 self.assertEqual(reply["processing"][field], "unknown")
-        self.assertEqual([a["processing"] for a in data["worker_answers"]],
-                         ["pending", "transport_accepted", "transport_accepted"])
-        self.assertTrue(all(a["reply_id"] is None for a in data["worker_answers"]))
+            self.assertEqual([a["processing"] for a in data["worker_answers"]],
+                             ["pending", "transport_accepted", "transport_accepted"])
+            self.assertTrue(all(a["reply_id"] is None for a in data["worker_answers"]))
 
     def test_recent_answered_limit_never_limits_pending(self):
         for limit, expected in ((0, [1, 2, 3]), (1, [1, 2, 3, 5])):
             code, out, err = self.run_cli("--answered-limit", str(limit))
-            self.assertEqual((code, err), (0, ""))
+            self.assert_cli_success(code, err)
             self.assertEqual([q["id"] for q in json.loads(out)["entry_messages"]], expected)
         self.assertNotEqual(self.run_cli("--answered-limit", "-1")[0], 0)
 
@@ -149,3 +154,30 @@ class SnapshotTests(unittest.TestCase):
             self.assertEqual(result.stdout, "")
             self.assertIn("orchd snapshot:", result.stderr)
             self.assertFalse((Path(missing) / "orchd.db").exists())
+
+    def test_incomplete_sqlite_schema_fails_without_migration(self):
+        self.con.close()
+        self.path.unlink()
+        with sqlite3.connect(self.path) as con:
+            con.execute("CREATE TABLE tasks(id TEXT PRIMARY KEY)")
+        con.close()
+        before = fingerprints(self.path)
+        code, out, err = self.run_cli()
+        self.assertNotEqual(code, 0)
+        self.assertEqual(out, "")
+        self.assertIn("orchd snapshot:", err)
+        self.assertIn("no such column", err)
+        self.assertEqual(fingerprints(self.path), before)
+
+    def test_success_tolerates_unrelated_resource_warning_on_stderr(self):
+        main = cli.main
+
+        def unrelated_warning_then_main(args):
+            print("ResourceWarning: unclosed database from another test", file=sys.stderr)
+            return main(args)
+
+        with patch("orchd.cli.main", side_effect=unrelated_warning_then_main):
+            code, out, err = self.run_cli()
+        self.assert_cli_success(code, err)
+        self.assertIn("ResourceWarning:", err)
+        self.assertEqual(json.loads(out)["schema_version"], 1)

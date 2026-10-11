@@ -66,6 +66,7 @@ Orch 指令現在必須明確使用 `orch start|stop|restart|list|attach`。舊�
 | `orchd watch [--since HH:MM]` | 持續查看 Orch／worker 訊息時間軸。 | `orchd watch` |
 | `orchd summary [--since HH:MM]` | 按 Orch 彙整 worker、model、問題、並行與 token。 | `orchd summary` |
 | `orchd board --html PATH` | 輸出私人靜態 HTML 快照，不消耗 inbox。 | `orchd board --html /tmp/orchd-board.html` |
+| `orchd snapshot --json [--answered-limit N]` | 從私人 DB／WAL 副本讀取看板 JSON，不遷移或消耗 inbox。 | `orchd snapshot --json --answered-limit 100` |
 | `orchd goal add\|set\|show\|list\|export` | 透過下列五個子指令管理中央目標。 | `orchd goal list` |
 | `orchd goal add REPO [GOAL_OPTIONS]` | 為 repo 建立目標並記錄稽核 actor。 | `orchd goal add example --type goal --intent "交付經審閱的修改"` |
 | `orchd goal set GOAL_ID [GOAL_OPTIONS]` | 更新目標與稽核歷史。 | `orchd goal set GOAL_ID --status waiting --ball Operator` |
@@ -74,6 +75,8 @@ Orch 指令現在必須明確使用 `orch start|stop|restart|list|attach`。舊�
 | `orchd goal export --md [--repo REPO]` | 印出中央目標的 Markdown 快照。 | `orchd goal export --md` |
 
 兩者的 `--since` 都使用今日本地 HH:MM。`watch` 從時間點之前最後一筆訊息的 ID 之後開始顯示，並持續追蹤新訊息；預設從最近 30 分鐘開始。`summary` 篩選該時間點（含）之後建立的任務，再彙整這些任務的所有訊息；預設包含全部任務。board 輸出檔案，重新執行才更新。
+
+`snapshot` 必須帶 `--json`，包含 goals／history、未結 tasks、entry 問題／reply metadata，以及獨立的 worker 問題／送答證據。`--answered-limit` 必須非負，預設 100，只限制最近 answered entry 題；current／queued（含 held）不限制。舊 binding 與 closed task 關聯仍可見。worker 題標為待 Orch 分流，worker 確認／執行保持 unknown。輸出含 `generated_at`、`source_db`、輸出契約 `schema_version` 與實際 DB 的 `schema_fingerprint`。DB 不存在、損毀或 schema 不完整時會報錯並以非 0 exit code 結束。
 
 ### GOAL_OPTIONS：add 與 set 的全部旗標
 
