@@ -116,7 +116,10 @@ def _choice(name, value, valid):
 
 def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, model=DEFAULT_WORKER_MODEL,
              model_reason=None, task_type=None, rework_of=None, found_by=None, verify=None, manual_checks=None,
-             verifies=None, backend="exec", goal_id=None, goal_critical=None):
+             verifies=None, backend="exec", goal_id=None, goal_critical=None, issue_ref=None):
+    from . import issue_links
+    if issue_ref is not None:
+        issue_links.validate_ref(issue_ref)
     if not orch_thread:
         raise ValueError("dispatch needs the caller's thread id")
     _choice("model", model, tuple(WORKER_MODELS))
@@ -190,6 +193,8 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
             except Exception:
                 pass
         raise
+    if issue_ref is not None:
+        issue_links.link(con, task_id, issue_ref, actor="orch", idempotency_key="dispatch:issue_ref")
     return store.get_task(con, task_id)
 
 
