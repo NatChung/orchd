@@ -126,7 +126,7 @@ opt-in v2 only; default callers keep their existing contract.
 `pending_worker_questions` is additive in v2 only. `worker_questions` retains its
 unread Orch triage meaning. The new collection uses message ID order, includes every
 `store.OPEN` task, and never limits rows with `answered_limit` or owner bindings.
-Each row has `id` (question message ID), `task_id`, `body`, `created_at`,
+Each row has `id` (question message ID), `task_id`, `body`, `summary`, `created_at`,
 `task` (persisted metadata including `id`, `repo`, `title`, `status`, `orch_thread`,
 plus `owner` as an alias of `orch_thread`), `task_open=true`, `processing`
 and `evidence`. `processing` is:
@@ -244,3 +244,22 @@ Compact status/inbox lifecycle enrichment, entry-lock wait behavior, lifecycle
 constant cleanup, concurrent two-Orch MCP cancellation coverage and other review
 notes remain separate work. The dashboard HTTP/UI, live migration, package upgrade,
 daemon restart, deployment and worker execution acknowledgement are outside this change.
+
+### Worker summary field (v2 only)
+
+`pending_worker_questions[].summary` is an optional display value: the opening
+`【給 Operator 的摘要】` block including its header, excluding `---詳細---` and
+all following evidence. It is `null` for legacy bodies, an empty summary, a missing
+exact standalone divider, or missing question messages. CRLF is accepted and
+summary line endings are normalized to LF. The header must be the first line;
+inline, indented or trailing-space dividers are not delimiters. The first exact
+divider wins. Parsing does not truncate the block or enforce editorial limits.
+`body` stays byte-for-byte intact. No database schema change is required, and v1
+is unchanged. See [ask format and example](commands.md#worker-ask-summary).
+
+```json
+{
+  "body": "【給 Operator 的摘要】\n要你決定：是否送出？\n選項：A 送出／B 暫緩\n建議：選 A，測試已通過。\n---詳細---\n完整預覽與證據",
+  "summary": "【給 Operator 的摘要】\n要你決定：是否送出？\n選項：A 送出／B 暫緩\n建議：選 A，測試已通過。"
+}
+```

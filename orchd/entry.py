@@ -18,7 +18,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from . import orch_revive, paths, store
+from . import orch_revive, paths, question_summary, store
 from .orch_health import owner_health
 
 DEFAULT_ENTRY = "desktop"
@@ -678,6 +678,7 @@ def ask_nat(con, rt, orch_id, text=None, task_id=None, quote_worker_question=Fal
     if not parts:
         raise ValueError("ask_nat needs text, or quote_worker_question with task_id")
     body = "\n\n".join(parts)
+    summary_warnings = question_summary.warn(body)
     if supersedes is None and any(value is not None for value in (expected_version, expected_state, reason)):
         raise ValueError("expected version/state and reason require supersedes")
     if supersedes is not None and (not isinstance(reason, str) or not reason.strip()):
@@ -716,6 +717,8 @@ def ask_nat(con, rt, orch_id, text=None, task_id=None, quote_worker_question=Fal
                   state=_row(con, question_id)["question_state"], **_questions(con, entry))
     if busy:
         result["note"] = "another question is open; this one waits and is sent after Operator answers the earlier ones"
+    if summary_warnings:
+        result["warnings"] = summary_warnings
     return result
 
 

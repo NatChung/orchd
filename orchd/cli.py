@@ -164,9 +164,11 @@ def build_parser():
     fl = sub.add_parser("flush")
     fl.add_argument("task_id")
     fl.add_argument("--after-pid", type=int)
-    ask = sub.add_parser("ask")
+    from . import question_summary
+    ask = sub.add_parser("ask", help="ask with an Operator summary and full evidence",
+                         description=question_summary.GUIDANCE, formatter_class=argparse.RawDescriptionHelpFormatter)
     ask.add_argument("task_id")
-    ask.add_argument("question")
+    ask.add_argument("question", help="summary block + ---詳細--- + full evidence; legacy bodies warn but are accepted")
     ver = sub.add_parser("verify")
     ver.add_argument("task_id")
     ver.add_argument("--timeout", type=float)
