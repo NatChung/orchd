@@ -199,3 +199,28 @@ reply→worker 收據關聯，見[看板回答與 snapshot v2 說明](dashboard-
 `answer` 固定輸出 JSON，沒有 `--json` 旗標。
 `snapshot --json` 預設保留 v1 的欄位、值與列範圍；新增的生命週期與回答階段
 需明確使用 `snapshot --json --schema-version 2`，也可用 `--schema-version 1` 選擇舊契約。
+
+### Worker ask summary
+
+Every worker `orchd ask ID "QUESTION"` must start with the following block.
+Use plain language, about 5 lines and at most 300 characters; keep SHAs, paths,
+logs, all required evidence and exact send previews after the standalone divider.
+If there are no options, write `選項：無`. The impact line is optional.
+
+```text
+【給 Operator 的摘要】
+要你決定：是否送出這份變更供審查？
+選項：A 送出／B 暫緩
+建議：選 A，測試已通過，可以交給 reviewer 檢查。
+不回覆的影響：變更會保留在分支，等你決定。
+---詳細---
+完整送出預覽、測試輸出與證據放在這裡。
+```
+
+CLI `ask` warns on stderr without rejecting legacy bodies. MCP `ask_nat`
+uses the same contract and returns an additive `warnings` list when the opening
+block is missing. When quoting a worker question, put the Operator summary in
+`text` and the full verbatim preview after `---詳細---`; quoting preserves the body.
+For quote-only calls, the quoted worker body is checked instead of the quote prefix.
+MCP warnings appear only in the result, after validation succeeds; they are not
+also printed to stderr. Warnings do not mean the question was rejected or approved.

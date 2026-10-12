@@ -1,7 +1,7 @@
 """Worker question state derived from committed task messages, independent of inbox reads."""
 import json
 
-from . import store
+from . import question_summary, store
 from .core import FOLLOWUP_HEAD
 
 
@@ -104,6 +104,7 @@ def pending(con, tasks):
             continue
         result.append(dict(id=question["id"] if question else None, task_id=task["id"],
                            body=question["body"] if question else None,
+                           summary=question_summary.parse(question["body"]) if question else None,
                            created_at=question["created_at"] if question else None,
                            task=dict(task, owner=task["orch_thread"]), task_open=True,
                            processing=state["processing"],

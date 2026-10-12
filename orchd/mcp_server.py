@@ -16,7 +16,7 @@ import re
 import sys
 import traceback
 
-from . import core, entry, goals, inventory, issue_links, store, verify as verification
+from . import core, entry, goals, inventory, issue_links, question_summary, store, verify as verification
 from .runtime import DEFAULT_WORKER_MODEL, WORKER_MODELS, Runtime
 
 TOOLS = [
@@ -198,7 +198,8 @@ TOOLS += [
                     "already open this one is queued (state queued) and sent after Operator answers the earlier ones, in "
                     "order. Pass task_id when it is about a task; quote_worker_question=true appends that task's "
                     "latest worker question verbatim from orchd's store (use it for outward-send previews instead "
-                    "of retyping them). Operator's answer arrives in entry_inbox as kind reply with reply_to=question_id.",
+                    "of retyping them). Operator's answer arrives in entry_inbox as kind reply with reply_to=question_id. "
+                    "Missing summary blocks return warnings but are accepted.\n" + question_summary.GUIDANCE,
      "inputSchema": {"type": "object", "properties": {
          "text": {"type": "string", "description": "Your question; optional with quote_worker_question"},
          "task_id": {"type": "string"},

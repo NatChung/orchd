@@ -8,7 +8,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import app_worker, orch_revive, paths, store, verify as verification, worker_health
+from . import app_worker, orch_revive, paths, question_summary, store, verify as verification, worker_health
 from .orch_health import owner_health
 from .runtime import (DEFAULT_ORCH_MODEL, DEFAULT_WORKER_MODEL, ORCH_MODELS, WORKER_MODELS,
                       claude_job_alive, error_detail, worker_kind)
@@ -72,7 +72,10 @@ Rules:
 - {long_runs} Never `pgrep -f` a pattern that your own command line contains.
 - Finish with exactly one `{cli} report <task-id> --status done|blocked --summary "<one line>" --evidence "<commits, PR URL, test commands and results, what is left undone>"`.
 - If you need a decision, use `{cli} ask` and {waiting}; do not report blocked for questions Operator can answer.
-- Report facts only; say what you did not verify.{codex_rules}"""
+- Report facts only; say what you did not verify.{codex_rules}
+
+Ask format (required for every worker question):
+{question_summary.GUIDANCE}"""
 
 
 def worker_cli():
@@ -261,9 +264,10 @@ def progress(con, rt, task_id, text):
 
 def ask(con, rt, task_id, question):
     task = store.get_task(con, task_id)
+    question_summary.warn(question)
     mid = store.add_message(con, task_id, "question", question)
     store.update_task(con, task_id, status="question")
-    return _wake(con, rt, task, mid, f"question: {_short(question.splitlines()[0])}")
+    return _wake(con, rt, task, mid, f"question: {_short(question_summary.wake_note(question))}")
 
 
 def inbox(con, orch_thread):
