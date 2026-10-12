@@ -19,7 +19,19 @@ account identifiers, local paths, and logs before posting.
 
 For orchd workers, outward writes require a full preview through `orchd ask` and
 an explicit answer approving that action. Read-only queries need no account switch.
+Exception: when Orch explicitly dispatches a worker to create an issue for
+Operator in a `NatChung/*` repository, that issue creation needs no preview.
+The exception applies only to the named creation task; PRs, comments, edits,
+closures and label maintenance still follow their approval rules. See
+[issue-linked workflow](../issue-linked-workflow.md#2-開票權限與-labels).
 Read back each write and retain the resulting link.
+
+Before creating an issue, check the mapped labels against the live labels.
+If `needs-triage` is missing, omit `--label needs-triage` from the create command
+and disclose the missing label and actual applied labels in the preview or
+exempt creation report. Do not automatically create the label. If a repository
+explicitly requires that label, obtain Operator's decision or complete separately
+approved label maintenance before creating the issue.
 
 ## Pull requests as a triage surface
 

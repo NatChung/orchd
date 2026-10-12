@@ -20,7 +20,7 @@ mapping 不存在時標「待確認」，不擅自套五角色。保留已存在
 
 ## 獨立維護預覽
 
-另派 label 維護任務。將下列完整預覽交 Nat，取得精確核准後才寫入：
+另派 label 維護任務。將下列完整預覽交 Operator，取得精確核准後才寫入：
 
 ```text
 目的地：example-company/example-hub（合成）
@@ -39,3 +39,7 @@ name/color/description 必須符合核准內容。每項寫入後 read-back 核�
 清單；repo 要求 label 必填時先處理決定，再送出開票命令。
 Jira 不做此 label 維護；legacy local phase 保持既有 mapping，
 新 GitHub 工作才依 GitHub guide 比對。
+
+缺 `needs-triage` 時，省略開票命令的 `--label needs-triage`，在預覽或
+免預覽回報中列明缺項；若 repo 明定必填則先請 Operator 決定，不送失敗的
+開票命令，也不自動建立 label。
