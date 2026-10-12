@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "projects": [
+    {
+      "project_id": "example-app",
+      "display_name": "Example app",
+      "routes": [
+        {
+          "tracker": "github",
+          "repo": "example-owner/example-app",
+          "account": "example-account"
+        }
+      ]
+    },
+    {
+      "project_id": "example-hub",
+      "display_name": "Example mixed tracker hub",
+      "routes": [
+        {
+          "tracker": "github",
+          "repo": "example-company/example-hub",
+          "account": "example-company-account"
+        },
+        {
+          "tracker": "jira",
+          "site": "https://jira.example.invalid",
+          "project_keys": ["DEMO"],
+          "credential_profile": "example-jira"
+        }
+      ]
+    }
+  ]
+}

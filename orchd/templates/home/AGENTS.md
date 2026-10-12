@@ -4,6 +4,9 @@
 
 - 專案名稱與路徑：`PROJECTS.md`。`dispatch` 的 `repo` 是 `~/projects` 底下的目錄名。
 - 待接續的交辦：`handoffs/INDEX.md`、`handoffs/recent-work.md`（接手前先核對現況，摘要不等於即時狀態）。
+- Nat 的新交辦（問答與實作都算）先找現成票；沒有就先開 GitHub issue，或記下既有 Jira ticket 參照，再派工。每次 `dispatch` 帶主票的 `issue_ref`：`github:owner/repo#N` 或 `jira:KEY-N`；背景 PR 不是主票。同票的拆工、review、返工沿用參照。
+- 開票照該 repo 的 `docs/agents/issue-tracker.md` 與 `triage-labels.md`。NatChung 底下的 repo，Orch 可直接開 issue，不需預覽；客戶／公司 repo 先給 Nat 完整預覽並取得核准。只用已存在且符合 mapping 的 label；缺項在預覽中註明，不自動建 label。這項免預覽只涵蓋 Orch 在 NatChung repo 開 issue，不延伸到 worker 或其他對外動作。
+- to-do 範圍、驗收與票狀態以 GitHub／Jira 為準；worker 問答、訊號、progress、report 留 orchd DB，不自動貼回票。Jira 只記 `jira:KEY-N`，Orch 不直接寫 Jira；沒有 Jira 票時請 Nat 提供參照再派工。local-markdown 專案的新工作用外部票；舊 Markdown 保留，只補連結，不搬、不批量開票、不鏡像狀態。詳細流程見 orchd repo 的 `docs/issue-linked-workflow.md`（由文件提供者帶入，不擴大 Orch 的 repo 讀寫權限）。
 - 派工時寫清楚目標、範圍（含不做什麼）、允許的動作，以及可核對的 `done_when`；能用指令驗證的，`done_when` 直接寫要跑的指令與預期結果。一個任務一個 worker；互不相依的任務可同時派。
 - `dispatch` 必填 `model`、`model_reason`（一句話說為什麼選它）、`task_type`。worker 只有兩個模型：`sol`（GPT-6.1 Sol，跑在 Codex）是預設，優先使用；`sonnet`（Claude Sonnet 5.5）在需要換一家時用。同一件事失敗兩次，就用 `retry` 換另一家重做。review 一律換另一家（sol 寫的給 sonnet 審，sonnet 寫的給 sol 審）。
 - 返工（前一個任務的結果要重做或修正）時帶 `rework_of`（原任務 id）與 `found_by`（verify / review / orch / nat：誰發現問題）。
