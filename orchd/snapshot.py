@@ -12,7 +12,7 @@ import json
 import time
 from pathlib import Path
 
-from . import entry, goals, stats, store, task_questions
+from . import entry, goals, issue_links, stats, store, task_questions
 
 
 def _metadata(row):
@@ -35,6 +35,11 @@ def read(path, *, answered_limit=100, schema_version=1):
             "SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name")]
         task_rows = {r["id"]: dict(r) for r in con.execute(
             "SELECT id,title,status,repo,goal_id,orch_thread,created_at,updated_at FROM tasks ORDER BY created_at,id")}
+        if schema_version == 2:
+            link_history = issue_links.history(con)
+            current_refs = {event["task_id"]: event["ref"] for event in link_history}
+            for task in task_rows.values():
+                task["issue_ref"] = current_refs.get(task["id"])
         tasks = [dict(t, latest_progress=None, latest_report=None) for t in task_rows.values()
                  if t["status"] in store.OPEN]
         recent = {}
@@ -118,12 +123,17 @@ def read(path, *, answered_limit=100, schema_version=1):
         deliveries = [dict(r) for r in con.execute("SELECT * FROM worker_deliveries ORDER BY created_at,id")]
         goal_rows = [goals.get(con, r["id"], history=True) for r in con.execute(
             "SELECT id FROM goals ORDER BY repo,created_at,id")]
+        if schema_version == 2:
+            for goal in goal_rows:
+                for task in goal["linked_tasks"]:
+                    task["issue_ref"] = current_refs.get(task["task_id"])
         return dict(generated_at=generated_at, source_db=str(path), schema_version=schema_version,
                     schema_fingerprint=hashlib.sha256(json.dumps(schema).encode()).hexdigest(),
                     answered_limit=answered_limit, goals=goal_rows, tasks=tasks,
                     entry_messages=entry_messages, replies=replies, worker_questions=worker_questions,
                     worker_answers=worker_answers, worker_deliveries=deliveries,
-                    **(dict(pending_worker_questions=task_questions.pending(con, task_rows.values()),
+                    **(dict(issue_links=dict(version=1, available=True, history=link_history),
+                            pending_worker_questions=task_questions.pending(con, task_rows.values()),
                             worker_question_resolutions=task_questions.dismissals(con),
                             binding_counts=[dict(entry_id=eid, orch_id=oid, **entry.message_counts(con, eid, oid))
                                             for eid, oid in sorted(bindings.items())])
