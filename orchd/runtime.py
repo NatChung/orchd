@@ -360,10 +360,7 @@ class Runtime:
         orch_home = Path(orch_home).resolve()
         # Claude Code 2.1.288 stores pasted/dragged images in this per-session
         # temp tree, not ~/.claude/image-cache. Expose only this home's cwd key.
-        image_key = re.sub(r"[^a-zA-Z0-9]", "-", str(orch_home))
-        if len(image_key) > 200:
-            raise RuntimeError("Orch home exceeds Claude's image-directory key limit (200 characters)")
-        images = Path("/tmp") / f"claude-{os.getuid()}" / image_key
+        images = paths.orch_images(orch_home)
         images.mkdir(mode=0o700, parents=True, exist_ok=True)
         images.chmod(0o700)
         images = images.resolve()
@@ -606,10 +603,11 @@ class Runtime:
                 "cache_read_input_tokens": cached, "messages": turns}
 
     def codex_user_messages(self, thread):
-        """The thread's persisted user inputs, oldest first, as [{turn_id, item_id, text}].
+        """Persisted inputs, oldest first: {turn_id, item_id, text, local_images?}.
 
         Read from the rollout's `item_completed` UserMessage events: the decoded text joined from its text parts,
-        not stripped or normalized, so a stored copy is byte-exact. A user role is not proof the text came from Operator:
+        not stripped or normalized, so a stored copy is byte-exact. Structured local_image paths are kept separately;
+        arbitrary paths in text are not attachments. A user role is not proof the text came from Operator:
         `codex queue` writes the same records. [] when the rollout is missing. An archived thread's rollout moves to
         the sibling archived_sessions/ (Desktop archives a conversation when it is closed), so look there too."""
         root = Path(os.environ.get("ORCHD_CODEX_SESSIONS", Path.home() / ".codex" / "sessions"))
@@ -631,7 +629,12 @@ class Runtime:
                 continue
             text = "".join(c.get("text", "") for c in item["content"]
                            if isinstance(c, dict) and c.get("type") in ("text", "Text", "input_text"))
-            found.append({"turn_id": payload.get("turn_id"), "item_id": item.get("id"), "text": text})
+            message = {"turn_id": payload.get("turn_id"), "item_id": item.get("id"), "text": text}
+            images = [c["path"] for c in item["content"] if isinstance(c, dict)
+                      and c.get("type") == "local_image" and isinstance(c.get("path"), str)]
+            if images:
+                message["local_images"] = images
+            found.append(message)
         return found
 
     def open_app_viewer(self, database, task):
