@@ -267,7 +267,7 @@ def ask(con, rt, task_id, question):
     question_summary.warn(question)
     mid = store.add_message(con, task_id, "question", question)
     store.update_task(con, task_id, status="question")
-    return _wake(con, rt, task, mid, f"question: {_short(question.splitlines()[0])}")
+    return _wake(con, rt, task, mid, f"question: {_short(question_summary.wake_note(question))}")
 
 
 def inbox(con, orch_thread):

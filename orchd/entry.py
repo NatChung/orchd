@@ -663,6 +663,7 @@ def ask_nat(con, rt, orch_id, text=None, task_id=None, quote_worker_question=Fal
     entry = _entry_of(con, orch_id)
     source_message_id = None
     parts = [text] if isinstance(text, str) and text.strip() else []
+    summary_body = text if parts else None
     if task_id is not None:
         task = store.get_task(con, task_id)
         if task["orch_thread"] != orch_id:
@@ -673,12 +674,13 @@ def ask_nat(con, rt, orch_id, text=None, task_id=None, quote_worker_question=Fal
             if latest is None:
                 raise ValueError(f"task {task_id} has no worker question to quote")
             parts.append(f"[worker question {latest['id']}, task {task_id}, verbatim]\n{latest['body']}")
+            if summary_body is None:
+                summary_body = latest["body"]
     elif quote_worker_question:
         raise ValueError("quote_worker_question needs task_id")
     if not parts:
         raise ValueError("ask_nat needs text, or quote_worker_question with task_id")
     body = "\n\n".join(parts)
-    summary_warnings = question_summary.warn(body)
     if supersedes is None and any(value is not None for value in (expected_version, expected_state, reason)):
         raise ValueError("expected version/state and reason require supersedes")
     if supersedes is not None and (not isinstance(reason, str) or not reason.strip()):
@@ -717,6 +719,8 @@ def ask_nat(con, rt, orch_id, text=None, task_id=None, quote_worker_question=Fal
                   state=_row(con, question_id)["question_state"], **_questions(con, entry))
     if busy:
         result["note"] = "another question is open; this one waits and is sent after Operator answers the earlier ones"
+    # Validate/save first; MCP and CLI entry ask expose warnings in the result only.
+    summary_warnings = question_summary.warn(summary_body, emit=False)
     if summary_warnings:
         result["warnings"] = summary_warnings
     return result

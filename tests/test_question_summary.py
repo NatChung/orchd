@@ -73,8 +73,48 @@ class SummaryIntegrationTests(unittest.TestCase):
             self.assertNotIn('isError', response['result'])
             result = json.loads(response['result']['content'][0]['text'])
             self.assertEqual(bool(result.get('warnings')), warns)
-            self.assertEqual('warning:' in err.getvalue(), warns)
+            self.assertEqual(err.getvalue(), '')
+            self.assertEqual(len(result.get('warnings', [])), int(warns))
             self.assertEqual(entry._row(self.con, result['question_id'])['body'], body)
+
+    def test_wake_note_uses_decision_or_first_content_and_legacy_first_line(self):
+        for body, note in ((summary.EXAMPLE, '要你決定：是否送出這份變更供審查？'),
+                           (summary.HEADER + '\n\n第一個內容\n---詳細---\n證據', '第一個內容'),
+                           ('legacy first\nsecond', 'legacy first')):
+            with patch('orchd.core._wake', return_value=True) as wake, contextlib.redirect_stderr(io.StringIO()):
+                core.ask(self.con, self.rt, self.task, body)
+            self.assertEqual(wake.call_args.args[-1], 'question: ' + note)
+            self.assertEqual(store.latest_message(self.con, self.task, 'question')['body'], body)
+
+    def test_quote_only_checks_worker_body_without_changing_verbatim_quote(self):
+        for body, warns in ((summary.EXAMPLE, False), ('legacy question', True)):
+            mid = store.add_message(self.con, self.task, 'question', body)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                result = mcp_server.call('ask_nat', {'task_id': self.task, 'quote_worker_question': True},
+                                         self.orch, self.con, self.rt)
+            self.assertEqual(bool(result.get('warnings')), warns)
+            self.assertEqual(err.getvalue(), '')
+            self.assertEqual(entry._row(self.con, result['question_id'])['body'],
+                             f'[worker question {mid}, task {self.task}, verbatim]\n{body}')
+
+    def test_failed_supersedes_validation_has_no_warning_or_saved_question(self):
+        old = entry.ask_nat(self.con, self.rt, self.orch, summary.EXAMPLE)['question_id']
+        count = self.con.execute('SELECT COUNT(*) FROM entry_messages').fetchone()[0]
+        for args in ({'expected_version': 1}, {'supersedes': old},
+                     {'supersedes': old, 'expected_version': 99, 'expected_state': 'current', 'reason': 'retry'},
+                     {'supersedes': old, 'expected_version': 1, 'expected_state': 'queued', 'reason': 'retry'}):
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err), self.assertRaises(ValueError):
+                entry.ask_nat(self.con, self.rt, self.orch, 'legacy revision', **args)
+            self.assertEqual(err.getvalue(), '')
+            self.assertEqual(self.con.execute('SELECT COUNT(*) FROM entry_messages').fetchone()[0], count)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            result = entry.ask_nat(self.con, self.rt, self.orch, 'legacy revision', supersedes=old,
+                                   expected_version=1, expected_state='current', reason='retry')
+        self.assertEqual(err.getvalue(), '')
+        self.assertEqual(result['warnings'], [summary.WARNING])
 
     def test_snapshot_v2_summary_null_and_v1_unchanged(self):
         for body in ('legacy', summary.EXAMPLE):

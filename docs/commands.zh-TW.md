@@ -221,4 +221,6 @@ CLI `ask` warns on stderr without rejecting legacy bodies. MCP `ask_nat`
 uses the same contract and returns an additive `warnings` list when the opening
 block is missing. When quoting a worker question, put the Operator summary in
 `text` and the full verbatim preview after `---詳細---`; quoting preserves the body.
-Warnings do not mean the question was rejected or approved.
+For quote-only calls, the quoted worker body is checked instead of the quote prefix.
+MCP warnings appear only in the result, after validation succeeds; they are not
+also printed to stderr. Warnings do not mean the question was rejected or approved.

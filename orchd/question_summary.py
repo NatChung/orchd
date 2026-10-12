@@ -42,8 +42,18 @@ def parse(body):
     return "\n".join(lines[:end]).rstrip() if any(line.strip() for line in lines[1:end]) else None
 
 
-def warn(body):
+def wake_note(body):
+    """Use the decision line for structured questions, keeping legacy first lines."""
+    block = parse(body)
+    if block is None:
+        return body.splitlines()[0]
+    lines = [line.strip() for line in block.splitlines()[1:] if line.strip()]
+    return next((line for line in lines if line.startswith("要你決定：")), lines[0])
+
+
+def warn(body, *, emit=True):
     if parse(body) is None:
-        print("warning: " + WARNING, file=sys.stderr)
+        if emit:
+            print("warning: " + WARNING, file=sys.stderr)
         return [WARNING]
     return []
