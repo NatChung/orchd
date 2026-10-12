@@ -1,4 +1,5 @@
 import concurrent.futures
+import base64
 import hashlib
 import json
 import os
@@ -13,6 +14,7 @@ from orchd.runtime import Runtime
 from tests import test_entry as entry_tests
 
 BODY = entry_tests.BODY
+PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC")
 
 
 class CacheTest(unittest.TestCase):
@@ -24,8 +26,14 @@ class CacheTest(unittest.TestCase):
         self.path_patch.start()
         self.addCleanup(self.path_patch.stop)
         self.addCleanup(self.tmp.cleanup)
-        self.source = self.base / "截圖 with spaces.png"
-        self.source.write_bytes(b"synthetic-image\x00\xff")
+        self.source_root = self.base / "desktop-temp"
+        folder = self.source_root / "TemporaryItems" / "NSIRD_screencaptureui_ABC123"
+        folder.mkdir(parents=True)
+        self.root_patch = patch.object(attachments, "_desktop_temp_root", return_value=self.source_root)
+        self.root_patch.start()
+        self.addCleanup(self.root_patch.stop)
+        self.source = folder / "截圖 with spaces.png"
+        self.source.write_bytes(PNG)
 
     def capture(self, sources=None, message=1, entry_id="desktop"):
         return attachments.capture(entry_id, message, sources or [str(self.source)])
@@ -60,7 +68,7 @@ class CacheTest(unittest.TestCase):
         self.assertEqual(omitted, 2)
 
     def test_missing_and_oversize_sources_are_recorded_without_partial_files(self):
-        missing = self.base / "missing.png"
+        missing = self.source.parent / "missing.png"
         with patch.object(attachments, "MAX_BYTES", 4):
             self.capture([str(missing), str(self.source)])
         items, _ = self.described()
@@ -68,7 +76,7 @@ class CacheTest(unittest.TestCase):
         self.assertEqual([p.name for p in self.directory().iterdir()], ["manifest.json"])
 
     def test_source_growth_is_bounded_even_when_initial_stat_is_small(self):
-        self.source.write_bytes(b"12345")
+        self.source.write_bytes(PNG)
         real_stat = os.fstat
         def smaller(fd):
             s = real_stat(fd)
@@ -77,7 +85,7 @@ class CacheTest(unittest.TestCase):
                 fields[6] = 1
                 return os.stat_result(fields)
             return s
-        with patch.object(attachments, "MAX_BYTES", 4), patch.object(attachments.os, "fstat", side_effect=smaller):
+        with patch.object(attachments, "MAX_BYTES", 12), patch.object(attachments.os, "fstat", side_effect=smaller):
             self.capture()
         self.assertEqual(self.described()[0][0]["error"], "too_large")
 
@@ -90,10 +98,10 @@ class CacheTest(unittest.TestCase):
                    self.source.name, str(self.base)]
         self.capture(sources)
         self.assertTrue(all(i["status"] == "failed" for i in self.described(sources)[0]))
-        self.assertEqual(self.source.read_bytes(), b"synthetic-image\x00\xff")
+        self.assertEqual(self.source.read_bytes(), PNG)
 
     def test_rejects_fifo_without_blocking(self):
-        fifo = self.base / "input.png"
+        fifo = self.source.parent / "input.png"
         os.mkfifo(fifo)
         self.capture([str(fifo)])
         self.assertEqual(self.described([str(fifo)])[0][0]["error"], "unsafe_source")
@@ -207,6 +215,119 @@ class CacheTest(unittest.TestCase):
         self.assertNotIn("cached_path", items[0])
         self.assertTrue(self.source.exists())
 
+    def test_private_key_text_is_rejected_inside_and_outside_allowlist_without_content_in_note(self):
+        secret = b"-----BEGIN OPENSSH PRIVATE KEY-----\nSYNTHETIC-DO-NOT-COPY\n"
+        outside = self.base / ".ssh" / "id_ed25519"
+        outside.parent.mkdir()
+        outside.write_bytes(secret)
+        disguised = self.source.parent / "key.png"
+        disguised.write_bytes(secret)
+        self.capture([str(outside), str(disguised)])
+        items, _ = self.described()
+        self.assertEqual([i["error"] for i in items], ["source_outside_allowlist", "not_an_image"])
+        self.assertEqual([p.name for p in self.directory().iterdir()], ["manifest.json"])
+        self.assertNotIn("SYNTHETIC-DO-NOT-COPY", (self.directory() / "manifest.json").read_text())
+
+    def test_extension_mismatch_and_unsupported_extension_are_not_copied(self):
+        files = [("jpeg.png", b"\xff\xd8\xff\xe0fake-jpeg"), ("png.jpg", PNG),
+                 ("image.txt", PNG), ("id_ed25519", PNG)]
+        sources = []
+        for name, content in files:
+            file = self.source.parent / name
+            file.write_bytes(content)
+            sources.append(str(file))
+        self.capture(sources)
+        self.assertEqual([i["error"] for i in self.described()[0]],
+                         ["image_extension_mismatch", "image_extension_mismatch", "unsupported_extension", "unsupported_extension"])
+        self.assertEqual([p.name for p in self.directory().iterdir()], ["manifest.json"])
+
+    def test_only_observed_screenshot_temp_pattern_is_allowed(self):
+        relative_paths = ["anything.png", "Codex/image.png", "TemporaryItems/Other/image.png",
+                          "TemporaryItems/NSIRD_screencaptureui_SHORT/image.png",
+                          "TemporaryItems/NSIRD_screencaptureui_ABC123/nested/image.png"]
+        for relative in relative_paths:
+            with self.subTest(relative=relative):
+                self.assertFalse(attachments._allowed_source(self.source_root / relative))
+        self.assertFalse(attachments._allowed_source(Path(str(self.source_root) + "-other") /
+                                                     "TemporaryItems/NSIRD_screencaptureui_ABC123/image.png"))
+        self.assertTrue(attachments._allowed_source(self.source))
+
+    def test_even_a_real_png_outside_allowlist_is_rejected_before_open(self):
+        outside = self.base / "outside.png"
+        outside.write_bytes(PNG)
+        with patch.object(attachments.os, "open", wraps=os.open) as opened:
+            self.capture([str(outside)])
+        self.assertNotIn(outside.name, [c.args[0] for c in opened.call_args_list])
+        self.assertEqual(self.described()[0][0]["error"], "source_outside_allowlist")
+
+    def test_symlink_in_allowlist_cannot_point_to_an_outside_image(self):
+        outside = self.base / "outside.png"
+        outside.write_bytes(PNG)
+        direct = self.source.parent / "link.png"
+        direct.symlink_to(outside)
+        parent_link = self.source_root / "TemporaryItems" / "NSIRD_screencaptureui_LINK12"
+        parent_link.symlink_to(self.base, target_is_directory=True)
+        self.capture([str(direct), str(parent_link / "outside.png")])
+        self.assertTrue(all(i["status"] == "failed" for i in self.described()[0]))
+        self.assertEqual([p.name for p in self.directory().iterdir()], ["manifest.json"])
+
+    def test_post_open_fd_path_is_checked_before_any_content_read(self):
+        with patch.object(attachments, "_fd_realpath", return_value=self.base / "outside.png"), \
+                patch.object(attachments.os, "read", wraps=os.read) as read:
+            self.capture()
+        read.assert_not_called()
+        self.assertEqual(self.described()[0][0]["error"], "source_outside_allowlist")
+
+    def test_changed_or_unverifiable_fd_path_fails_closed(self):
+        other = self.source.parent / "changed.png"
+        with patch.object(attachments, "_fd_realpath", return_value=other):
+            self.capture()
+        self.assertEqual(self.described()[0][0]["error"], "source_path_changed")
+        with patch.object(attachments, "_fd_realpath", side_effect=ValueError("source_path_unverifiable")):
+            self.capture(message=2)
+        self.assertEqual(self.described(message=2)[0][0]["error"], "source_path_unverifiable")
+
+    def test_hard_link_to_an_outside_image_is_rejected(self):
+        outside = self.base / "outside.png"
+        outside.write_bytes(PNG)
+        linked = self.source.parent / "linked.png"
+        os.link(outside, linked)
+        self.capture([str(linked)])
+        self.assertEqual(self.described()[0][0]["error"], "unsafe_source")
+
+    def test_known_magic_headers_match_the_allowed_extensions(self):
+        def ftyp(major, compatible):
+            payload = major + b"\0" * 4 + compatible
+            return (len(payload) + 8).to_bytes(4, "big") + b"ftyp" + payload
+        samples = [(".png", PNG), (".jpg", b"\xff\xd8\xff\xe0"), (".jpeg", b"\xff\xd8\xff\xe1"),
+                   (".gif", b"GIF87a"), (".gif", b"GIF89a"),
+                   (".webp", b"RIFF" + (12).to_bytes(4, "little") + b"WEBPVP8 "),
+                   (".heic", ftyp(b"heic", b"mif1")), (".heic", ftyp(b"mif1", b"heic")),
+                   (".heif", ftyp(b"heic", b"mif1")), (".heif", ftyp(b"mif1", b"mif1"))]
+        for i, (suffix, content) in enumerate(samples, 1):
+            with self.subTest(suffix=suffix, content=content[:16]):
+                image = self.source.parent / ("image" + suffix)
+                image.write_bytes(content)
+                self.capture([str(image)], message=i)
+                result = self.described(message=i)[0][0]
+                self.assertEqual(Path(result["cached_path"]).read_bytes(), content)
+
+    def test_truncated_unknown_and_non_heif_ftyp_headers_are_rejected(self):
+        headers = [b"\x89PNG", b"plain text", b"\0\0\0\x18ftypmif1\0\0\0\0",
+                   b"\0\0\0\x14ftypmp42\0\0\0\0heic", b"\0\0\0\x14ftypmif1\0\0\0\0avif"]
+        for header in headers:
+            self.assertIsNone(attachments._image_kind(header))
+        with self.assertRaisesRegex(ValueError, "image_extension_mismatch"):
+            attachments._validate_image(b"\0\0\0\x14ftypmif1\0\0\0\0mif1", ".heic")
+
+    def test_legacy_unvalidated_manifest_is_not_advertised(self):
+        self.capture()
+        manifest = self.directory() / "manifest.json"
+        data = json.loads(manifest.read_text())
+        data["version"] = 1
+        manifest.write_text(json.dumps(data))
+        self.assertNotIn("cached_path", self.described()[0][0])
+
 
 class RelayAttachmentTest(unittest.TestCase):
     relay = entry_tests.EntryTest.relay
@@ -218,8 +339,14 @@ class RelayAttachmentTest(unittest.TestCase):
         self.path_patch = patch.object(paths, "orch_images", return_value=self.image_root)
         self.path_patch.start()
         self.addCleanup(self.path_patch.stop)
-        self.source = Path(self.tmp.name).resolve() / "測試 screenshot.png"
-        self.source.write_bytes(b"synthetic-image")
+        self.source_root = Path(self.tmp.name).resolve() / "desktop-temp"
+        folder = self.source_root / "TemporaryItems" / "NSIRD_screencaptureui_ABC123"
+        folder.mkdir(parents=True)
+        self.root_patch = patch.object(attachments, "_desktop_temp_root", return_value=self.source_root)
+        self.root_patch.start()
+        self.addCleanup(self.root_patch.stop)
+        self.source = folder / "測試 screenshot.png"
+        self.source.write_bytes(PNG)
 
     def tearDown(self):
         entry_tests.EntryTest.tearDown(self)
@@ -237,7 +364,7 @@ class RelayAttachmentTest(unittest.TestCase):
         def check_copy(*args):
             copies = list((self.image_root / "attachments").glob("*/*/01.png"))
             self.assertEqual(len(copies), 1)
-            self.assertEqual(copies[0].read_bytes(), b"synthetic-image")
+            self.assertEqual(copies[0].read_bytes(), PNG)
             return send(*args)
         with patch.object(self.rt, "send_uds", side_effect=check_copy):
             result = self.relay()
@@ -348,6 +475,22 @@ class RelayAttachmentTest(unittest.TestCase):
 
 
 class RolloutImageTest(unittest.TestCase):
+    def test_desktop_temp_root_comes_from_os_not_tmpdir(self):
+        import subprocess
+        result = subprocess.CompletedProcess([], 0, stdout="/private/var/folders/ab/synthetic_user/T/\n")
+        with patch.object(attachments.sys, "platform", "darwin"), \
+                patch.object(attachments.subprocess, "run", return_value=result) as run, \
+                patch.dict(os.environ, {"TMPDIR": "/untrusted"}):
+            root = attachments._desktop_temp_root.__wrapped__()
+        self.assertEqual(root, Path("/private/var/folders/ab/synthetic_user/T"))
+        self.assertEqual(run.call_args.args[0], ["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"])
+
+    def test_unknown_os_temp_root_fails_closed(self):
+        import subprocess
+        result = subprocess.CompletedProcess([], 0, stdout="/Users/synthetic/Downloads\n")
+        with patch.object(attachments.sys, "platform", "darwin"), patch.object(attachments.subprocess, "run", return_value=result):
+            self.assertIsNone(attachments._desktop_temp_root.__wrapped__())
+
     def test_structured_local_image_paths_survive_text_extraction(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "rollout-date-synthetic-thread.jsonl"

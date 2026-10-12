@@ -50,7 +50,18 @@ orchd 的 MCP server 在 Native 是否也不受這份權限限制（它要寫 `O
 啟動 Orch 時已允許讀取的圖片目錄；不修改 Claude settings 或 Orch 家。非法 entry 路徑字元會以 hash 編碼。
 不從任意正文路徑抓檔案，也不下載 URL。
 
-只複製目前使用者擁有的 regular file；每張最多 20 MiB、每則最多 10 張。來源與目標的
+來源 allowlist 只包含 macOS `/usr/bin/getconf DARWIN_USER_TEMP_DIR` 回報的本使用者暫存根目錄下
+`TemporaryItems/NSIRD_screencaptureui_<6 個英數字元>/<單一檔案>`：這是現有 Entry 實例確認的
+截圖路徑。沒有證據支持更廣的 ChatGPT／Codex 暫存 pattern，因此不接受整個 `T/`、Downloads、
+專案、Orch 家或 `TMPDIR` 指定的路徑。未來其他來源需要另行確認 allowlist，拒絕時會提供 reason code。
+open 前檢查來源路徑，open 後用 macOS `F_GETPATH` 從 fd 取得實際位置，再確認仍在 allowlist
+且與原路徑一致；不會在這些檢查之前讀取內容，也拒絕 hard link。
+
+只複製目前使用者擁有的 regular file；以 magic bytes 辨認 PNG、JPEG、GIF、WebP、HEIC／HEIF，
+副檔名必須在 `.png/.jpg/.jpeg/.gif/.webp/.heic/.heif` 清單中且與 signature／ftyp brands 一致。
+`.heif` 可容納 HEIC，`.heic` 必須具有 HEIC brand；不接受 AVIF、未知或不完整的 ftyp header。
+不符時不複製，只留下不含檔案內容的診斷代碼；manifest v2 才代表經過來源及格式驗證，舊 v1
+快取不再由 inbox 提供可讀路徑。每張最多 20 MiB、每則最多 10 張。來源與目標的
 symlink（含父目錄）會拒絕，macOS 固定的 `/var`、`/tmp` 系統別名例外。使用私有目錄 0700、
 檔案及 manifest 0600、原子完成與跨程序鎖；重複 relay 不重複複製。缺檔、權限或容量問題
 不丟掉 Operator 文字，`entry_inbox` 會附失敗說明，請 Operator 重傳。
