@@ -16,7 +16,7 @@ import re
 import sys
 import traceback
 
-from . import core, entry, goals, inventory, store, verify as verification
+from . import core, entry, goals, inventory, issue_links, store, verify as verification
 from .runtime import DEFAULT_WORKER_MODEL, WORKER_MODELS, Runtime
 
 TOOLS = [
@@ -45,6 +45,7 @@ TOOLS = [
                    "description": "sol = GPT-6.1 Sol on Codex, the default and preferred worker; "
                                   "sonnet = Claude Sonnet 5.5, use when switching to another vendor"},
          "goal_id": {"type": "string", "description": "Central goal id; must belong to repo"},
+         "issue_ref": {"type": "string", "description": "Optional parent ref: github:owner/repo#N or jira:KEY-N; format validation only"},
          "goal_critical": {"type": "boolean", "description": "Requires goal_id; whether the task is critical to that goal"},
          "backend": {"type": "string", "enum": ["exec", "app-server"], "default": "exec",
                      "description": "Opt-in Codex app-server; default exec remains unchanged"},
@@ -169,6 +170,15 @@ TOOLS = [
 
 # Orch-side tools for the Desktop entry; refused unless the caller is the Orch the entry is bound to.
 TOOLS += [
+    {"name": "task_link", "annotations": {"readOnlyHint": False},
+     "description": "Link a task to one parent issue ref; supersedes its prior link. No tracker calls. Durable task-scoped key replay.",
+     "inputSchema": {"type": "object", "required": ["task_id", "ref"], "properties": {
+         "task_id": {"type": "string"}, "ref": {"type": "string"},
+         "idempotency_key": {"type": "string"}}}},
+    {"name": "task_unlink", "annotations": {"readOnlyHint": False},
+     "description": "Clear a task's parent ref, preserving link history. No task or tracker status change.",
+     "inputSchema": {"type": "object", "required": ["task_id"], "properties": {
+         "task_id": {"type": "string"}, "idempotency_key": {"type": "string"}}}},
     {"name": "entry_inbox",
      "description": "Read Operator's unread messages from the Desktop entry, verbatim from the entry thread's saved history, "
                     "with body_bytes/body_sha256. A reply carries reply_to (your question id), task_id and "
@@ -290,6 +300,12 @@ ENTRY_INSTRUCTIONS = (
 
 
 def call(name, args, thread, con, rt):
+    if name in ("task_link", "task_unlink"):
+        if not thread:
+            raise ValueError(f"{name} needs the caller's thread id")
+        options = dict(actor="orch", idempotency_key=args.get("idempotency_key"))
+        return (issue_links.link(con, args["task_id"], args["ref"], **options) if name == "task_link"
+                else issue_links.unlink(con, args["task_id"], **options))
     if name == "goal_list":
         return goals.list_goals(con, args.get("repo"), args.get("status"))
     if name == "goal_set":
@@ -304,7 +320,7 @@ def call(name, args, thread, con, rt):
                           found_by=args.get("found_by"), verify=args.get("verify"),
                           manual_checks=args.get("manual_checks"), verifies=args.get("verifies"),
                           backend=args.get("backend", "exec"), goal_id=args.get("goal_id"),
-                          goal_critical=args.get("goal_critical"))
+                          goal_critical=args.get("goal_critical"), issue_ref=args.get("issue_ref"))
         return {"task_id": t["id"], "status": t["status"], "branch": t["branch"], "worktree": t["worktree"],
                 "orch_id": thread, "model": t["model"],
                 "other_open_on_repo": core.other_open_on_repo(con, t["repo"], thread, t["id"])}

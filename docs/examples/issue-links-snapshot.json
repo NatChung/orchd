@@ -1,0 +1,726 @@
+{
+  "generated_at": 123456,
+  "source_db": "/synthetic/orchd.db",
+  "schema_version": 2,
+  "schema_fingerprint": "0aaf4051827579c263683755c0488cb0b247499997580550b31b724e4e08d09c",
+  "answered_limit": 100,
+  "goals": [
+    {
+      "id": "feb2c7f8c9dd",
+      "repo": "example",
+      "type": "goal",
+      "intent": "",
+      "pg": "Synthetic goal",
+      "sprint_goal": "",
+      "sprint_start": null,
+      "sprint_end": null,
+      "done_when": "",
+      "evidence": "",
+      "authority": "",
+      "status": "active",
+      "ball": "",
+      "blocker": "",
+      "follow_up_date": null,
+      "source": "",
+      "last_confirmed_date": null,
+      "companies": [],
+      "plan": "",
+      "v": null,
+      "j": 1,
+      "deadline": null,
+      "last_progress_date": "1970-01-02",
+      "waiting_nat_since": null,
+      "created_at": 123456.0,
+      "updated_at": 123456.0,
+      "linked_tasks": [
+        {
+          "task_id": "open",
+          "title": "Synthetic task",
+          "status": "done",
+          "goal_critical": null,
+          "issue_ref": "jira:TEST-2"
+        },
+        {
+          "task_id": "closed",
+          "title": "Synthetic task",
+          "status": "closed",
+          "goal_critical": null,
+          "issue_ref": "github:example/project#3"
+        }
+      ],
+      "history": [
+        {
+          "id": 1,
+          "actor": "synthetic-operator",
+          "created_at": 123456.0,
+          "changes": {
+            "repo": {
+              "before": null,
+              "after": "example"
+            },
+            "type": {
+              "before": null,
+              "after": "goal"
+            },
+            "intent": {
+              "before": null,
+              "after": ""
+            },
+            "pg": {
+              "before": null,
+              "after": "Synthetic goal"
+            },
+            "sprint_goal": {
+              "before": null,
+              "after": ""
+            },
+            "done_when": {
+              "before": null,
+              "after": ""
+            },
+            "evidence": {
+              "before": null,
+              "after": ""
+            },
+            "authority": {
+              "before": null,
+              "after": ""
+            },
+            "status": {
+              "before": null,
+              "after": "active"
+            },
+            "ball": {
+              "before": null,
+              "after": ""
+            },
+            "blocker": {
+              "before": null,
+              "after": ""
+            },
+            "source": {
+              "before": null,
+              "after": ""
+            },
+            "plan": {
+              "before": null,
+              "after": ""
+            },
+            "sprint_start": {
+              "before": null,
+              "after": null
+            },
+            "sprint_end": {
+              "before": null,
+              "after": null
+            },
+            "follow_up_date": {
+              "before": null,
+              "after": null
+            },
+            "last_confirmed_date": {
+              "before": null,
+              "after": null
+            },
+            "deadline": {
+              "before": null,
+              "after": null
+            },
+            "last_progress_date": {
+              "before": null,
+              "after": "1970-01-02"
+            },
+            "waiting_nat_since": {
+              "before": null,
+              "after": null
+            },
+            "companies": {
+              "before": null,
+              "after": []
+            },
+            "v": {
+              "before": null,
+              "after": null
+            },
+            "j": {
+              "before": null,
+              "after": 1
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "tasks": [
+    {
+      "id": "open",
+      "title": "Synthetic task",
+      "status": "done",
+      "repo": "example",
+      "goal_id": "feb2c7f8c9dd",
+      "orch_thread": "orch-current",
+      "created_at": 1.0,
+      "updated_at": 2.0,
+      "issue_ref": "jira:TEST-2",
+      "latest_progress": {
+        "id": 1,
+        "task_id": "open",
+        "kind": "progress",
+        "evidence": "Synthetic evidence",
+        "wake_error": null,
+        "created_at": 123456.0,
+        "read_at": null,
+        "recipient_orch": null,
+        "notice_error": null,
+        "notice_recipient": null,
+        "entry_reply_id": null
+      },
+      "latest_report": {
+        "id": 2,
+        "task_id": "open",
+        "kind": "report",
+        "evidence": "Synthetic evidence",
+        "wake_error": null,
+        "created_at": 123456.0,
+        "read_at": null,
+        "recipient_orch": null,
+        "notice_error": null,
+        "notice_recipient": null,
+        "entry_reply_id": null
+      }
+    },
+    {
+      "id": "unlinked",
+      "title": "Synthetic task",
+      "status": "done",
+      "repo": "example",
+      "goal_id": null,
+      "orch_thread": "orch-current",
+      "created_at": 1.0,
+      "updated_at": 2.0,
+      "issue_ref": null,
+      "latest_progress": null,
+      "latest_report": null
+    }
+  ],
+  "entry_messages": [
+    {
+      "id": 1,
+      "entry_id": "synthetic-entry",
+      "orch_id": "orch-current",
+      "direction": "out",
+      "kind": "question",
+      "body_bytes": 18,
+      "body_sha256": "synthetic-hash",
+      "source_turn": null,
+      "source_thread": null,
+      "source_item_id": null,
+      "task_id": "open",
+      "source_message_id": 1,
+      "reply_to": null,
+      "question_state": "current",
+      "delivery": "delivered",
+      "delivery_error": null,
+      "recipient": null,
+      "attempts": 0,
+      "created_at": 1.0,
+      "delivered_at": null,
+      "read_at": null,
+      "version": 1,
+      "supersedes": null,
+      "superseded_by": null,
+      "revisit_at": null,
+      "note": null,
+      "reason": null,
+      "queue_order": null,
+      "notified_at": null,
+      "revisit_due": false,
+      "history": [],
+      "body": "Synthetic question",
+      "binding_current": true,
+      "task_open": true,
+      "task": {
+        "id": "open",
+        "title": "Synthetic task",
+        "status": "done",
+        "repo": "example",
+        "goal_id": "feb2c7f8c9dd",
+        "orch_thread": "orch-current",
+        "created_at": 1.0,
+        "updated_at": 2.0,
+        "issue_ref": "jira:TEST-2"
+      },
+      "audience": "nat"
+    },
+    {
+      "id": 2,
+      "entry_id": "synthetic-entry",
+      "orch_id": "orch-current",
+      "direction": "out",
+      "kind": "question",
+      "body_bytes": 18,
+      "body_sha256": "synthetic-hash",
+      "source_turn": null,
+      "source_thread": null,
+      "source_item_id": null,
+      "task_id": "open",
+      "source_message_id": 1,
+      "reply_to": null,
+      "question_state": "queued",
+      "delivery": "held",
+      "delivery_error": null,
+      "recipient": null,
+      "attempts": 0,
+      "created_at": 2.0,
+      "delivered_at": null,
+      "read_at": null,
+      "version": 1,
+      "supersedes": null,
+      "superseded_by": null,
+      "revisit_at": null,
+      "note": null,
+      "reason": null,
+      "queue_order": null,
+      "notified_at": null,
+      "revisit_due": false,
+      "history": [],
+      "body": "Synthetic question",
+      "binding_current": true,
+      "task_open": true,
+      "task": {
+        "id": "open",
+        "title": "Synthetic task",
+        "status": "done",
+        "repo": "example",
+        "goal_id": "feb2c7f8c9dd",
+        "orch_thread": "orch-current",
+        "created_at": 1.0,
+        "updated_at": 2.0,
+        "issue_ref": "jira:TEST-2"
+      },
+      "audience": "nat"
+    },
+    {
+      "id": 3,
+      "entry_id": "synthetic-entry",
+      "orch_id": "orch-old",
+      "direction": "out",
+      "kind": "question",
+      "body_bytes": 18,
+      "body_sha256": "synthetic-hash",
+      "source_turn": null,
+      "source_thread": null,
+      "source_item_id": null,
+      "task_id": "closed",
+      "source_message_id": 1,
+      "reply_to": null,
+      "question_state": "current",
+      "delivery": "delivered",
+      "delivery_error": null,
+      "recipient": null,
+      "attempts": 0,
+      "created_at": 3.0,
+      "delivered_at": null,
+      "read_at": null,
+      "version": 1,
+      "supersedes": null,
+      "superseded_by": null,
+      "revisit_at": null,
+      "note": null,
+      "reason": null,
+      "queue_order": null,
+      "notified_at": null,
+      "revisit_due": false,
+      "history": [],
+      "body": "Synthetic question",
+      "binding_current": false,
+      "task_open": false,
+      "task": {
+        "id": "closed",
+        "title": "Synthetic task",
+        "status": "closed",
+        "repo": "example",
+        "goal_id": "feb2c7f8c9dd",
+        "orch_thread": "orch-current",
+        "created_at": 1.0,
+        "updated_at": 2.0,
+        "issue_ref": "github:example/project#3"
+      },
+      "audience": "nat"
+    },
+    {
+      "id": 5,
+      "entry_id": "synthetic-entry",
+      "orch_id": "orch-current",
+      "direction": "out",
+      "kind": "question",
+      "body_bytes": 18,
+      "body_sha256": "synthetic-hash",
+      "source_turn": null,
+      "source_thread": null,
+      "source_item_id": null,
+      "task_id": null,
+      "source_message_id": 1,
+      "reply_to": null,
+      "question_state": "answered",
+      "delivery": "delivered",
+      "delivery_error": null,
+      "recipient": null,
+      "attempts": 0,
+      "created_at": 5.0,
+      "delivered_at": null,
+      "read_at": null,
+      "version": 1,
+      "supersedes": null,
+      "superseded_by": null,
+      "revisit_at": null,
+      "note": null,
+      "reason": null,
+      "queue_order": null,
+      "notified_at": null,
+      "revisit_due": false,
+      "history": [],
+      "body": "Synthetic question",
+      "binding_current": true,
+      "task_open": null,
+      "task": null,
+      "audience": "nat"
+    },
+    {
+      "id": 4,
+      "entry_id": "synthetic-entry",
+      "orch_id": "orch-current",
+      "direction": "out",
+      "kind": "question",
+      "body_bytes": 18,
+      "body_sha256": "synthetic-hash",
+      "source_turn": null,
+      "source_thread": null,
+      "source_item_id": null,
+      "task_id": "open",
+      "source_message_id": 1,
+      "reply_to": null,
+      "question_state": "answered",
+      "delivery": "delivered",
+      "delivery_error": null,
+      "recipient": null,
+      "attempts": 0,
+      "created_at": 4.0,
+      "delivered_at": null,
+      "read_at": null,
+      "version": 1,
+      "supersedes": null,
+      "superseded_by": null,
+      "revisit_at": null,
+      "note": null,
+      "reason": null,
+      "queue_order": null,
+      "notified_at": null,
+      "revisit_due": false,
+      "history": [],
+      "body": "Synthetic question",
+      "binding_current": true,
+      "task_open": true,
+      "task": {
+        "id": "open",
+        "title": "Synthetic task",
+        "status": "done",
+        "repo": "example",
+        "goal_id": "feb2c7f8c9dd",
+        "orch_thread": "orch-current",
+        "created_at": 1.0,
+        "updated_at": 2.0,
+        "issue_ref": "jira:TEST-2"
+      },
+      "audience": "nat"
+    }
+  ],
+  "replies": [
+    {
+      "id": 6,
+      "entry_id": "synthetic-entry",
+      "orch_id": "orch-current",
+      "direction": "in",
+      "kind": "reply",
+      "body_bytes": 15,
+      "body_sha256": "synthetic-hash",
+      "source_turn": null,
+      "source_thread": null,
+      "source_item_id": null,
+      "task_id": "open",
+      "source_message_id": null,
+      "reply_to": 4,
+      "question_state": null,
+      "delivery": "sending",
+      "delivery_error": null,
+      "recipient": null,
+      "attempts": 0,
+      "created_at": 6.0,
+      "delivered_at": null,
+      "read_at": null,
+      "version": 1,
+      "supersedes": null,
+      "superseded_by": null,
+      "revisit_at": null,
+      "note": null,
+      "reason": null,
+      "queue_order": null,
+      "notified_at": null,
+      "processing": {
+        "saved": true,
+        "saved_at": 6.0,
+        "orch_notification": "uncertain",
+        "orch_notified_at": null,
+        "orch_read_at": null,
+        "worker_forwarded": null,
+        "worker_answer_ids": [],
+        "worker_confirmed": "unknown",
+        "worker_executed": "unknown"
+      }
+    }
+  ],
+  "worker_questions": [
+    {
+      "id": 3,
+      "task_id": "open",
+      "kind": "question",
+      "evidence": "Synthetic evidence",
+      "wake_error": null,
+      "created_at": 123456.0,
+      "read_at": null,
+      "recipient_orch": null,
+      "notice_error": null,
+      "notice_recipient": null,
+      "entry_reply_id": null,
+      "body": "Synthetic worker message",
+      "task": {
+        "id": "open",
+        "title": "Synthetic task",
+        "status": "done",
+        "repo": "example",
+        "goal_id": "feb2c7f8c9dd",
+        "orch_thread": "orch-current",
+        "created_at": 1.0,
+        "updated_at": 2.0,
+        "issue_ref": "jira:TEST-2"
+      },
+      "audience": "orch",
+      "processing": "awaiting_orch_triage"
+    }
+  ],
+  "worker_answers": [
+    {
+      "id": 5,
+      "task_id": "open",
+      "kind": "answer_queued",
+      "evidence": "Synthetic evidence",
+      "wake_error": null,
+      "created_at": 123456.0,
+      "read_at": null,
+      "recipient_orch": null,
+      "notice_error": null,
+      "notice_recipient": null,
+      "entry_reply_id": null,
+      "processing": "pending",
+      "reply_id": null
+    },
+    {
+      "id": 6,
+      "task_id": "open",
+      "kind": "answer_queued",
+      "evidence": "Synthetic evidence",
+      "wake_error": null,
+      "created_at": 123456.0,
+      "read_at": 8.0,
+      "recipient_orch": null,
+      "notice_error": null,
+      "notice_recipient": null,
+      "entry_reply_id": null,
+      "processing": "transport_accepted",
+      "reply_id": null
+    },
+    {
+      "id": 7,
+      "task_id": "open",
+      "kind": "answer",
+      "evidence": "Synthetic evidence",
+      "wake_error": null,
+      "created_at": 123456.0,
+      "read_at": null,
+      "recipient_orch": null,
+      "notice_error": null,
+      "notice_recipient": null,
+      "entry_reply_id": null,
+      "processing": "transport_accepted",
+      "reply_id": null
+    }
+  ],
+  "worker_deliveries": [],
+  "issue_links": {
+    "version": 1,
+    "available": true,
+    "history": [
+      {
+        "message_id": 8,
+        "task_id": "open",
+        "version": 1,
+        "ref": "github:example/project#1",
+        "actor": "operator",
+        "created_at": 123456,
+        "supersedes": null,
+        "idempotency_key": "synthetic-first",
+        "receipt": {
+          "status": "linked",
+          "task_id": "open",
+          "issue_ref": "github:example/project#1",
+          "changed": true,
+          "actor": "operator",
+          "created_at": 123456,
+          "supersedes": null,
+          "idempotency_key": "synthetic-first",
+          "message_id": 8
+        }
+      },
+      {
+        "message_id": 9,
+        "task_id": "open",
+        "version": 1,
+        "ref": "jira:TEST-2",
+        "actor": "orch",
+        "created_at": 123456,
+        "supersedes": 8,
+        "idempotency_key": "synthetic-second",
+        "receipt": {
+          "status": "linked",
+          "task_id": "open",
+          "issue_ref": "jira:TEST-2",
+          "changed": true,
+          "actor": "orch",
+          "created_at": 123456,
+          "supersedes": 8,
+          "idempotency_key": "synthetic-second",
+          "message_id": 9
+        }
+      },
+      {
+        "message_id": 10,
+        "task_id": "open",
+        "version": 1,
+        "ref": null,
+        "actor": "orch",
+        "created_at": 123456,
+        "supersedes": 9,
+        "idempotency_key": "synthetic-unlink",
+        "receipt": {
+          "status": "unlinked",
+          "task_id": "open",
+          "issue_ref": null,
+          "changed": true,
+          "actor": "orch",
+          "created_at": 123456,
+          "supersedes": 9,
+          "idempotency_key": "synthetic-unlink",
+          "message_id": 10
+        }
+      },
+      {
+        "message_id": 11,
+        "task_id": "open",
+        "version": 1,
+        "ref": "jira:TEST-2",
+        "actor": "orch",
+        "created_at": 123456,
+        "supersedes": 10,
+        "idempotency_key": "synthetic-relink",
+        "receipt": {
+          "status": "linked",
+          "task_id": "open",
+          "issue_ref": "jira:TEST-2",
+          "changed": true,
+          "actor": "orch",
+          "created_at": 123456,
+          "supersedes": 10,
+          "idempotency_key": "synthetic-relink",
+          "message_id": 11
+        }
+      },
+      {
+        "message_id": 12,
+        "task_id": "closed",
+        "version": 1,
+        "ref": "github:example/project#3",
+        "actor": "orch",
+        "created_at": 123456,
+        "supersedes": null,
+        "idempotency_key": "synthetic-closed",
+        "receipt": {
+          "status": "linked",
+          "task_id": "closed",
+          "issue_ref": "github:example/project#3",
+          "changed": true,
+          "actor": "orch",
+          "created_at": 123456,
+          "supersedes": null,
+          "idempotency_key": "synthetic-closed",
+          "message_id": 12
+        }
+      }
+    ]
+  },
+  "pending_worker_questions": [],
+  "worker_question_resolutions": [],
+  "binding_counts": [
+    {
+      "entry_id": "synthetic-entry",
+      "orch_id": "orch-current",
+      "counts": [
+        {
+          "direction": "in",
+          "kind": "reply",
+          "state": "uncertain",
+          "n": 1
+        },
+        {
+          "direction": "out",
+          "kind": "question",
+          "state": "delivered",
+          "n": 4
+        },
+        {
+          "direction": "out",
+          "kind": "question",
+          "state": "held",
+          "n": 1
+        }
+      ],
+      "current_counts": [
+        {
+          "direction": "in",
+          "kind": "reply",
+          "state": "uncertain",
+          "n": 1
+        },
+        {
+          "direction": "out",
+          "kind": "question",
+          "state": "delivered",
+          "n": 3
+        },
+        {
+          "direction": "out",
+          "kind": "question",
+          "state": "held",
+          "n": 1
+        }
+      ],
+      "historical_counts": [
+        {
+          "direction": "out",
+          "kind": "question",
+          "state": "delivered",
+          "n": 1
+        }
+      ]
+    }
+  ]
+}

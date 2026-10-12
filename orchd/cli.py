@@ -129,6 +129,15 @@ def build_parser():
         if action == "supersede":
             command.add_argument("--text", required=True, help="new question; old answers are not reused")
             command.add_argument("--task-id", help="explicit task link for the new question")
+    task = sub.add_parser("task", help="link or unlink a task's parent issue reference")
+    task_actions = task.add_subparsers(dest="task_action", required=True)
+    for action in ("link", "unlink"):
+        command = task_actions.add_parser(action, description="Always prints a JSON receipt; no tracker writes.")
+        command.add_argument("--task", required=True)
+        if action == "link":
+            command.add_argument("--ref", required=True)
+        command.add_argument("--actor", choices=("orch", "operator"), default="orch")
+        command.add_argument("--idempotency-key", help="Task-scoped durable replay key; generated if omitted")
     task_questions = sub.add_parser("task-question", help="answer the latest pending worker question directly")
     task_question_actions = task_questions.add_subparsers(dest="task_question_action", required=True)
     task_answer = task_question_actions.add_parser("answer", description="Always prints a JSON receipt.")
@@ -357,6 +366,22 @@ def main(argv=None):
                 con.close()
             if snap is not None:
                 snap.close()
+    if args.cmd == "task":
+        import sqlite3
+        from orchd import issue_links
+        con = None
+        try:
+            con = store.connect()
+            options = dict(actor=args.actor, idempotency_key=args.idempotency_key)
+            result = (issue_links.link(con, args.task, args.ref, **options) if args.task_action == "link"
+                      else issue_links.unlink(con, args.task, **options))
+        except (ValueError, KeyError, RuntimeError, OSError, sqlite3.Error) as error:
+            result = dict(status="failed", task_id=args.task, error=str(error))
+        finally:
+            if con is not None:
+                con.close()
+        print(json.dumps(result, ensure_ascii=False, indent=1))
+        return 1 if result["status"] == "failed" else 0
     if args.cmd == "task-question":
         import sqlite3
         from orchd import task_question_answers
