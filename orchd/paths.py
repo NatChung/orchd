@@ -4,6 +4,7 @@
 defaults from that user's HOME, not ours. State (the SQLite DB) stays in ORCHD_HOME, outside these folders.
 """
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -22,6 +23,15 @@ def orch_home(home=None, env=None):
 def interface_home(home=None, env=None):
     env = os.environ if env is None else env
     return Path(env.get("ORCHD_INTERFACE_HOME") or root(home, env) / "interface")
+
+
+def orch_images(home=None):
+    """Claude's already-readable image tree for this Orch cwd (not a new permission)."""
+    cwd = Path(home or orch_home()).resolve()
+    key = re.sub(r"[^a-zA-Z0-9]", "-", str(cwd))
+    if len(key) > 200:
+        raise RuntimeError("Orch home exceeds Claude's image-directory key limit (200 characters)")
+    return Path("/tmp").resolve() / f"claude-{os.getuid()}" / key
 
 
 def config_dir(home=None, env=None):

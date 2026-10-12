@@ -38,6 +38,10 @@ class EntryRuntime(FakeRuntime):
 class EntryTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        cache = Path(self.tmp.name).resolve() / "claude-test" / "synthetic-home"
+        self.cache_patch = patch("orchd.entry_attachments.paths.orch_images", return_value=cache)
+        self.cache_patch.start()
+        self.addCleanup(self.cache_patch.stop)
         self.con = store.connect(Path(self.tmp.name) / "t.db")
         self.rt = EntryRuntime()
         self.orch = core.start_orch(self.con, self.rt, "opus")["id"]

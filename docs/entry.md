@@ -42,6 +42,41 @@ orchd 的 MCP server 在 Native 是否也不受這份權限限制（它要寫 `O
 | Orch | `ask_nat(text?, task_id?, quote_worker_question?)` | 一次一題，其餘排隊；可原樣引用 worker 的問題（對外預覽） |
 | Orch | `answer(task_id, entry_reply_id=N)` | 把 Operator 的回覆原文轉給 worker；task 不符就拒絕 |
 
+## 圖片附件
+
+`relay` 保留 rollout `UserMessage.content` 的結構化 `local_image.path`，立即複製到
+`/tmp/claude-<uid>/<Orch cwd key>/attachments/<entry>/<message>/`（macOS 會呈現 resolve 後的
+`/private/tmp/...`），完成後才通知 Orch。uid 與 cwd key 由 `paths.orch_home()` 推導，沿用
+啟動 Orch 時已允許讀取的圖片目錄；不修改 Claude settings 或 Orch 家。非法 entry 路徑字元會以 hash 編碼。
+不從任意正文路徑抓檔案，也不下載 URL。
+
+來源 allowlist 只包含 macOS `/usr/bin/getconf DARWIN_USER_TEMP_DIR` 回報的本使用者暫存根目錄下
+`TemporaryItems/NSIRD_screencaptureui_<6 個英數字元>/<單一檔案>`：這是現有 Entry 實例確認的
+截圖路徑。沒有證據支持更廣的 ChatGPT／Codex 暫存 pattern，因此不接受整個 `T/`、Downloads、
+專案、Orch 家或 `TMPDIR` 指定的路徑。未來其他來源需要另行確認 allowlist，拒絕時會提供 reason code。
+open 前檢查來源路徑，open 後用 macOS `F_GETPATH` 從 fd 取得實際位置，再確認仍在 allowlist
+且與原路徑一致；不會在這些檢查之前讀取內容，也拒絕 hard link。
+
+只複製目前使用者擁有的 regular file；以 magic bytes 辨認 PNG、JPEG、GIF、WebP、HEIC／HEIF，
+副檔名必須在 `.png/.jpg/.jpeg/.gif/.webp/.heic/.heif` 清單中且與 signature／ftyp brands 一致。
+`.heif` 可容納 HEIC，`.heic` 必須具有 HEIC brand；不接受 AVIF、未知或不完整的 ftyp header。
+不符時不複製，只留下不含檔案內容的診斷代碼；manifest v2 才代表經過來源及格式驗證，舊 v1
+快取不再由 inbox 提供可讀路徑。每張最多 20 MiB、每則最多 10 張。來源與目標的
+symlink（含父目錄）會拒絕，macOS 固定的 `/var`、`/tmp` 系統別名例外。使用私有目錄 0700、
+檔案及 manifest 0600、原子完成與跨程序鎖；重複 relay 不重複複製。缺檔、權限或容量問題
+不丟掉 Operator 文字，`entry_inbox` 會附失敗說明，請 Operator 重傳。
+
+SQLite 的 `body`、`source_raw` 與原文 digest 不變，也不改 schema。`entry_inbox.body` 保留原文，
+再附原路徑與 Orch 可讀的新路徑；`attachments` 提供複製結果。回傳的 `body_bytes/body_sha256`
+對應呈現後的 body，`source_body_bytes/source_body_sha256` 對應 DB 原文；沒有附件時維持原有格式。
+`answer(entry_reply_id=...)` 仍轉送 DB 原文，不包含呈現用的附件補充。
+
+保存期限為複製後 7 天，`relay`／`entry_inbox` 活動時最多每小時清理一次，只清理 orchd 自有的
+`attachments` 子樹，不碰 Claude 的 session images。長期無呼叫時可能留超過 7 天；OS 或
+重開機也可能提早清除。快取過期或遺失時不再讀來源補拷，而是明確請 Operator 重傳；原 rollout
+的附件 metadata（或 Desktop 的檔案包裝文字）仍可提供缺檔提示。這不是持久的附件封存，也不
+回補舊訊息的附件。未在 live Desktop／Orch 驗證讀圖；自動化測試使用合成檔案與隔離 DB。
+
 狀態：`pending`／`held`（排隊中的題目）／`delivered`／`failed`／`uncertain`／`not_delivered`（Orch 離線，已保存）。
 `delivered` 只代表送到 Orch 的 socket、Desktop queue 或工具結果，不代表 Operator 已讀，更不代表同意。
 `uncertain`（送出但收據沒寫進去）不會自動重送。

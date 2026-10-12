@@ -18,7 +18,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from . import orch_revive, paths, question_summary, store
+from . import entry_attachments, orch_revive, paths, question_summary, store
 from .orch_health import owner_health
 
 DEFAULT_ENTRY = "desktop"
@@ -464,6 +464,7 @@ def _state(row):
 
 def relay(con, rt, entry_id, thread, turn_id=None, reply_to=None):
     """Entry tool: relay Operator's latest message in this thread, read from the rollout, to the bound Orch."""
+    entry_attachments.cleanup()
     entry, resumed = touch(con, entry_id, thread)
     try:
         source = _source(rt, thread, turn_id)
@@ -513,6 +514,7 @@ def relay(con, rt, entry_id, thread, turn_id=None, reply_to=None):
                     note="the voice model re-sent what was already relayed in this turn; nothing new to pass on")
     body = voice["text"] if voice else source["text"]
     note = None
+    attachment_error = None
     try:
         with store.immediate(con):
             entry = get_entry(con, entry_id)
@@ -542,6 +544,8 @@ def relay(con, rt, entry_id, thread, turn_id=None, reply_to=None):
                 if current is not None:
                     note = (f"question {current['id']} is still open; this was relayed as a new message, "
                             "not as its answer")
+            if source.get("local_images"):
+                attachment_error = entry_attachments.capture(entry_id, message_id, source["local_images"])
     except sqlite3.IntegrityError:  # a concurrent relay stored the same source item first
         existing = con.execute("SELECT * FROM entry_messages WHERE source_thread=? AND source_item_id=?",
                                (thread, source["item_id"])).fetchone()
@@ -552,6 +556,8 @@ def relay(con, rt, entry_id, thread, turn_id=None, reply_to=None):
     status = sent or ("delivered" if row["read_at"] else _state(row))
     health = reachability(con, rt, entry["orch_id"])
     result = dict(_public(row), status=status, orch_id=entry["orch_id"], orch_health=health, resumed=resumed)
+    if attachment_error:
+        result["attachment_error"] = attachment_error
     if status == "not_delivered":
         result["note"] = (f"Orch {entry['orch_id']} is offline ({health['reason']}): the message could not be "
                           "passed on and is kept; it is sent when that Orch is back. No Orch was started.")
@@ -616,8 +622,9 @@ def _questions(con, entry):
                 queued_questions=[dict(id=r["id"], task_id=r["task_id"]) for r in queued_questions(con, entry)])
 
 
-def inbox(con, orch_id):
-    """Orch tool: Operator's unread messages and replies, verbatim, with their question/task links."""
+def inbox(con, orch_id, rt=None):
+    """Orch tool: original text plus attachment-copy paths, with separate source/presentation digests."""
+    entry_attachments.cleanup()
     entry = _entry_of(con, orch_id)
     now = time.time()
     with store.immediate(con):
@@ -626,12 +633,27 @@ def inbox(con, orch_id):
         con.executemany("UPDATE entry_messages SET read_at=?, delivery='delivered', "
                         "delivered_at=COALESCE(delivered_at, ?) WHERE id=?", [(now, now, r["id"]) for r in rows])
     messages = []
+    sources_by_thread = {}
     for r in rows:
         data = _public(r, body=True)
         data.pop("delivery")
         data.pop("delivery_error", None)
         if r["source_message_id"] is not None:
             data["worker_question_message_id"] = r["source_message_id"]
+        # Rollout metadata identifies attachments even after the OS purges their
+        # manifest. Inspect it once per source thread; never reopen the images.
+        sources = []
+        if rt is not None and r["source_thread"] and r["source_item_id"]:
+            thread = r["source_thread"]
+            if thread not in sources_by_thread:
+                try:
+                    sources_by_thread[thread] = {m["item_id"]: m.get("local_images", [])
+                                                 for m in rt.codex_user_messages(thread)}
+                except (OSError, ValueError):
+                    sources_by_thread[thread] = {}
+            sources = sources_by_thread[thread].get(r["source_item_id"], [])
+        sources = sources or entry_attachments.mentioned_images(r["body"])
+        entry_attachments.present(data, entry["id"], sources)
         messages.append(data)
     return dict(entry_id=entry["id"], messages=messages, **_questions(con, entry))
 

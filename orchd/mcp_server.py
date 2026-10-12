@@ -180,8 +180,11 @@ TOOLS += [
      "inputSchema": {"type": "object", "required": ["task_id"], "properties": {
          "task_id": {"type": "string"}, "idempotency_key": {"type": "string"}}}},
     {"name": "entry_inbox",
-     "description": "Read Operator's unread messages from the Desktop entry, verbatim from the entry thread's saved history, "
-                    "with body_bytes/body_sha256. A reply carries reply_to (your question id), task_id and "
+     "description": "Read Operator's unread messages from the Desktop entry. Original text is preserved; local images "
+                    "have private temporary copy paths appended to body (or an unavailable warning). "
+                    "body_bytes/body_sha256 cover the returned body; source_body_bytes/source_body_sha256, when present, "
+                    "cover the saved original. Copies can expire: ask Operator to reattach if unavailable. "
+                    "A reply carries reply_to (your question id), task_id and "
                     "worker_question_message_id: forward it to the worker with answer(task_id, entry_reply_id=<message_id>) "
                     "so the text is not retyped. A message starting with [語音輸入…] came by voice: it may hold "
                     "speech-recognition errors, so when it is unclear what Operator wants, ask with send_to_nat or ask_nat "
@@ -342,7 +345,7 @@ def call(name, args, thread, con, rt):
     if name == "interrupt":
         return core.interrupt(con, rt, args["task_id"], args.get("text"))
     if name == "entry_inbox":
-        return entry.inbox(con, thread)
+        return entry.inbox(con, thread, rt)
     if name == "send_to_nat":
         return entry.send_to_nat(con, rt, thread, args.get("text"))
     if name == "ask_nat":
