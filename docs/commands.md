@@ -69,6 +69,8 @@ Run `orchd init` first to create the interface configuration. `binding` defaults
 | `orchd snapshot --json [--schema-version 1|2] [--answered-limit N]` | Read dashboard JSON from a private DB/WAL copy without migrations or inbox consumption. | `orchd snapshot --json --answered-limit 100` |
 | `orchd task-question answer --task ID --question-id ID --text-file PATH --idempotency-key KEY [--actor dashboard\|operator]` | Answer the latest pending worker question with durable idempotency; prints a JSON receipt. | `orchd task-question answer --task abc --question-id 42 --text-file /tmp/answer.txt --idempotency-key dashboard-42` |
 | `orchd task-question dismiss --task ID --question-id ID --reason TEXT --idempotency-key KEY [--actor dashboard\|operator]` | Dismiss an expired decision with a durable audit and Orch inbox event; sends nothing to the worker. | `orchd task-question dismiss --task abc --question-id 42 --reason expired --idempotency-key dismiss-42` |
+| `orchd task link --task ID --ref REF [--actor orch\|operator] [--idempotency-key K]` | Set the parent ref with an event superseding the previous link; prints JSON, no tracker writes. | `orchd task link --task example-task --ref jira:DEMO-7` |
+| `orchd task unlink --task ID [--actor orch\|operator] [--idempotency-key K]` | Clear the current ref while preserving history; no task or tracker status change. | `orchd task unlink --task example-task` |
 | `orchd goal add\|set\|show\|list\|export` | Manage central goals through the five subcommands below. | `orchd goal list` |
 | `orchd goal add REPO [GOAL_OPTIONS]` | Create a goal for a repository and record its audit actor. | `orchd goal add example --type goal --intent "Ship a reviewed change"` |
 | `orchd goal set GOAL_ID [GOAL_OPTIONS]` | Update a goal and its audit history. | `orchd goal set GOAL_ID --status waiting --ball Operator` |
@@ -79,6 +81,46 @@ Run `orchd init` first to create the interface configuration. `binding` defaults
 Both `--since` flags use local HH:MM today. `watch` starts after the last message ID whose timestamp is before the cutoff, then follows new messages; it defaults to the last 30 minutes. `summary` selects tasks created at or after the cutoff and summarizes all messages belonging to those tasks; it defaults to all tasks. Board writes a file; rerun to refresh it.
 
 `snapshot` requires `--json`. It includes goals/history, open tasks, entry questions/reply metadata and separate worker question/answer evidence. `--answered-limit` is non-negative and defaults to 100; it limits only recent answered entry questions, while current/queued questions (including held) remain unlimited. Historical bindings and closed task links stay visible. Worker questions await Orch triage; worker confirmation/execution remains unknown. The output includes `generated_at`, `source_db`, output contract `schema_version` and actual database `schema_fingerprint`. Missing, corrupt or incomplete databases produce an error and a non-zero exit code.
+
+### Parent references: CLI, MCP and snapshot v2
+
+These behaviors match main `9bfb35a`. REF is `github:owner/repo#N` or
+`jira:KEY-N`, with positive N. Validation checks format only, without checking
+tracker existence or access. Both CLI actions default actor to orch; actor is
+audit attribution. Keys are task-scoped and generated/returned when omitted.
+Replaying the same key and payload returns the original receipt without restoring
+a superseded ref; reusing a key with a different ref or actor fails. JSON receipts
+include task_id, issue_ref, changed, actor, created_at, message_id, supersedes,
+idempotency_key and status. Failures print JSON and exit 1.
+
+Links use last-writer-wins supersession, preserving history rather than rejecting
+replacement. There is no expected-ref flag or conditional update on the old value.
+Orch maintains refs and must confirm the current ref before changing it.
+
+MCP tools (there is no shell dispatch command):
+
+- `dispatch` accepts optional `issue_ref`; omission leaves the task unlinked.
+  Other required arguments retain their existing rules.
+- `task_link` requires `task_id` and `ref`, with optional `idempotency_key`.
+- `task_unlink` requires `task_id`, with optional `idempotency_key`.
+
+Both link tools require a caller thread id and use actor orch. They do not check
+whether that Orch owns the task, like close and followup; Orch must verify the task.
+Dispatch spawns the worker before writing the link. A link failure after spawn
+returns an error, but the task/worker may already run without a link. Use list_open
+or snapshot to identify the created task and current ref, then repair with
+task_link or CLI link instead of blindly dispatching another worker.
+
+`orchd snapshot --json --schema-version 2` includes `issue_ref` on top-level and
+embedded tasks (null when unlinked), plus
+`issue_links: {version: 1, available: true, history: [...]}`. History retains link,
+unlink and superseded audit events. v1 omits these additions. Snapshot stays
+read-only, without migrations or tracker calls. Missing fields in older versions
+do not prove that tasks have no parent.
+
+For older MCP dispatch schemas without issue_ref, record the formal parent in
+instructions and report the unavailable dependency. After upgrading, confirm
+and add the formal link. See [issue-linked workflow](issue-linked-workflow.md).
 
 ### GOAL_OPTIONS: every add/set flag
 
