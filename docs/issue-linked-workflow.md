@@ -85,8 +85,9 @@ worker ask、Operator 回答、訊號、progress、report 留 DB，不鏡像到�
 
 ### 版本依賴與舊版退路
 
-[PR #25](https://github.com/NatChung/orchd/pull/25) 的 `e34b5e3` 定義以下
-contract；合併並升級前，使用中的 CLI／MCP 不一定提供這些功能。
+以下 contract 以 main 的 `9bfb35a`（已合併
+[PR #25](https://github.com/NatChung/orchd/pull/25)）實際行為為準；
+尚未升級的 CLI／MCP 不一定提供這些功能。
 核對 MCP dispatch schema 與 CLI `--help`，升級後重啟必要的 session／MCP。
 
 - MCP：dispatch 可選 `issue_ref`；`task_link` 使用 `task_id`、`ref`，
@@ -106,7 +107,17 @@ orchd task unlink --task example-task
 連結，回報「issue_ref 依賴未就緒」，沿既有 dispatch 執行；
 不要傳不支援的參數，也不要宣稱文字已成為正式關聯。升級後逐筆核對，
 透過 task_link／CLI link 補關聯，不自動回填歷史任務。
-既有關聯修改前核對目前參照；此介面不提供舊值條件更新保護。遇到歸屬爭議先確認，不直接覆寫。
+refs 由 Orch 維護，換 ref 前先確認目前 ref。link 採 last-writer-wins：
+新事件以 `supersedes` 指向前一事件，保留歷史，但不拒絕覆寫既有 link，
+也沒有舊值條件更新保護。`task_link`／`task_unlink` 需要 caller thread id，
+但不檢查該 Orch 是否擁有 task（與 close、followup 一樣）；
+Orch 必須自行確認要維護的 task 與主票。
+
+dispatch 先建立 task 並 spawn worker，再寫 issue link。spawn 後寫 link
+失敗時，dispatch 會報錯，但 worker 可能已在沒有 link 的狀態下執行。
+Orch 應先用 list_open／snapshot 核對已建立 task 的 id 與目前 ref，
+再用 `task_link` 或 `orchd task link --task ID --ref REF` 補上關聯；
+不要只因 dispatch 報錯就重派另一個 worker。
 
 查 snapshot v2 時選同 ref 的 tasks，再用 task id 找 DB 問答／progress／report；
 舊版退路期間只以已核對的 task id 找 DB 紀錄，不從自由文字自動推定關聯。

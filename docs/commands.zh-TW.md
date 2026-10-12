@@ -69,6 +69,8 @@ Orch 指令現在必須明確使用 `orch start|stop|restart|list|attach`。舊�
 | `orchd snapshot --json [--schema-version 1|2] [--answered-limit N]` | 從私人 DB／WAL 副本讀取看板 JSON，不遷移或消耗 inbox。 | `orchd snapshot --json --answered-limit 100` |
 | `orchd task-question answer --task ID --question-id ID --text-file PATH --idempotency-key KEY [--actor dashboard\|operator]` | 直接回答最新待答 worker 問題，持久化冪等，輸出 JSON 收據。 | `orchd task-question answer --task abc --question-id 42 --text-file /tmp/answer.txt --idempotency-key dashboard-42` |
 | `orchd task-question dismiss --task ID --question-id ID --reason TEXT --idempotency-key KEY [--actor dashboard\|operator]` | 將過期決定 dismiss，保存稽核並通知 Orch inbox，不送 worker、不 close 任務。 | `orchd task-question dismiss --task abc --question-id 42 --reason expired --idempotency-key dismiss-42` |
+| `orchd task link --task ID --ref REF [--actor orch\|operator] [--idempotency-key K]` | 設定主票參照，以新事件取代前一 link；輸出 JSON，不寫 tracker。 | `orchd task link --task example-task --ref jira:DEMO-7` |
+| `orchd task unlink --task ID [--actor orch\|operator] [--idempotency-key K]` | 清除目前參照，保留歷史；不改 task／tracker 狀態。 | `orchd task unlink --task example-task` |
 | `orchd goal add\|set\|show\|list\|export` | 透過下列五個子指令管理中央目標。 | `orchd goal list` |
 | `orchd goal add REPO [GOAL_OPTIONS]` | 為 repo 建立目標並記錄稽核 actor。 | `orchd goal add example --type goal --intent "交付經審閱的修改"` |
 | `orchd goal set GOAL_ID [GOAL_OPTIONS]` | 更新目標與稽核歷史。 | `orchd goal set GOAL_ID --status waiting --ball Operator` |
@@ -79,6 +81,41 @@ Orch 指令現在必須明確使用 `orch start|stop|restart|list|attach`。舊�
 兩者的 `--since` 都使用今日本地 HH:MM。`watch` 從時間點之前最後一筆訊息的 ID 之後開始顯示，並持續追蹤新訊息；預設從最近 30 分鐘開始。`summary` 篩選該時間點（含）之後建立的任務，再彙整這些任務的所有訊息；預設包含全部任務。board 輸出檔案，重新執行才更新。
 
 `snapshot` 必須帶 `--json`，包含 goals／history、未結 tasks、entry 問題／reply metadata，以及獨立的 worker 問題／送答證據。`--answered-limit` 必須非負，預設 100，只限制最近 answered entry 題；current／queued（含 held）不限制。舊 binding 與 closed task 關聯仍可見。worker 題標為待 Orch 分流，worker 確認／執行保持 unknown。輸出含 `generated_at`、`source_db`、輸出契約 `schema_version` 與實際 DB 的 `schema_fingerprint`。DB 不存在、損毀或 schema 不完整時會報錯並以非 0 exit code 結束。
+
+### 主票參照：CLI、MCP 與 snapshot v2
+
+以下以 main `9bfb35a` 的行為為準。REF 格式是 `github:owner/repo#N` 或
+`jira:KEY-N`（N 正整數）；只驗證格式，不連外核對票存在或權限。
+link／unlink 的 actor 預設 orch，僅作稽核歸屬。idempotency key 以 task
+為範圍，省略時產生並回傳；相同 key 與 payload 重送回原 receipt，
+即使後來已有新 link 也不恢復舊 ref；同 key 不同 ref／actor 拒絕。
+JSON receipt 含 task_id、issue_ref、changed、actor、created_at、
+message_id、supersedes、idempotency_key 與 status。失敗輸出 JSON，exit 1。
+
+link 是 last-writer-wins 的 supersede，保留歷史而非拒絕覆蓋；沒有
+expected-ref 旗標或舊值條件更新。refs 由 Orch 維護，換 ref 前先確認目前 ref。
+
+MCP（不是 shell dispatch 指令）：
+
+- `dispatch` 可選 `issue_ref`，省略即未掛票；其他必填參數維持原規則。
+- `task_link` 必填 `task_id`、`ref`，可選 `idempotency_key`。
+- `task_unlink` 必填 `task_id`，可選 `idempotency_key`。
+
+兩個 link 工具需 caller thread id，actor 固定 orch；沒有 Orch 對 task
+的擁有權檢查（與 close、followup 一樣），Orch 必須自行核對 task。
+dispatch 先 spawn 再寫 link；spawn 後 link 寫入失敗會報錯，但 task／worker
+可能已在沒有 link 的狀態下執行。先用 list_open／snapshot 找到正確 task id
+與目前 ref，再用 task_link／CLI link 補上，避免直接重派。
+
+`orchd snapshot --json --schema-version 2` 在 top-level 與 embedded task
+輸出 `issue_ref`（無參照為 null），另輸出
+`issue_links: {version: 1, available: true, history: [...]}`。history 保存
+link／unlink／superseded 的稽核事件；v1 不含這些新欄位。snapshot 只讀，
+不遷移、不連 tracker；舊版缺欄位不代表已確認無票。
+
+未升級的 MCP dispatch 沒有 issue_ref 時，在 instructions 記正式主票並
+回報依賴未就緒，升級後核對再補正式 link。完整流程見
+[先有票再派工](issue-linked-workflow.md)。
 
 ### GOAL_OPTIONS：add 與 set 的全部旗標
 
