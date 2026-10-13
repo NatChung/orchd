@@ -98,6 +98,8 @@ expected-ref 旗標或舊值條件更新。refs 由 Orch 維護，換 ref 前先
 MCP（不是 shell dispatch 指令）：
 
 - `dispatch` 可選 `issue_ref`，省略即未掛票；其他必填參數維持原規則。
+- `dispatch` 省略 `model` 時用 `sonnet`（Claude Sonnet 5.5）；`sol`（GPT-6.1 Sol，Codex）用於換家。
+  要改預設，在 MCP server 環境設 `ORCHD_WORKER_MODEL=sol|sonnet`。
 - `task_link` 必填 `task_id`、`ref`，可選 `idempotency_key`。
 - `task_unlink` 必填 `task_id`，可選 `idempotency_key`。
 

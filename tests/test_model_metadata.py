@@ -90,6 +90,20 @@ class ModelMetadataTest(unittest.TestCase):
         self.assertIn("model", tools["inbox"])
         self.assertIn("model", tools["list_open"])
 
+    def test_worker_model_default_env_override(self):
+        import subprocess, sys
+        code = "from orchd import runtime; print(runtime.DEFAULT_WORKER_MODEL)"
+        def run(value):
+            env = {k: v for k, v in os.environ.items() if k != "ORCHD_WORKER_MODEL"}
+            if value is not None:
+                env["ORCHD_WORKER_MODEL"] = value
+            return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
+        self.assertEqual(run(None).stdout.strip(), "sonnet")
+        self.assertEqual(run("sol").stdout.strip(), "sol")
+        bad = run("opus")
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("ORCHD_WORKER_MODEL", bad.stderr)
+
     def test_mcp_worker_model_schema_and_dispatch_validation(self):
         from orchd import mcp_server
         tools = {t["name"]: t for t in mcp_server.TOOLS}
@@ -99,7 +113,7 @@ class ModelMetadataTest(unittest.TestCase):
             self.assertIn("default and preferred", prop["description"])
             self.assertNotIn("opus", json.dumps(tools[name]))
             self.assertNotIn("M tier", json.dumps(tools[name]))
-        self.assertEqual(tools["dispatch"]["inputSchema"]["properties"]["model"]["default"], "sol")
+        self.assertEqual(tools["dispatch"]["inputSchema"]["properties"]["model"]["default"], "sonnet")
 
         args = dict(repo="demo", title="T", instructions="do it", done_when="tests pass",
                     model_reason="clear scope", task_type="code")
@@ -115,7 +129,7 @@ class ModelMetadataTest(unittest.TestCase):
             self.assertTrue(result["isError"])
             self.assertIn("use one of sol, sonnet", result["content"][0]["text"])
         self.assertEqual(store.open_tasks(self.con), [])
-        for extra, full in (({}, "gpt-6.1-sol"), ({"model": "sol"}, "gpt-6.1-sol"),
+        for extra, full in (({}, "claude-sonnet-5-5"), ({"model": "sol"}, "gpt-6.1-sol"),
                             ({"model": "sonnet"}, "claude-sonnet-5-5")):
             result = dispatch(**extra)
             self.assertNotIn("isError", result)

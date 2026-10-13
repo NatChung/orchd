@@ -100,6 +100,8 @@ Orch maintains refs and must confirm the current ref before changing it.
 MCP tools (there is no shell dispatch command):
 
 - `dispatch` accepts optional `issue_ref`; omission leaves the task unlinked.
+- `dispatch` without `model` uses `sonnet` (Claude Sonnet 5.5); `sol` (GPT-6.1 Sol on Codex) is for switching vendors.
+  Set `ORCHD_WORKER_MODEL=sol|sonnet` in the MCP server environment to change that default.
   Other required arguments retain their existing rules.
 - `task_link` requires `task_id` and `ref`, with optional `idempotency_key`.
 - `task_unlink` requires `task_id`, with optional `idempotency_key`.

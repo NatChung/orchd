@@ -42,8 +42,8 @@ TOOLS = [
          "instructions": {"type": "string", "description": "Goal, scope, allowed actions, what to report"},
          "done_when": {"type": "string", "description": "Checkable completion conditions"},
          "model": {"type": "string", "enum": list(WORKER_MODELS), "default": DEFAULT_WORKER_MODEL,
-                   "description": "sol = GPT-6.1 Sol on Codex, the default and preferred worker; "
-                                  "sonnet = Claude Sonnet 5.5, use when switching to another vendor"},
+                   "description": "sonnet = Claude Sonnet 5.5, the default and preferred worker; "
+                                  "sol = GPT-6.1 Sol on Codex, use when switching to another vendor"},
          "goal_id": {"type": "string", "description": "Central goal id; must belong to repo"},
          "issue_ref": {"type": "string", "description": "Optional parent ref: github:owner/repo#N or jira:KEY-N; format validation only"},
          "goal_critical": {"type": "boolean", "description": "Requires goal_id; whether the task is critical to that goal"},
@@ -140,15 +140,15 @@ TOOLS = [
      "inputSchema": {"type": "object", "required": ["task_id"], "properties": {"task_id": {"type": "string"}}}},
     {"name": "retry",
      "description": "Replace a task's worker with a new one on the same worktree and branch, keeping all its local work "
-                    "(uncommitted, untracked, stash, commits). Use sol (the default and preferred worker) or "
-                    "sonnet when switching to another vendor; the from -> to change and your reason are recorded. Stops only "
+                    "(uncommitted, untracked, stash, commits). Use sonnet (the default and preferred worker) or "
+                    "sol when switching to another vendor; the from -> to change and your reason are recorded. Stops only "
                     "that task's worker and starts nothing if it does not stop. Refused for closed tasks or a "
                     "missing worktree. The new worker gets the task, its latest progress/report and your reason.",
      "inputSchema": {"type": "object", "required": ["task_id", "model", "reason"], "properties": {
          "task_id": {"type": "string"},
          "model": {"type": "string", "enum": list(WORKER_MODELS),
-                   "description": "sol = GPT-6.1 Sol on Codex, the default and preferred worker; "
-                                  "sonnet = Claude Sonnet 5.5, use when switching to another vendor"},
+                   "description": "sonnet = Claude Sonnet 5.5, the default and preferred worker; "
+                                  "sol = GPT-6.1 Sol on Codex, use when switching to another vendor"},
          "backend": {"type": "string", "enum": ["exec", "app-server"],
                      "description": "Optional; retains Codex attempt backend, Sonnet uses its existing backend"},
          "reason": {"type": "string", "description": "Why this worker is being replaced and why this model"}}}},

@@ -117,7 +117,7 @@ class AppViewerTest(AppBase):
     def test_mcp_dispatch_routes_only_explicit_opt_in(self):
         args=dict(repo="demo",title="T",instructions="i",done_when="d",model_reason="r",task_type="code")
         with patch.object(app_worker,"start") as start:
-            mcp_server.call("dispatch",dict(args,backend="app-server"),"thread-A",self.con,self.rt)
+            mcp_server.call("dispatch",dict(args,backend="app-server",model="sol"),"thread-A",self.con,self.rt)
         start.assert_called_once()
         self.assertEqual(start.call_args.args[2]["backend"],"app-server")
         self.assertIn("end your turn right away",start.call_args.kwargs["brief"])

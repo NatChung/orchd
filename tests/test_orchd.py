@@ -256,11 +256,11 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(self.rt.stopped, ["job1"])
         self.assertEqual(store.open_tasks(self.con), [])
 
-    def test_dispatch_defaults_to_sol_and_logs_event(self):
+    def test_dispatch_defaults_to_sonnet_and_logs_event(self):
         t = core.dispatch(self.con, self.rt, orch_thread="thread-A", repo="demo", title="T",
                           instructions="do it", done_when="tests pass", model_reason="clear scope", task_type="code")
-        self.assertEqual((t["model"], t["model_reason"], t["task_type"]), ("gpt-6.1-sol", "clear scope", "code"))
-        self.assertEqual(self.rt.model, "gpt-6.1-sol")
+        self.assertEqual((t["model"], t["model_reason"], t["task_type"]), ("claude-sonnet-5-5", "clear scope", "code"))
+        self.assertEqual(self.rt.model, "claude-sonnet-5-5")
         row = self.con.execute("SELECT body FROM messages WHERE kind='dispatch'").fetchone()
         self.assertEqual(json.loads(row[0])["model_reason"], "clear scope")
         self.assertEqual(self.dispatch(model="sonnet")["model"], "claude-sonnet-5-5")
@@ -612,7 +612,7 @@ class McpTest(unittest.TestCase):
         self.assertEqual(row["orch_thread"], "thread-X")
         dispatched = json.loads(replies[2]["result"]["content"][0]["text"])
         self.assertEqual((dispatched["orch_id"], dispatched["model"], dispatched["other_open_on_repo"]),
-                         ("thread-X", "gpt-6.1-sol", []))
+                         ("thread-X", "claude-sonnet-5-5", []))
 
     def test_env_orch_id_wins_over_meta_thread(self):
         os.environ["ORCHD_ORCH_ID"] = "oabc1234"
