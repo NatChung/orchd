@@ -88,8 +88,8 @@ SQLite 的 `body`、`source_raw` 與原文 digest 不變，也不改 schema。`e
 本入口綁定的 Orch（採用後以目前 owner 為準）。
 
 Orch 沿用 `orchd orch attach ORCH_ID --viewer`：健康檢查、閒置／被 daemon 收掉時接回同一段對話，再 attach。
-worker 沿用 `view_worker`：Claude 用 `claude attach JOB`；app-server Sol 用 native remote TUI，忙碌時也能 attach；
-exec Sol 忙碌時明確拒絕，回合之間用 `codex resume`。沒有 watch-only 模式，也沒有 takeover lease。
+worker 沿用 `view_worker`：Claude 用 `claude attach JOB`；新的 Sol 預設 app-server，用 native remote TUI，忙碌時也能 attach；
+明確指定或既有的 exec Sol 不遷移，忙碌時明確拒絕，回合之間用 `codex resume`。沒有 watch-only 模式，也沒有 takeover lease。
 每次呼叫都要求開新的 Ghostty 視窗；重用或 focus 既有視窗不在範圍內。
 
 成功結果包含 `target`、`orch_id`、`kind`、`launched`（viewer 與 job/session identity）、

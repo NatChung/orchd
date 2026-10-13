@@ -22,7 +22,7 @@ class Base(unittest.TestCase):
         self.rt = FakeRuntime()
         self.rt.sleep = lambda s: None
         t = core.dispatch(self.con, self.rt, orch_thread="thread-A", repo="demo", title="T", instructions="do it",
-                          done_when="x", model="sol", model_reason="r", task_type="code")
+                          done_when="x", model="sol", model_reason="r", task_type="code", backend="exec")
         self.id = t["id"]  # job 4242 (the first turn) is alive
         self.rt.alive_pids = {"4242"}
 

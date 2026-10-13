@@ -119,7 +119,7 @@ def _choice(name, value, valid):
 
 def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, model=None,
              model_reason=None, task_type=None, rework_of=None, found_by=None, verify=None, manual_checks=None,
-             verifies=None, backend="exec", goal_id=None, goal_critical=None, issue_ref=None):
+             verifies=None, backend=None, goal_id=None, goal_critical=None, issue_ref=None):
     from . import issue_links
     if issue_ref is not None:
         issue_links.validate_ref(issue_ref)
@@ -146,6 +146,8 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
             raise ValueError(f"verifies: unknown task {verifies}") from None
         if verified["status"] == "closed":
             raise ValueError(f"verifies: task {verifies} is closed")
+    if backend is None:
+        backend = config.worker_backend(model)
     _choice("backend", backend, ("exec", "app-server"))
     if backend == "app-server" and worker_kind(WORKER_MODELS[model]) != "codex":
         raise ValueError("app-server backend requires a Codex model")

@@ -11,7 +11,7 @@ from tests.test_orchd import FakeRuntime
 class AppViewerTest(AppBase):
     def test_busy_and_idle_open_only_stored_task_remote_wrapper(self):
         self.rt.open_app_viewer=lambda db,task:setattr(self,'opened',(db,dict(task)))
-        for state in ('active','idle'):
+        for state in ('active','idle','alive'):
             with patch.object(app_worker,'health',return_value=state):
                 text=core.view(self.con,self.rt,self.id)
             self.assertIn('Ghostty',text)
@@ -35,14 +35,18 @@ class AppViewerTest(AppBase):
         self.root.chmod(0o755)
         with self.assertRaises(ValueError):app_worker.validate(self.task)
 
-    def test_default_dispatch_and_migration_remain_exec(self):
+    def test_sonnet_default_and_legacy_rows_remain_exec(self):
         task=core.dispatch(self.con,self.rt,orch_thread='thread-A',repo='demo',title='T',instructions='i',
                            done_when='d',model_reason='r',task_type='code')
         self.assertEqual(task['backend'],'exec')
         self.assertIsNone(task['generation'])
         self.assertFalse(app_worker.enabled(task))
         tool=next(t for t in mcp_server.TOOLS if t['name']=='dispatch')
-        self.assertEqual(tool['inputSchema']['properties']['backend']['default'],'exec')
+        self.assertNotIn('default',tool['inputSchema']['properties']['backend'])
+        legacy=store.create_task(self.con,id='legacy',repo='demo',repo_path='/tmp/demo',title='T',
+                                 instructions='i',done_when='d',orch_thread='thread-A',codex_bin='codex',
+                                 model='gpt-6.1-sol')
+        self.assertEqual(legacy['backend'],'exec')
 
     def test_definite_rpc_rejection_keeps_pending_but_is_retryable(self):
         from orchd.app_transport import RPCError
@@ -124,10 +128,97 @@ class AppViewerTest(AppBase):
             mcp_server.call("dispatch",dict(args),"thread-A",self.con,self.rt)
         start.assert_called_once()
 
-    def test_mcp_dispatch_routes_only_explicit_opt_in(self):
+    def test_mcp_dispatch_routes_sol_to_app_server_by_default(self):
         args=dict(repo="demo",title="T",instructions="i",done_when="d",model_reason="r",task_type="code")
         with patch.object(app_worker,"start") as start:
-            mcp_server.call("dispatch",dict(args,backend="app-server",model="sol"),"thread-A",self.con,self.rt)
+            mcp_server.call("dispatch",dict(args,model="sol"),"thread-A",self.con,self.rt)
         start.assert_called_once()
         self.assertEqual(start.call_args.args[2]["backend"],"app-server")
         self.assertIn("end your turn right away",start.call_args.kwargs["brief"])
+
+    def test_core_default_and_explicit_exec_override(self):
+        args=dict(orch_thread='thread-A',repo='demo',title='T',instructions='i',done_when='d',
+                  model='sol',model_reason='r',task_type='code')
+        with patch.object(app_worker,'start') as start:
+            task=core.dispatch(self.con,self.rt,**args)
+        start.assert_called_once()
+        self.assertEqual(task['backend'],'app-server')
+        with patch.object(app_worker,'start') as start:
+            task=core.dispatch(self.con,self.rt,backend='exec',**args)
+        start.assert_not_called()
+        self.assertEqual(task['backend'],'exec')
+        self.assertEqual(task['session_id'],'thread-W')
+
+    def test_mcp_explicit_exec_overrides_configured_sol_default(self):
+        args=dict(repo='demo',title='T',instructions='i',done_when='d',model_reason='r',
+                  task_type='code',backend='exec')
+        with patch.dict(os.environ,{'ORCHD_WORKER_MODEL':'sol'}), patch.object(app_worker,'start') as start:
+            result=mcp_server.call('dispatch',args,'thread-A',self.con,self.rt)
+        start.assert_not_called()
+        self.assertEqual(store.get_task(self.con,result['task_id'])['backend'],'exec')
+
+    def test_answers_and_followups_survive_busy_and_multiple_viewers_once(self):
+        # API delivery uses the real queue and supervisor; only the transport/viewer liveness is fake.
+        viewers=['window-one','window-two']
+        def control(task,cmd,**kw):
+            self.assertEqual(cmd,'flush')
+            return self.supervisor.flush()
+        self.rt.open_app_viewer=lambda *args: None
+        with patch.object(app_worker,'control',side_effect=control), \
+             patch.object(app_worker,'health',return_value='active'), \
+             patch.object(self.supervisor,'viewers',side_effect=lambda: list(viewers)):
+            core.view(self.con,self.rt,self.id)
+            self.assertEqual(core.answer(self.con,self.rt,self.id,'first answer')['status'],'queued')
+            self.assertEqual(core.followup(self.con,self.rt,self.id,'next instruction')['status'],'queued')
+            self.assertEqual(self.supervisor.rpc.calls,[])
+            self.complete();self.idle()
+            core.view(self.con,self.rt,self.id)
+            self.assertEqual(self.supervisor.flush()['status'],'queued')
+            viewers.pop()
+            self.assertEqual(self.supervisor.flush()['status'],'queued')
+            self.assertEqual(store.pending_answer_count(self.con,self.id),2)
+            viewers.clear()
+            self.assertEqual(self.supervisor.flush()['delivered'],2)
+            self.assertEqual(self.supervisor.flush()['delivered'],0)
+        starts=[p for method,p in self.supervisor.rpc.calls if method=='turn/start']
+        self.assertEqual(len(starts),1)
+        text=starts[0]['input'][0]['text']
+        self.assertLess(text.index('first answer'),text.index('next instruction'))
+        self.assertEqual(text.count('first answer'),1)
+        self.assertEqual(text.count('next instruction'),1)
+        self.assertEqual(store.pending_answer_count(self.con,self.id),0)
+        rows=self.con.execute("SELECT body FROM messages WHERE task_id=? AND kind='answer' ORDER BY id",(self.id,)).fetchall()
+        self.assertEqual(len(rows),2)
+        self.assertEqual(self.rt.stopped,[])
+        self.assertEqual(self.rt.resumed,[])
+
+    def test_claude_native_attach_and_delivery_busy_idle_and_asking(self):
+        task=core.dispatch(self.con,self.rt,orch_thread='thread-A',repo='demo',title='T',instructions='i',
+                           done_when='d',model='sonnet',model_reason='r',task_type='code')
+        self.rt.sent.clear()
+        for state in ('busy','idle','asking'):
+            with self.subTest(state=state):
+                self.rt.jobs['job1']={'status':state,'pid':999}
+                if state=='asking':
+                    core.ask(self.con,self.rt,task['id'],'decision?')
+                core.view(self.con,self.rt,task['id'])
+                self.assertEqual(self.rt.viewed[-1],'job1')
+                self.assertEqual(core.answer(self.con,self.rt,task['id'],f'answer-{state}')['delivered'],1)
+                self.assertEqual(core.followup(self.con,self.rt,task['id'],f'followup-{state}')['delivered'],1)
+                self.assertEqual(core.answer(self.con,self.rt,task['id'],flush=True)['delivered'],0)
+        self.assertEqual(len(self.rt.sent),6)
+        for state in ('busy','idle','asking'):
+            self.assertEqual(sum(f'answer-{state}' in text for _,_,text in self.rt.sent),1)
+            self.assertEqual(sum(f'followup-{state}' in text for _,_,text in self.rt.sent),1)
+        self.assertEqual(self.rt.stopped,[])
+
+    def test_idle_viewer_holds_new_answer_and_followup_until_release(self):
+        self.idle()
+        with patch.object(app_worker,'control',side_effect=lambda task,cmd: self.supervisor.flush()), \
+             patch.object(self.supervisor,'viewers',return_value=['viewer']):
+            self.assertEqual(core.answer(self.con,self.rt,self.id,'idle answer')['status'],'queued')
+            self.assertEqual(core.followup(self.con,self.rt,self.id,'idle followup')['status'],'queued')
+            self.assertEqual(self.supervisor.rpc.calls,[])
+        self.assertEqual(self.supervisor.flush()['delivered'],2)
+        self.assertEqual(self.supervisor.flush()['delivered'],0)
+        self.assertEqual(len([c for c in self.supervisor.rpc.calls if c[0]=='turn/start']),1)

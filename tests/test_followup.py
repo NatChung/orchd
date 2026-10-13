@@ -28,7 +28,7 @@ class FollowupTest(unittest.TestCase):
 
     def dispatch(self, model="sonnet"):
         t = core.dispatch(self.con, self.rt, orch_thread="thread-A", repo="demo", title="T", instructions="do it",
-                          done_when="tests pass", model=model, model_reason="r", task_type="code")
+                          done_when="tests pass", model=model, model_reason="r", task_type="code", backend="exec")
         self.rt.sent.clear()  # the task message itself
         return t
 
@@ -177,7 +177,7 @@ class FollowupAcceptanceTest(unittest.TestCase):
 
     def done_task(self, model="sonnet"):
         t = core.dispatch(self.con, self.rt, orch_thread="thread-A", repo="demo", title="T", instructions="do it",
-                          done_when="pass", model=model, model_reason="r", task_type="code")
+                          done_when="pass", model=model, model_reason="r", task_type="code", backend="exec")
         self.rt.sent.clear()
         core.report(self.con, self.rt, t["id"], "done", "prior result", "prior evidence")
         return store.get_task(self.con, t["id"])

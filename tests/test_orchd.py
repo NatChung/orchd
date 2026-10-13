@@ -346,7 +346,7 @@ class CodexWorkerTest(unittest.TestCase):
 
     def dispatch(self, repo="demo"):
         return core.dispatch(self.con, self.rt, orch_thread="thread-A", repo=repo, title="T", instructions="do it",
-                             done_when="tests pass", model="sol", model_reason="second vendor", task_type="code")
+                             done_when="tests pass", model="sol", model_reason="second vendor", task_type="code", backend="exec")
 
     def test_sol_runs_on_codex_with_brief_and_task_in_one_prompt(self):
         t = self.dispatch(repo="untrusted")  # Claude's trust list does not gate a Codex worker

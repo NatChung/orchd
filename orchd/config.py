@@ -117,6 +117,11 @@ def worker_model(explicit=None, env=None):
     return FACTORY_WORKER_MODEL, "default"
 
 
+def worker_backend(model):
+    """Default for a new dispatch after resolving its model; stored attempts are unchanged."""
+    return "app-server" if model == "sol" else "exec"
+
+
 def file_projects_dir(env=None, home=None):
     """projects_dir as written in the config file (validated), or None; used by paths.projects_dir."""
     return _file_value(_read(env, home)[1], path(env, home), "projects-dir")
@@ -238,5 +243,6 @@ def show(env=None):
     projects, projects_source = get_value("projects-dir", env)
     return {"file": str(path(env)), "file-source": path_source(env),
             "worker-model": {"value": model, "source": source},
+            "worker-backend": {"value": worker_backend(model), "source": "model-default"},
             "projects-dir": {"value": projects, "source": projects_source},
             "review": "always the other vendor than the author (not configurable)"}

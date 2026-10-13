@@ -48,8 +48,10 @@ TOOLS = [
          "goal_id": {"type": "string", "description": "Central goal id; must belong to repo"},
          "issue_ref": {"type": "string", "description": "Optional parent ref: github:owner/repo#N or jira:KEY-N; format validation only"},
          "goal_critical": {"type": "boolean", "description": "Requires goal_id; whether the task is critical to that goal"},
-         "backend": {"type": "string", "enum": ["exec", "app-server"], "default": "exec",
-                     "description": "Opt-in Codex app-server; default exec remains unchanged"},
+         "backend": {"type": "string", "enum": ["exec", "app-server"],
+                     "description": "Optional. New sol workers default to app-server for native TUI attach while busy or idle; "
+                                    "sonnet keeps its Claude backend. Explicit exec remains available for sol. "
+                                    "App-server requires sol; existing workers are not migrated."},
          "model_reason": {"type": "string", "description": "One sentence: why this model for this task"},
          "task_type": {"type": "string", "enum": list(core.TASK_TYPES)},
          "rework_of": {"type": "string", "description": "Task id this task redoes or fixes"},
@@ -135,8 +137,9 @@ TOOLS = [
          "outcome": {"type": "string", "enum": list(core.OUTCOMES)},
          "rating": {"type": "integer", "minimum": 1, "maximum": 3, "description": "Operator's optional 1-3 score"}}}},
     {"name": "view_worker",
-     "description": "Open a Ghostty window attached to a task's worker so Operator can watch or type. A Codex worker opens only "
-                    "between turns on exec; app-server workers attach with the native remote TUI while busy or idle. "
+     "description": "Open a Ghostty window attached to a task's worker so Operator can watch or type. Claude and "
+                    "app-server workers (the default for new sol workers) attach while busy or idle. "
+                    "Explicit or existing exec workers open only between turns. "
                     "App-server FIFO answers wait until all viewer windows close.",
      "inputSchema": {"type": "object", "required": ["task_id"], "properties": {"task_id": {"type": "string"}}}},
     {"name": "retry",
@@ -324,7 +327,7 @@ def call(name, args, thread, con, rt):
                           task_type=args.get("task_type"), rework_of=args.get("rework_of"),
                           found_by=args.get("found_by"), verify=args.get("verify"),
                           manual_checks=args.get("manual_checks"), verifies=args.get("verifies"),
-                          backend=args.get("backend", "exec"), goal_id=args.get("goal_id"),
+                          backend=args.get("backend"), goal_id=args.get("goal_id"),
                           goal_critical=args.get("goal_critical"), issue_ref=args.get("issue_ref"))
         return {"task_id": t["id"], "status": t["status"], "branch": t["branch"], "worktree": t["worktree"],
                 "orch_id": thread, "model": t["model"],

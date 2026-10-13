@@ -30,7 +30,7 @@ class DashboardAnswersTest(unittest.TestCase):
     def task(self, model="sonnet"):
         return core.dispatch(self.con, self.rt, orch_thread=self.orch, repo="synthetic",
                              title="Synthetic task", instructions="Synthetic work", done_when="Synthetic check",
-                             model=model, model_reason="Synthetic choice", task_type="code")["id"]
+                             model=model, model_reason="Synthetic choice", task_type="code", backend="exec")["id"]
 
     def ask(self, **kwargs):
         return entry.ask_nat(self.con, self.rt, self.orch, "Synthetic question", **kwargs)["question_id"]

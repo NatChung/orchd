@@ -10,7 +10,7 @@ orchd manages tasks across AI coding agents. An **Orch** breaks down work and di
 - [Claude Code](https://claude.com/claude-code), signed in and able to run background sessions. The current transport uses `--bg` and an experimental messaging socket; CLI updates can affect compatibility.
 - [Codex CLI](https://github.com/openai/codex), signed in when using Codex workers. Codex Desktop is an optional conversation entry point.
 - tmux for background sessions. Ghostty is optional for attach/viewer windows. GitHub CLI is optional for issue tracking and account routing.
-- Python dependencies include psutil and websocket-client. App-server workers are opt-in; the default worker backend is exec.
+- Python dependencies include psutil and websocket-client. New sol workers default to app-server for native TUI attach while busy or idle. Explicit `backend=exec` remains available; sonnet and existing workers are unchanged.
 
 Sign in through each provider's CLI and accept the trust prompts for your projects and Orch home. Credentials stay in the providers' local login settings.
 

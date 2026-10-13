@@ -1,4 +1,4 @@
-"""Opt-in task-attempt app-server runtime. No shared Codex daemon or global config.
+"""Task-attempt app-server runtime (the default for new sol workers). No shared Codex daemon or global config.
 
 Only the supervisor owns the RPC connection and delivery journal. IPC takes task
 id/generation, never arbitrary commands or endpoints. Ambiguous sends are held for

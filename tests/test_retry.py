@@ -103,7 +103,7 @@ class RetryTest(unittest.TestCase):
     def dispatch(self, model="sonnet"):
         t = core.dispatch(self.con, self.rt, orch_thread="thread-A", repo="demo", title="T",
                           instructions="do it", done_when="tests pass", model=model,
-                          model_reason="clear scope", task_type="code")
+                          model_reason="clear scope", task_type="code", backend="exec")
         self.rt.started.clear()
         return t
 
@@ -361,7 +361,7 @@ class RetryReviewRegressionTest(unittest.TestCase):
 
     def dispatch(self, model):
         t = core.dispatch(self.con, self.rt, orch_thread="thread-A", repo="demo", title="T", instructions="do it",
-                          done_when="tests pass", model=model, model_reason="r", task_type="code")
+                          done_when="tests pass", model=model, model_reason="r", task_type="code", backend="exec")
         self.rt.started.clear()
         return t
 
