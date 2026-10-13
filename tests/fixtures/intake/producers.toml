@@ -1,0 +1,7 @@
+[intake.producers.email-adapter]
+providers = ["email"]
+accounts = ["alice@example.com"]
+
+[intake.producers.line-adapter]
+providers = ["line"]
+accounts = ["example-line-bot"]

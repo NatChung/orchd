@@ -122,6 +122,25 @@ def file_projects_dir(env=None, home=None):
     return _file_value(_read(env, home)[1], path(env, home), "projects-dir")
 
 
+def intake_producers(env=None, home=None):
+    """{producer: {providers, accounts}} from [intake.producers.NAME] (read only; edit the file by hand).
+    Absent means no producer is allowed. A wrong-shaped section raises ValueError, so intake fails closed."""
+    file = path(env, home)
+    section = _read(env, home)[1].get("intake", {})
+    if not isinstance(section, dict) or not isinstance(section.get("producers", {}), dict):
+        raise ValueError(f"{file}: [intake.producers] must be tables")
+    out = {}
+    for name, grant in section.get("producers", {}).items():
+        if not isinstance(grant, dict):
+            raise ValueError(f"{file}: [intake.producers.{name}] must be a table")
+        lists = grant.get("providers"), grant.get("accounts")
+        if not all(isinstance(v, list) and v and all(isinstance(i, str) for i in v)
+                                                  for v in lists):
+            raise ValueError(f"{file}: [intake.producers.{name}] needs non-empty string lists providers and accounts")
+        out[name] = dict(providers=lists[0], accounts=lists[1])
+    return out
+
+
 def _edit(text, table, name, value):
     """Set (str) or remove (None) one key by editing lines in place; table None is the top level."""
     eol = "\r\n" if "\r\n" in text else "\n"  # inserted lines follow the file's own style

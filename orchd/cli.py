@@ -18,6 +18,7 @@
   orchd verify ID [--timeout S]               verifier worker: rerun the verified task's locked command at its locked SHA
   orchd orch list [--all] [--json] [--restore ID]          live/resumable Orchs; --all includes archived/unknown
   orchd orch attach ID [--viewer]                  attach an existing Claude Orch (resume its conversation if idle)
+  orchd intake submit|pending|bind|ack|classify|draft|draft-show|approve|claim|receipt|cancel   local intake queue and reply approvals (docs/intake.md)
   orchd list                                  open tasks, worker/Orch health, unread notification failures
   orchd goal add|set|show|list|export --md      central goals, audit history, markdown snapshot
   orchd board --html PATH                     private static project board, no inbox consumption
@@ -153,6 +154,41 @@ def build_parser():
     task_dismiss.add_argument("--reason", required=True)
     task_dismiss.add_argument("--idempotency-key", required=True)
     task_dismiss.add_argument("--actor", choices=("dashboard", "operator"), default="dashboard")
+    intake = sub.add_parser("intake", help="local intake queue, reply drafts, approvals and send receipts (JSON receipts)")
+    intake_actions = intake.add_subparsers(dest="intake_action", required=True)
+    for action, helptext in (("submit", "producer: durable receipt for one normalized event (--file PATH or -)"),
+                             ("draft", "create a reply draft or its next version (--file PATH or -)"),
+                             ("approve", "approve one exact draft version (--file PATH or -)"),
+                             ("receipt", "connector: record sent|failed|uncertain (--file PATH or -)"),
+                             ("classify", "annotate an event: classification, level, todo_id, issue_ref, project")):
+        command = intake_actions.add_parser(action, help=helptext)
+        command.add_argument("--file", default="-", help="JSON input; - is stdin")
+        if action == "submit":
+            command.add_argument("--producer", required=True, help="name granted in [intake.producers.NAME]")
+        if action == "classify":
+            command.add_argument("--receipt", required=True)
+        if action in ("draft", "approve", "classify"):
+            command.add_argument("--actor", choices=("orch", "operator"), default="operator" if action == "approve" else "orch")
+        if action == "receipt":
+            command.add_argument("--actor", choices=("connector", "operator"), default="connector")
+    intake_pending = intake_actions.add_parser("pending", help="unacked events for an owner; does not consume")
+    intake_pending.add_argument("--owner", help="Orch id; omit to list unassigned events")
+    intake_pending.add_argument("--limit", type=int, default=100)
+    intake_bind = intake_actions.add_parser("bind", help="bind an unassigned event to a registered Orch")
+    intake_bind.add_argument("--receipt", required=True)
+    intake_bind.add_argument("--owner", required=True)
+    intake_ack = intake_actions.add_parser("ack", help="Orch processing ack, separate from the durable receipt")
+    intake_ack.add_argument("receipts", nargs="+")
+    intake_ack.add_argument("--actor", choices=("orch", "operator"), default="orch")
+    intake_claim = intake_actions.add_parser("claim", help="connector: approved -> sending, once")
+    intake_claim.add_argument("--draft", required=True)
+    intake_claim.add_argument("--version", required=True, type=int)
+    intake_show = intake_actions.add_parser("draft-show", help="read-only: one exact draft version including its body")
+    intake_show.add_argument("--draft", required=True)
+    intake_show.add_argument("--version", required=True, type=int)
+    intake_cancel = intake_actions.add_parser("cancel", help="cancel a not-yet-sending draft")
+    intake_cancel.add_argument("--draft", required=True)
+    intake_cancel.add_argument("--actor", choices=("orch", "operator"), default="operator")
     sub.add_parser("ack").add_argument("task_id")
     rep = sub.add_parser("report")
     rep.add_argument("task_id")
@@ -229,6 +265,58 @@ def build_parser():
     doc.add_argument("--json", action="store_true", help="read-only JSON output; never prompt")
     doc.add_argument("--no-input", action="store_true", help="read-only check; skip first-run project setup")
     return parser
+
+
+def _intake_main(args):
+    """Every outcome is one JSON receipt on stdout; exit 1 for status=failed. A rejected call writes nothing."""
+    import sqlite3
+    from orchd import config, intake
+    con = None
+    try:
+        action = args.intake_action
+        payload = None
+        if action in ("submit", "draft", "approve", "receipt", "classify"):
+            try:
+                text = sys.stdin.read() if args.file == "-" else Path(args.file).read_text(encoding="utf-8")
+                payload = json.loads(text)
+            except (OSError, UnicodeError, ValueError) as error:
+                raise intake.IntakeError("invalid", f"cannot read JSON input: {type(error).__name__}") from None
+        producers = config.intake_producers() if action == "submit" else None
+        if action == "submit":  # grant check before the DB is even opened: a rejected producer writes nothing
+            event = payload if isinstance(payload, dict) else {}
+            intake.check_producer(producers, args.producer, event.get("provider"), event.get("account"))
+        con = store.connect()
+        if action == "submit":
+            result = intake.submit(con, payload, producer=args.producer, producers=producers)
+        elif action == "pending":
+            result = intake.pending(con, args.owner, args.limit)
+        elif action == "bind":
+            result = intake.bind_owner(con, args.receipt, args.owner)
+        elif action == "ack":
+            result = intake.ack(con, args.receipts, actor=args.actor)
+        elif action == "classify":
+            result = intake.classify(con, args.receipt, payload)
+        elif action == "draft":
+            result = intake.draft(con, payload, actor=args.actor)
+        elif action == "approve":
+            result = intake.approve(con, payload, actor=args.actor)
+        elif action == "draft-show":
+            result = intake.show_draft(con, args.draft, args.version)
+        elif action == "claim":
+            result = intake.claim(con, args.draft, args.version)
+        elif action == "receipt":
+            result = intake.record_receipt(con, payload, actor=args.actor)
+        else:
+            result = intake.cancel(con, args.draft, actor=args.actor)
+    except intake.IntakeError as error:
+        result = intake.failure(error)
+    except (ValueError, OSError, sqlite3.Error) as error:
+        result = dict(status="failed", error_code="invalid", error=str(error))
+    finally:
+        if con is not None:
+            con.close()
+    print(json.dumps(result, ensure_ascii=False, indent=1))
+    return 1 if result.get("status") == "failed" else 0
 
 
 def main(argv=None):
@@ -404,6 +492,8 @@ def main(argv=None):
                 con.close()
             if snap is not None:
                 snap.close()
+    if args.cmd == "intake":
+        return _intake_main(args)
     if args.cmd == "task":
         import sqlite3
         from orchd import issue_links

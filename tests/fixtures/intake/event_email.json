@@ -1,0 +1,3 @@
+{"version": 1, "provider": "email", "account": "alice@example.com", "company": "example-co",
+ "event_id": "mail:thread-1:msg-1", "source_ref": "mail:alice@example.com/msg-1", "thread_ref": "mail:thread-1",
+ "source_time": 1760000000, "summary": "Synthetic: customer asks for a delivery date"}

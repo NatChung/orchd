@@ -1,0 +1,3 @@
+{"draft_id": "dr_example", "provider": "email", "sender": "alice@example.com", "target": "mail:thread-1",
+ "source_ref": "mail:alice@example.com/msg-1", "level": "L2", "summary": "Synthetic reply draft",
+ "body": "Synthetic body", "expires_at": 4102444800}
