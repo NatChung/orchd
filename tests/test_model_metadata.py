@@ -29,7 +29,7 @@ class ModelMetadataTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def dispatch(self, thread="thread-A", **kw):
-        kw = {"model_reason": "clear scope", "task_type": "code", **kw}
+        kw = {"model_reason": "clear scope", "task_type": "code", "backend": "exec", **kw}
         return core.dispatch(self.con, self.rt, orch_thread=thread, repo="demo", title="T",
                              instructions="do it", done_when="tests pass", **kw)
 
@@ -109,7 +109,7 @@ class ModelMetadataTest(unittest.TestCase):
             # Exercise the JSON-RPC handler: schema hints alone do not validate tools/call arguments.
             with contextlib.redirect_stderr(io.StringIO()):
                 return mcp_server.handle({"id": 1, "method": "tools/call", "params": {
-                    "name": "dispatch", "arguments": dict(args, **extra),
+                    "name": "dispatch", "arguments": dict(args, backend="exec", **extra),
                     "_meta": {"threadId": "thread-A"}}}, self.con, self.rt)["result"]
 
         for model in ("opus", "claude-opus-5-5"):

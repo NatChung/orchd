@@ -25,7 +25,7 @@ class AnswerQueueTest(unittest.TestCase):
 
     def dispatch(self, model="sol"):
         return core.dispatch(self.con, self.rt, orch_thread="thread-A", repo="demo", title="T", instructions="do it",
-                             done_when="tests pass", model=model, model_reason="r", task_type="code")
+                             done_when="tests pass", model=model, model_reason="r", task_type="code", backend="exec")
 
     def answers(self, task_id):
         return [r["body"] for r in self.con.execute(

@@ -88,7 +88,9 @@ class ConfigTest(unittest.TestCase):
             return store.get_task(con, t["id"])["model"]
         self.assertEqual(go(), "claude-sonnet-5-5")
         self.write('[worker]\nmodel = "sol"\n')
-        self.assertEqual(go(), "gpt-6.1-sol")
+        with mock.patch("orchd.app_worker.start") as start:
+            self.assertEqual(go(), "gpt-6.1-sol")
+        self.assertEqual(start.call_args.args[2]["backend"], "app-server")
         self.assertEqual(go(model="sonnet"), "claude-sonnet-5-5")
         self.write('[worker]\nmodel = "opus"\n')
         before = len(store.open_tasks(con))
@@ -102,8 +104,11 @@ class ConfigTest(unittest.TestCase):
         code, out, _ = self.run_cli("config", "show")
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out)["worker-model"], {"value": "sonnet", "source": "default"})
+        self.assertEqual(json.loads(out)["worker-backend"], {"value": "exec", "source": "model-default"})
         self.assertEqual(self.run_cli("config", "set", "worker-model", "sol")[0], 0)
         self.assertEqual(self.run_cli("config", "get", "worker-model"), (0, "sol\n", ""))
+        self.assertEqual(json.loads(self.run_cli("config", "show")[1])["worker-backend"],
+                         {"value": "app-server", "source": "model-default"})
         self.assertEqual(json.loads(self.run_cli("config", "show")[1])["worker-model"],
                          {"value": "sol", "source": "file"})
         with mock.patch.dict(os.environ, {"ORCHD_WORKER_MODEL": "sonnet"}):

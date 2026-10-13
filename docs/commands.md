@@ -102,7 +102,8 @@ MCP tools (there is no shell dispatch command):
 - `dispatch` accepts optional `issue_ref`; omission leaves the task unlinked.
 - `dispatch` without `model` uses the configured worker default (factory `sonnet`, Claude Sonnet 5.5; `sol` is GPT-6.1 Sol on Codex).
   See [Worker model setting](#worker-model-setting). `retry` still requires `model`. `backend=app-server` needs a Codex model,
-  so omitting `model` while the default is `sonnet` is rejected; pass `model=sol`.
+  so explicitly requesting app-server while the effective model is `sonnet` is rejected; pass `model=sol`.
+  Omitted backend is resolved after model: new `sol` uses app-server, `sonnet` keeps Claude. Explicit `backend=exec` preserves the Codex exec path; existing attempts are unchanged.
   Other required arguments retain their existing rules.
 - `task_link` requires `task_id` and `ref`, with optional `idempotency_key`.
 - `task_unlink` requires `task_id`, with optional `idempotency_key`.
@@ -159,6 +160,8 @@ from `worker.model` (dotted or inline `worker` forms are refused: edit those by 
 is created `0600` in a `0700` directory.
 `ORCHD_CONFIG_FILE` names an exact file and outranks `ORCHD_CONFIG_DIR`; it is a test/advanced hook, and `orchd config show` prints
 which one chose the file (`file-source`).
+`config show` also reports `worker-backend` with source `model-default`: `app-server` for effective `sol`, `exec` for `sonnet` (its existing Claude runtime). This derived field is read-only, not a config key; override it per dispatch with `backend=exec`. Retry retains a stored Codex attempt backend unless explicitly overridden. Existing exec workers are not migrated and can open a viewer only between turns. New app-server workers and Claude workers support native attach while busy or idle; app-server FIFO answers/followups wait until all viewer windows close.
+
 Review always uses the other vendor than the author and has no setting.
 
 ```bash
