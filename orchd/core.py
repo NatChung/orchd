@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import app_worker, orch_revive, paths, question_summary, store, verify as verification, worker_health
 from .orch_health import owner_health
-from .runtime import (DEFAULT_ORCH_MODEL, DEFAULT_WORKER_MODEL, ORCH_MODELS, WORKER_MODELS,
+from .runtime import (DEFAULT_ORCH_MODEL, ORCH_MODELS, WORKER_MODELS,
                       claude_job_alive, error_detail, worker_kind)
 
 
@@ -117,7 +117,7 @@ def _choice(name, value, valid):
         raise ValueError(f"unknown {name} {value!r}; use one of {', '.join(valid)}")
 
 
-def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, model=DEFAULT_WORKER_MODEL,
+def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, model=None,
              model_reason=None, task_type=None, rework_of=None, found_by=None, verify=None, manual_checks=None,
              verifies=None, backend="exec", goal_id=None, goal_critical=None, issue_ref=None):
     from . import issue_links
@@ -125,7 +125,8 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
         issue_links.validate_ref(issue_ref)
     if not orch_thread:
         raise ValueError("dispatch needs the caller's thread id")
-    _choice("model", model, tuple(WORKER_MODELS))
+    from . import config
+    model, _ = config.worker_model(model)  # explicit > ORCHD_WORKER_MODEL > config.toml > sonnet; bad value raises
     if not isinstance(model_reason, str) or not model_reason.strip():
         raise ValueError("dispatch needs a non-empty model_reason")
     _choice("task_type", task_type, TASK_TYPES)

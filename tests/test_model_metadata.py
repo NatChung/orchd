@@ -15,8 +15,11 @@ class ModelMetadataTest(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        patcher = mock.patch.dict(os.environ, {"ORCHD_HOME": self.tmp.name})
+        patcher = mock.patch.dict(os.environ, {"ORCHD_HOME": self.tmp.name,
+                                               "ORCHD_CONFIG_DIR": self.tmp.name + "/cfg"})
         patcher.start()
+        os.environ.pop("ORCHD_WORKER_MODEL", None)
+        os.environ.pop("ORCHD_CONFIG_FILE", None)
         self.addCleanup(patcher.stop)
         self.con = store.connect()
         self.rt = FakeRuntime()
@@ -90,30 +93,15 @@ class ModelMetadataTest(unittest.TestCase):
         self.assertIn("model", tools["inbox"])
         self.assertIn("model", tools["list_open"])
 
-    def test_worker_model_default_env_override(self):
-        import subprocess, sys
-        code = "from orchd import runtime; print(runtime.DEFAULT_WORKER_MODEL)"
-        def run(value):
-            env = {k: v for k, v in os.environ.items() if k != "ORCHD_WORKER_MODEL"}
-            if value is not None:
-                env["ORCHD_WORKER_MODEL"] = value
-            return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
-        self.assertEqual(run(None).stdout.strip(), "sonnet")
-        self.assertEqual(run("sol").stdout.strip(), "sol")
-        bad = run("opus")
-        self.assertNotEqual(bad.returncode, 0)
-        self.assertIn("ORCHD_WORKER_MODEL", bad.stderr)
-
     def test_mcp_worker_model_schema_and_dispatch_validation(self):
         from orchd import mcp_server
         tools = {t["name"]: t for t in mcp_server.TOOLS}
         for name in ("dispatch", "retry"):
             prop = tools[name]["inputSchema"]["properties"]["model"]
             self.assertEqual(prop["enum"], ["sol", "sonnet"])
-            self.assertIn("default and preferred", prop["description"])
             self.assertNotIn("opus", json.dumps(tools[name]))
             self.assertNotIn("M tier", json.dumps(tools[name]))
-        self.assertEqual(tools["dispatch"]["inputSchema"]["properties"]["model"]["default"], "sonnet")
+        self.assertNotIn("default", tools["dispatch"]["inputSchema"]["properties"]["model"])
 
         args = dict(repo="demo", title="T", instructions="do it", done_when="tests pass",
                     model_reason="clear scope", task_type="code")
@@ -134,3 +122,13 @@ class ModelMetadataTest(unittest.TestCase):
             result = dispatch(**extra)
             self.assertNotIn("isError", result)
             self.assertEqual(json.loads(result["content"][0]["text"])["model"], full)
+        # Omitting model follows the effective setting, not a hard-coded alias.
+        cfg = os.environ["ORCHD_CONFIG_DIR"]
+        os.makedirs(cfg, exist_ok=True)
+        with open(cfg + "/config.toml", "w") as f:
+            f.write('[worker]\nmodel = "sol"\n')
+        result = dispatch()
+        self.assertNotIn("isError", result)
+        self.assertEqual(json.loads(result["content"][0]["text"])["model"], "gpt-6.1-sol")
+        with mock.patch.dict(os.environ, {"ORCHD_WORKER_MODEL": "sonnet"}):
+            self.assertEqual(json.loads(dispatch()["content"][0]["text"])["model"], "claude-sonnet-5-5")

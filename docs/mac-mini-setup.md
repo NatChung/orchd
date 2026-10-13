@@ -26,8 +26,8 @@ user.name|user.email`, and `ssh-keygen -l -f -` (public-key text on stdin, never
 Each open step shows who runs it (Operator, at the target machine's own terminal), the exact command, the source it was
 checked from, and the receipt that proves it worked.
 
-Worker choices: `sonnet` (claude-sonnet-5-5, default and preferred) and `sol` (GPT-6.1 Sol on Codex,
-when switching vendors). Set `ORCHD_WORKER_MODEL=sol` to change the dispatch default. Both CLIs are checked by the wizard; doctor reports Codex as optional for machines
+Worker choices: `sonnet` (claude-sonnet-5-5, factory default) and `sol` (GPT-6.1 Sol on Codex).
+Change the dispatch default with `orchd config set worker-model sol` (or `ORCHD_WORKER_MODEL`; see docs/commands.md). Both CLIs are checked by the wizard; doctor reports Codex as optional for machines
 using only Claude. Per-repo Claude trust checks apply to Sonnet workers; Sol runs on Codex.
 
 ## 2. Generic environment vs example profile

@@ -114,6 +114,16 @@ class AppViewerTest(AppBase):
         self.complete()
         self.assertEqual(store.get_task(self.con,self.id)["active_turn"],"new-turn")
 
+    def test_mcp_app_server_without_model_follows_configured_default(self):
+        args=dict(repo="demo",title="T",instructions="i",done_when="d",model_reason="r",task_type="code",backend="app-server")
+        with patch.dict(os.environ,{"ORCHD_WORKER_MODEL":"sonnet"}), patch.object(app_worker,"start") as start:
+            with self.assertRaisesRegex(ValueError,"app-server backend requires a Codex model"):
+                mcp_server.call("dispatch",dict(args),"thread-A",self.con,self.rt)
+        start.assert_not_called()
+        with patch.dict(os.environ,{"ORCHD_WORKER_MODEL":"sol"}), patch.object(app_worker,"start") as start:
+            mcp_server.call("dispatch",dict(args),"thread-A",self.con,self.rt)
+        start.assert_called_once()
+
     def test_mcp_dispatch_routes_only_explicit_opt_in(self):
         args=dict(repo="demo",title="T",instructions="i",done_when="d",model_reason="r",task_type="code")
         with patch.object(app_worker,"start") as start:

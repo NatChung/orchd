@@ -100,8 +100,9 @@ Orch maintains refs and must confirm the current ref before changing it.
 MCP tools (there is no shell dispatch command):
 
 - `dispatch` accepts optional `issue_ref`; omission leaves the task unlinked.
-- `dispatch` without `model` uses `sonnet` (Claude Sonnet 5.5); `sol` (GPT-6.1 Sol on Codex) is for switching vendors.
-  Set `ORCHD_WORKER_MODEL=sol|sonnet` in the MCP server environment to change that default.
+- `dispatch` without `model` uses the configured worker default (factory `sonnet`, Claude Sonnet 5.5; `sol` is GPT-6.1 Sol on Codex).
+  See [Worker model setting](#worker-model-setting). `retry` still requires `model`. `backend=app-server` needs a Codex model,
+  so omitting `model` while the default is `sonnet` is rejected; pass `model=sol`.
   Other required arguments retain their existing rules.
 - `task_link` requires `task_id` and `ref`, with optional `idempotency_key`.
 - `task_unlink` requires `task_id`, with optional `idempotency_key`.
@@ -138,6 +139,27 @@ and add the formal link. See [issue-linked workflow](issue-linked-workflow.md).
 ```
 
 Every field flag takes a value. General fields are text; dates use YYYY-MM-DD. `--companies` takes a JSON string array; `--linked-tasks` takes a JSON array of objects with `task_id` and boolean `goal_critical`. `--v` is a number from 0–10 recording Operator-approved value; `--j` is 1, 2, 3, 5 or 8. `--type` is goal/continuous; `--status` is active/waiting/paused/done. `--fields` is a JSON object with underscore field names; flags override it. To clear optional dates or v, pass JSON null through `--fields`, for example `orchd goal set GOAL_ID --fields '{"deadline": null, "v": null}'`. `--deadline null` and `--v null` do not work; do not override the null with a flag for the same field. Repo is immutable after creation. `--actor` defaults to `operator:<OS user>` and is audit attribution, not authentication. See [goals and board](goals-board.md).
+
+## Worker model setting
+
+Personal settings live in `~/.config/orchd/config.toml` (`ORCHD_CONFIG_DIR` moves the directory), next to `init.toml`:
+
+```toml
+[worker]
+model = "sol"   # sol | sonnet; omit for the factory default, sonnet
+```
+
+Precedence for the dispatch default: explicit `model` on the dispatch (flag) > env `ORCHD_WORKER_MODEL` > config file > `sonnet`.
+An empty `ORCHD_WORKER_MODEL` counts as unset. Any other invalid value, in any layer, is an error (nothing falls through to
+the next layer); a missing file is fine. The value is read on every dispatch, so a running MCP server needs no restart.
+Review always uses the other vendor than the author and has no setting.
+
+```bash
+orchd config show                   # every setting, its value and source (env | file | default), plus the file path
+orchd config get worker-model       # prints the effective value, e.g. sonnet
+orchd config set worker-model sol   # validates, then writes the file
+orchd config unset worker-model     # remove the entry; back to the factory default (restore)
+```
 
 ## Worker reporting
 
