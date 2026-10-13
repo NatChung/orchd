@@ -1,0 +1,3 @@
+{"version": 1, "provider": "email", "account": "nat@ariontechs.com", "company": "ariontechs",
+ "event_id": "gmail:thread-1:msg-1", "source_ref": "gmail:nat@ariontechs.com/msg-1", "thread_ref": "gmail:thread-1",
+ "source_time": 1760000000, "summary": "Synthetic: customer asks for a delivery date"}

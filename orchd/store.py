@@ -146,6 +146,73 @@ CREATE TABLE IF NOT EXISTS entry_answer_submissions(
     reply_id INTEGER NOT NULL REFERENCES entry_messages(id),
     PRIMARY KEY(entry_id, idempotency_key)
 );
+CREATE TABLE IF NOT EXISTS intake_log(
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    ref TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS intake_events(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    receipt_id TEXT NOT NULL UNIQUE,
+    version INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    account TEXT NOT NULL,
+    company TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    source_ref TEXT NOT NULL,
+    thread_ref TEXT,
+    source_time REAL NOT NULL,
+    received_at REAL NOT NULL,
+    producer TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    owner_orch TEXT,
+    state TEXT NOT NULL DEFAULT 'received',
+    acked_at REAL,
+    acked_by TEXT,
+    classification TEXT,
+    level TEXT,
+    todo_id TEXT,
+    issue_ref TEXT,
+    project TEXT,
+    UNIQUE(provider, account, event_id)
+);
+CREATE TABLE IF NOT EXISTS intake_drafts(
+    draft_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    receipt_id TEXT,
+    provider TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    target TEXT NOT NULL,
+    source_ref TEXT NOT NULL,
+    level TEXT NOT NULL,
+    template TEXT,
+    summary TEXT NOT NULL,
+    body TEXT NOT NULL,
+    body_sha256 TEXT NOT NULL,
+    expires_at REAL NOT NULL,
+    state TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    connector_receipt_id TEXT,
+    outcome_detail TEXT,
+    PRIMARY KEY(draft_id, version)
+);
+CREATE TABLE IF NOT EXISTS intake_approvals(
+    approval_id TEXT PRIMARY KEY,
+    draft_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    body_sha256 TEXT NOT NULL,
+    sender TEXT NOT NULL,
+    target TEXT NOT NULL,
+    source_ref TEXT NOT NULL,
+    expires_at REAL NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    actor TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
 """
 
 # Columns added after v1. Nullable so old rows and old code keep working against the same DB.

@@ -1,0 +1,3 @@
+{"draft_id": "dr_example", "provider": "email", "sender": "nat@ariontechs.com", "target": "gmail:thread-1",
+ "source_ref": "gmail:nat@ariontechs.com/msg-1", "level": "L2", "summary": "Synthetic reply draft",
+ "body": "Synthetic body", "expires_at": 4102444800}

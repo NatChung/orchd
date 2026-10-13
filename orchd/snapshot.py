@@ -12,7 +12,7 @@ import json
 import time
 from pathlib import Path
 
-from . import entry, goals, issue_links, stats, store, task_questions
+from . import entry, goals, intake, issue_links, stats, store, task_questions
 
 
 def _metadata(row):
@@ -133,6 +133,7 @@ def read(path, *, answered_limit=100, schema_version=1):
                     entry_messages=entry_messages, replies=replies, worker_questions=worker_questions,
                     worker_answers=worker_answers, worker_deliveries=deliveries,
                     **(dict(issue_links=dict(version=1, available=True, history=link_history),
+                            intake=intake.project(con, tables, generated_at),
                             pending_worker_questions=task_questions.pending(con, task_rows.values()),
                             worker_question_resolutions=task_questions.dismissals(con),
                             binding_counts=[dict(entry_id=eid, orch_id=oid, **entry.message_counts(con, eid, oid))

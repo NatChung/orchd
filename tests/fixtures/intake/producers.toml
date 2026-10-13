@@ -1,0 +1,7 @@
+[intake.producers.nat-assistant-email]
+providers = ["email"]
+accounts = ["nat@ariontechs.com"]
+
+[intake.producers.nat-assistant-line]
+providers = ["line"]
+accounts = ["line-bot"]
