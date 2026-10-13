@@ -154,7 +154,7 @@ Every layer is validated, even when a higher layer would win: an invalid flag, e
 falls through. Only an omitted flag (`null`) and an empty `ORCHD_WORKER_MODEL` count as unset; an explicit empty string, `0` or
 `false` is an error. A missing file is fine; a directory at that path, invalid TOML, or a wrong shape (for example `worker = "sol"`
 instead of a `[worker]` table) is an error that names the file. The value is read on every dispatch, so a running MCP server needs no restart.
-`orchd config set/unset` edit only the `model` line and refuse, writing nothing, unless the file re-parses to the same data apart
+`orchd config set/unset` edit only the `model` line (all other bytes, CRLF line endings included, stay as they were; a new line follows the file's own ending style) and refuse, writing nothing, unless the file re-parses to the same data apart
 from `worker.model` (dotted or inline `worker` forms are refused: edit those by hand). The file keeps its permissions; a new one
 is created `0600` in a `0700` directory.
 `ORCHD_CONFIG_FILE` names an exact file and outranks `ORCHD_CONFIG_DIR`; it is a test/advanced hook, and `orchd config show` prints
@@ -165,7 +165,7 @@ Review always uses the other vendor than the author and has no setting.
 orchd config show                   # every setting, its value and source (env | file | default), plus the file path
 orchd config get worker-model       # prints the effective value, e.g. sonnet
 orchd config set worker-model sol   # validates, then writes the file
-orchd config unset worker-model     # remove the entry; back to the factory default (restore)
+orchd config unset worker-model     # remove the override from the config file; ORCHD_WORKER_MODEL, if set, still wins, else sonnet
 ```
 
 ## Worker reporting

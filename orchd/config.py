@@ -1,12 +1,12 @@
 """Personal orchd settings: ~/.config/orchd/config.toml (ORCHD_CONFIG_DIR), next to init.toml.
 
     [worker]
-    model = "sol"        # sol | sonnet; factory default sonnet
+    model = "sol"        # sol | sonnet; with nothing set anywhere, sonnet
 
 Worker model precedence: dispatch's explicit model (flag) > ORCHD_WORKER_MODEL (env) > config file > default.
 Every layer is validated even when a higher one wins; a bad value raises ValueError naming its source.
 Only None (flag) and an empty ORCHD_WORKER_MODEL count as "not given". A wrong-shaped file fails closed.
-set/unset edit the one line in place and refuse (writing nothing) unless the re-parsed result equals the old data
+set/unset edit the one line in place (line endings, CRLF included, are kept byte for byte) and refuse (writing nothing) unless the re-parsed result equals the old data
 apart from worker.model, so nothing else in the file is rewritten.
 ORCHD_CONFIG_FILE points at an exact file; it is a test/advanced hook and outranks ORCHD_CONFIG_DIR.
 Review always uses the other vendor than the author, so it has no setting.
@@ -54,7 +54,7 @@ def _read(env=None):
         raise ValueError(f"{file}: not a file")
     if tomllib is None:
         raise ValueError(f"{file} needs Python 3.11+ (tomllib) to read")
-    text = file.read_text()
+    text = file.read_text(newline="")  # keep \r\n as is
     try:
         return text, tomllib.loads(text)
     except tomllib.TOMLDecodeError as error:
@@ -96,14 +96,16 @@ def worker_model(explicit=None, env=None):
 
 def _edit(text, value):
     """Set (str) or remove (None) worker.model by editing lines in place."""
-    lines = text.splitlines(keepends=True)
+    eol = "\r\n" if "\r\n" in text else "\n"  # inserted lines follow the file's own style
+    lines = text.split("\n")
+    lines = [line + "\n" for line in lines[:-1]] + ([lines[-1]] if lines[-1] else [])
     start = next((i for i, line in enumerate(lines) if _TABLE.match(line)), None)
-    new = None if value is None else f'model = "{value}"\n'
+    new = None if value is None else f'model = "{value}"{eol}'
     if start is None:
         if new is None:
             return text
-        sep = "" if not text else ("\n" if text.endswith("\n") else "\n\n")
-        return text + sep + "[worker]\n" + new
+        sep = "" if not text else (eol if text.endswith("\n") else eol * 2)
+        return text + sep + "[worker]" + eol + new
     end = next((i for i in range(start + 1, len(lines)) if _ANY_TABLE.match(lines[i])), len(lines))
     at = next((i for i in range(start + 1, end) if _MODEL.match(lines[i])), None)
     if at is None:
@@ -112,7 +114,7 @@ def _edit(text, value):
     elif new is None:
         del lines[at]
     else:
-        lines[at] = new
+        lines[at] = new.rstrip("\r\n") + ("\r\n" if lines[at].endswith("\r\n") else "\n")  # keep that line's own ending
     return "".join(lines)
 
 
@@ -136,7 +138,7 @@ def _save(old_text, old_data, value, env=None):
     file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, tmp = tempfile.mkstemp(dir=file.parent, prefix=file.name + ".", suffix=".tmp")  # 0600, unique per writer
     try:
-        with os.fdopen(fd, "w") as handle:
+        with os.fdopen(fd, "w", newline="") as handle:
             handle.write(new_text)
         if file.exists():
             os.chmod(tmp, file.stat().st_mode & 0o777)

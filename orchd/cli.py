@@ -223,7 +223,7 @@ def build_parser():
     cfg_set = cfg_actions.add_parser("set")
     cfg_set.add_argument("key")
     cfg_set.add_argument("value")
-    cfg_actions.add_parser("unset", help="remove the file entry; back to the factory default").add_argument("key")
+    cfg_actions.add_parser("unset", help="remove the override from the config file (env var, if set, still wins)").add_argument("key")
     doc = sub.add_parser("doctor")
     doc.add_argument("--profile", choices=["example"], help="also check a configurable example layout (accounts, SSH aliases, connectors)")
     doc.add_argument("--json", action="store_true", help="read-only JSON output; never prompt")
@@ -305,7 +305,7 @@ def main(argv=None):
                 print(f"{args.key} = {args.value} ({config.path()})")
             else:
                 config.unset_value(args.key)
-                print(f"{args.key} unset; now {config.worker_model()[0]} ({config.worker_model()[1]})")
+                print(f"{args.key} removed from the config file; effective now {config.worker_model()[0]} ({config.worker_model()[1]})")
         except ValueError as error:
             print(f"orchd config: {error}", file=sys.stderr)
             return 1

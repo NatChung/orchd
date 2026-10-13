@@ -1,4 +1,5 @@
 import contextlib
+import gc
 import io
 import json
 import os
@@ -28,6 +29,7 @@ class ConfigTest(unittest.TestCase):
         self.file.write_text(text)
 
     def run_cli(self, *argv):
+        gc.collect()  # connections leaked by other tests must not warn into the stderr captured below
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = cli.main(list(argv))
@@ -126,6 +128,29 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(self.run_cli("config", "unset", "worker-model")[0], 0)
         self.assertIn('keep = "me"', self.file.read_text())
         self.assertEqual(config.worker_model(), ("sonnet", "default"))
+
+    def test_crlf_file_keeps_every_other_byte(self):
+        def put(raw):
+            self.dir.mkdir(parents=True, exist_ok=True)
+            self.file.write_bytes(raw)
+        put(b'# mine\r\n[other]\r\nkeep = "me"\r\n[worker]\r\nmodel = "sol"  # why\r\n[z]\r\nq = 1\r\n')
+        self.assertEqual(self.run_cli("config", "set", "worker-model", "sonnet")[0], 0)
+        self.assertEqual(self.file.read_bytes(),
+                         b'# mine\r\n[other]\r\nkeep = "me"\r\n[worker]\r\nmodel = "sonnet"\r\n[z]\r\nq = 1\r\n')
+        self.assertEqual(self.run_cli("config", "unset", "worker-model")[0], 0)
+        self.assertEqual(self.file.read_bytes(), b'# mine\r\n[other]\r\nkeep = "me"\r\n[worker]\r\n[z]\r\nq = 1\r\n')
+        self.assertEqual(self.run_cli("config", "set", "worker-model", "sol")[0], 0)  # inserted line follows the file
+        self.assertEqual(self.file.read_bytes(),
+                         b'# mine\r\n[other]\r\nkeep = "me"\r\n[worker]\r\nmodel = "sol"\r\n[z]\r\nq = 1\r\n')
+        put(b'[other]\r\nkeep = 1\r\n')  # new table appended in the file's style
+        self.assertEqual(self.run_cli("config", "set", "worker-model", "sol")[0], 0)
+        self.assertEqual(self.file.read_bytes(), b'[other]\r\nkeep = 1\r\n\r\n[worker]\r\nmodel = "sol"\r\n')
+
+    def test_lf_file_untouched(self):
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.file.write_bytes(b'# a\n[worker]\nmodel = "sol"\n')
+        self.assertEqual(self.run_cli("config", "set", "worker-model", "sonnet")[0], 0)
+        self.assertEqual(self.file.read_bytes(), b'# a\n[worker]\nmodel = "sonnet"\n')
 
     def test_get_surfaces_invalid_config(self):
         self.write('[worker]\nmodel = "opus"\n')
