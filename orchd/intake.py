@@ -7,6 +7,7 @@ Contract reference: docs/intake.md. Frozen fixtures: tests/fixtures/intake/.
 """
 import hashlib
 import json
+import math
 import re
 import time
 import uuid
@@ -27,7 +28,7 @@ AUTO_SEND = dict(enabled=False, reason="disabled by default; every outbound draf
 
 EVENT_FIELDS = {"version", "provider", "account", "company", "event_id", "source_ref", "thread_ref",
                 "source_time", "summary", "owner_orch"}
-REQUIRED = ("version", "provider", "account", "company", "event_id", "source_ref", "source_time", "summary")
+REQUIRED = ("version", "provider", "account", "event_id", "source_ref", "source_time", "summary")
 ISSUE_REF = re.compile(r"(?:github:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9_.-]+#[1-9][0-9]*"
                        r"|jira:[A-Z][A-Z0-9_]*-[1-9][0-9]*)\Z")
 
@@ -63,8 +64,8 @@ def _text(value, name, *, limit=None, required=True):
 
 
 def _time(value, name):
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
-        raise IntakeError("invalid", f"{name} must be a positive unix timestamp")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        raise IntakeError("invalid", f"{name} must be a positive finite unix timestamp")
     return float(value)
 
 
@@ -292,9 +293,10 @@ def draft(con, payload, *, actor="orch"):
             prior = _draft_row(con, draft_id, latest)
             if prior["state"] in ("sending", "sent", "uncertain"):
                 raise IntakeError("invalid_state", f"draft is {prior['state']}; it cannot be revised")
-            if (prior["body_sha256"], prior["sender"], prior["target"], prior["source_ref"], prior["expires_at"]) == \
-                    (digest, fields["sender"], fields["target"], fields["source_ref"], expires_at) \
-                    and prior["state"] in ("pending_approval", "approved"):
+            same = dict(receipt_id=payload.get("receipt_id"), provider=payload["provider"],
+                        level=payload.get("level", "L2"), template=template, expires_at=expires_at,
+                        body_sha256=digest, **{k: v for k, v in fields.items() if k != "body"})
+            if all(prior[k] == v for k, v in same.items()) and prior["state"] in ("pending_approval", "approved"):
                 return _draft_receipt(prior, "unchanged")
             con.execute("UPDATE intake_drafts SET state='superseded',updated_at=? WHERE draft_id=? AND version=? "
                         "AND state IN ('pending_approval','approved')", (now, draft_id, latest))
@@ -308,6 +310,20 @@ def draft(con, payload, *, actor="orch"):
              expires_at, actor, now, now))
         _log(con, "draft", f"{draft_id}:{version}")
         return _draft_receipt(_draft_row(con, draft_id, version), "drafted")
+
+
+def show_draft(con, draft_id, version):
+    """Read-only: the full draft (including body) for one exact version, so it can be shown before approval."""
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise IntakeError("invalid", "version must be an integer")
+    row = _draft_row(con, draft_id, version)
+    approval = con.execute("SELECT approval_id FROM intake_approvals WHERE draft_id=? AND version=?",
+                           (draft_id, version)).fetchone()
+    view = {k: row[k] for k in row.keys()}
+    view.update(status="draft", is_latest=version == _latest(con, draft_id),
+                expired=row["state"] in ("pending_approval", "approved") and time.time() >= row["expires_at"],
+                approval_id=approval[0] if approval else None)
+    return view
 
 
 def approve(con, payload, *, actor="operator"):

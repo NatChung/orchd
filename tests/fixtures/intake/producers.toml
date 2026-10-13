@@ -1,7 +1,7 @@
-[intake.producers.nat-assistant-email]
+[intake.producers.email-adapter]
 providers = ["email"]
-accounts = ["nat@ariontechs.com"]
+accounts = ["alice@example.com"]
 
-[intake.producers.nat-assistant-line]
+[intake.producers.line-adapter]
 providers = ["line"]
-accounts = ["line-bot"]
+accounts = ["example-line-bot"]

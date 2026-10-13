@@ -1,3 +1,3 @@
-{"version": 1, "provider": "line", "account": "line-bot", "company": "personal",
+{"version": 1, "provider": "line", "account": "example-line-bot", "company": "personal",
  "event_id": "line:group-1:1760000100000", "source_ref": "line:group-1/1760000100000",
  "source_time": 1760000100, "summary": "Synthetic: group message", "owner_orch": "orch-1"}

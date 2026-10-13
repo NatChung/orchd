@@ -18,7 +18,7 @@
   orchd verify ID [--timeout S]               verifier worker: rerun the verified task's locked command at its locked SHA
   orchd orch list [--all] [--json] [--restore ID]          live/resumable Orchs; --all includes archived/unknown
   orchd orch attach ID [--viewer]                  attach an existing Claude Orch (resume its conversation if idle)
-  orchd intake submit|pending|bind|ack|classify|draft|approve|claim|receipt|cancel   local intake queue and reply approvals (docs/intake.md)
+  orchd intake submit|pending|bind|ack|classify|draft|draft-show|approve|claim|receipt|cancel   local intake queue and reply approvals (docs/intake.md)
   orchd list                                  open tasks, worker/Orch health, unread notification failures
   orchd goal add|set|show|list|export --md      central goals, audit history, markdown snapshot
   orchd board --html PATH                     private static project board, no inbox consumption
@@ -183,6 +183,9 @@ def build_parser():
     intake_claim = intake_actions.add_parser("claim", help="connector: approved -> sending, once")
     intake_claim.add_argument("--draft", required=True)
     intake_claim.add_argument("--version", required=True, type=int)
+    intake_show = intake_actions.add_parser("draft-show", help="read-only: one exact draft version including its body")
+    intake_show.add_argument("--draft", required=True)
+    intake_show.add_argument("--version", required=True, type=int)
     intake_cancel = intake_actions.add_parser("cancel", help="cancel a not-yet-sending draft")
     intake_cancel.add_argument("--draft", required=True)
     intake_cancel.add_argument("--actor", choices=("orch", "operator"), default="operator")
@@ -297,6 +300,8 @@ def _intake_main(args):
             result = intake.draft(con, payload, actor=args.actor)
         elif action == "approve":
             result = intake.approve(con, payload, actor=args.actor)
+        elif action == "draft-show":
+            result = intake.show_draft(con, args.draft, args.version)
         elif action == "claim":
             result = intake.claim(con, args.draft, args.version)
         elif action == "receipt":

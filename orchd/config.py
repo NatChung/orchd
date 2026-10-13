@@ -131,8 +131,10 @@ def intake_producers(env=None, home=None):
         raise ValueError(f"{file}: [intake.producers] must be tables")
     out = {}
     for name, grant in section.get("producers", {}).items():
+        if not isinstance(grant, dict):
+            raise ValueError(f"{file}: [intake.producers.{name}] must be a table")
         lists = grant.get("providers"), grant.get("accounts")
-        if not isinstance(grant, dict) or not all(isinstance(v, list) and v and all(isinstance(i, str) for i in v)
+        if not all(isinstance(v, list) and v and all(isinstance(i, str) for i in v)
                                                   for v in lists):
             raise ValueError(f"{file}: [intake.producers.{name}] needs non-empty string lists providers and accounts")
         out[name] = dict(providers=lists[0], accounts=lists[1])

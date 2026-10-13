@@ -1,4 +1,4 @@
 {"draft_id": "dr_example", "version": 1,
  "body_sha256": "24a225060015d36ac2507b199f561043ed5374faada4fb75c880c19017f40038",
- "sender": "nat@ariontechs.com", "target": "gmail:thread-1", "source_ref": "gmail:nat@ariontechs.com/msg-1",
+ "sender": "alice@example.com", "target": "mail:thread-1", "source_ref": "mail:alice@example.com/msg-1",
  "idempotency_key": "approve-dr_example-1"}

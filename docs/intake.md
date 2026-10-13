@@ -1,6 +1,6 @@
 # Intake contract v1 (frozen for W2–W5)
 
-Source: nat-assistant `docs/superpowers/specs/2026-10-13-polling-orch-dashboard-design.md` (W1), Refs NatChung/nat-assistant#8.
+Source: the polling design in NatChung/nat-assistant#8 (work package W1).
 Baseline: orchd `main` at f0a5c43 (snapshot schema v2, `entry-question`, `task-question` already present).
 Fixtures: `tests/fixtures/intake/`. Code: `orchd/intake.py`. Polling is not enabled by this change; L1 auto-send is disabled.
 
@@ -12,9 +12,9 @@ Producers never touch SQLite. They call `orchd intake ...`; every call prints ex
 `~/.config/orchd/config.toml` (or `ORCHD_CONFIG_FILE`); edit by hand, orchd has no writer for it:
 
 ```toml
-[intake.producers.nat-assistant-email]
+[intake.producers.email-adapter]
 providers = ["email"]
-accounts  = ["nat@ariontechs.com"]
+accounts  = ["alice@example.com"]
 ```
 
 No grant, or an unset allowlist, rejects everything (`producer_not_allowed`, message names the producer).
@@ -30,6 +30,7 @@ A malformed section fails closed. Identity comes only from `--producer` plus thi
 | `orchd intake ack R [R...] [--actor orch\|operator]` | – | `acked` (each receipt `acked`/`duplicate`) |
 | `orchd intake classify --receipt R [--file F\|-]` | `{classification A-D, level L0-L2, todo_id, issue_ref, project}` | `classified` |
 | `orchd intake draft [--file F\|-] [--actor]` | draft JSON | `drafted` / `unchanged` |
+| `orchd intake draft-show --draft D --version N` | – | `draft` (read-only; full draft incl. `body`, `body_sha256`, `state`, `is_latest`, `expired`, `approval_id`) |
 | `orchd intake approve [--file F\|-] [--actor orch\|operator]` | approval JSON | `approved` / `duplicate` |
 | `orchd intake claim --draft D --version N` | – | `claimed` |
 | `orchd intake receipt [--file F\|-] [--actor connector\|operator]` | receipt JSON | `recorded` / `duplicate` |
@@ -38,7 +39,7 @@ A malformed section fails closed. Identity comes only from `--producer` plus thi
 ## Event (submit)
 
 Required: `version` (=1), `provider` (`email|slack|line`), `account`, `event_id`, `source_ref`, `source_time`
-(unix seconds), `summary` (≤1000 chars). Optional: `company` (default = account), `thread_ref`, `owner_orch`.
+(finite unix seconds; inf/nan rejected), `summary` (≤1000 chars). Optional: `company` (default = account), `thread_ref`, `owner_orch`.
 Any other field (including `producer`, `sender`, `body`) is rejected `unknown_field`. No full text is accepted.
 
 Unique key: `(provider, account, event_id)`. Same key + same content → original receipt, `status=duplicate`.
@@ -53,7 +54,7 @@ owner_state (assigned|unassigned), content_sha256`. The scanner advances its che
 
 States: `pending_approval → approved → sending → sent | failed | uncertain`; also `cancelled`, `superseded`.
 Draft input: `{draft_id?, receipt_id?, provider, sender, target, source_ref, level (L0-L2, default L2), template?,
-summary, body, expires_at}`. A changed draft is a new `version`; older versions become `superseded` and their
+summary, body, expires_at}`. Resubmitting identical content returns `unchanged`; a change to any persisted field (receipt_id, provider, level, template, summary, body, sender, target, source_ref, expires_at) is a new `version`; older versions become `superseded` and their
 approval stops counting. Approval input must be exactly
 `{draft_id, version, body_sha256, sender, target, source_ref, idempotency_key}` (`body_sha256` = sha256 of the body
 as shown in the draft receipt). Errors: `stale` (not latest version / hash differs), `target_mismatch`, `expired`,
@@ -91,7 +92,7 @@ intake: {version: 1, available: bool, revision: int|null,
 
 `available: false` (DB without the intake tables) means "not connected", never zero items. `revision` is the max
 `intake_log.seq`; it changes on every state change in the same DB file, so the existing DB/WAL watch refreshes SSE.
-Bodies of events and drafts are never projected. Items are the newest 500.
+Bodies of events and drafts are never projected in the snapshot; W5 reads a draft body before approval with `draft-show` for the exact version. Items are the newest 500.
 
 ## Not in W1
 
