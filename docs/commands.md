@@ -150,8 +150,15 @@ model = "sol"   # sol | sonnet; omit for the factory default, sonnet
 ```
 
 Precedence for the dispatch default: explicit `model` on the dispatch (flag) > env `ORCHD_WORKER_MODEL` > config file > `sonnet`.
-An empty `ORCHD_WORKER_MODEL` counts as unset. Any other invalid value, in any layer, is an error (nothing falls through to
-the next layer); a missing file is fine. The value is read on every dispatch, so a running MCP server needs no restart.
+Every layer is validated, even when a higher layer would win: an invalid flag, env value or file setting is an error, and nothing
+falls through. Only an omitted flag (`null`) and an empty `ORCHD_WORKER_MODEL` count as unset; an explicit empty string, `0` or
+`false` is an error. A missing file is fine; a directory at that path, invalid TOML, or a wrong shape (for example `worker = "sol"`
+instead of a `[worker]` table) is an error that names the file. The value is read on every dispatch, so a running MCP server needs no restart.
+`orchd config set/unset` edit only the `model` line and refuse, writing nothing, unless the file re-parses to the same data apart
+from `worker.model` (dotted or inline `worker` forms are refused: edit those by hand). The file keeps its permissions; a new one
+is created `0600` in a `0700` directory.
+`ORCHD_CONFIG_FILE` names an exact file and outranks `ORCHD_CONFIG_DIR`; it is a test/advanced hook, and `orchd config show` prints
+which one chose the file (`file-source`).
 Review always uses the other vendor than the author and has no setting.
 
 ```bash

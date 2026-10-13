@@ -133,6 +133,97 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("opus", err)
 
+    # review blockers: set/unset must not rewrite anything else in the file
+    def test_set_preserves_escapes_and_quoted_keys(self):
+        import tomllib
+        original = '# mine\nnote = "a\\nb"\n["a.b"]\nx = 1\n\n[worker]\nmodel = "sol"  # why\n'
+        self.write(original)
+        self.assertEqual(self.run_cli("config", "set", "worker-model", "sonnet")[0], 0)
+        text = self.file.read_text()
+        self.assertIn('note = "a\\nb"', text)
+        self.assertIn('["a.b"]', text)
+        self.assertIn("# mine", text)
+        expected = tomllib.loads(original)
+        expected["worker"]["model"] = "sonnet"
+        self.assertEqual(tomllib.loads(text), expected)
+        self.assertEqual(self.run_cli("config", "unset", "worker-model")[0], 0)
+        self.assertIn('note = "a\\nb"', self.file.read_text())
+        self.assertEqual(config.worker_model(), ("sonnet", "default"))
+
+    def test_set_refuses_dotted_and_inline_forms_unchanged(self):
+        for original in ('worker.model = "sol"\n', 'worker = { model = "sol" }\n'):
+            self.write(original)
+            code, _, err = self.run_cli("config", "set", "worker-model", "sonnet")
+            self.assertEqual(code, 1, original)
+            self.assertEqual(self.file.read_text(), original)
+            self.assertIn("config.toml", err)
+            code, _, err = self.run_cli("config", "unset", "worker-model")
+            self.assertEqual(code, 1, original)
+            self.assertEqual(self.file.read_text(), original)
+
+    def test_set_uses_unique_temp_file(self):
+        self.write('[worker]\nmodel = "sol"\n')
+        stale = self.dir / "config.toml.tmp"
+        stale.write_text("other writer")
+        self.run_cli("config", "set", "worker-model", "sonnet")
+        self.assertEqual(stale.read_text(), "other writer")
+        self.assertEqual(sorted(p.name for p in self.dir.iterdir()), ["config.toml", "config.toml.tmp"])
+
+    def test_permissions(self):
+        self.run_cli("config", "set", "worker-model", "sol")
+        self.assertEqual(self.dir.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(self.file.stat().st_mode & 0o777, 0o600)
+        self.file.chmod(0o640)
+        self.run_cli("config", "set", "worker-model", "sonnet")
+        self.assertEqual(self.file.stat().st_mode & 0o777, 0o640)
+        self.run_cli("config", "unset", "worker-model")
+        self.assertEqual(self.file.stat().st_mode & 0o777, 0o640)
+
+    # every layer is validated, even when a higher layer would win
+    def test_invalid_lower_layers_are_not_masked(self):
+        self.write('[worker]\nmodel = "opus"\n')
+        with self.assertRaisesRegex(ValueError, r"config\.toml.*opus"):
+            config.worker_model("sonnet")
+        with mock.patch.dict(os.environ, {"ORCHD_WORKER_MODEL": "sol"}):
+            with self.assertRaisesRegex(ValueError, r"config\.toml.*opus"):
+                config.worker_model()
+        self.file.unlink()
+        with mock.patch.dict(os.environ, {"ORCHD_WORKER_MODEL": "opus"}):
+            with self.assertRaisesRegex(ValueError, "ORCHD_WORKER_MODEL.*opus"):
+                config.worker_model("sol")
+
+    def test_explicit_empty_or_falsy_values_are_errors_only_none_is_omitted(self):
+        for bad in ("", 0, False, [], 3):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                config.worker_model(bad)
+        self.assertEqual(config.worker_model(None), ("sonnet", "default"))
+
+    def test_wrong_structure_fails_closed(self):
+        for text in ('worker = "sol"\n', 'worker = ["sol"]\n', '[worker]\nmodel = ["sol"]\n'):
+            self.write(text)
+            with self.assertRaisesRegex(ValueError, r"config\.toml"):
+                config.worker_model()
+
+    def test_bad_current_value_can_still_be_replaced_or_unset(self):
+        self.write('[worker]\nmodel = "opus"\n')
+        self.assertEqual(self.run_cli("config", "set", "worker-model", "sol")[0], 0)
+        self.write('[worker]\nmodel = "opus"\n')
+        self.assertEqual(self.run_cli("config", "unset", "worker-model")[0], 0)
+        self.assertEqual(config.worker_model(), ("sonnet", "default"))
+
+    def test_directory_at_config_path_is_an_error(self):
+        self.file.mkdir(parents=True)
+        with self.assertRaisesRegex(ValueError, r"config\.toml.*not a file"):
+            config.worker_model()
+
+    def test_show_names_the_file_source(self):
+        shown = json.loads(self.run_cli("config", "show")[1])
+        self.assertEqual(shown["file-source"], "ORCHD_CONFIG_DIR")
+        override = Path(self.tmp.name) / "x.toml"
+        with mock.patch.dict(os.environ, {"ORCHD_CONFIG_FILE": str(override)}):
+            shown = json.loads(self.run_cli("config", "show")[1])
+        self.assertEqual((shown["file"], shown["file-source"]), (str(override), "ORCHD_CONFIG_FILE"))
+
     def test_mcp_dispatch_schema_does_not_hardcode_default(self):
         from orchd import mcp_server
         prop = {t["name"]: t for t in mcp_server.TOOLS}["dispatch"]["inputSchema"]["properties"]["model"]
