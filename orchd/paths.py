@@ -63,30 +63,10 @@ def projects_dir(home=None, env=None):
 
     if env.get("ORCHD_PROJECTS"):
         return expand(env["ORCHD_PROJECTS"])
-    config = config_dir(home, env) / "config.toml"
-    try:
-        text = config.read_text(encoding="utf-8") if config.exists() else None
-    except FileNotFoundError:
-        pass
-    except (OSError, UnicodeError) as exc:
-        raise ValueError(f"cannot read {config} ({type(exc).__name__})") from exc
-    else:
-        if text is None:
-            data = {}
-        else:
-            try:
-                import tomllib
-            except ImportError as exc:
-                raise ValueError("reading orchd config.toml requires Python 3.11+") from exc
-            try:
-                data = tomllib.loads(text)
-            except tomllib.TOMLDecodeError as exc:
-                raise ValueError(f"invalid TOML in {config}") from exc
-        value = data.get("projects_dir")
-        if value is not None:
-            if not isinstance(value, str) or not value:
-                raise ValueError(f"projects_dir in {config} must be a non-empty string")
-            return expand(value)
+    from . import config  # lazy: config imports paths
+    value = config.file_projects_dir(env, home)  # validated; unreadable or wrong-shaped file raises ValueError
+    if value is not None:
+        return expand(value)
     checkout = Path(__file__).resolve().parents[1]
     if checkout.is_relative_to(home.resolve()) and (checkout / ".git").is_dir():
         return home / checkout.relative_to(home.resolve()).parent

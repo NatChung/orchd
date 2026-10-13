@@ -166,7 +166,13 @@ orchd config show                   # every setting, its value and source (env |
 orchd config get worker-model       # prints the effective value, e.g. sonnet
 orchd config set worker-model sol   # validates, then writes the file
 orchd config unset worker-model     # remove the override from the config file; ORCHD_WORKER_MODEL, if set, still wins, else sonnet
+orchd config get projects-dir       # effective project root (ORCHD_PROJECTS > file > checkout parent > ~/projects)
+orchd config set projects-dir ~/projects   # absolute or ~/ path; same writer the first-run `orchd doctor` prompt uses
 ```
+
+`worker-model` and `projects-dir` are written by the same in-place editor: only that one line changes, CRLF and the
+file's mode are kept (a new file is 0600 in a 0700 directory), and it refuses to write when the result would not re-parse
+to the old data plus the one change.
 
 ## Worker reporting
 

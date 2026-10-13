@@ -249,6 +249,67 @@ class ConfigTest(unittest.TestCase):
             shown = json.loads(self.run_cli("config", "show")[1])
         self.assertEqual((shown["file"], shown["file-source"]), (str(override), "ORCHD_CONFIG_FILE"))
 
+    # projects_dir shares the worker.model writer: same CRLF / mode / other-bytes guarantees
+    def test_projects_dir_get_set_unset_and_show(self):
+        root = Path(self.tmp.name) / "My Repos"
+        self.assertEqual(self.run_cli("config", "set", "projects-dir", str(root))[0], 0)
+        self.assertEqual(self.file.read_text(), f'projects_dir = "{root}"\n')
+        self.assertEqual(self.run_cli("config", "get", "projects-dir"), (0, f"{root}\n", ""))
+        self.assertEqual(json.loads(self.run_cli("config", "show")[1])["projects-dir"], {"value": str(root), "source": "file"})
+        self.assertEqual(self.run_cli("config", "unset", "projects-dir")[0], 0)
+        self.assertEqual(self.file.read_text(), "")
+        self.assertEqual(json.loads(self.run_cli("config", "show")[1])["projects-dir"]["source"], "default")
+
+    def test_projects_dir_set_rejects_bad_values_and_writes_nothing(self):
+        for bad in ("", "relative/path"):
+            code, _, err = self.run_cli("config", "set", "projects-dir", bad)
+            self.assertEqual(code, 1, bad)
+            self.assertIn("projects_dir", err)
+        self.assertFalse(self.file.exists())
+
+    def test_projects_dir_crlf_file_keeps_every_other_byte(self):
+        self.dir.mkdir(parents=True)
+        self.file.write_bytes(b'# mine\r\n[other]\r\nkeep = "me"\r\n[worker]\r\nmodel = "sol"\r\n')
+        self.assertEqual(self.run_cli("config", "set", "projects-dir", "/a/b")[0], 0)
+        self.assertEqual(self.file.read_bytes(),
+                         b'projects_dir = "/a/b"\r\n# mine\r\n[other]\r\nkeep = "me"\r\n[worker]\r\nmodel = "sol"\r\n')
+        self.assertEqual(self.run_cli("config", "set", "projects-dir", "/c")[0], 0)  # replace keeps the file's endings
+        self.assertEqual(self.file.read_bytes(),
+                         b'projects_dir = "/c"\r\n# mine\r\n[other]\r\nkeep = "me"\r\n[worker]\r\nmodel = "sol"\r\n')
+        self.assertEqual(self.run_cli("config", "unset", "projects-dir")[0], 0)
+        self.assertEqual(self.file.read_bytes(), b'# mine\r\n[other]\r\nkeep = "me"\r\n[worker]\r\nmodel = "sol"\r\n')
+
+    def test_projects_dir_permissions(self):
+        self.run_cli("config", "set", "projects-dir", "/a")
+        self.assertEqual(self.dir.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(self.file.stat().st_mode & 0o777, 0o600)
+        self.file.chmod(0o640)
+        self.run_cli("config", "set", "projects-dir", "/b")
+        self.assertEqual(self.file.stat().st_mode & 0o777, 0o640)
+
+    def test_projects_dir_does_not_touch_worker_model_and_vice_versa(self):
+        self.write('projects_dir = "/a"  # note\n[worker]\nmodel = "sol"\n')
+        self.run_cli("config", "set", "worker-model", "sonnet")
+        self.assertEqual(self.file.read_text(), 'projects_dir = "/a"  # note\n[worker]\nmodel = "sonnet"\n')
+        self.run_cli("config", "set", "projects-dir", "/b")
+        self.assertEqual(self.file.read_text(), 'projects_dir = "/b"\n[worker]\nmodel = "sonnet"\n')
+
+    def test_projects_dir_fails_closed(self):
+        for original in ('projects_dir = [\n', 'projects_dir.x = 1\n'):  # invalid TOML; dotted form we cannot edit in place
+            self.write(original)
+            for action in (("set", "projects-dir", "/z"), ("unset", "projects-dir")):
+                code, _, err = self.run_cli("config", *action)
+                self.assertEqual(code, 1, (original, action))
+                self.assertIn("config.toml", err)
+                self.assertEqual(self.file.read_text(), original)
+
+    def test_bad_projects_dir_value_in_file_is_reported_but_can_be_replaced(self):
+        self.write('projects_dir = 7\n')
+        with self.assertRaisesRegex(ValueError, "projects_dir"):
+            config.file_projects_dir()
+        self.assertEqual(self.run_cli("config", "set", "projects-dir", "/ok")[0], 0)
+        self.assertEqual(self.file.read_text(), 'projects_dir = "/ok"\n')
+
     def test_mcp_dispatch_schema_does_not_hardcode_default(self):
         from orchd import mcp_server
         prop = {t["name"]: t for t in mcp_server.TOOLS}["dispatch"]["inputSchema"]["properties"]["model"]

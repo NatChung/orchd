@@ -100,7 +100,7 @@ MCP（不是 shell dispatch 指令）：
 - `dispatch` 可選 `issue_ref`，省略即未掛票；其他必填參數維持原規則。
 - `dispatch` 省略 `model` 時用設定的 worker 預設（出廠 `sonnet`；`sol` 是 GPT-6.1 Sol，Codex）。
   優先順序：dispatch 明確帶的 `model` > 環境變數 `ORCHD_WORKER_MODEL`（空字串視為未設）> `~/.config/orchd/config.toml` 的 `[worker] model` > `sonnet`。每一層都會驗證（即使上層會勝出），非法值一律報錯；只有省略 `model` 與空的環境變數視為未設，明確傳空字串、`0`、`false` 也報錯；設定檔是目錄、非法 TOML 或結構不對（如 `worker = "sol"`）也報錯並指出檔案。`ORCHD_CONFIG_FILE` 是測試／進階用的指定檔案 hook，優先於 `ORCHD_CONFIG_DIR`，`config show` 的 `file-source` 會顯示來源。
-  用 `orchd config show|get|set|unset worker-model` 查看與修改（show 會列出來源）；`unset` 即還原出廠預設。`retry` 仍必填 `model`；`backend=app-server` 需要 `sol`，預設是 `sonnet` 時省略 `model` 會被拒絕。
+  用 `orchd config show|get|set|unset worker-model`（以及 `projects-dir`，與 doctor 第一次詢問專案目錄走同一個寫入器）查看與修改（show 會列出來源）；`unset` 即還原出廠預設。`retry` 仍必填 `model`；`backend=app-server` 需要 `sol`，預設是 `sonnet` 時省略 `model` 會被拒絕。
 - `task_link` 必填 `task_id`、`ref`，可選 `idempotency_key`。
 - `task_unlink` 必填 `task_id`，可選 `idempotency_key`。
 
