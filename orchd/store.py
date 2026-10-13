@@ -176,6 +176,10 @@ CREATE TABLE IF NOT EXISTS intake_events(
     todo_id TEXT,
     issue_ref TEXT,
     project TEXT,
+    excluded_at REAL,
+    excluded_by TEXT,
+    exclusion_reason TEXT,
+    exclusion_rule_version TEXT,
     UNIQUE(provider, account, event_id)
 );
 CREATE TABLE IF NOT EXISTS intake_drafts(
@@ -260,7 +264,9 @@ def connect(path=None):
             except sqlite3.OperationalError:  # another process added it first
                 pass
     for table, columns in (("messages", MESSAGE_COLUMNS), ("entry_messages", ENTRY_MESSAGE_COLUMNS),
-                           ("orchs", ORCH_COLUMNS), ("entry_answer_submissions", SUBMISSION_COLUMNS)):
+                           ("orchs", ORCH_COLUMNS), ("entry_answer_submissions", SUBMISSION_COLUMNS),
+                           ("intake_events", ("excluded_at REAL", "excluded_by TEXT",
+                                              "exclusion_reason TEXT", "exclusion_rule_version TEXT"))):
         have = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
         for column in columns:
             if column.split()[0] not in have:
