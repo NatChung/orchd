@@ -157,12 +157,62 @@ class OwnerTests(IntakeBase):
 
 
 class ClassifyTests(IntakeBase):
+    def test_terminal_events_cannot_be_classified_and_write_nothing(self):
+        for state in ("acked", "excluded"):
+            with self.subTest(state=state):
+                rid = self.submit(event_id=state, owner_orch="orch-1")["receipt_id"]
+                intake.classify(self.con, rid, dict(classification="A"))
+                if state == "acked":
+                    intake.ack(self.con, [rid])
+                else:
+                    intake.exclude(self.con, [rid], reason="out_of_scope", rule_version="rules-2", actor="orch")
+                before = list(self.con.iterdump())
+                with self.assertRaises(intake.IntakeError) as caught:
+                    intake.classify(self.con, rid, dict(classification="C", level="L2"))
+                self.assertEqual(caught.exception.code, "invalid_state")
+                self.assertIn(state, str(caught.exception))
+                self.assertEqual(list(self.con.iterdump()), before)
+
     def test_classify_validates(self):
         rid = self.submit()["receipt_id"]
         self.assertEqual(intake.classify(self.con, rid, dict(classification="C", level="L2", todo_id="TODO-1",
                                                              issue_ref="github:a/b#1"))["status"], "classified")
         for bad in (dict(classification="Z"), dict(level="L9"), dict(issue_ref="nope"), dict(x=1), {}):
             self.assertEqual(self.code(lambda b=bad: intake.classify(self.con, rid, b)), "invalid")
+
+
+class DraftEventStateTests(IntakeBase):
+    def test_excluded_receipt_rejects_new_draft_without_writes(self):
+        rid = self.submit()["receipt_id"]
+        intake.exclude(self.con, [rid], reason="out_of_scope", rule_version="rules-2", actor="orch")
+        before = list(self.con.iterdump())
+        with self.assertRaises(intake.IntakeError) as caught:
+            intake.draft(self.con, dict(fixture("draft_v1.json"), receipt_id=rid))
+        self.assertEqual(caught.exception.code, "invalid_state")
+        self.assertIn("excluded", str(caught.exception))
+        self.assertEqual(list(self.con.iterdump()), before)
+
+    def test_excluded_receipt_rejects_unchanged_and_revised_drafts(self):
+        rid = self.submit()["receipt_id"]
+        payload = dict(fixture("draft_v1.json"), receipt_id=rid)
+        intake.draft(self.con, payload)
+        intake.exclude(self.con, [rid], reason="out_of_scope", rule_version="rules-2", actor="orch")
+        before = list(self.con.iterdump())
+        for body in (payload["body"], "Revised body"):
+            with self.subTest(body=body):
+                self.assertEqual(self.code(lambda: intake.draft(self.con, dict(payload, body=body))),
+                                 "invalid_state")
+                self.assertEqual(list(self.con.iterdump()), before)
+
+    def test_received_and_acked_receipts_still_allow_drafts(self):
+        for state in ("received", "acked"):
+            with self.subTest(state=state):
+                rid = self.submit(event_id=state, owner_orch="orch-1")["receipt_id"]
+                if state == "acked":
+                    intake.ack(self.con, [rid])
+                payload = dict(fixture("draft_v1.json"), draft_id=f"dr_{state}", receipt_id=rid)
+                self.assertEqual(intake.draft(self.con, payload)["status"], "drafted")
+                self.assertEqual(intake.draft(self.con, payload)["status"], "unchanged")
 
 
 class ExcludeTests(IntakeBase):
@@ -594,6 +644,30 @@ class CliTests(IntakeBase):
         code, receipt = self.run_cli("submit", "--producer", "email-adapter",
                                      stdin=(FIX / "event_email.json").read_text())
         self.assertEqual((code, receipt["status"]), (0, "duplicate"))
+
+    def test_event_state_guards_exit_1_with_json_and_no_writes(self):
+        for state in ("received", "acked", "excluded"):
+            rid = self.submit(event_id=state, owner_orch="orch-1")["receipt_id"]
+            if state == "acked":
+                intake.ack(self.con, [rid])
+            elif state == "excluded":
+                intake.exclude(self.con, [rid], reason="out_of_scope", rule_version="rules-2", actor="orch")
+            payloads = (("classify", dict(classification="C")),
+                        ("draft", dict(fixture("draft_v1.json"), draft_id=f"dr_{state}", receipt_id=rid)))
+            for action, payload in payloads:
+                with self.subTest(state=state, action=action):
+                    before = list(self.con.iterdump())
+                    args = (action, "--receipt", rid) if action == "classify" else (action,)
+                    code, result = self.run_cli(*args, stdin=json.dumps(payload))
+                    rejected = state == "excluded" or (state == "acked" and action == "classify")
+                    if rejected:
+                        self.assertEqual((code, result["status"], result.get("error_code")),
+                                         (1, "failed", "invalid_state"))
+                        self.assertIn(state, result["error"])
+                        self.assertEqual(list(self.con.iterdump()), before)
+                    else:
+                        self.assertEqual((code, result["status"]),
+                                         (0, "classified" if action == "classify" else "drafted"))
 
     def test_rejected_producer_names_it_exits_1_and_writes_nothing(self):
         empty = Path(self.temp.name) / "empty.toml"

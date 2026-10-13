@@ -74,8 +74,9 @@ the same event is still `duplicate`. No source deletion or purge occurs.
 Repeat the same decision (receipt, reason, rule version, actor) → per-receipt `duplicate`, no log/revision
 change. A changed decision on an excluded receipt → `conflict`. A batch uses one transaction: missing,
 acked or conflicting receipts reject the whole batch without changes. Repeated receipt IDs are collapsed.
-Acked events cannot be excluded. Excluded events cannot be bound (even to the same owner), acked or
-classified. Each newly excluded receipt appends one `exclude` log row and increments snapshot revision.
+Acked events cannot be excluded. Classification requires state `received`; acked and excluded events
+reject classification with `invalid_state`. Excluded events cannot be bound (even to the same owner), acked
+or used for a draft. Each newly excluded receipt appends one `exclude` log row and increments snapshot revision.
 
 ## Pending traversal
 
@@ -106,7 +107,11 @@ remain pending, without claiming business completion or a frozen queue across co
 
 States: `pending_approval → approved → sending → sent | failed | uncertain`; also `cancelled`, `superseded`.
 Draft input: `{draft_id?, receipt_id?, provider, sender, target, source_ref, level (L0-L2, default L2), template?,
-summary, body, expires_at}`. Resubmitting identical content returns `unchanged`; a change to any persisted field (receipt_id, provider, level, template, summary, body, sender, target, source_ref, expires_at) is a new `version`; older versions become `superseded` and their
+summary, body, expires_at}`. If `receipt_id` is supplied, the event must exist and must not be excluded.
+An excluded receipt rejects new, revised and identical draft submissions with `invalid_state`, without
+changing existing drafts, approvals or logs. Received and acked receipts remain eligible for drafts;
+drafts without a receipt remain supported.
+Resubmitting identical content returns `unchanged`; a change to any persisted field (receipt_id, provider, level, template, summary, body, sender, target, source_ref, expires_at) is a new `version`; older versions become `superseded` and their
 approval stops counting. Approval input must be exactly
 `{draft_id, version, body_sha256, sender, target, source_ref, idempotency_key}` (`body_sha256` = sha256 of the body
 as shown in the draft receipt). Errors: `stale` (not latest version / hash differs), `target_mismatch`, `expired`,
