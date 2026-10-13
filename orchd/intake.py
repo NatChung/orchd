@@ -307,8 +307,8 @@ def classify(con, receipt_id, fields):
             _text(fields[name], name, limit=200)
     with store.immediate(con):
         row = _event(con, receipt_id)
-        if row["state"] == "excluded":
-            raise IntakeError("invalid_state", "an excluded event cannot be classified")
+        if row["state"] != "received":
+            raise IntakeError("invalid_state", f"an {row['state']} event cannot be classified")
         sets = ",".join(f"{k}=?" for k in fields)
         con.execute(f"UPDATE intake_events SET {sets} WHERE receipt_id=?", (*fields.values(), receipt_id))
         _log(con, "classify", receipt_id)
@@ -356,7 +356,9 @@ def draft(con, payload, *, actor="orch"):
     now = time.time()
     with store.immediate(con):
         if payload.get("receipt_id") is not None:
-            _event(con, payload["receipt_id"])
+            event = _event(con, payload["receipt_id"])
+            if event["state"] == "excluded":
+                raise IntakeError("invalid_state", "an excluded event cannot be used for a draft")
         latest = _latest(con, draft_id)
         digest = _sha(fields["body"])
         if latest is not None:
