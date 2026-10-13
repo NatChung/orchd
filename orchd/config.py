@@ -54,7 +54,8 @@ def _read(env=None):
         raise ValueError(f"{file}: not a file")
     if tomllib is None:
         raise ValueError(f"{file} needs Python 3.11+ (tomllib) to read")
-    text = file.read_text(newline="")  # keep \r\n as is
+    with open(file, newline="") as handle:  # keep \r\n as is (Path.read_text(newline=) is 3.13+)
+        text = handle.read()
     try:
         return text, tomllib.loads(text)
     except tomllib.TOMLDecodeError as error:
