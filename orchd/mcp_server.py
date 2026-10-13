@@ -17,7 +17,7 @@ import sys
 import traceback
 
 from . import core, entry, goals, inventory, issue_links, question_summary, store, verify as verification
-from .runtime import DEFAULT_WORKER_MODEL, WORKER_MODELS, Runtime
+from .runtime import WORKER_MODELS, Runtime
 
 TOOLS = [
     {"name": "list_orchs",
@@ -41,9 +41,10 @@ TOOLS = [
          "title": {"type": "string"},
          "instructions": {"type": "string", "description": "Goal, scope, allowed actions, what to report"},
          "done_when": {"type": "string", "description": "Checkable completion conditions"},
-         "model": {"type": "string", "enum": list(WORKER_MODELS), "default": DEFAULT_WORKER_MODEL,
-                   "description": "sol = GPT-6.1 Sol on Codex, the default and preferred worker; "
-                                  "sonnet = Claude Sonnet 5.5, use when switching to another vendor"},
+         "model": {"type": "string", "enum": list(WORKER_MODELS),
+                   "description": "Optional. Omitted = the default from orchd config (ORCHD_WORKER_MODEL, then "
+                                  "config.toml; factory sonnet); see `orchd config show`. "
+                                  "sonnet = Claude Sonnet 5.5; sol = GPT-6.1 Sol on Codex"},
          "goal_id": {"type": "string", "description": "Central goal id; must belong to repo"},
          "issue_ref": {"type": "string", "description": "Optional parent ref: github:owner/repo#N or jira:KEY-N; format validation only"},
          "goal_critical": {"type": "boolean", "description": "Requires goal_id; whether the task is critical to that goal"},
@@ -140,15 +141,15 @@ TOOLS = [
      "inputSchema": {"type": "object", "required": ["task_id"], "properties": {"task_id": {"type": "string"}}}},
     {"name": "retry",
      "description": "Replace a task's worker with a new one on the same worktree and branch, keeping all its local work "
-                    "(uncommitted, untracked, stash, commits). Use sol (the default and preferred worker) or "
-                    "sonnet when switching to another vendor; the from -> to change and your reason are recorded. Stops only "
+                    "(uncommitted, untracked, stash, commits). Pick sonnet or "
+                    "sol (required here; usually the other vendor than the current worker); the from -> to change and your reason are recorded. Stops only "
                     "that task's worker and starts nothing if it does not stop. Refused for closed tasks or a "
                     "missing worktree. The new worker gets the task, its latest progress/report and your reason.",
      "inputSchema": {"type": "object", "required": ["task_id", "model", "reason"], "properties": {
          "task_id": {"type": "string"},
          "model": {"type": "string", "enum": list(WORKER_MODELS),
-                   "description": "sol = GPT-6.1 Sol on Codex, the default and preferred worker; "
-                                  "sonnet = Claude Sonnet 5.5, use when switching to another vendor"},
+                   "description": "Required. sonnet = Claude Sonnet 5.5; sol = GPT-6.1 Sol on Codex. "
+                                  "(dispatch may omit its model and use the configured default; retry may not.)"},
          "backend": {"type": "string", "enum": ["exec", "app-server"],
                      "description": "Optional; retains Codex attempt backend, Sonnet uses its existing backend"},
          "reason": {"type": "string", "description": "Why this worker is being replaced and why this model"}}}},
@@ -319,7 +320,7 @@ def call(name, args, thread, con, rt):
     if name == "dispatch":
         t = core.dispatch(con, rt, orch_thread=thread, repo=args["repo"], title=args["title"],
                           instructions=args["instructions"], done_when=args["done_when"],
-                          model=args.get("model") or DEFAULT_WORKER_MODEL, model_reason=args.get("model_reason"),
+                          model=args.get("model"), model_reason=args.get("model_reason"),
                           task_type=args.get("task_type"), rework_of=args.get("rework_of"),
                           found_by=args.get("found_by"), verify=args.get("verify"),
                           manual_checks=args.get("manual_checks"), verifies=args.get("verifies"),

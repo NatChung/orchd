@@ -8,7 +8,7 @@
 - 開票 worker 照 repo 的 `docs/agents/issue-tracker.md` 與 `triage-labels.md`。Orch 不跑 shell；Orch 明確派去為 Operator 開 `NatChung/*` issue 的 worker 可免預覽，其餘客戶／公司 repo 先完整預覽給 Operator 核准。例外只限該次 issue 建立，不涵蓋 PR、留言、label 維護或其他寫入。缺 label 在預覽／免預覽開票回報註明，不自動建立；缺 `needs-triage` 時省略該 label 參數，若 repo 明定必填則先請 Operator 決定。
 - to-do 範圍、驗收與票狀態以 GitHub／Jira 為準；worker 問答、訊號、progress、report 留 orchd DB，不自動貼回票。Orch 只記 `jira:KEY-N`，不派 Jira 寫入；需要建票或改需求時交 Operator 或其指定的 Jira 維護者。local-markdown 新工作用外部票；舊 Markdown 保留，只補連結，不搬、不批量開票、不鏡像狀態。詳細流程見 orchd repo 的 `docs/issue-linked-workflow.md`（由文件提供者帶入，不擴大 Orch 的 repo 讀寫權限）。
 - 派工時寫清楚目標、範圍（含不做什麼）、允許的動作，以及可核對的 `done_when`；能用指令驗證的，`done_when` 直接寫要跑的指令與預期結果。一個任務一個 worker；互不相依的任務可同時派。
-- `dispatch` 必填 `model`、`model_reason`（一句話說為什麼選它）、`task_type`。worker 只有兩個模型：`sol`（GPT-6.1 Sol，跑在 Codex）是預設，優先使用；`sonnet`（Claude Sonnet 5.5）在需要換一家時用。同一件事失敗兩次，就用 `retry` 換另一家重做。review 一律換另一家（sol 寫的給 sonnet 審，sonnet 寫的給 sol 審）。
+- `dispatch` 必填 `model_reason`（一句話說為什麼選它）、`task_type`；`model` 可省略，省略時用 orchd 設定的預設（`orchd config show` 看有效值與來源；環境變數 `ORCHD_WORKER_MODEL` 優先於 `~/.config/orchd/config.toml`，出廠是 `sonnet`）。worker 只有兩個模型：`sonnet`（Claude Sonnet 5.5）與 `sol`（GPT-6.1 Sol，跑在 Codex）；要換一家時明確帶 `model`。`backend=app-server` 只支援 `sol`，所以省略 `model` 而有效預設不是 `sol` 時會被拒絕，要明確帶 `model=sol`。同一件事失敗兩次，就用 `retry` 換另一家重做。review 一律換另一家（sonnet 寫的給 sol 審，sol 寫的給 sonnet 審），不另設定。
 - 返工（前一個任務的結果要重做或修正）時帶 `rework_of`（原任務 id）與 `found_by`（verify / review / orch / nat：誰發現問題）。
 - `dispatch` 回傳 `other_open_on_repo` 不是空的時候，表示別組 Orch 也在改同一個 repo：派工內容要避開對方範圍，並告訴 Operator。
 - 派工後回報 task_id 就結束這一回合，不要在同一回合等待、sleep 或反覆呼叫 `inbox`：worker 的通知要等目前回合結束才送得進來。

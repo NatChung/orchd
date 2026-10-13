@@ -15,8 +15,11 @@ class ModelMetadataTest(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        patcher = mock.patch.dict(os.environ, {"ORCHD_HOME": self.tmp.name})
+        patcher = mock.patch.dict(os.environ, {"ORCHD_HOME": self.tmp.name,
+                                               "ORCHD_CONFIG_DIR": self.tmp.name + "/cfg"})
         patcher.start()
+        os.environ.pop("ORCHD_WORKER_MODEL", None)
+        os.environ.pop("ORCHD_CONFIG_FILE", None)
         self.addCleanup(patcher.stop)
         self.con = store.connect()
         self.rt = FakeRuntime()
@@ -96,10 +99,9 @@ class ModelMetadataTest(unittest.TestCase):
         for name in ("dispatch", "retry"):
             prop = tools[name]["inputSchema"]["properties"]["model"]
             self.assertEqual(prop["enum"], ["sol", "sonnet"])
-            self.assertIn("default and preferred", prop["description"])
             self.assertNotIn("opus", json.dumps(tools[name]))
             self.assertNotIn("M tier", json.dumps(tools[name]))
-        self.assertEqual(tools["dispatch"]["inputSchema"]["properties"]["model"]["default"], "sol")
+        self.assertNotIn("default", tools["dispatch"]["inputSchema"]["properties"]["model"])
 
         args = dict(repo="demo", title="T", instructions="do it", done_when="tests pass",
                     model_reason="clear scope", task_type="code")
@@ -115,8 +117,18 @@ class ModelMetadataTest(unittest.TestCase):
             self.assertTrue(result["isError"])
             self.assertIn("use one of sol, sonnet", result["content"][0]["text"])
         self.assertEqual(store.open_tasks(self.con), [])
-        for extra, full in (({}, "gpt-6.1-sol"), ({"model": "sol"}, "gpt-6.1-sol"),
+        for extra, full in (({}, "claude-sonnet-5-5"), ({"model": "sol"}, "gpt-6.1-sol"),
                             ({"model": "sonnet"}, "claude-sonnet-5-5")):
             result = dispatch(**extra)
             self.assertNotIn("isError", result)
             self.assertEqual(json.loads(result["content"][0]["text"])["model"], full)
+        # Omitting model follows the effective setting, not a hard-coded alias.
+        cfg = os.environ["ORCHD_CONFIG_DIR"]
+        os.makedirs(cfg, exist_ok=True)
+        with open(cfg + "/config.toml", "w") as f:
+            f.write('[worker]\nmodel = "sol"\n')
+        result = dispatch()
+        self.assertNotIn("isError", result)
+        self.assertEqual(json.loads(result["content"][0]["text"])["model"], "gpt-6.1-sol")
+        with mock.patch.dict(os.environ, {"ORCHD_WORKER_MODEL": "sonnet"}):
+            self.assertEqual(json.loads(dispatch()["content"][0]["text"])["model"], "claude-sonnet-5-5")

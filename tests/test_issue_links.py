@@ -149,7 +149,7 @@ class IssueLinkTests(unittest.TestCase):
         self.assertEqual(self.con.execute("SELECT COUNT(*) FROM tasks").fetchone()[0], before)
         with patch.object(self.rt, "start_codex_worker", side_effect=RuntimeError("synthetic launch failure")):
             with self.assertRaises(RuntimeError):
-                self.dispatch(issue_ref="jira:TEST-1")
+                self.dispatch(model="sol", issue_ref="jira:TEST-1")
         failed = self.con.execute("SELECT id FROM tasks WHERE status='failed'").fetchone()[0]
         self.assertEqual(issue_links.history(self.con, failed), [])
         result = mcp_server.call("task_link", dict(task_id=self.tid, ref="jira:TEST-4", idempotency_key="mcp"),

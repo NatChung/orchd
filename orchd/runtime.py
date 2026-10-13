@@ -22,7 +22,7 @@ from .processes import cleanup_processes, task_processes
 WORKER_MODELS = {"sol": "gpt-6.1-sol", "sonnet": "claude-sonnet-5-5"}
 # Claude Orch choices are independent of the worker policy; its current default stays unchanged.
 ORCH_MODELS = {"sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}
-DEFAULT_WORKER_MODEL = "sol"
+# The worker default (factory sonnet) is resolved per dispatch by orchd.config: env, then config.toml.
 DEFAULT_ORCH_MODEL = "opus"
 # Native tools observed in the 2.1.289 restricted Orch, including background-only
 # tools and Agent/Task aliases. New CLI tools are not implicitly granted.

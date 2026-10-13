@@ -24,6 +24,7 @@
   orchd watch [--since HH:MM]                 live timeline of Orch <-> worker messages
   orchd summary [--since HH:MM]               per Orch: workers, models, questions, parallelism, tokens
   orchd stats [--since T] [--json]            per Orch x task_type: counts, rework, source-backed tokens, cost estimate
+  orchd config show|get KEY|set KEY VALUE|unset KEY   personal settings (worker-model, projects-dir); show prints each value's source
   orchd doctor [--profile example] [--json] [--no-input]   machine check; first-run terminal setup; exit 1 required fail, 2 required unknown
   orchd adopt NEW_ORCH [TASK_ID...] [--from OLD_ORCH] [--force]   move open tasks to another Orch (operator only)
   orchd close ID                              stop a task's worker and clean its worktree if safe
@@ -215,6 +216,14 @@ def build_parser():
     adopt.add_argument("--from", dest="from_orch", help="move all open tasks of this Orch (or limit TASK_IDs to it)")
     adopt.add_argument("--force", action="store_true", help="also move from an alive or unknown owner, and tell it")
     sub.add_parser("close").add_argument("task_id")
+    cfg = sub.add_parser("config", help="personal settings in ~/.config/orchd/config.toml (worker-model, projects-dir)")
+    cfg_actions = cfg.add_subparsers(dest="config_action", required=True)
+    cfg_actions.add_parser("show", help="every setting with its source: flag, env, file or default")
+    cfg_actions.add_parser("get").add_argument("key")
+    cfg_set = cfg_actions.add_parser("set")
+    cfg_set.add_argument("key")
+    cfg_set.add_argument("value")
+    cfg_actions.add_parser("unset", help="remove the override from the config file (env var, if set, still wins)").add_argument("key")
     doc = sub.add_parser("doctor")
     doc.add_argument("--profile", choices=["example"], help="also check a configurable example layout (accounts, SSH aliases, connectors)")
     doc.add_argument("--json", action="store_true", help="read-only JSON output; never prompt")
@@ -281,6 +290,25 @@ def main(argv=None):
                 con.close()
             if snap is not None:
                 snap.close()
+
+    if args.cmd == "config":  # config file only; never touches the DB
+        from orchd import config
+        try:
+            if args.config_action == "show":
+                print(json.dumps(config.show(), ensure_ascii=False, indent=1))
+            elif args.config_action == "get":
+                print(config.get_value(args.key)[0])
+            elif args.config_action == "set":
+                config.set_value(args.key, args.value)
+                print(f"{args.key} = {args.value} ({config.path()})")
+            else:
+                config.unset_value(args.key)
+                value, source = config.get_value(args.key)
+                print(f"{args.key} removed from the config file; effective now {value} ({source})")
+        except ValueError as error:
+            print(f"orchd config: {error}", file=sys.stderr)
+            return 1
+        return 0
 
     if args.cmd == "doctor":  # no DB; only interactive first-run setup may save the chosen project root
         from orchd import doctor

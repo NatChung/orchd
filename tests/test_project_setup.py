@@ -91,3 +91,20 @@ class ProjectSetupTest(unittest.TestCase):
             cli.main(['doctor'])
         ask.assert_not_called()
         self.assertEqual(self.config.read_text(), original)
+
+    def test_prompt_write_keeps_crlf_mode_and_other_bytes(self):
+        self.config.parent.mkdir(parents=True)
+        original = b'# keep\r\n[worker]\r\nmodel = "sol"  # why\r\n'
+        self.config.write_bytes(original)
+        self.config.chmod(0o640)
+        with mock.patch.object(cli.sys.stdin, 'isatty', return_value=True), mock.patch('builtins.input', return_value=str(self.projects)):
+            self.assertEqual(cli.main(['doctor']), 0)
+        self.assertEqual(self.config.read_bytes(), f'projects_dir = "{self.projects}"\r\n'.encode() + original)
+        self.assertEqual(self.config.stat().st_mode & 0o777, 0o640)
+
+    def test_prompt_creates_new_file_private(self):
+        with mock.patch.object(cli.sys.stdin, 'isatty', return_value=True), mock.patch('builtins.input', return_value=str(self.projects)):
+            cli.main(['doctor'])
+        self.assertEqual(self.config.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.config.parent.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(self.config.read_text(), f'projects_dir = "{self.projects}"\n')
