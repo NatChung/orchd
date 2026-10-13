@@ -130,7 +130,12 @@ def _event_view(row):
     keys = ("receipt_id", "version", "provider", "account", "company", "event_id", "source_ref", "thread_ref",
             "source_time", "received_at", "producer", "summary", "owner_orch", "state", "acked_at", "acked_by",
             "classification", "level", "todo_id", "issue_ref", "project")
-    return {k: row[k] for k in keys}
+    view = {k: row[k] for k in keys}
+    # Snapshot reads unmigrated v1 databases too; missing additive columns are null.
+    view.update({k: row[k] if k in row.keys() else None for k in
+                 ("excluded_at", "excluded_by", "exclusion_reason", "exclusion_rule_version")})
+    view["id"] = row["id"]
+    return view
 
 
 def _receipt(row, status):
@@ -138,7 +143,9 @@ def _receipt(row, status):
                 event_id=row["event_id"], received_at=row["received_at"], state=row["state"],
                 owner_orch=row["owner_orch"],
                 owner_state="assigned" if row["owner_orch"] else "unassigned",
-                content_sha256=row["content_sha256"])
+                content_sha256=row["content_sha256"],
+                **{k: row[k] for k in ("excluded_at", "excluded_by", "exclusion_reason",
+                                      "exclusion_rule_version")})
 
 
 def submit(con, payload, *, producer, producers):
@@ -176,20 +183,79 @@ def _event(con, receipt_id):
     return row
 
 
-def pending(con, owner=None, limit=100):
-    """Unacked events for one owner (or unassigned when owner is None). Read-only: nothing is consumed."""
-    if owner is None:
-        rows = con.execute("SELECT * FROM intake_events WHERE state='received' AND owner_orch IS NULL "
-                           "ORDER BY id LIMIT ?", (limit,))
-    else:
-        rows = con.execute("SELECT * FROM intake_events WHERE state='received' AND owner_orch=? "
-                           "ORDER BY id LIMIT ?", (owner, limit))
-    return dict(owner=owner, events=[_event_view(r) for r in rows])
+def pending(con, owner=None, limit=100, *, after_id=None, high_water_id=None, cursor=None):
+    """Read a live queue in id order, bounded by a traversal's fixed high-water id.
+
+    Carry next_cursor to keep the boundary and owner. Queue membership is evaluated on each page;
+    events bound into a queue behind its cursor are picked up by the next traversal, not lost forever.
+    """
+    scope = _sha(json.dumps(owner))[:16]
+    if cursor is not None:
+        if after_id is not None or high_water_id is not None:
+            raise IntakeError("invalid", "cursor cannot be combined with after-id or high-water-id")
+        try:
+            tag, after, high, cursor_scope = cursor.split(":")
+            if tag != "p1" or cursor_scope != scope:
+                raise ValueError
+            after_id, high_water_id = int(after), int(high)
+        except (ValueError, AttributeError):
+            raise IntakeError("invalid", "invalid cursor or cursor belongs to another owner queue") from None
+    after_id = 0 if after_id is None else after_id
+    for name, value in (("after-id", after_id), ("high-water-id", high_water_id)):
+        if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+            raise IntakeError("invalid", f"{name} must be a non-negative integer")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        raise IntakeError("invalid", "limit must be a positive integer")
+    if high_water_id is None:
+        high_water_id = con.execute("SELECT COALESCE(MAX(id),0) FROM intake_events").fetchone()[0]
+    if after_id > high_water_id:
+        raise IntakeError("invalid", "after-id exceeds high-water-id")
+    clause, params = ("owner_orch IS NULL", ()) if owner is None else ("owner_orch=?", (owner,))
+    rows = con.execute("SELECT * FROM intake_events WHERE state='received' AND " + clause +
+                       " AND id>? AND id<=? ORDER BY id LIMIT ?",
+                       (*params, after_id, high_water_id, limit + 1)).fetchall()
+    has_more = len(rows) > limit
+    events = [_event_view(r) for r in rows[:limit]]
+    last_id = events[-1]["id"] if events else after_id
+    return dict(owner=owner, events=events, has_more=has_more, high_water_id=high_water_id,
+                next_cursor=f"p1:{last_id}:{high_water_id}:{scope}" if has_more else None)
+
+
+def exclude(con, receipt_ids, *, reason, rule_version, actor):
+    """Explicit Orch/Operator decision, never inferred from third-party event content. Atomic batch."""
+    reason = _text(reason, "reason", limit=200)
+    rule_version = _text(rule_version, "rule-version", limit=200)
+    if actor not in ACTORS:
+        raise IntakeError("invalid", "actor must be orch or operator")
+    if not receipt_ids:
+        raise IntakeError("invalid", "at least one receipt is required")
+    with store.immediate(con):
+        rows = [_event(con, r) for r in dict.fromkeys(receipt_ids)]
+        for row in rows:
+            if row["state"] == "excluded":
+                if (row["exclusion_reason"], row["exclusion_rule_version"], row["excluded_by"]) != \
+                        (reason, rule_version, actor):
+                    raise IntakeError("conflict", "receipt already excluded with a different decision")
+            elif row["state"] != "received":
+                raise IntakeError("invalid_state", "only received events can be excluded")
+        results = []
+        for row in rows:
+            if row["state"] == "excluded":
+                results.append(_receipt(row, "duplicate"))
+                continue
+            con.execute("UPDATE intake_events SET state='excluded',excluded_at=?,excluded_by=?,"
+                        "exclusion_reason=?,exclusion_rule_version=? WHERE receipt_id=?",
+                        (time.time(), actor, reason, rule_version, row["receipt_id"]))
+            _log(con, "exclude", row["receipt_id"])
+            results.append(_receipt(_event(con, row["receipt_id"]), "excluded"))
+        return dict(status="excluded", receipts=results)
 
 
 def bind_owner(con, receipt_id, owner):
     with store.immediate(con):
         row = _event(con, receipt_id)
+        if row["state"] == "excluded":
+            raise IntakeError("invalid_state", "an excluded event cannot be bound")
         _check_owner(con, owner)
         if row["owner_orch"] == owner:
             return _receipt(row, "unchanged")
@@ -201,13 +267,15 @@ def bind_owner(con, receipt_id, owner):
 
 
 def ack(con, receipt_ids, *, actor="orch"):
-    """Processing ack by the Orch (a later stage than the durable receipt). Idempotent per receipt.
-    An unassigned event cannot be acked: it has no owner to have processed it."""
+    """Owner has durably taken responsibility (later than submit/bind, not business completion).
+    Idempotent per receipt. An unassigned event has no owner to have taken responsibility."""
     if actor not in ACTORS:
         raise IntakeError("invalid", "actor must be orch or operator")
     with store.immediate(con):
         rows = [_event(con, r) for r in receipt_ids]
         for row in rows:
+            if row["state"] == "excluded":
+                raise IntakeError("invalid_state", "an excluded event cannot be acked")
             if row["owner_orch"] is None:
                 raise IntakeError("invalid_state", f"{row['receipt_id']} has no owner; bind one first")
         results = []
@@ -238,7 +306,9 @@ def classify(con, receipt_id, fields):
         if fields.get(name) is not None:
             _text(fields[name], name, limit=200)
     with store.immediate(con):
-        _event(con, receipt_id)
+        row = _event(con, receipt_id)
+        if row["state"] == "excluded":
+            raise IntakeError("invalid_state", "an excluded event cannot be classified")
         sets = ",".join(f"{k}=?" for k in fields)
         con.execute(f"UPDATE intake_events SET {sets} WHERE receipt_id=?", (*fields.values(), receipt_id))
         _log(con, "classify", receipt_id)
@@ -458,7 +528,8 @@ def project(con, tables, now):
                     owner_state=("unassigned" if row["owner_orch"] is None else
                                  "owner_stopped" if row["owner_orch"] in stopped else "assigned"))
         age = now - row["received_at"]
-        item["retention"] = ("acked" if row["state"] == "acked" else
+        item["retention"] = ("excluded" if row["state"] == "excluded" else
+                             "acked" if row["state"] == "acked" else
                              "expired" if age >= RETENTION_SECONDS else
                              "expiring" if age >= RETENTION_SECONDS - WARN_BEFORE_SECONDS else "ok")
         item["draft_refs"] = [dict(draft_id=d["draft_id"], version=d["version"]) for d in con.execute(
@@ -485,8 +556,9 @@ def project(con, tables, now):
                                            (d["draft_id"], d["version"])).fetchone() or [None])[0]
         drafts.append(item)
     sources = [dict(provider=r["provider"], account=r["account"], company=r["company"], received=r["n"],
-                    unacked=r["unacked"], last_received_at=r["last"]) for r in con.execute(
-        "SELECT provider,account,company,COUNT(*) n,SUM(state='received') unacked,MAX(received_at) last "
+                    unacked=r["unacked"], excluded=r["excluded"], last_received_at=r["last"]) for r in con.execute(
+        "SELECT provider,account,company,COUNT(*) n,SUM(state='received') unacked,"
+        "SUM(state='excluded') excluded,MAX(received_at) last "
         "FROM intake_events GROUP BY provider,account,company ORDER BY provider,account")]
     return dict(version=VERSION, available=True, revision=revision(con), auto_send=AUTO_SEND, warnings=warnings,
                 sources=sources, items=items, drafts=drafts)

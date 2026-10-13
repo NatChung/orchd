@@ -18,7 +18,7 @@
   orchd verify ID [--timeout S]               verifier worker: rerun the verified task's locked command at its locked SHA
   orchd orch list [--all] [--json] [--restore ID]          live/resumable Orchs; --all includes archived/unknown
   orchd orch attach ID [--viewer]                  attach an existing Claude Orch (resume its conversation if idle)
-  orchd intake submit|pending|bind|ack|classify|draft|draft-show|approve|claim|receipt|cancel   local intake queue and reply approvals (docs/intake.md)
+  orchd intake submit|pending|bind|ack|exclude|classify|draft|draft-show|approve|claim|receipt|cancel   local intake queue and reply approvals (docs/intake.md)
   orchd list                                  open tasks, worker/Orch health, unread notification failures
   orchd goal add|set|show|list|export --md      central goals, audit history, markdown snapshot
   orchd board --html PATH                     private static project board, no inbox consumption
@@ -174,10 +174,18 @@ def build_parser():
     intake_pending = intake_actions.add_parser("pending", help="unacked events for an owner; does not consume")
     intake_pending.add_argument("--owner", help="Orch id; omit to list unassigned events")
     intake_pending.add_argument("--limit", type=int, default=100)
+    intake_pending.add_argument("--after-id", type=int, help="exclusive event id boundary")
+    intake_pending.add_argument("--high-water-id", type=int, help="fixed traversal upper bound")
+    intake_pending.add_argument("--cursor", help="next_cursor from the preceding page (keeps owner and upper bound)")
+    intake_exclude = intake_actions.add_parser("exclude", help="explicit terminal exclusion; no owner required")
+    intake_exclude.add_argument("--receipt", required=True, nargs="+", action="extend")
+    intake_exclude.add_argument("--reason", required=True)
+    intake_exclude.add_argument("--rule-version", required=True)
+    intake_exclude.add_argument("--actor", required=True, choices=("orch", "operator"))
     intake_bind = intake_actions.add_parser("bind", help="bind an unassigned event to a registered Orch")
     intake_bind.add_argument("--receipt", required=True)
     intake_bind.add_argument("--owner", required=True)
-    intake_ack = intake_actions.add_parser("ack", help="Orch processing ack, separate from the durable receipt")
+    intake_ack = intake_actions.add_parser("ack", help="owner durably took responsibility, separate from submit/bind")
     intake_ack.add_argument("receipts", nargs="+")
     intake_ack.add_argument("--actor", choices=("orch", "operator"), default="orch")
     intake_claim = intake_actions.add_parser("claim", help="connector: approved -> sending, once")
@@ -289,7 +297,11 @@ def _intake_main(args):
         if action == "submit":
             result = intake.submit(con, payload, producer=args.producer, producers=producers)
         elif action == "pending":
-            result = intake.pending(con, args.owner, args.limit)
+            result = intake.pending(con, args.owner, args.limit, after_id=args.after_id,
+                                    high_water_id=args.high_water_id, cursor=args.cursor)
+        elif action == "exclude":
+            result = intake.exclude(con, args.receipt, reason=args.reason,
+                                    rule_version=args.rule_version, actor=args.actor)
         elif action == "bind":
             result = intake.bind_owner(con, args.receipt, args.owner)
         elif action == "ack":

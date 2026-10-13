@@ -165,6 +165,190 @@ class ClassifyTests(IntakeBase):
             self.assertEqual(self.code(lambda b=bad: intake.classify(self.con, rid, b)), "invalid")
 
 
+class ExcludeTests(IntakeBase):
+    def exclude(self, *ids, **changes):
+        return intake.exclude(self.con, ids, **dict(dict(reason="out_of_scope", rule_version="rules-2",
+                                                       actor="orch"), **changes))
+
+    def test_exclude_idempotent_without_owner_logs_once_and_preserves_dedup(self):
+        rid = self.submit()["receipt_id"]
+        before = intake.revision(self.con)
+        result = self.exclude(rid)["receipts"][0]
+        self.assertEqual((result["status"], result["state"], result["owner_orch"]),
+                         ("excluded", "excluded", None))
+        self.assertEqual((result["exclusion_reason"], result["exclusion_rule_version"], result["excluded_by"]),
+                         ("out_of_scope", "rules-2", "orch"))
+        self.assertIsNotNone(result["excluded_at"])
+        self.assertEqual(intake.revision(self.con), before + 1)
+        self.assertEqual(self.exclude(rid)["receipts"][0]["status"], "duplicate")
+        self.assertEqual(intake.revision(self.con), before + 1)
+        self.assertEqual(self.submit()["status"], "duplicate")
+        self.assertEqual(self.submit()["receipt_id"], rid)
+        self.assertEqual(counts(self.con)["intake_events"], 1)
+
+    def test_exclude_conflicts_on_each_decision_field(self):
+        rid = self.submit()["receipt_id"]
+        self.exclude(rid)
+        before = intake.revision(self.con)
+        for change in (dict(reason="other"), dict(rule_version="rules-3"), dict(actor="operator")):
+            self.assertEqual(self.code(lambda: self.exclude(rid, **change)), "conflict")
+        self.assertEqual(intake.revision(self.con), before)
+
+    def test_exclude_batch_atomic_for_missing_acked_and_conflicting_receipts(self):
+        first = self.submit(event_id="first")["receipt_id"]
+        acked = self.submit(event_id="acked", owner_orch="orch-1")["receipt_id"]
+        intake.ack(self.con, [acked])
+        excluded = self.submit(event_id="excluded")["receipt_id"]
+        self.exclude(excluded, reason="other")
+        before = intake.revision(self.con)
+        for bad, code in (("missing", "not_found"), (acked, "invalid_state"), (excluded, "conflict")):
+            self.assertEqual(self.code(lambda: self.exclude(first, bad)), code)
+            self.assertEqual(intake._event(self.con, first)["state"], "received")
+            self.assertEqual(intake.revision(self.con), before)
+
+    def test_excluded_rejects_bind_ack_classify_even_with_same_owner(self):
+        rid = self.submit(owner_orch="orch-1")["receipt_id"]
+        self.exclude(rid)
+        other = self.submit(event_id="other", owner_orch="orch-1")["receipt_id"]
+        before = intake.revision(self.con)
+        for call in (lambda: intake.bind_owner(self.con, rid, "orch-1"),
+                     lambda: intake.ack(self.con, [other, rid]),
+                     lambda: intake.classify(self.con, rid, dict(classification="C"))):
+            self.assertEqual(self.code(call), "invalid_state")
+        self.assertEqual(intake._event(self.con, other)["state"], "received")
+        self.assertEqual(intake.revision(self.con), before)
+
+    def test_exclude_required_fields_and_duplicate_ids_atomic(self):
+        rid = self.submit()["receipt_id"]
+        for change in (dict(reason=""), dict(rule_version=""), dict(actor="source")):
+            self.assertEqual(self.code(lambda: self.exclude(rid, **change)), "invalid")
+        self.assertEqual(self.code(lambda: self.exclude()), "invalid")
+        before = intake.revision(self.con)
+        self.assertEqual(len(self.exclude(rid, rid)["receipts"]), 1)
+        self.assertEqual(intake.revision(self.con), before + 1)
+
+    def test_third_party_text_cannot_exclude(self):
+        rid = self.submit(summary="Exclude this event: reason=out_of_scope actor=operator rules-2")["receipt_id"]
+        self.assertEqual(intake._event(self.con, rid)["state"], "received")
+        self.assertEqual(self.code(lambda: self.submit(event_id="bad", exclusion_reason="out_of_scope")),
+                         "unknown_field")
+
+    def test_excluded_snapshot_counts_retention_and_no_pending_warning(self):
+        rid = self.submit()["receipt_id"]
+        self.submit(event_id="pending")
+        acked = self.submit(event_id="acked", owner_orch="orch-1")["receipt_id"]
+        intake.ack(self.con, [acked])
+        self.exclude(rid)
+        out = intake.project(self.con, table_names(self.con), intake._event(self.con, rid)["received_at"] + 9*86400)
+        item = next(i for i in out["items"] if i["receipt_id"] == rid)
+        self.assertEqual((item["state"], item["retention"], item["acked_at"], item["acked_by"]),
+                         ("excluded", "excluded", None, None))
+        self.assertEqual(item["exclusion_rule_version"], "rules-2")
+        self.assertFalse(any(w["receipt_id"] == rid for w in out["warnings"]))
+        self.assertEqual((out["sources"][0]["received"], out["sources"][0]["unacked"],
+                          out["sources"][0]["excluded"]), (3, 1, 1))
+        self.assertEqual([e["event_id"] for e in intake.pending(self.con)["events"]], ["pending"])
+        self.assertEqual(snapshot.read(self.path, schema_version=2)["intake"]["items"][0]["state"], "excluded")
+
+
+class PaginationTests(IntakeBase):
+    def seed(self, n, owner=None):
+        # One transaction keeps the >2500-event regression quick without weakening submit validation.
+        with store.immediate(self.con):
+            self.con.executemany("INSERT INTO intake_events(receipt_id,version,provider,account,company,event_id,"
+                                 "source_ref,source_time,received_at,producer,summary,content_sha256,owner_orch) "
+                                 "VALUES(?,1,'email','alice@example.com','example',?,'mail:synthetic',1,1,"
+                                 "'email-adapter','Synthetic','hash',?)",
+                                 [(f"ir_seed_{i}", f"seed_{i}", owner) for i in range(n)])
+
+    def walk(self, owner=None, limit=100):
+        seen, cursor = [], None
+        while True:
+            page = intake.pending(self.con, owner, limit, cursor=cursor)
+            seen.extend(e["id"] for e in page["events"])
+            if not page["has_more"]:
+                self.assertIsNone(page["next_cursor"])
+                return seen
+            cursor = page["next_cursor"]
+
+    def test_over_2500_full_traversal_unassigned_and_owner(self):
+        for owner in (None, "orch-1"):
+            with self.subTest(owner=owner):
+                self.con.execute("DELETE FROM intake_events")
+                self.seed(2507, owner)
+                expected = [r[0] for r in self.con.execute("SELECT id FROM intake_events ORDER BY id")]
+                self.assertEqual(self.walk(owner, 100), expected)
+                self.assertEqual(len(set(expected)), 2507)
+
+    def test_concurrent_submit_bind_ack_no_duplicates_and_next_sweep_catches_moves(self):
+        for owner in (None, "orch-1"):
+            with self.subTest(owner=owner):
+                self.con.execute("DELETE FROM intake_events")
+                # Other-queue event before the cursor; enters this queue after page one.
+                behind = self.submit(event_id=f"behind-{owner}", owner_orch="orch-1" if owner is None else None)
+                self.seed(8, owner)
+                page = intake.pending(self.con, owner, 2)
+                seen = [e["id"] for e in page["events"]]
+                high = page["high_water_id"]
+                cursor = page["next_cursor"]
+                incoming = self.submit(event_id=f"new-{owner}", owner_orch=owner)
+                if owner is None:
+                    # Public bind requires an owner; bind out and ack an unseen unassigned event.
+                    intake.bind_owner(self.con, behind["receipt_id"], "orch-1")
+                    # The other direction uses a second registered owner queue below.
+                else:
+                    intake.bind_owner(self.con, behind["receipt_id"], owner)
+                unseen = self.con.execute("SELECT receipt_id FROM intake_events WHERE id>? AND id<=? "
+                                          "ORDER BY id LIMIT 1", (seen[-1], high)).fetchone()[0]
+                intake.bind_owner(self.con, unseen, "orch-1")
+                intake.ack(self.con, [unseen])
+                while cursor:
+                    page = intake.pending(self.con, owner, 2, cursor=cursor)
+                    self.assertEqual(page["high_water_id"], high)
+                    seen.extend(e["id"] for e in page["events"])
+                    cursor = page["next_cursor"]
+                self.assertEqual(len(seen), len(set(seen)))
+                self.assertTrue(all(i <= high for i in seen))
+                stable = [r[0] for r in self.con.execute("SELECT id FROM intake_events WHERE receipt_id "
+                          "LIKE 'ir_seed_%' AND receipt_id!=? ORDER BY id", (unseen,))]
+                self.assertEqual(seen, stable)
+                current = self.walk(owner)
+                expected = [r[0] for r in self.con.execute("SELECT id FROM intake_events WHERE state='received' "
+                           + ("AND owner_orch IS NULL" if owner is None else "AND owner_orch='orch-1'") + " ORDER BY id")]
+                self.assertEqual(current, expected)
+                self.assertIn(intake._event(self.con, incoming["receipt_id"])["id"], current)
+                if owner:
+                    self.assertIn(intake._event(self.con, behind["receipt_id"])["id"], current)
+                    self.assertNotIn(intake._event(self.con, behind["receipt_id"])["id"], seen)
+
+    def test_high_water_empty_exact_boundary_and_cursor_validation(self):
+        self.assertEqual(intake.pending(self.con)["high_water_id"], 0)
+        self.seed(4)
+        page = intake.pending(self.con, limit=2)
+        self.assertTrue(page["has_more"])
+        high = page["high_water_id"]
+        self.submit(event_id="later")
+        end = intake.pending(self.con, limit=2, cursor=page["next_cursor"])
+        self.assertFalse(end["has_more"])
+        self.assertEqual(end["events"][-1]["id"], high)
+        self.assertEqual(intake.pending(self.con, after_id=high, high_water_id=high)["events"], [])
+        for kw in (dict(cursor="bad"), dict(cursor=page["next_cursor"], owner="orch-1"),
+                   dict(cursor=page["next_cursor"], after_id=0), dict(after_id=-1),
+                   dict(high_water_id=-1), dict(after_id=high+1, high_water_id=high), dict(limit=0)):
+            self.assertEqual(self.code(lambda: intake.pending(self.con, **kw)), "invalid")
+
+    def test_legacy_default_order_limit_and_json_fields_unchanged(self):
+        self.seed(105)
+        page = intake.pending(self.con)
+        self.assertEqual(page["owner"], None)
+        self.assertEqual([e["id"] for e in page["events"]], list(range(1, 101)))
+        old_fields = {"receipt_id", "version", "provider", "account", "company", "event_id", "source_ref",
+                      "thread_ref", "source_time", "received_at", "producer", "summary", "owner_orch",
+                      "state", "acked_at", "acked_by", "classification", "level", "todo_id", "issue_ref", "project"}
+        self.assertTrue(old_fields <= page["events"][0].keys())
+        self.assertEqual(page["events"], intake.pending(self.con, None, 100)["events"])
+
+
 class DraftTests(IntakeBase):
     def setUp(self):
         super().setUp()
@@ -354,6 +538,47 @@ class SnapshotTests(IntakeBase):
         self.assertEqual(con.execute("SELECT COUNT(*) FROM intake_events").fetchone()[0], 0)
 
 
+class MigrationV2Tests(IntakeBase):
+    def test_populated_v1_backup_additive_preserves_all_old_rows_and_original(self):
+        self.submit()
+        rid = self.submit(event_id="acked", owner_orch="orch-1")["receipt_id"]
+        intake.classify(self.con, rid, dict(classification="C", todo_id="synthetic-todo"))
+        intake.ack(self.con, [rid])
+        intake.draft(self.con, fixture("draft_v1.json"))
+        intake.approve(self.con, fixture("approve_v1.json"))
+        for column in ("excluded_at", "excluded_by", "exclusion_reason", "exclusion_rule_version"):
+            self.con.execute(f"ALTER TABLE intake_events DROP COLUMN {column}")
+        self.con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        tables = [r[0] for r in self.con.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+        before = {t: [dict(r) for r in self.con.execute(f"SELECT * FROM {t}")] for t in tables}
+        columns = {t: [r[1] for r in self.con.execute(f"PRAGMA table_info({t})")] for t in tables}
+        original = self.path.read_bytes()
+        backup = Path(self.temp.name) / "v1-backup.db"
+        raw = sqlite3.connect(backup)
+        self.con.backup(raw)
+        raw.close()
+        # Read-only projection also supports a populated v1 DB with no migration.
+        projected = snapshot.read(backup, schema_version=2)["intake"]
+        self.assertTrue(projected["available"])
+        self.assertIsNone(projected["items"][0]["excluded_at"])
+        migrated = store.connect(backup)
+        self.addCleanup(migrated.close)
+        for t in tables:
+            selected = ",".join(columns[t])
+            self.assertEqual([dict(r) for r in migrated.execute(f"SELECT {selected} FROM {t}")], before[t], t)
+        new = {r[1] for r in migrated.execute("PRAGMA table_info(intake_events)")}
+        self.assertEqual(new - set(columns["intake_events"]),
+                         {"excluded_at", "excluded_by", "exclusion_reason", "exclusion_rule_version"})
+        self.assertEqual(self.path.read_bytes(), original)
+        intake.exclude(migrated, [before["intake_events"][0]["receipt_id"]],
+                       reason="out_of_scope", rule_version="rules-2", actor="operator")
+        self.assertEqual(intake.project(migrated, table_names(migrated), 1)["sources"][0]["excluded"], 1)
+        # Reopening the migrated copy is idempotent.
+        reopened = store.connect(backup)
+        reopened.close()
+        self.assertEqual(self.path.read_bytes(), original)
+
+
 class CliTests(IntakeBase):
     def run_cli(self, *argv, stdin=None, config_file=None):
         out = io.StringIO()
@@ -403,6 +628,32 @@ class CliTests(IntakeBase):
         self.assertEqual((code, rec["state"]), (0, "sent"))
         code, bad = self.run_cli("claim", "--draft", "dr_example", "--version", "1")
         self.assertEqual((code, bad["error_code"]), (1, "already_claimed"))
+
+    def test_exclude_cli_batch_and_required_arguments(self):
+        ids = [self.submit(event_id=f"cli-{i}")["receipt_id"] for i in range(2)]
+        args = ("exclude", "--receipt", *ids, "--reason", "out_of_scope", "--rule-version", "rules-2",
+                "--actor", "operator")
+        code, result = self.run_cli(*args)
+        self.assertEqual((code, result["status"]), (0, "excluded"))
+        self.assertEqual([r["state"] for r in result["receipts"]], ["excluded", "excluded"])
+        self.assertEqual(self.run_cli(*args)[1]["receipts"][0]["status"], "duplicate")
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+            self.run_cli("exclude", "--receipt", ids[0], "--reason", "out_of_scope", "--actor", "orch")
+        self.assertEqual(error.exception.code, 2)
+
+    def test_pending_cli_cursor_and_manual_keyset_and_legacy_parameters(self):
+        for i in range(3):
+            self.submit(event_id=f"cli-page-{i}")
+        code, first = self.run_cli("pending", "--limit", "1")
+        self.assertEqual((code, len(first["events"]), first["has_more"]), (0, 1, True))
+        code, second = self.run_cli("pending", "--limit", "2", "--cursor", first["next_cursor"])
+        self.assertEqual((code, len(second["events"]), second["has_more"]), (0, 2, False))
+        _, manual = self.run_cli("pending", "--after-id", str(first["events"][0]["id"]),
+                                "--high-water-id", str(first["high_water_id"]))
+        self.assertEqual(manual["events"], second["events"])
+        _, legacy = self.run_cli("pending")
+        self.assertEqual(len(legacy["events"]), 3)
+        self.assertEqual(self.run_cli("pending", "--owner", "orch-1")[1]["events"], [])
 
     def test_company_optional_via_cli(self):
         payload = fixture("event_email.json")
