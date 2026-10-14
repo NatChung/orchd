@@ -11,7 +11,7 @@
 | `orchd orch restart` | 重開目前 Desktop 綁定的 Orch，接手未結任務並重新 bind。 |
 | `orchd list` | 查看未結任務與健康狀態。 |
 | `orchd doctor` | 檢查機器就緒狀態。 |
-| `orchd upgrade` | 更新 uv 安裝的程式。 |
+| `orchd upgrade` | 更新 uv 安裝的程式與 managed 家目錄規則。 |
 
 ## BREAKING CHANGE：升級指令
 
@@ -33,7 +33,7 @@ Orch 指令現在必須明確使用 `orch start|stop|restart|list|attach`。舊�
 | --- | --- | --- |
 | `orchd init [--from OLD_HOME] [--no-trust]` | 建立 home／interface 範本與 trust，保留已修改範本。 | `orchd init` |
 | `orchd doctor [--profile example] [--json] [--no-input]` | 檢查機器是否就緒；終端機首次執行時可保存專案目錄。`--json`／`--no-input` 不詢問。 | `orchd doctor` |
-| `orchd upgrade` | 從 uv 記錄的來源更新程式。 | `orchd upgrade` |
+| `orchd upgrade` | 從 uv 記錄來源更新程式並執行家目錄 migration；`--dry-run` 只預覽，`--migrations-only` 只重試 migration。 | `orchd upgrade` |
 
 `init --from` 複製舊 Orch home 的內容；目標檔案若仍是未修改的 init 範本，會以來源檔案替換，其他既有檔案則保留並列出。略過 `.git`、`.gitignore`、`.DS_Store`、`.claude`、`.codex` 與 `AGENTS.md`；`--no-trust` 跳過 Codex trust 寫入與 Claude trust 檢查。`doctor` 結束碼：0 通過、1 必要檢查失敗、2 必要檢查未知；`--profile example` 是選用的合成範例。
 
@@ -227,3 +227,5 @@ block is missing. When quoting a worker question, put the Operator summary in
 For quote-only calls, the quoted worker body is checked instead of the quote prefix.
 MCP warnings appear only in the result, after validation succeeds; they are not
 also printed to stderr. Warnings do not mean the question was rejected or approved.
+
+家目錄規則會在程式更新後自動以版本化步驟更新；managed 區塊外原文保留，覆寫前備份。旗標、自訂路徑與舊版首次更新步驟見[家目錄 migration](upgrade-migrations.md)。

@@ -30,7 +30,7 @@ On the first terminal run, if no projects directory is configured or detected, `
 orchd upgrade
 ```
 
-Upgrade reads the source recorded by uv and installs the latest commit on that source's default branch. It drops branch pins and leaves the database and personal settings in place. Existing sessions and MCP processes can keep the old code; start new sessions when convenient. Upgrade does not restart the daemon. Update checkout installations in their own checkout.
+Upgrade reads the source recorded by uv and installs the latest commit on that source's default branch. It drops branch pins, preserves task data and personal settings, then runs versioned home-rule migrations with backups. See [home migration behavior](docs/upgrade-migrations.md) for managed blocks, previews, retries, and the first upgrade from a legacy version. Existing sessions and MCP processes can keep the old code; start new sessions when convenient. Upgrade does not restart the daemon. Update checkout installations in their own checkout.
 
 ## Migrating from the private repository
 

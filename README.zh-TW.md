@@ -28,7 +28,7 @@ orchd doctor
 orchd upgrade
 ```
 
-upgrade 讀取 uv 安裝紀錄的來源，安裝該來源預設 branch 的最新 commit；branch pin 會移除。它不更新資料庫或個人設定。既有 session／MCP process 仍持有原本程式，請在方便時開始新 session；更新不是重新啟動 daemon 的指令。Checkout 安裝請在自己的 checkout 更新程式。
+upgrade 讀取 uv 安裝紀錄的來源，安裝該來源預設 branch 的最新 commit；branch pin 會移除。它保留任務資料與個人設定，再自動執行家目錄規則 migration 並備份；managed 區塊、預覽、重試與舊版第一次更新的操作見[家目錄更新](docs/upgrade-migrations.md)。既有 session／MCP process 仍持有原本程式，請在方便時開始新 session；更新不是重新啟動 daemon 的指令。Checkout 安裝請在自己的 checkout 更新程式。
 
 ## 從私人 repo 遷移
 

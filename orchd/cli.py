@@ -101,7 +101,9 @@ def build_parser():
     init = sub.add_parser("init")
     init.add_argument("--from", dest="source", help="copy what an old Orch home kept (e.g. ~/projects/orch); never overwrites")
     init.add_argument("--no-trust", action="store_true", help="do not write Codex trust or check Claude trust")
-    sub.add_parser("upgrade")
+    upgrade_parser = sub.add_parser("upgrade")
+    upgrade_parser.add_argument("--migrations-only", action="store_true", help="retry home migrations without reinstalling")
+    upgrade_parser.add_argument("--dry-run", action="store_true", help="preview home migrations without writing or reinstalling")
     binding = sub.add_parser("binding")
     binding.add_argument("--entry", default="desktop")
     how = binding.add_mutually_exclusive_group()
@@ -462,12 +464,12 @@ def main(argv=None):
               else doctor.render(checks))
         return doctor.exit_code(checks)
 
-    if args.cmd == "upgrade":  # program only; never touches the DB or ~/orch
+    if args.cmd == "upgrade":
         from orchd import upgrade
-        code, lines = upgrade.upgrade()
+        code, lines = upgrade.upgrade(migrations_only=args.migrations_only, dry_run=args.dry_run)
         print("\n".join(lines), file=sys.stdout if code == 0 else sys.stderr)
         return code
-    if args.cmd == "init":  # files and trust only; never touches the DB
+    if args.cmd == "init":  # files, trust and home-location record; no task DB changes
         from orchd import bootstrap
         try:
             result = bootstrap.init(Runtime(), trust=not args.no_trust, source=args.source)

@@ -1,3 +1,4 @@
+<!-- orchd:managed:start v=1 -->
 # Orch
 
 在這個目錄開的 session 是 Orch。Orch 只拆工作、派工、核對回報；不讀寫任何專案 repo，專案裡的查詢與修改一律用 orchd 的 `dispatch` 交給 worker。
@@ -24,3 +25,4 @@
 - `list_open` 列出所有 Orch 的未結任務；Operator 要看 worker 畫面時用 `view_worker`（Claude 與 app-server 忙碌或閒置都能原生 attach；exec 只能在回合之間開啟。app-server 的 FIFO answer/followup 等所有 viewer 關閉後投遞）。`worker_alive` 是 `null` 時，exec sol worker 已經問問題或回報、正在等你，可以 `answer`；`false` 表示 worker 沒回報就結束了，用 `list_open` 的 note 與 worktree 判斷要不要重派。
 - `dispatch` 回報 repo 未被 Claude trust 時，請 Operator 在該 repo 開一次 `claude` 接受 trust（只有 sonnet 需要）。
 - 筆記：每組 Orch 只寫自己的 `groups/<orch_id>.md`（`orch_id` 在 `dispatch` 回傳裡）。`PROJECTS.md`、`handoffs/` 等共用檔由 Operator 改，Orch 只讀。Orch 不 commit。
+<!-- orchd:managed:end -->
