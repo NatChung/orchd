@@ -3,7 +3,7 @@
 The caller's id is `ORCHD_ORCH_ID` from the environment when set (a Claude Orch started by
 `orchd orch start`; Claude Code sends no thread id). Otherwise it is `params._meta.threadId`, which both
 codex exec and the Desktop app send on every tools/call (verified 2026-09-29); such a Codex thread is
-registered as a codex Orch on its first call other than the read-only `list_orchs`.
+registered as a codex Orch on its first call other than the read-only `list_orchs` or `quota_status`.
 
 `orchd mcp --role entry` serves the Desktop entry (issue #37) instead: only ENTRY_TOOLS are listed or callable,
 their arguments are ids (never a body), and the caller is never registered as an Orch. This guards orchd's
@@ -20,6 +20,10 @@ from . import core, entry, goals, inventory, issue_links, question_summary, stor
 from .runtime import WORKER_MODELS, Runtime
 
 TOOLS = [
+    {"name": "quota_status", "annotations": {"readOnlyHint": True},
+     "description": "Read shared subscription quota windows, source, reset and age. Expired/missing data is unknown. "
+                    "No inference, refresh, model switching or reservation.",
+     "inputSchema": {"type": "object", "properties": {}}},
     {"name": "list_orchs",
      "annotations": {"readOnlyHint": False},
      "description": "Full registry inventory as JSON text (also supplied as structuredContent), including dead, "
@@ -308,6 +312,9 @@ ENTRY_INSTRUCTIONS = (
 
 
 def call(name, args, thread, con, rt):
+    if name == 'quota_status':
+        from .quota import Cache
+        return Cache().status()
     if name in ("task_link", "task_unlink"):
         if not thread:
             raise ValueError(f"{name} needs the caller's thread id")
@@ -331,6 +338,9 @@ def call(name, args, thread, con, rt):
                           goal_critical=args.get("goal_critical"), issue_ref=args.get("issue_ref"))
         return {"task_id": t["id"], "status": t["status"], "branch": t["branch"], "worktree": t["worktree"],
                 "orch_id": thread, "model": t["model"],
+                "quota_shadow": json.loads(con.execute(
+                    "SELECT body FROM messages WHERE task_id=? AND kind='dispatch' ORDER BY id DESC LIMIT 1",
+                    (t['id'],)).fetchone()['body'])['quota_shadow'],
                 "other_open_on_repo": core.other_open_on_repo(con, t["repo"], thread, t["id"])}
     if name == "inbox":
         if not thread:
@@ -456,11 +466,11 @@ def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY):
                 thread = os.environ.get("ORCHD_ORCH_ID")
                 if not thread:
                     thread = meta.get("threadId") or (meta.get("x-codex-turn-metadata") or {}).get("thread_id")
-                    if thread and params.get("name") != "list_orchs":
+                    if thread and params.get("name") not in ("list_orchs", "quota_status"):
                         store.register_orch(con, thread, "codex")
                 data = call(params.get("name"), params.get("arguments") or {}, thread, con, rt)
             result = {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False, indent=1)}]}
-            if (role != "entry" and params.get("name") == "list_orchs") or (role == "entry" and params.get("name") == "foreground"):
+            if (role != "entry" and params.get("name") in ("list_orchs", "quota_status")) or (role == "entry" and params.get("name") == "foreground"):
                 result["structuredContent"] = data
         except Exception as error:
             traceback.print_exc(file=sys.stderr)

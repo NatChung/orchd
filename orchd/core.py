@@ -168,9 +168,13 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
                                  goal_id=goal_id, goal_critical=goal_critical)
         goals.record_dispatch(con, goal_id, task_id, f"orch:{orch_thread}")
     spec = {k: v for k, v in dict(verify=verify, manual_checks=manual_checks, verifies=verifies).items() if v}
+    from .quota import dispatch_shadow
+    quota_shadow = dispatch_shadow(backend=backend, task_type='review' if verifies else task_type,
+                                   author_model=verified['model'] if verifies else None)
     store.add_message(con, task_id, "dispatch", json.dumps(
         dict(model=WORKER_MODELS[model], model_reason=model_reason, task_type=task_type,
-             rework_of=rework_of, found_by=found_by, goal_id=goal_id, goal_critical=goal_critical, **spec), ensure_ascii=False))
+             rework_of=rework_of, found_by=found_by, goal_id=goal_id, goal_critical=goal_critical,
+             quota_shadow=quota_shadow, **spec), ensure_ascii=False))
     try:
         base, branch, worktree = rt.create_worktree(repo_path, repo, task_id)
         store.update_task(con, task_id, base=base, branch=branch, worktree=worktree)

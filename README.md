@@ -114,6 +114,8 @@ For daily use, remember `orch restart` (replace an Orch, including adopt and reb
 
 See also [CONTEXT.md](CONTEXT.md), [architecture decisions](docs/adr/), [entry](docs/entry.md), [permissions](docs/orch-permissions.md), [goals and board](docs/goals-board.md), and [review/merge policy](docs/review-merge-policy.md).
 
+See [quota observations](docs/quota.md) for `orchd quota`, MCP `quota_status`, official receipts and dispatch shadow advice. Shadow advice does not change the selected model or backend.
+
 ## BREAKING CHANGE: upgrade commands
 
 Orch commands now require an explicit `orch start|stop|restart|list|attach` action. The old entry points were removed; there are no aliases. Update scripts, shell aliases, runbooks and handoff notes using this table. Existing flags and action behavior stay the same.

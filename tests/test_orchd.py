@@ -606,7 +606,7 @@ class McpTest(unittest.TestCase):
         self.assertEqual({t["name"] for t in replies[1]["result"]["tools"]},
                          {"dispatch", "inbox", "list_open", "list_orchs", "answer", "close", "view_worker", "lock_verify", "retry", "followup", "interrupt",
                   "entry_inbox", "send_to_nat", "ask_nat", "entry_question_show", "entry_question_snooze",
-                  "entry_question_cancel", "goal_list", "goal_set", "task_link", "task_unlink"})
+                  "entry_question_cancel", "goal_list", "goal_set", "task_link", "task_unlink", "quota_status"})
         self.assertNotIn("isError", replies[2]["result"])
         (row,) = json.loads(replies[3]["result"]["content"][0]["text"])
         self.assertEqual(row["orch_thread"], "thread-X")

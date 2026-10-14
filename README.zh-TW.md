@@ -108,6 +108,8 @@ orchd list
 
 另見 [CONTEXT.md](CONTEXT.md)、[架構決策](docs/adr/)、[入口](docs/entry.md)、[權限](docs/orch-permissions.md)、[目標與看板](docs/goals-board.md)與 [review／merge](docs/review-merge-policy.md)。
 
+[Quota 觀測](docs/quota.md) 說明 `orchd quota`、MCP `quota_status`、官方 receipt 與 dispatch shadow 建議；建議不會改變實際選用的 model 或 backend。
+
 ## BREAKING CHANGE：升級指令
 
 Orch 指令現在必須明確使用 `orch start|stop|restart|list|attach`。舊入口已移除，不保留 alias；請依下表更新腳本、shell alias、操作手冊與交接文件。既有旗標和動作語意維持不變。
