@@ -208,7 +208,6 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
             rt.send_uds(sock, session, task_message(task))
     except Exception as error:
         store.update_task(con, task_id, status="failed", note=f"{type(error).__name__}: {error}"[:1000])
-        rate_limit_notice(con, rt, task_id, str(error), 'startup', allow_auto=False)
         worktree = store.get_task(con, task_id)["worktree"]
         if worktree:  # nothing has run in it yet, so it holds no work
             try:

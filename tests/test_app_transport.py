@@ -37,3 +37,24 @@ class TransportTest(unittest.TestCase):
             rpc=RPC('/private/app.sock');wire.received.put('');rpc.reader.join(1)
             with self.assertRaises(ConnectionError):rpc.call('thread/read',{})
             rpc.close()
+
+    def test_rpc_rejection_preserves_structured_provider_error(self):
+        error = {'code': -32000, 'message': 'Rejected',
+                 'data': {'codexErrorInfo': 'usageLimitExceeded'}}
+        class RejectingWire(Wire):
+            def send(self, raw):
+                msg = json.loads(raw)
+                if msg.get('method') == 'turn/start':
+                    self.received.put(json.dumps({'id': msg['id'], 'error': error}))
+                else:
+                    super().send(raw)
+        wire = RejectingWire()
+        with patch('orchd.app_transport.socket.socket'), patch(
+                'websocket.create_connection', return_value=wire):
+            rpc = RPC('/private/app.sock')
+            try:
+                with self.assertRaises(RPCError) as raised:
+                    rpc.call('turn/start', {})
+                self.assertEqual(raised.exception.error, error)
+            finally:
+                rpc.close()

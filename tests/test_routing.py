@@ -35,6 +35,81 @@ class RoutingTest(unittest.TestCase):
         self.args = dict(repo='demo', title='Synthetic', instructions='Synthetic', done_when='Synthetic',
                          model='auto', backend='exec', model_reason='independent', task_type='code')
 
+    def test_provider_error_formats_and_contextual_fallback(self):
+        # Source: openai/codex tag rust-v0.160.1:
+        # codex-rs/app-server-protocol/schema/typescript/v2/{TurnError,CodexErrorInfo}.ts
+        # codex-rs/exec/src/exec_events.rs: TurnFailed + ThreadErrorEvent
+        # codex-rs/protocol/src/error.rs: UsageLimitReachedError::fmt
+        # These are source-shaped fixtures, not captured live quota failures.
+        for error in (
+            {'message': 'Limit reached', 'codexErrorInfo': 'usageLimitExceeded', 'additionalDetails': None},
+            {'message': 'Limit reached', 'codexErrorInfo': 'rateLimitExceeded'},
+            {'message': 'Connection failed', 'codexErrorInfo': {
+                'httpConnectionFailed': {'httpStatusCode': 429}}},
+            {'code': 'usage_limit_exceeded'}, {'type': 'rate_limit'},
+            {'status_code': 429}, {'httpStatusCode': 429},
+            {'code': -32000, 'message': 'Rejected', 'data': {'type': 'rate_limit'}},
+            {'message': 'You’ve hit your usage limit. Please try again later.'},
+            "You've hit your usage limit. Please try again later.",
+            '429 Too Many Requests', 'status 429',
+            'unexpected status code: 429 Too Many Requests',
+            'rate limit exceeded: upstream request limit',
+        ):
+            with self.subTest(error=error):
+                self.assertTrue(routing.limited(error))
+        for error in (
+            'parse error at line 429', 'gh: API rate limit exceeded for user',
+            'test log: 429', 'curl output: HTTP/1.1 429 Too Many Requests',
+            '429', 'rate limit', 'usage limit exceeded',
+            {'message': 'parse error at line 429'},
+            {'message': 'gh: API rate limit exceeded for user'},
+            {'message': '429 Too Many Requests', 'codexErrorInfo': 'sandboxError'},
+            {'output': 'status 429'},
+            {'data': {'output': '429 Too Many Requests'}},
+            {'type': 'item.completed', 'item': {'type': 'command_execution',
+                'aggregated_output': 'HTTP/1.1 429 Too Many Requests'}},
+        ):
+            with self.subTest(error=error):
+                self.assertFalse(routing.limited(error))
+
+    def test_exec_tool_output_and_unrelated_failed_turns_do_not_limit(self):
+        task = self.dispatch()
+        events = [{'type': 'item.completed', 'item': {'id': 'cmd',
+            'type': 'command_execution', 'command': command, 'status': 'failed',
+            'exit_code': 1, 'aggregated_output': output}}
+            for command, output in (
+                ('parser', 'parse error at line 429'),
+                ('gh api user', 'gh: API rate limit exceeded for user'),
+                ('pytest', 'test log: 429'),
+                ('curl https://example.com', 'HTTP/1.1 429 Too Many Requests'))]
+        # Even provider turn failures need provider-specific error context.
+        events += [{'type': 'turn.failed', 'error': {'message': text}}
+                   for text in ('parse error at line 429', 'gh: API rate limit exceeded for user')]
+        log = Path(self.tmp.name) / 'tools.jsonl'
+        log.write_text(''.join(json.dumps(event) + '\n' for event in events))
+        core.auto_flush(self.con, self.rt, task['id'], int(task['job_id']), turn_log=log)
+        self.assertEqual(self.rt.auto_requests, [])
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM messages WHERE kind='rate_limit'").fetchone()[0], 0)
+        self.assertEqual(routing.select(self.con)['selected_alias'], 'sol')
+
+    def test_app_command_output_is_not_a_provider_error(self):
+        task = self.dispatch()
+        store.update_task(self.con, task['id'], backend='app-server', generation='g', active_turn='t')
+        supervisor = app_worker.Supervisor(self.con.execute('PRAGMA database_list').fetchone()[2], task['id'], 'g')
+        self.addCleanup(supervisor.con.close)
+        with patch('orchd.runtime.Runtime', return_value=self.rt):
+            supervisor.event({'method': 'item/completed', 'params': {
+                'threadId': task['session_id'], 'turnId': 't', 'item': {
+                    'id': 'cmd', 'type': 'commandExecution', 'status': 'failed',
+                    'aggregatedOutput': 'HTTP/1.1 429 Too Many Requests'}}})
+            supervisor.event({'method': 'turn/completed', 'params': {
+                'threadId': task['session_id'], 'turn': {'id': 't', 'status': 'failed',
+                    'error': {'message': 'gh: API rate limit exceeded for user',
+                              'codexErrorInfo': 'sandboxError'}}}})
+        self.assertEqual(self.rt.auto_requests, [])
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM messages WHERE kind='rate_limit'").fetchone()[0], 0)
+        self.assertEqual(routing.select(self.con)['selected_alias'], 'sol')
+
     def observe(self, sol, sonnet=20, age=0):
         now = time.time()
         cache = quota.Cache()
@@ -90,7 +165,7 @@ class RoutingTest(unittest.TestCase):
     def test_exec_failure_notifies_once_and_retry_switches_same_worktree(self):
         task = self.dispatch()
         log = Path(self.tmp.name) / 'turn.jsonl'
-        log.write_text(json.dumps({'type': 'turn.failed', 'error': {'message': '429 rate limit exceeded'}})+'\n')
+        log.write_text(json.dumps({'type': 'turn.failed', 'error': {'message': "You’ve hit your usage limit. Please try again later."}})+'\n')
         for _ in range(2):
             core.auto_flush(self.con, self.rt, task['id'], int(task['job_id']), turn_log=log)
         self.assertEqual(len(self.rt.woken), 1)
@@ -108,9 +183,9 @@ class RoutingTest(unittest.TestCase):
         self.assertIn('actions already sent', self.rt.sent[-1][2])
         self.assertEqual(core.auto_retry(self.con, self.rt, *self.rt.auto_requests[0])['status'], 'skipped')
         core.retry(self.con, self.rt, task['id'], 'sol', 'manual test', backend='exec')
-        core.rate_limit_notice(self.con, self.rt, task['id'], '429', 'second')
+        core.rate_limit_notice(self.con, self.rt, task['id'], {'code': 'usage_limit_exceeded'}, 'second')
         self.assertEqual(len(self.rt.auto_requests), 1)
-        self.assertFalse(core.rate_limit_notice(self.con, self.rt, task['id'], '429', 'second'))
+        self.assertFalse(core.rate_limit_notice(self.con, self.rt, task['id'], {'code': 'usage_limit_exceeded'}, 'second'))
 
     def test_app_turn_failure_notifies_and_ignores_old_completion(self):
         task = self.dispatch()
@@ -118,7 +193,7 @@ class RoutingTest(unittest.TestCase):
         supervisor = app_worker.Supervisor(self.con.execute('PRAGMA database_list').fetchone()[2], task['id'], 'g')
         self.addCleanup(supervisor.con.close)
         event = {'method': 'turn/completed', 'params': {'threadId': task['session_id'],
-            'turn': {'id': 't', 'status': 'failed', 'error': {'message': 'usage limit reached'}}}}
+            'turn': {'id': 't', 'status': 'failed', 'error': {'message': 'Limit reached', 'codexErrorInfo': 'usageLimitExceeded'}}}}
         with patch('orchd.runtime.Runtime', return_value=self.rt):
             supervisor.event(event)
             supervisor.event(event)
@@ -136,7 +211,7 @@ class RoutingTest(unittest.TestCase):
     def test_rate_limit_cooldown_expires_and_other_errors_do_not_count(self):
         task = self.dispatch()
         self.assertFalse(core.rate_limit_notice(self.con, self.rt, task['id'], 'network error', 'one'))
-        self.assertTrue(core.rate_limit_notice(self.con, self.rt, task['id'], 'rateLimitExceeded', 'one'))
+        self.assertTrue(core.rate_limit_notice(self.con, self.rt, task['id'], {'codexErrorInfo': 'rateLimitExceeded'}, 'one'))
         self.assertEqual(routing.select(self.con)['selected_alias'], 'sonnet')
         self.assertEqual(routing.select(self.con, now=time.time()+601)['selected_alias'], 'sol')
 
@@ -177,19 +252,20 @@ class RoutingTest(unittest.TestCase):
         expected = quota.shadow(snapshot)['selected_alias']
         self.assertEqual(self.dispatch()['model'], core.WORKER_MODELS[expected])
 
-    def test_startup_limit_records_failed_task_in_batch_and_next_item_switches(self):
-        with patch.object(self.rt, 'start_codex_worker', side_effect=RuntimeError('429 rate limit')):
+    def test_startup_exception_does_not_record_provider_limit(self):
+        with patch.object(self.rt, 'start_codex_worker', side_effect=RuntimeError("You’ve hit your usage limit. Please try again later.")):
             result = core.dispatch_batch(self.con, self.rt, orch_thread='orch', tasks=[self.args, self.args])
-        self.assertEqual([t['status'] for t in result['tasks']], ['failed', 'running'])
+        self.assertEqual([t['status'] for t in result['tasks']], ['failed', 'failed'])
         self.assertEqual(store.get_task(self.con, result['tasks'][0]['task_id'])['status'], 'failed')
-        self.assertEqual(result['tasks'][1]['model'], core.WORKER_MODELS['sonnet'])
+        self.assertEqual(result['tasks'][1]['status'], 'failed')
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM messages WHERE kind='rate_limit'").fetchone()[0], 0)
 
     def test_superseded_or_closed_worker_cannot_notify(self):
         task = self.dispatch()
-        self.assertFalse(core.rate_limit_notice(self.con, self.rt, task['id'], '429', 'old', job_id='obsolete'))
-        self.assertFalse(core.rate_limit_notice(self.con, self.rt, task['id'], '429', 'old', generation='obsolete'))
+        self.assertFalse(core.rate_limit_notice(self.con, self.rt, task['id'], {'code': 'usage_limit_exceeded'}, 'old', job_id='obsolete'))
+        self.assertFalse(core.rate_limit_notice(self.con, self.rt, task['id'], {'code': 'usage_limit_exceeded'}, 'old', generation='obsolete'))
         store.update_task(self.con, task['id'], status='closed')
-        self.assertFalse(core.rate_limit_notice(self.con, self.rt, task['id'], '429', 'old'))
+        self.assertFalse(core.rate_limit_notice(self.con, self.rt, task['id'], {'code': 'usage_limit_exceeded'}, 'old'))
         self.assertEqual(self.rt.woken, [])
 
     def test_real_process_smoke(self):
@@ -203,7 +279,7 @@ class RoutingTest(unittest.TestCase):
 
     def test_explicit_model_only_notifies_and_shadow_stays_unapplied(self):
         task = self.dispatch(model='sol')
-        core.rate_limit_notice(self.con, self.rt, task['id'], '429', 'explicit')
+        core.rate_limit_notice(self.con, self.rt, task['id'], {'code': 'usage_limit_exceeded'}, 'explicit')
         self.assertEqual(self.rt.auto_requests, [])
         self.assertEqual(len(self.rt.woken), 1)
         self.assertFalse(task['auto_model'])
@@ -214,8 +290,8 @@ class RoutingTest(unittest.TestCase):
     def test_auto_retry_holds_queue_then_delivers_once_to_replacement(self):
         task = self.dispatch()
         store.add_message(self.con, task['id'], store.QUEUED, 'Synthetic pending answer')
-        core.rate_limit_notice(self.con, self.rt, task['id'], '429', 'one')
-        core.rate_limit_notice(self.con, self.rt, task['id'], '429', 'two')
+        core.rate_limit_notice(self.con, self.rt, task['id'], {'code': 'usage_limit_exceeded'}, 'one')
+        core.rate_limit_notice(self.con, self.rt, task['id'], {'code': 'usage_limit_exceeded'}, 'two')
         self.assertEqual(len(self.rt.auto_requests), 1)
         self.assertEqual(core.answer(self.con, self.rt, task['id'], flush=True)['status'], 'queued')
         self.assertEqual(self.rt.resumed, [])
@@ -228,7 +304,7 @@ class RoutingTest(unittest.TestCase):
 
     def test_auto_retry_failure_consumes_attempt_and_notifies_without_losing_work(self):
         task = self.dispatch()
-        core.rate_limit_notice(self.con, self.rt, task['id'], '429', 'one')
+        core.rate_limit_notice(self.con, self.rt, task['id'], {'code': 'usage_limit_exceeded'}, 'one')
         with patch.object(self.rt, 'claude_trusted', return_value=False):
             result = core.auto_retry(self.con, self.rt, *self.rt.auto_requests[0])
         self.assertEqual(result['status'], 'failed')
@@ -241,7 +317,7 @@ class RoutingTest(unittest.TestCase):
     def test_auto_retry_refuses_newer_app_turn(self):
         task = self.dispatch()
         store.update_task(self.con, task['id'], backend='app-server', generation='g', active_turn=None)
-        core.rate_limit_notice(self.con, self.rt, task['id'], '429', 'one', generation='g')
+        core.rate_limit_notice(self.con, self.rt, task['id'], {'code': 'usage_limit_exceeded'}, 'one', generation='g')
         store.update_task(self.con, task['id'], active_turn='new-native-turn')
         self.assertEqual(core.auto_retry(self.con, self.rt, *self.rt.auto_requests[0])['status'], 'skipped')
         self.assertEqual(store.get_task(self.con, task['id'])['auto_retry_count'], 0)
@@ -262,7 +338,8 @@ class RoutingTest(unittest.TestCase):
         supervisor = app_worker.Supervisor(self.con.execute('PRAGMA database_list').fetchone()[2], task['id'], 'g')
         self.addCleanup(supervisor.con.close)
         supervisor.rpc = Mock()
-        supervisor.rpc.call.side_effect = RPCError('429 rate limit')
+        supervisor.rpc.call.side_effect = RPCError({'code': -32000, 'message': 'Rejected',
+            'data': {'type': 'usage_limit_exceeded'}})
         self.assertEqual(supervisor.flush()['status'], 'failed')
         self.assertEqual(self.rt.auto_requests, [])
         with patch('orchd.runtime.Runtime', return_value=self.rt):
@@ -279,7 +356,7 @@ class RoutingTest(unittest.TestCase):
         supervisor = app_worker.Supervisor(self.con.execute('PRAGMA database_list').fetchone()[2], task['id'], 'g')
         self.addCleanup(supervisor.con.close)
         supervisor.rpc = Mock()
-        turns = [{'id': 'missed', 'status': 'failed', 'error': {'message': 'usage limit exceeded'}}]
+        turns = [{'id': 'missed', 'status': 'failed', 'error': {'message': 'Limit reached', 'codexErrorInfo': 'usageLimitExceeded'}}]
         with patch.object(supervisor, 'history', return_value=turns), patch('orchd.runtime.Runtime', return_value=self.rt):
             supervisor.reconcile()
         self.assertEqual(len(self.rt.auto_requests), 1)
@@ -287,7 +364,7 @@ class RoutingTest(unittest.TestCase):
 
     def test_competing_helpers_claim_one_automatic_attempt(self):
         task = self.dispatch()
-        core.rate_limit_notice(self.con, self.rt, task['id'], '429', 'one')
+        core.rate_limit_notice(self.con, self.rt, task['id'], {'code': 'usage_limit_exceeded'}, 'one')
         results, errors = [], []
         database = self.con.execute('PRAGMA database_list').fetchone()[2]
         def run():
@@ -310,7 +387,7 @@ class RoutingTest(unittest.TestCase):
 
     def test_helper_waits_for_initial_dispatch_to_publish_running(self):
         task = self.dispatch()
-        core.rate_limit_notice(self.con, self.rt, task['id'], '429', 'one')
+        core.rate_limit_notice(self.con, self.rt, task['id'], {'code': 'usage_limit_exceeded'}, 'one')
         store.update_task(self.con, task['id'], status='starting')
         with patch.object(self.rt, 'sleep', side_effect=lambda _: store.update_task(self.con, task['id'], status='running')):
             self.assertEqual(core.auto_retry(self.con, self.rt, *self.rt.auto_requests[0])['status'], 'running')
@@ -319,7 +396,7 @@ class RoutingTest(unittest.TestCase):
         task = self.dispatch()
         store.update_task(self.con, task['id'], status='starting', job_id=None)
         log = Path(self.tmp.name)/'early.jsonl'
-        log.write_text(json.dumps({'type':'turn.failed', 'error':{'message':'429 rate limit'}})+'\n')
+        log.write_text(json.dumps({'type':'turn.failed', 'error':{'message':"You’ve hit your usage limit. Please try again later."}})+'\n')
         with patch.object(self.rt, 'sleep', side_effect=lambda _: store.update_task(
                 self.con, task['id'], status='running', job_id=task['job_id'])):
             core.auto_flush(self.con, self.rt, task['id'], int(task['job_id']), turn_log=log)

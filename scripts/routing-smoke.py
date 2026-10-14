@@ -133,7 +133,7 @@ def main():
                 simultaneous_alive=True, distinct_git_worktrees=True, grouped_tasks=len(grouped))))
             failing = tasks[0]
             log = root/'failure.jsonl'
-            log.write_text(json.dumps({'type':'turn.failed', 'error':{'message':'429 rate limit'}})+'\n')
+            log.write_text(json.dumps({'type':'turn.failed', 'error':{'message':"You’ve hit your usage limit. Please try again later."}})+'\n')
             core.auto_flush(con, rt, failing['id'], int(failing['job_id']), turn_log=log)
             assert len(rt.helpers) == 1
             psutil.Process(rt.helpers[0]).wait(timeout=15)

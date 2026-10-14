@@ -371,8 +371,8 @@ class Supervisor:
             self.con.execute("UPDATE worker_deliveries SET state='rejected',error=? WHERE id=?",(str(exc),delivery_id))
             self.update(note=f"app-server delivery rejected; pending retained: {exc}")
             from .routing import limited
-            if limited(str(exc)):
-                self.deferred_limit = (str(exc), self.generation + ':' + delivery_id)
+            if limited(exc.error):
+                self.deferred_limit = (exc.error, self.generation + ':' + delivery_id)
             return dict(status='failed',delivered=0,pending=store.pending_answer_count(self.con,self.task_id),error=str(exc))
         except Exception as exc:
             self.con.execute("UPDATE worker_deliveries SET state='uncertain',error=? WHERE id=?",(str(exc),delivery_id))
