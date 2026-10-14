@@ -11,7 +11,9 @@ import time
 
 
 class RPCError(RuntimeError):
-    pass
+    def __init__(self, error):
+        self.error = error
+        super().__init__(str(error))
 
 
 class RPC:
@@ -82,7 +84,7 @@ class RPC:
                 self.condition.wait(left)
             response = self.responses.pop(seq)
         if 'error' in response:
-            raise RPCError(str(response['error']))
+            raise RPCError(response['error'])
         return response['result']
 
     def close(self):

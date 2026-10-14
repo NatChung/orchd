@@ -179,6 +179,18 @@ class Runtime:
             return False
         return True
 
+    def start_auto_retry(self, database, task_id, event_id):
+        """Separate process/group and ownership mark so stopping the old worker cannot kill this helper."""
+        from . import store
+        directory = store.home() / 'auto-retry'
+        directory.mkdir(parents=True, exist_ok=True)
+        env = dict(os.environ, ORCHD_WORKTREE=str(directory.resolve()))
+        with (directory / f'{task_id}-{event_id}.log').open('a') as out:
+            return subprocess.Popen([sys.executable, paths.orchd_executable(), '_auto-retry', task_id,
+                                     str(event_id), '--database', str(database)],
+                                    cwd=directory, env=env, stdin=subprocess.DEVNULL,
+                                    stdout=out, stderr=subprocess.STDOUT, start_new_session=True).pid
+
     # -- repos and worktrees ----------------------------------------------------
     def repo_path(self, repo):
         path = (self.projects / repo).resolve()
@@ -551,8 +563,8 @@ class Runtime:
             return cmd
         script = ('task=$1; orchd=$2; log=$3; shift 3; '
                   '"$@"; "$orchd" quota --codex-log "$log" >/dev/null 2>&1; '
-                  '"$orchd" flush "$task" --after-pid $$')
-        return ["/bin/sh", "-c", script, "orchd-turn", name[len("orchd-"):], paths.orchd_executable(), log, *cmd]
+                  '"$orchd" flush "$task" --after-pid $$ --turn-log "$log"')
+        return ["/bin/sh", "-c", script, "orchd-turn", name[len("orchd-"):], paths.orchd_executable(), str(log), *cmd]
 
     def start_codex_worker(self, worktree, log, prompt, model):
         pid = self.spawn(self.codex_turn([self.codex, "exec", *CODEX_FLAGS, "-m", model, "-C", worktree, prompt], log),
