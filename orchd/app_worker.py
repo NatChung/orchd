@@ -209,6 +209,13 @@ class Supervisor:
         if not self.current():
             return
         params = msg.get('params', {})
+        if msg.get('method') == 'account/rateLimits/updated':
+            from .quota import Cache
+            try:
+                Cache().codex(params, source='codex.updated')
+            except Exception:
+                pass  # Optional telemetry must not break delivery.
+            return
         task = self.task()
         if params.get('threadId') != task['session_id']:
             return
@@ -438,6 +445,11 @@ class Supervisor:
                 time.sleep(.05)
             os.chmod(task['endpoint'],0o600)
             self.rpc=RPC(task['endpoint'])
+            from .quota import Cache, refresh
+            try:
+                refresh(Cache(), rpc=self.rpc)
+            except Exception:
+                pass
             thread=self.rpc.call('thread/start',{'cwd':task['worktree'],'model':spec['model'],
                               'approvalPolicy':'never','sandbox':'danger-full-access',
                               'developerInstructions':spec.get('brief')})['thread']

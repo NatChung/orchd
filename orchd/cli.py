@@ -218,6 +218,11 @@ def build_parser():
     ver.add_argument("task_id")
     ver.add_argument("--timeout", type=float)
     sub.add_parser("list")
+    quota_parser = sub.add_parser('quota', help='subscription quota observations; never launches inference')
+    quota_parser.add_argument('--refresh', action='store_true', help='refresh from Codex session snapshots')
+    quota_parser.add_argument('--endpoint', help='existing authorized Codex app-server Unix socket')
+    quota_parser.add_argument('--ingest', choices=['claude-statusline', 'claude-sdk'],
+                              help='consume an official receipt from stdin; no global config changes')
     goal = sub.add_parser("goal", help="central goals, audit history and markdown snapshot")
     goal_sub = goal.add_subparsers(dest="goal_cmd", required=True)
     from orchd import goals
@@ -333,6 +338,27 @@ def _intake_main(args):
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    if args.cmd == 'quota':
+        from orchd import quota
+        cache = quota.Cache()
+        try:
+            if args.ingest:
+                cache.claude(json.load(sys.stdin), sdk=args.ingest == 'claude-sdk')
+            if args.endpoint:
+                from orchd.app_transport import RPC
+                rpc = RPC(args.endpoint)
+                try:
+                    quota.refresh(cache, rpc=rpc)
+                finally:
+                    rpc.close()
+            elif args.refresh:
+                quota.refresh(cache)
+            print(json.dumps(cache.status(), ensure_ascii=False, indent=2))
+            return 0
+        except (OSError, ValueError, TypeError, AttributeError) as error:
+            print(f'orchd quota: {type(error).__name__}', file=sys.stderr)
+            return 1
+
     if args.cmd == "orch":
         args.cmd = f"orch {args.orch_action}"
 

@@ -1,0 +1,155 @@
+import tempfile
+import unittest
+import json
+import os
+from unittest.mock import patch
+import io
+import contextlib
+from pathlib import Path
+
+from orchd import quota
+
+
+class QuotaTest(unittest.TestCase):
+    def test_codex_read_and_updated_preserve_buckets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            cache.codex({'rateLimitsByLimitId': {
+                'codex': {'primary': {'usedPercent': 42, 'windowDurationMins': 10080,
+                                      'resetsAt': 2000}, 'secondary': None},
+                'other': {'primary': {'usedPercent': 25, 'windowDurationMins': 15,
+                                     'resetsAt': 1800}}}}, now=1000)
+            windows = cache.status(now=1001)['sol']['windows']
+            self.assertEqual([(w['limit_id'], w['used_percent']) for w in windows],
+                             [('codex', 42), ('other', 25)])
+            self.assertEqual(windows[0]['window_seconds'], 604800)
+            cache.codex({'rateLimits': {'limitId': 'codex', 'primary': {
+                'usedPercent': 43, 'windowDurationMins': 10080, 'resetsAt': 2000}}},
+                source='codex.updated', now=1002)
+            self.assertEqual(cache.status(now=1003)['sol']['windows'][0]['used_percent'], 43)
+
+    def test_claude_receipts_expire_without_guessing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            cache.claude({'rate_limits': {'five_hour': {'used_percentage': 23.5, 'resets_at': 2000},
+                                         'seven_day': {'used_percentage': 41.2, 'resets_at': 3000}}}, now=1000)
+            self.assertEqual(cache.status(now=1060)['sonnet']['state'], 'known')
+            window = cache.status(now=1061)['sonnet']['windows'][0]
+            self.assertEqual((window['state'], window['used_percent'], window['reason']),
+                             ('unknown', None, 'expired TTL'))
+            self.assertEqual(cache.status(now=1301)['sonnet']['windows'][0]['reason'], 'stale')
+            cache.claude({'rate_limit_info': {'rate_limit_type': 'seven_day_sonnet',
+                                             'utilization': .5, 'resets_at': 4000}}, sdk=True, now=1302)
+            self.assertEqual(next(w for w in cache.status(now=1303)['sonnet']['windows'] if w['name'] == 'seven_day_sonnet')['used_percent'], 50)
+            cache.claude({'rate_limit_info': {'rate_limit_type': 'seven_day_sonnet',
+                                             'status': 'allowed', 'resets_at': 4000}}, sdk=True, now=1304)
+            self.assertIsNone(next(w for w in cache.status(now=1305)['sonnet']['windows'] if w['name'] == 'seven_day_sonnet')['used_percent'])
+
+    def test_session_fallback_uses_event_time_and_not_token_totals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sessions = root / 'sessions'
+            sessions.mkdir()
+            (sessions / 'one.jsonl').write_text(json.dumps({'timestamp': '1970-01-01T00:16:40Z',
+                'type': 'event_msg', 'payload': {'type': 'token_count', 'rate_limits': {
+                    'primary': {'used_percent': 42, 'window_minutes': 10080, 'resets_at': 2000}}}}) + '\n')
+            cache = quota.Cache(root / 'quota.db')
+            quota.refresh(cache, sessions=sessions, now=1001)
+            self.assertEqual(cache.status(now=1002)['sol']['windows'][0]['age_seconds'], 2)
+            self.assertEqual(cache.status(now=1061)['sol']['windows'][0]['state'], 'unknown')
+
+    def test_shadow_dispatch_preserves_explicit_model_and_records_review_rule(self):
+        from orchd import core, store
+        from tests.test_orchd import FakeRuntime
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'ORCHD_HOME': tmp}):
+            con = store.connect()
+            self.addCleanup(con.close)
+            args = dict(orch_thread='orch', repo='demo', title='T', instructions='do', done_when='ok',
+                        model='sol', backend='exec', model_reason='explicit', task_type='code')
+            author = core.dispatch(con, FakeRuntime(), **args)
+            review = core.dispatch(con, FakeRuntime(), **dict(args, task_type='review', verifies=author['id']))
+            self.assertEqual(review['model'], core.WORKER_MODELS['sol'])
+            msg = con.execute("SELECT body FROM messages WHERE task_id=? AND kind='dispatch'", (review['id'],)).fetchone()
+            shadow = json.loads(msg['body'])['quota_shadow']
+            self.assertIsNone(shadow['selected_alias'])
+            self.assertIn('review', shadow['reason'])
+            store.update_task(con, author['id'], model=None)
+            unknown = core.dispatch(con, FakeRuntime(), **dict(args, verifies=author['id']))
+            msg = con.execute("SELECT body FROM messages WHERE task_id=? AND kind='dispatch'", (unknown['id'],)).fetchone()
+            self.assertIsNone(json.loads(msg['body'])['quota_shadow']['selected_alias'])
+
+    def test_cli_receipt_and_mcp_status_share_snapshot(self):
+        from orchd.cli import main
+        from orchd import mcp_server
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'ORCHD_HOME': tmp}):
+            receipt = json.dumps({'rate_limits': {'five_hour': {'used_percentage': 20, 'resets_at': 4000},
+                'seven_day': {'used_percentage': 50, 'resets_at': 5000}}})
+            with patch('sys.stdin', io.StringIO(receipt)), patch('orchd.quota.time.time', return_value=1000), \
+                    contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(main(['quota', '--ingest', 'claude-statusline']), 0)
+                self.assertEqual(json.loads(out.getvalue())['sonnet']['state'], 'known')
+                status = mcp_server.call('quota_status', {}, None, None, None)
+                self.assertEqual(status['sonnet']['windows'][0]['used_percent'], 20)
+
+    def test_app_server_account_events_are_not_thread_filtered(self):
+        from orchd.app_worker import Supervisor
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'ORCHD_HOME': tmp}):
+            supervisor = Supervisor.__new__(Supervisor)
+            with patch.object(supervisor, 'current', return_value=True):
+                supervisor.event({'method': 'account/rateLimits/updated', 'params': {'rateLimits': {
+                    'primary': {'usedPercent': 30, 'windowDurationMins': 300, 'resetsAt': 4000}}}})
+            self.assertEqual(quota.Cache().status(now=1000)['sol']['windows'][0]['source'], 'codex.updated')
+
+    def test_missing_invalid_and_reset_windows_are_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            self.assertEqual(cache.status(now=1000)['sol']['state'], 'unknown')
+            for used, reset, duration in [(None, 2000, 300), (True, 2000, 300),
+                                          (101, 2000, 300), (10, 1000, 300), (10, 2000, None)]:
+                cache.codex({'rateLimits': {'primary': {'usedPercent': used,
+                    'windowDurationMins': duration, 'resetsAt': reset}}}, now=1000)
+                self.assertEqual(cache.status(now=1000)['sol']['state'], 'unknown')
+
+    def test_read_refresh_is_single_flight_and_does_not_infer(self):
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            rpc = Mock()
+            rpc.call.return_value = {'rateLimits': {'primary': {'usedPercent': 20,
+                'windowDurationMins': 300, 'resetsAt': 2000}}}
+            quota.refresh(cache, rpc=rpc, now=1000)
+            quota.refresh(cache, rpc=rpc, now=1010)
+            rpc.call.assert_called_once_with('account/rateLimits/read', {}, timeout=3)
+            self.assertEqual(cache.status(now=1010)['sol']['windows'][0]['source'], 'codex.read')
+
+    def test_shadow_requires_known_capacity_and_cross_provider_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            cache.codex({'rateLimits': {'primary': {'usedPercent': 96,
+                'windowDurationMins': 300, 'resetsAt': 2000}}}, now=1000)
+            cache.claude({'rate_limits': {'five_hour': {'used_percentage': 20, 'resets_at': 2000},
+                'seven_day': {'used_percentage': 50, 'resets_at': 5000}}}, now=1000)
+            snapshot = cache.status(now=1001)
+            self.assertEqual(quota.shadow(snapshot, now=1001)['selected_alias'], 'sonnet')
+            self.assertIsNone(quota.shadow(snapshot, task_type='review', author_model='claude-sonnet-5-5',
+                                          now=1001)['selected_alias'])
+            self.assertIsNone(quota.shadow(snapshot, backend='app-server', task_type='review',
+                author_model='gpt-6.1-sol', now=1001)['selected_alias'])
+
+    def test_older_observations_cannot_replace_newer_and_status_is_read_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'quota.db'
+            cache = quota.Cache(path)
+            payload = {'rateLimits': {'primary': {'usedPercent': 40,
+                'windowDurationMins': 300, 'resetsAt': 2000}}}
+            cache.codex(payload, now=1000)
+            cache.codex(payload, source='old', now=999)
+            with patch.object(cache, 'connect', side_effect=AssertionError('read must not initialize DB')):
+                self.assertEqual(cache.status(now=1001)['sol']['windows'][0]['source'], 'codex.read')
+
+    def test_missing_bucket_cannot_be_hidden_by_another_known_bucket(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            cache.codex({'rateLimitsByLimitId': {'codex': {}, 'other': {'primary': {
+                'usedPercent': 10, 'windowDurationMins': 300, 'resetsAt': 2000}}}}, now=1000)
+            self.assertEqual(cache.status(now=1001)['sol']['state'], 'unknown')
