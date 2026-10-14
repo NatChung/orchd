@@ -21,6 +21,7 @@ from . import store
 
 TTL = 60
 MAX_AGE = 300
+REFRESH_INTERVAL = 30  # Refresh before observation TTL, leaving room for RPC latency.
 
 
 def number(value):
@@ -121,7 +122,7 @@ class Cache:
 
 
 def refresh(cache, *, rpc=None, sessions=None, now=None, force=False, thread=None):
-    """Refresh once per TTL under a process-shared lock. Never launch a model.
+    """Refresh before observation TTL under a shared lock. Never launch a model.
 
     rpc must be an already initialized, authorized app-server connection. A
     bounded tail of the 20 most recently modified sessions is the fallback.
@@ -136,7 +137,7 @@ def refresh(cache, *, rpc=None, sessions=None, now=None, force=False, thread=Non
             return
         lock.seek(0)
         previous = lock.read()
-        if not force and previous and 0 <= now - float(previous) <= TTL:
+        if not force and previous and 0 <= now - float(previous) <= REFRESH_INTERVAL:
             return
         lock.seek(0)
         lock.truncate()

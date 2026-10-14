@@ -26,7 +26,7 @@ MCP and also records it in the existing `dispatch` message for audit.
 The shared snapshot is `$ORCHD_HOME/quota.db` (default
 `~/.local/share/orchd/quota.db`), separate from the task DB. Concurrent writers
 upsert each bucket transactionally; older receipts cannot replace newer ones.
-Codex refresh is single-flight with a nonblocking file lock and a 60-second
+Codex refresh is single-flight with a nonblocking file lock and a 30-second
 attempt TTL. Reads never create or migrate a DB. Observations older than 60
 seconds are unknown; older than 300 seconds are marked stale. Missing/invalid
 percentages, durations, resets, future observation timestamps, and passed resets
@@ -45,7 +45,7 @@ different providers are not equivalent token quantities.
 * [Codex app-server](https://learn.chatgpt.com/docs/app-server): existing initialized
   RPC connections use `account/rateLimits/read` (3-second response timeout).
   App-server workers collect at startup, at each matching turn start/completion,
-  and during idle time under the shared 60-second attempt TTL. They consume
+  and during idle time under the shared 30-second attempt TTL. They consume
   `account/rateLimits/updated` before thread filtering. All metered buckets are
   retained. Explicit `--probe sol` starts a temporary private app-server, reads
   the account RPC, and terminates it without starting a thread or model turn. CLI socket connection failures are diagnostic
@@ -115,7 +115,8 @@ window reason after 300 seconds, and `expired TTL` is a reason after 60 seconds.
 
 * **Codex app-server:** force a read on matching `turn/started` and
   `turn/completed`, even if another worker just refreshed. The supervisor also
-  tries refresh during idle time, with the existing single-flight attempt TTL.
+  tries refresh during idle time, with the existing single-flight 30-second attempt TTL, leaving 30 seconds before observations
+  expire to absorb RPC latency.
   Failed reads fall back to bounded session receipts without changing their
   original timestamps. These account reads cost process/network work, not model
   tokens. A disconnected/stopped supervisor cannot maintain freshness.
@@ -164,7 +165,9 @@ and per-turn collection without altering model dispatch. Managed policy or
 and TTL/stale rules still apply. Explicit probes are available for diagnosis.
 
 Local branch validation uses a separate temporary `ORCHD_HOME`. Both native
-probes returned known subscription windows without model inference. Tests cover
+probes returned known subscription windows without model inference. A native
+Codex account RPC was also refreshed at idle samples over 63 seconds; all three
+samples stayed known with fresh receipt timestamps, without a model turn. Tests cover
 exec thread isolation and receipt age, forced app-server turn reads and idle
 TTL, native Claude parsing/year rollover, unknown/timeout behavior and worker
 hook wiring. No install, restart or merge is part of this change.

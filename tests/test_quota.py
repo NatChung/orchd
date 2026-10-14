@@ -12,6 +12,17 @@ from orchd import quota
 
 
 class QuotaTest(unittest.TestCase):
+    def test_empty_rpc_payload_cannot_overwrite_known_quota(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            cache.codex({'rateLimits': {'primary': {'usedPercent': 52,
+                'windowDurationMins': 10080, 'resetsAt': 2000}}}, now=1000)
+            with self.assertRaisesRegex(ValueError, 'no rate limit snapshot'):
+                cache.codex({}, now=1001)
+            window = cache.status(now=1002)['sol']['windows'][0]
+            self.assertEqual((window['state'], window['used_percent'], window['observed_at']),
+                             ('known', 52, 1000))
+
     def test_exec_turn_collects_only_its_own_rollout_and_preserves_age(self):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'ORCHD_CODEX_SESSIONS': tmp}):
             root = Path(tmp)
@@ -46,7 +57,7 @@ class QuotaTest(unittest.TestCase):
                 supervisor.collect_quota()
             self.assertEqual(supervisor.rpc.call.call_count, 2)
             self.assertEqual(quota.Cache().status(now=1001)['sol']['state'], 'known')
-            with patch('orchd.quota.time.time', return_value=1061):
+            with patch('orchd.quota.time.time', return_value=1031):
                 supervisor.collect_quota()
             self.assertEqual(quota.Cache().status(now=1062)['sol']['state'], 'known')
 
