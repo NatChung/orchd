@@ -20,6 +20,7 @@ class UpgradeTest(unittest.TestCase):
         self.calls = []
         self.head = NEW
         self.install_rc = 0
+        self.migration_rc = 0
 
     def receipt(self, requirement):
         self.prefix.mkdir(parents=True, exist_ok=True)
@@ -35,6 +36,8 @@ class UpgradeTest(unittest.TestCase):
         self.calls.append(cmd)
         if cmd[:2] == ["git", "ls-remote"]:
             return subprocess.CompletedProcess(cmd, 0, f"{self.head}\tHEAD\n", "")
+        if cmd[-1] == "--migrations-only":
+            return subprocess.CompletedProcess(cmd, self.migration_rc, "home migration summary", "")
         if self.install_rc == 0:
             self.commit(self.head)
         return subprocess.CompletedProcess(cmd, self.install_rc, "", "uv: Repository not found")
@@ -45,7 +48,7 @@ class UpgradeTest(unittest.TestCase):
     def test_upgrades_from_the_recorded_source_and_reports_both_commits(self):
         code, lines = self.upgrade()
         self.assertEqual(code, 0)
-        self.assertEqual(self.calls[-1], ["/opt/uv", "tool", "install", "--force", "--refresh",
+        self.assertEqual(self.calls[-2], ["/opt/uv", "tool", "install", "--force", "--refresh",
                                           "git+ssh://git@github-personal/ExampleOwner/orchd"])
         self.assertIn("orchd aaaaaaa -> bbbbbbb", lines)
         self.assertIn("orchd binding --new", lines[-1])
@@ -54,22 +57,40 @@ class UpgradeTest(unittest.TestCase):
         self.head = OLD
         code, lines = self.upgrade()
         self.assertEqual(code, 0)
-        self.assertEqual([c[:2] for c in self.calls], [["git", "ls-remote"]])
+        self.assertEqual([c[:2] for c in self.calls], [["git", "ls-remote"], [str(self.prefix / "bin" / "orchd"), "upgrade"]])
         self.assertIn("already the newest", lines[0])
+
+    def test_migrations_use_new_cli_and_failure_keeps_program_success(self):
+        self.migration_rc = 1
+        code, lines = self.upgrade()
+        self.assertEqual(code, 0)
+        self.assertEqual(upgrade.installed_commit(self.prefix), NEW)
+        self.assertEqual(self.calls[-1], [str(self.prefix / "bin" / "orchd"), "upgrade", "--migrations-only"])
+        self.assertIn("Retry: orchd upgrade --migrations-only", "\n".join(lines))
+
+    def test_runner_exception_does_not_undo_program_upgrade(self):
+        def run(cmd):
+            if cmd[-1] == "--migrations-only":
+                raise OSError("could not start new CLI")
+            return self.run_cmd(cmd)
+        code, lines = upgrade.upgrade(self.prefix, run=run, which=lambda name: "/opt/uv", checkout=False)
+        self.assertEqual(code, 0)
+        self.assertEqual(upgrade.installed_commit(self.prefix), NEW)
+        self.assertIn("--migrations-only", "\n".join(lines))
 
     def test_branch_pin_is_dropped_for_the_default_branch(self):
         self.receipt('{ name = "orchd", git = "ssh://git@github-personal/ExampleOwner/orchd", rev = "doctor-before-init" }')
         code, lines = self.upgrade()
         self.assertEqual(code, 0)
         self.assertIn("rev=doctor-before-init", lines[0])
-        self.assertEqual(self.calls[-1][-1], "git+ssh://git@github-personal/ExampleOwner/orchd")
+        self.assertEqual(self.calls[-2][-1], "git+ssh://git@github-personal/ExampleOwner/orchd")
 
     def test_pin_in_the_url_is_dropped_too(self):
         self.receipt('{ name = "orchd", git = "ssh://git@github-personal/ExampleOwner/orchd?rev=orchd-upgrade-62" }')
         code, lines = self.upgrade()
         self.assertEqual(code, 0)
         self.assertIn("rev=orchd-upgrade-62", lines[0])
-        self.assertEqual(self.calls[-1][-1], "git+ssh://git@github-personal/ExampleOwner/orchd")
+        self.assertEqual(self.calls[-2][-1], "git+ssh://git@github-personal/ExampleOwner/orchd")
 
     def test_failure_keeps_the_install_and_shows_uv_error(self):
         self.install_rc = 2
@@ -104,7 +125,7 @@ class UpgradeTest(unittest.TestCase):
         self.receipt('{ name = "orchd", git = "https://github.com/NatChung/orchd.git" }')
         code, lines = self.upgrade()
         self.assertEqual(code, 0)
-        self.assertEqual(self.calls[-1][-1], upgrade.PUBLIC_SOURCE)
+        self.assertEqual(self.calls[-2][-1], upgrade.PUBLIC_SOURCE)
         self.assertIn("orchd aaaaaaa -> bbbbbbb", lines)
 
     def test_checkout_points_at_git_pull(self):

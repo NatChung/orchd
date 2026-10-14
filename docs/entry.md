@@ -19,7 +19,7 @@ orchd binding      # 沿用已綁定且在線的 Claude Orch；沒有就開一�
 新增 foreground 後，既有入口需要重新產生 `~/orch/interface/.codex/config.toml` 與 `~/orch/interface/AGENTS.md`：
 先將這兩個檔案移到備份位置，再用新版程式跑 `orchd init`，核對輸出為 created，必要時重新套用自己的修改，
 然後重開 Desktop 入口對話以載入新設定。自訂 interface 路徑時用相應路徑。
-`orchd upgrade` **不會**自動做這一步：它只重新安裝程式，不呼叫 init、不改 `~/orch`；
+`orchd upgrade` 現在會以 migration 更新 AGENTS.md 的 managed 規則區塊（見[家目錄更新](upgrade-migrations.md)），但不刷新 `.codex/config.toml`，也不呼叫 init；
 單獨再跑 init 也會保留舊的不同內容。此變更未升級、重啟或改動任何 live 入口。
 
 1. 在 Desktop 打開 `~/orch/interface`，權限選 **`interface`**（init 寫好的權限設定），不要用完整存取權。

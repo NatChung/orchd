@@ -2,7 +2,7 @@
 
 `uv tool upgrade` keeps uv's cached git resolution and misses new commits, so this runs
 `uv tool install --force --refresh <source>` with the source read from uv's own receipt. Only the program
-changes: ~/orch, the database and ~/.config/orchd are left alone.
+changes first, then the newly installed CLI runs versioned home migrations.
 """
 import json
 import shutil
@@ -74,9 +74,25 @@ def default_run(cmd):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=600)
 
 
-def upgrade(prefix=None, run=default_run, which=shutil.which, checkout=None):
+def post_upgrade(prefix, run):
+    """Use the newly installed code, not modules cached before uv replaced the package."""
+    try:
+        out = run([str(prefix / "bin" / "orchd"), "upgrade", "--migrations-only"])
+        lines = [text.strip() for text in (out.stdout, out.stderr) if text.strip()]
+        if out.returncode:
+            lines.append("Program upgrade succeeded; home migrations failed. Retry: orchd upgrade --migrations-only")
+        return lines
+    except Exception as error:
+        return [f"Program upgrade succeeded; home migrations failed: {error}",
+                "Retry: orchd upgrade --migrations-only"]
+
+
+def upgrade(prefix=None, run=default_run, which=shutil.which, checkout=None, *, migrations_only=False, dry_run=False):
     """Returns (exit code, lines to print)."""
     prefix = Path(prefix or sys.prefix)
+    if migrations_only or dry_run:
+        from . import home_migrations
+        return home_migrations.run(dry_run=dry_run)
     checkout = Path(__file__).resolve().parents[1] / "bin" / "orchd" if checkout is None else checkout
     if checkout and Path(checkout).is_file():
         return 1, [f"orchd is running from a checkout ({Path(checkout).parents[1]}): update it with `git pull` there."]
@@ -100,7 +116,7 @@ def upgrade(prefix=None, run=default_run, which=shutil.which, checkout=None):
     if git_url and not pin:
         head = remote_head(git_url, run)
         if head and before and head == before:
-            return 0, [f"orchd is already the newest commit ({before[:7]})."]
+            return 0, [f"orchd is already the newest commit ({before[:7]}).", *post_upgrade(prefix, run)]
     out = run([uv, "tool", "install", "--force", "--refresh", spec])
     if out.returncode != 0:
         return out.returncode or 1, lines + ["upgrade failed; the installed orchd is unchanged:",
@@ -108,7 +124,8 @@ def upgrade(prefix=None, run=default_run, which=shutil.which, checkout=None):
     after = installed_commit(prefix)
     lines.append(f"orchd {(before or 'unknown')[:7]} -> {(after or 'unknown')[:7]}" if before != after
                  else f"orchd reinstalled at {(after or 'unknown')[:7]}")
-    lines.append("Only the program changed (~/orch, the database and ~/.config/orchd are untouched). Running Orchs and "
+    lines.extend(post_upgrade(prefix, run))
+    lines.append("Running Orchs and "
                  "Desktop MCP servers keep the old code: start a new Orch with `orchd binding --new` and open a new "
                  "Desktop conversation.")
     return 0, lines

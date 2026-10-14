@@ -178,6 +178,8 @@ def init(rt, home=None, env=None, trust=True, source=None, orchd_bin=None):
         result["codex_trust"] = codex_trust(codex_config(home, env), [orch, interface])
         result["claude_trust"] = ("trusted" if rt.claude_trusted(orch.resolve()) else
                                   f"not trusted: run `cd {orch} && claude`, accept the trust prompt, then exit")
+    from . import home_migrations
+    home_migrations.record_init(home, env)
     result["next"] = ("Run `orchd binding` to bind the interface to a Claude Orch, then open "
                       f"{interface} in the Codex Desktop app (permissions: interface).")
     return result

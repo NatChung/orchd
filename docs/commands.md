@@ -11,7 +11,7 @@ Based on argparse in `orchd/cli.py` and dynamic fields in `orchd/goals.py`. All 
 | `orchd orch restart` | Replace the Desktop-bound Orch, adopt open tasks and rebind. |
 | `orchd list` | Check open tasks and health. |
 | `orchd doctor` | Check machine readiness. |
-| `orchd upgrade` | Update the uv-installed program. |
+| `orchd upgrade` | Update the uv-installed program and managed home rules. |
 
 ## BREAKING CHANGE: upgrade commands
 
@@ -33,7 +33,7 @@ Removed entry points exit with code 2 and point to the new command. Without a su
 | --- | --- | --- |
 | `orchd init [--from OLD_HOME] [--no-trust]` | Create home/interface templates and configure trust without overwriting edited templates. | `orchd init` |
 | `orchd doctor [--profile example] [--json] [--no-input]` | Check machine readiness; on the first terminal run, offer to save the projects directory. `--json` / `--no-input` never prompt. | `orchd doctor` |
-| `orchd upgrade` | Update the uv-installed program from its recorded source. | `orchd upgrade` |
+| `orchd upgrade` | Update from the recorded source, then migrate home rules; `--dry-run` previews only, `--migrations-only` retries without reinstalling. | `orchd upgrade` |
 
 `init --from` copies content from an old Orch home. It replaces destination files that still match an unmodified init template; other existing files are kept and listed. It skips `.git`, `.gitignore`, `.DS_Store`, `.claude`, `.codex`, and `AGENTS.md`; `--no-trust` skips Codex trust writes and Claude trust checks. Doctor exit codes: 0 passed, 1 required check failed, 2 required check unknown. `--profile example` is an optional fictional layout.
 
@@ -270,3 +270,5 @@ block is missing. When quoting a worker question, put the Operator summary in
 For quote-only calls, the quoted worker body is checked instead of the quote prefix.
 MCP warnings appear only in the result, after validation succeeds; they are not
 also printed to stderr. Warnings do not mean the question was rejected or approved.
+
+Home rules are updated automatically after program upgrade, using versioned steps, backups and managed blocks. See [migration behavior](upgrade-migrations.md) for `orchd upgrade --dry-run`, `--migrations-only`, custom paths and legacy first-run instructions.
