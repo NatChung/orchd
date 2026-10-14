@@ -37,6 +37,7 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "dispatch",
      "description": "Start one worker (Claude or Codex, by model) for one task in a fresh worktree of a repo under ~/projects. "
+                    "Use model=auto for dispatch; for review explicitly select the other vendor (sol author -> sonnet reviewer, sonnet author -> sol reviewer). "
                     "Returns immediately; the worker reports later and you are woken with an [orchd] message. "
                     "The result lists other_open_on_repo: open tasks on the same repo from other Orchs.",
      "inputSchema": {"type": "object", "required": ["repo", "title", "instructions", "done_when", "model_reason",
@@ -183,7 +184,7 @@ _batch_item_spec = dict(_dispatch_spec, properties=dict(_dispatch_spec['properti
     model=dict(_dispatch_spec['properties']['model'], default='auto',
                description='Optional; batch defaults to auto. Explicit sol/sonnet respected.')))
 TOOLS.append({"name": "dispatch_batch",
-    "description": "Start 1-4 mutually independent tasks, each with its own worker/worktree. Workers run concurrently after launch; model defaults to auto per item. Returns group_id and indexed successes/errors; partial failure does not roll back launched tasks. No queue: submit excess later. Do not blindly resubmit successful items. list_open/inbox accept group_id. Quota is best-effort, no reservation or global concurrency guarantee.",
+    "description": "Start 1-4 mutually independent tasks, each with its own worker/worktree. Split all mutually independent work and dispatch it concurrently, submitting consecutive batches when more than 4 tasks are ready. Keep work on the same files in the same repo, or work with ordering dependencies, together or sequential. Workers run concurrently after launch; model defaults to auto per item. Returns group_id and indexed successes/errors; partial failure does not roll back launched tasks. No queue: submit excess in the next batch without waiting for completion. Do not blindly resubmit successful items. list_open/inbox accept group_id. Quota is best-effort, no reservation or global concurrency guarantee.",
     "inputSchema": {"type": "object", "required": ["tasks"], "properties": {
         "tasks": {"type": "array", "minItems": 1, "maxItems": 4,
                   "items": _batch_item_spec}}}})
