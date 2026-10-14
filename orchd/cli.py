@@ -209,6 +209,11 @@ def build_parser():
     fl = sub.add_parser("flush")
     fl.add_argument("task_id")
     fl.add_argument("--after-pid", type=int)
+    fl.add_argument("--turn-log", help=argparse.SUPPRESS)
+    ar = sub.add_parser('_auto-retry', help=argparse.SUPPRESS)
+    ar.add_argument('task_id')
+    ar.add_argument('event_id', type=int)
+    ar.add_argument('--database', required=True)
     from . import question_summary
     ask = sub.add_parser("ask", help="ask with an Operator summary and full evidence",
                          description=question_summary.GUIDANCE, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -578,7 +583,7 @@ def main(argv=None):
         print(json.dumps(result, ensure_ascii=False, indent=1))
         return 1 if result["status"] == "failed" else 0
 
-    con, rt = store.connect(), Runtime()
+    con, rt = store.connect(args.database if args.cmd == '_auto-retry' else None), Runtime()
     if args.cmd in ("watch", "summary"):
         from orchd import watch
         since = None
@@ -649,9 +654,13 @@ def main(argv=None):
         woke = core.progress(con, rt, args.task_id, args.text)
         print(f"progress sent on {args.task_id}" + ("" if woke else " (stored; waking Orch failed)"))
     elif args.cmd == "flush":
-        result = core.auto_flush(con, rt, args.task_id, args.after_pid)
+        result = core.auto_flush(con, rt, args.task_id, args.after_pid, turn_log=args.turn_log)
         print(json.dumps(result, ensure_ascii=False))
         return 1 if result["status"] == "failed" else 0
+    elif args.cmd == '_auto-retry':
+        result = core.auto_retry(con, rt, args.task_id, args.event_id)
+        print(json.dumps(result, ensure_ascii=False))
+        return 1 if result['status'] == 'failed' else 0
     elif args.cmd == "ask":
         woke = core.ask(con, rt, args.task_id, args.question)
         print(f"asked on {args.task_id}; wait for an [orchd answer {args.task_id}] message"

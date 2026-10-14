@@ -188,6 +188,7 @@ class Supervisor:
         self.interrupting = False
         self.reconnect_at = 0
         self.deferred_flush = None
+        self.deferred_limit = None
         self.reconcile_pending = False
 
     def task(self):
@@ -241,6 +242,13 @@ class Supervisor:
             self.update(active_turn=None, turn_state=turn['status'], last_completed_turn=turn['id'])
             if turn['status'] != 'completed':
                 self.update(note=f"app-server turn {turn['status']}: {turn.get('error')}")
+            if turn['status'] == 'failed':
+                from .core import rate_limit_notice
+                from .runtime import Runtime
+                if rate_limit_notice(self.con, Runtime(), self.task_id, turn.get('error'),
+                                     self.generation + ':' + turn['id'], generation=self.generation):
+                    self.deferred_flush = None
+                    return  # hold queued inputs for the replacement worker
             if not self.interrupting:
                 self.deferred_flush = (self.generation, task['session_id'], turn['id'])
 
@@ -257,6 +265,16 @@ class Supervisor:
             refresh(Cache(), rpc=self.rpc, force=force)
         except Exception:
             pass  # Quota telemetry must not break delivery or shutdown.
+
+    def handle_deferred_limit(self):
+        # send() may run under the delivery lock. Notify/start helper only after
+        # releasing it, since notification and retry both acquire that lock.
+        if self.deferred_limit is not None:
+            error, attempt = self.deferred_limit
+            self.deferred_limit = None
+            from .core import rate_limit_notice
+            from .runtime import Runtime
+            rate_limit_notice(self.con, Runtime(), self.task_id, error, attempt, generation=self.generation)
 
     def viewers(self):
         live = []
@@ -300,6 +318,13 @@ class Supervisor:
         elif turns:
             last = turns[-1]
             self.update(active_turn=None, turn_state=last['status'], last_completed_turn=last['id'])
+            if last['status'] == 'failed':
+                from .core import rate_limit_notice
+                from .runtime import Runtime
+                if rate_limit_notice(self.con, Runtime(), self.task_id, last.get('error'),
+                                     self.generation + ':' + last['id'], generation=self.generation):
+                    self.deferred_flush = None
+                    return
             self.deferred_flush=(self.generation,task['session_id'],last['id'])
         else:
             self.update(active_turn=None, turn_state='idle')
@@ -345,6 +370,9 @@ class Supervisor:
         except RPCError as exc:  # definitive server rejection: bytes did not start a turn
             self.con.execute("UPDATE worker_deliveries SET state='rejected',error=? WHERE id=?",(str(exc),delivery_id))
             self.update(note=f"app-server delivery rejected; pending retained: {exc}")
+            from .routing import limited
+            if limited(str(exc)):
+                self.deferred_limit = (str(exc), self.generation + ':' + delivery_id)
             return dict(status='failed',delivered=0,pending=store.pending_answer_count(self.con,self.task_id),error=str(exc))
         except Exception as exc:
             self.con.execute("UPDATE worker_deliveries SET state='uncertain',error=? WHERE id=?",(str(exc),delivery_id))
@@ -360,6 +388,9 @@ class Supervisor:
             base = dict(delivered=0,pending=len(pending))
             if not self.current() or guard and guard != (task['generation'],task['session_id'],task['last_completed_turn']):
                 return dict(status='skipped',reason='superseded',**base)
+            from .core import auto_retry_pending
+            if auto_retry_pending(self.con, task):
+                return dict(status='queued',reason='automatic provider retry pending',**base)
             uncertain = self.con.execute("SELECT 1 FROM worker_deliveries WHERE task_id=? AND generation=? "
                                          "AND state IN ('sending','uncertain') LIMIT 1",(self.task_id,self.generation)).fetchone()
             if uncertain:
@@ -483,10 +514,12 @@ class Supervisor:
                             self.reconcile()
                         self.drain()
                         self.collect_quota()  # Single-flight TTL also refreshes idle workers, without inference.
+                        self.handle_deferred_limit()
                         self.reconcile_if_needed()
                         if self.deferred_flush:
                             self.flush(guard=self.deferred_flush)
                             self.deferred_flush = None
+                        self.handle_deferred_limit()
                         # Viewer death releases human ownership; an idle FIFO can then flush.
                         had=self.con.execute('SELECT 1 FROM worker_viewers WHERE task_id=? AND generation=?',
                                              (self.task_id,self.generation)).fetchone()

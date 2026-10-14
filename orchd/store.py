@@ -221,7 +221,8 @@ CREATE TABLE IF NOT EXISTS intake_approvals(
 
 # Columns added after v1. Nullable so old rows and old code keep working against the same DB.
 TASK_COLUMNS = ("goal_id TEXT REFERENCES goals(id)", "goal_critical INTEGER CHECK(goal_critical IN (0,1))",
-                "model TEXT", "model_reason TEXT", "task_type TEXT", "rework_of TEXT",
+                "model TEXT", "model_reason TEXT", "group_id TEXT", "task_type TEXT", "rework_of TEXT",
+                "auto_model INTEGER NOT NULL DEFAULT 0", "auto_retry_count INTEGER NOT NULL DEFAULT 0",
                 "found_by TEXT", "outcome TEXT", "rating INTEGER",
                 "verify TEXT", "manual_checks TEXT", "verifies TEXT",
                 "backend TEXT NOT NULL DEFAULT 'exec'", "generation TEXT", "endpoint TEXT",
@@ -387,7 +388,7 @@ def add_message(con, task_id, kind, body, evidence=None, *, entry_reply_id=None)
 
 def unread_for_thread(con, thread):
     return con.execute(
-        "SELECT m.*, t.repo, t.title, t.status, t.model FROM messages m JOIN tasks t ON t.id=m.task_id "
+        "SELECT m.*, t.repo, t.title, t.status, t.model, t.model_reason, t.group_id FROM messages m JOIN tasks t ON t.id=m.task_id "
         f"WHERE t.orch_thread=? AND m.read_at IS NULL AND m.kind IN ({','.join('?' * len(ORCH_KINDS))}) "
         "ORDER BY m.id", (thread, *ORCH_KINDS)).fetchall()
 

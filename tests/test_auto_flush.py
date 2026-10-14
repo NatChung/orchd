@@ -328,7 +328,7 @@ class TurnWrapperTest(unittest.TestCase):
             self.assertEqual(lines[0], "codex exec resume --json --dangerously-bypass-approvals-and-sandbox "
                                        "-m gpt-6.1-sol th-1 hello world")
             self.assertEqual(lines[1], f"orchd quota --codex-log {log}")
-            self.assertEqual(lines[2], f"orchd flush abc123 --after-pid {pid}")
+            self.assertEqual(lines[2], f"orchd flush abc123 --after-pid {pid} --turn-log {log}")
 
     def test_log_outside_a_task_directory_is_not_wrapped(self):
         self.assertEqual(Runtime().codex_turn(["codex"], "/l/codex.jsonl"), ["codex"])

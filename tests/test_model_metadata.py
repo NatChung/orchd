@@ -98,7 +98,7 @@ class ModelMetadataTest(unittest.TestCase):
         tools = {t["name"]: t for t in mcp_server.TOOLS}
         for name in ("dispatch", "retry"):
             prop = tools[name]["inputSchema"]["properties"]["model"]
-            self.assertEqual(prop["enum"], ["sol", "sonnet"])
+            self.assertEqual(prop["enum"], ["sol", "sonnet", "auto"] if name == "dispatch" else ["sol", "sonnet"])
             self.assertNotIn("opus", json.dumps(tools[name]))
             self.assertNotIn("M tier", json.dumps(tools[name]))
         self.assertNotIn("default", tools["dispatch"]["inputSchema"]["properties"]["model"])

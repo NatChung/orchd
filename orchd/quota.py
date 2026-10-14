@@ -286,8 +286,9 @@ def probe(cache, provider, binary=None):
                     process.wait()
 
 
-def shadow(snapshot, *, backend='exec', task_type=None, author_model=None, now=None):
-    """A provisional observation, not a reservation or permission to launch."""
+def shadow(snapshot, *, backend='exec', task_type=None, author_model=None, now=None,
+           applied=False, recent_limited=()):
+    """One shared selection policy, optionally applied; never a quota reservation."""
     now = time.time() if now is None else now
     allowed = ['sol'] if backend == 'app-server' else ['sol', 'sonnet']
     review = task_type == 'review' or author_model is not None
@@ -301,7 +302,7 @@ def shadow(snapshot, *, backend='exec', task_type=None, author_model=None, now=N
     for provider in allowed:
         value = snapshot[provider]
         windows = value['windows']
-        if value['state'] == 'known' and windows and all(w['used_percent'] < 95 for w in windows):
+        if provider not in recent_limited and value['state'] == 'known' and windows and all(w['used_percent'] < 95 for w in windows):
             # Most constrained window's remaining percentage per second until reset.
             score = min((95 - w['used_percent']) / max(1, w['reset_at'] - now) for w in windows)
             usable.append((score, provider == 'sol', provider))
@@ -309,6 +310,18 @@ def shadow(snapshot, *, backend='exec', task_type=None, author_model=None, now=N
     reason = ('review requires another provider; ' if review else '')
     if selected:
         reason += 'known capacity with 5% margin; remaining capacity/reset-time score (provisional)'
+    elif applied and allowed:
+        # Apply the same policy's fallback rather than queueing on absent telemetry.
+        used = {p: max((w['used_percent'] for w in snapshot[p]['windows']
+                       if w.get('state') == 'known' and number(w.get('used_percent'))), default=None)
+                for p in allowed}
+        not_full = [p for p in allowed if p not in recent_limited and (used[p] is None or used[p] < 95)]
+        candidates = not_full or [p for p in allowed if p not in recent_limited and used[p] is not None]
+        selected = ('sol' if 'sol' in not_full else not_full[0]) if not_full else (
+            min(candidates, key=lambda p: (used[p], p != 'sol')) if candidates else
+            'sol' if 'sol' in allowed else allowed[0])
+        reason += ('quota unknown/stale; fallback (prefer sol when not exhausted), no capacity guarantee' if not_full else
+                   'allowed providers full; most remaining known percentage, tie/no evidence: sol (best-effort)')
     elif review:
         reason += 'wait: required provider unavailable, unknown, or backend incompatible'
     elif any(snapshot[p]['state'] == 'unknown' for p in allowed):
@@ -316,13 +329,21 @@ def shadow(snapshot, *, backend='exec', task_type=None, author_model=None, now=N
         reason += 'quota unknown; conservative sol preference, no capacity guarantee'
     else:
         reason += 'wait: known windows at or above 95% used'
+    if applied and recent_limited:
+        reason += '; recent rate limit within 10 minutes: ' + ','.join(sorted(recent_limited))
+    if applied and selected == 'sonnet' and ('sol' in recent_limited or any(
+            w.get('state') == 'known' and number(w.get('used_percent')) and w['used_percent'] >= 95
+            for w in snapshot['sol']['windows'])):
+        reason += '; sol at >=95% or recent rate limit; selected sonnet'
     return dict(selected_alias=selected, reason=reason, policy_version='quota-shadow-v1',
-                applied=False, quota=snapshot)
+                applied=applied, quota=snapshot)
 
 
 def dispatch_shadow(**kwargs):
     try:
-        return shadow(Cache().status(), **kwargs)
+        return shadow(Cache().status(now=kwargs.get('now')), **kwargs)
     except Exception:
+        if kwargs.get('applied'):
+            return shadow({p: dict(state='unknown', windows=[]) for p in ('sol', 'sonnet')}, **kwargs)
         return dict(selected_alias=None, reason='quota observation unavailable',
                     policy_version='quota-shadow-v1', applied=False)

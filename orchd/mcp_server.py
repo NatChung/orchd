@@ -45,9 +45,11 @@ TOOLS = [
          "title": {"type": "string"},
          "instructions": {"type": "string", "description": "Goal, scope, allowed actions, what to report"},
          "done_when": {"type": "string", "description": "Checkable completion conditions"},
-         "model": {"type": "string", "enum": list(WORKER_MODELS),
+         "model": {"type": "string", "enum": [*WORKER_MODELS, "auto"],
                    "description": "Optional. Omitted = the default from orchd config (ORCHD_WORKER_MODEL, then "
                                   "config.toml; factory sonnet); see `orchd config show`. "
+                                  "auto = apply quota-shadow-v1 capacity/reset-time score, 95% margin; tie/unknown prefers sol, recent rate limits excluded. "
+                                  "Auto sol rate-limit failures retry sonnet once per task and notify inbox; explicit models only notify. "
                                   "sonnet = Claude Sonnet 5.5; sol = GPT-6.1 Sol on Codex"},
          "goal_id": {"type": "string", "description": "Central goal id; must belong to repo"},
          "issue_ref": {"type": "string", "description": "Optional parent ref: github:owner/repo#N or jira:KEY-N; format validation only"},
@@ -84,8 +86,8 @@ TOOLS = [
                     "stored full model id in `model` (\"unknown\" for tasks dispatched before models were stored). "
                     "pending is the task's count of undelivered queued answers and followups, even if closed; "
                     "it reveals no queued body and does not consume or flush the queue. "
-                    "Call it when an [orchd] message arrives.",
-     "inputSchema": {"type": "object", "properties": {}}},
+                    "Includes model_reason and group_id; optional group_id leaves other batches unread. Call it when an [orchd] message arrives.",
+     "inputSchema": {"type": "object", "properties": {"group_id": {"type": "string"}}}},
     {"name": "list_open",
      "description": "List every task that is not closed, across all Orch sessions, with worker liveness. "
                     "model is the task's stored full model id (\"unknown\" if none was stored). "
@@ -98,8 +100,8 @@ TOOLS = [
                     "owner_health is independent: alive/dead from a successful Claude job probe, unknown "
                     "when unverified (including Codex owners). notification_delivery shows unread counts "
                     "and safe wake-failure metadata without consuming inbox or revealing message content. "
-                    "This does not adopt tasks or change their owner.",
-     "inputSchema": {"type": "object", "properties": {}}},
+                    "Includes model_reason, group_id, auto_model and auto_retry_count; optional group_id filters a batch. This does not adopt tasks or change their owner.",
+     "inputSchema": {"type": "object", "properties": {"group_id": {"type": "string"}}}},
     {"name": "answer",
      "description": "Send an answer to a worker's question. For outward sends, pass Operator's decision verbatim. "
                     "Returns status delivered|queued|failed with delivered and pending counts. A Codex worker gets "
@@ -175,6 +177,16 @@ TOOLS = [
          "task_id": {"type": "string"},
          "message": {"type": "string", "description": "The next instruction, with any new scope or done_when"}}}},
 ]
+
+_dispatch_spec = next(t['inputSchema'] for t in TOOLS if t['name'] == 'dispatch')
+_batch_item_spec = dict(_dispatch_spec, properties=dict(_dispatch_spec['properties'],
+    model=dict(_dispatch_spec['properties']['model'], default='auto',
+               description='Optional; batch defaults to auto. Explicit sol/sonnet respected.')))
+TOOLS.append({"name": "dispatch_batch",
+    "description": "Start 1-4 mutually independent tasks, each with its own worker/worktree. Workers run concurrently after launch; model defaults to auto per item. Returns group_id and indexed successes/errors; partial failure does not roll back launched tasks. No queue: submit excess later. Do not blindly resubmit successful items. list_open/inbox accept group_id. Quota is best-effort, no reservation or global concurrency guarantee.",
+    "inputSchema": {"type": "object", "required": ["tasks"], "properties": {
+        "tasks": {"type": "array", "minItems": 1, "maxItems": 4,
+                  "items": _batch_item_spec}}}})
 
 # Orch-side tools for the Desktop entry; refused unless the caller is the Orch the entry is bound to.
 TOOLS += [
@@ -312,6 +324,8 @@ ENTRY_INSTRUCTIONS = (
 
 
 def call(name, args, thread, con, rt):
+    if name == 'dispatch_batch':
+        return core.dispatch_batch(con, rt, orch_thread=thread, tasks=args['tasks'])
     if name == 'quota_status':
         from .quota import Cache
         return Cache().status()
@@ -337,7 +351,7 @@ def call(name, args, thread, con, rt):
                           backend=args.get("backend"), goal_id=args.get("goal_id"),
                           goal_critical=args.get("goal_critical"), issue_ref=args.get("issue_ref"))
         return {"task_id": t["id"], "status": t["status"], "branch": t["branch"], "worktree": t["worktree"],
-                "orch_id": thread, "model": t["model"],
+                "orch_id": thread, "model": t["model"], "model_reason": t['model_reason'],
                 "quota_shadow": json.loads(con.execute(
                     "SELECT body FROM messages WHERE task_id=? AND kind='dispatch' ORDER BY id DESC LIMIT 1",
                     (t['id'],)).fetchone()['body'])['quota_shadow'],
@@ -345,11 +359,11 @@ def call(name, args, thread, con, rt):
     if name == "inbox":
         if not thread:
             raise ValueError("inbox needs the caller's thread id")
-        return core.inbox(con, thread)
+        return core.inbox(con, thread, args.get('group_id'))
     if name == "list_orchs":
         return inventory.list_orchs(con, rt, observe=True)
     if name == "list_open":
-        return core.list_open(con, rt)
+        return [t for t in core.list_open(con, rt) if args.get('group_id') is None or t['group_id'] == args['group_id']]
     if name == "answer":
         text = args.get("text")
         if args.get("entry_reply_id") is not None and not thread:
