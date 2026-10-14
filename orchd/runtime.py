@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import shlex
 import socket
 import subprocess
 import sys
@@ -341,8 +342,14 @@ class Runtime:
                            "also check daemon version, authentication and messaging capability.")
 
     def start_worker(self, worktree, sock, brief, model):
+        from . import store
+        command = shlex.join(['env', 'ORCHD_HOME=' + str(store.home()), paths.orchd_executable(),
+                              'quota', '--probe', 'sonnet', '--binary', self.claude]) + ' >/dev/null 2>&1'
+        hooks = {event: [{'hooks': [{'type': 'command', 'command': command, 'timeout': 25}]}]
+                 for event in ('SessionStart', 'UserPromptSubmit', 'Stop', 'StopFailure')}
         return self.start_claude(worktree, sock, model, [
             "--dangerously-skip-permissions", "--settings", json.dumps({"crossSessionInbound": "accept",
+                "hooks": hooks,
                 "env": {k: v for k, v in worker_env(worktree).items()
                         if k == "PATH" or k == "GH_TOKEN" or k == "ORCHD_GH_ACCOUNTS"
                         or k == "ORCHD_WORKTREE"
@@ -542,8 +549,10 @@ class Runtime:
         name = Path(log).parent.name
         if not name.startswith("orchd-"):
             return cmd
-        script = 'task=$1; orchd=$2; shift 2; "$@"; "$orchd" flush "$task" --after-pid $$'
-        return ["/bin/sh", "-c", script, "orchd-turn", name[len("orchd-"):], paths.orchd_executable(), *cmd]
+        script = ('task=$1; orchd=$2; log=$3; shift 3; '
+                  '"$@"; "$orchd" quota --codex-log "$log" >/dev/null 2>&1; '
+                  '"$orchd" flush "$task" --after-pid $$')
+        return ["/bin/sh", "-c", script, "orchd-turn", name[len("orchd-"):], paths.orchd_executable(), log, *cmd]
 
     def start_codex_worker(self, worktree, log, prompt, model):
         pid = self.spawn(self.codex_turn([self.codex, "exec", *CODEX_FLAGS, "-m", model, "-C", worktree, prompt], log),

@@ -321,13 +321,14 @@ class TurnWrapperTest(unittest.TestCase):
             with patch.dict(os.environ, {"ORCHD_EXECUTABLE": str(orchd), "TRACE": str(trace)}):
                 pid = int(rt.resume_codex_worker(str(tmp), str(log), "th-1", "hello world", "gpt-6.1-sol"))
                 for _ in range(100):
-                    if trace.exists() and "orchd" in trace.read_text():
+                    if trace.exists() and "orchd flush" in trace.read_text():
                         break
                     time.sleep(0.05)
             lines = trace.read_text().splitlines()
             self.assertEqual(lines[0], "codex exec resume --json --dangerously-bypass-approvals-and-sandbox "
                                        "-m gpt-6.1-sol th-1 hello world")
-            self.assertEqual(lines[1], f"orchd flush abc123 --after-pid {pid}")
+            self.assertEqual(lines[1], f"orchd quota --codex-log {log}")
+            self.assertEqual(lines[2], f"orchd flush abc123 --after-pid {pid}")
 
     def test_log_outside_a_task_directory_is_not_wrapped(self):
         self.assertEqual(Runtime().codex_turn(["codex"], "/l/codex.jsonl"), ["codex"])
@@ -347,7 +348,7 @@ class AppAutoFlushTest(AppBase):
         guard=(self.gen,"thread","turn")
         self.assertEqual(self.supervisor.flush(guard)["delivered"],1)
         self.assertEqual(self.supervisor.flush(guard)["status"],"queued")
-        self.assertEqual(len(self.supervisor.rpc.calls),1)
+        self.assertEqual(len([m for m,p in self.supervisor.rpc.calls if m != 'account/rateLimits/read']),1)
         self.complete(turn="turn")
         self.assertEqual(store.get_task(self.con,self.id)["active_turn"],"next-turn")
 
@@ -379,7 +380,7 @@ class AppAutoFlushTest(AppBase):
         rpc.call=call
         result=self.supervisor.interrupt()
         self.assertTrue(result["interrupted"])
-        self.assertEqual([m for m,p in rpc.calls],["turn/interrupt","turn/start"])
+        self.assertEqual([m for m,p in rpc.calls if m != 'account/rateLimits/read'],["turn/interrupt","turn/start"])
 
     def test_stale_interrupt_cannot_cancel_correction_already_auto_flushed(self):
         self.queue("correction")
@@ -388,5 +389,5 @@ class AppAutoFlushTest(AppBase):
             expected_generation=self.gen,expected_thread="thread",expected_turn="turn"))
         self.assertFalse(result["interrupted"])
         self.assertEqual(store.get_task(self.con,self.id)["active_turn"],"next-turn")
-        self.assertEqual([m for m,p in self.supervisor.rpc.calls],["turn/start"])
+        self.assertEqual([m for m,p in self.supervisor.rpc.calls if m != 'account/rateLimits/read'],["turn/start"])
         self.assertEqual(store.pending_answer_count(self.con,self.id),0)

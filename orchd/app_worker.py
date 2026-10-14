@@ -220,6 +220,8 @@ class Supervisor:
         if params.get('threadId') != task['session_id']:
             return
         method = msg.get('method')
+        if method in ('turn/started', 'turn/completed'):
+            self.collect_quota(force=True)
         # Task-scoped evidence for native viewer input and completion, never an Orch inbox notification.
         if method in ('turn/started', 'turn/completed', 'item/started', 'item/completed'):
             key = 'item' if method.startswith('item/') else 'turn'
@@ -248,6 +250,13 @@ class Supervisor:
                 self.event(self.rpc.events.get_nowait())
             except queue.Empty:
                 break
+
+    def collect_quota(self, force=False):
+        from .quota import Cache, refresh
+        try:
+            refresh(Cache(), rpc=self.rpc, force=force)
+        except Exception:
+            pass  # Quota telemetry must not break delivery or shutdown.
 
     def viewers(self):
         live = []
@@ -473,6 +482,7 @@ class Supervisor:
                             self.rpc.close();self.rpc=RPC(task['endpoint'])
                             self.reconcile()
                         self.drain()
+                        self.collect_quota()  # Single-flight TTL also refreshes idle workers, without inference.
                         self.reconcile_if_needed()
                         if self.deferred_flush:
                             self.flush(guard=self.deferred_flush)
