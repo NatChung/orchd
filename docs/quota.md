@@ -2,7 +2,7 @@
 
 This is observation only. Explicit `sol` / `sonnet`, backend validation, launch,
 retry and resume keep their existing behavior. There is no `model=auto`, queue,
-reservation, fan-out, paid API probe, credential reader or reset-credit consumer.
+reservation, fan-out, paid inference probe, credential reader or reset-credit consumer.
 Installation and restarting running orchd processes must be scheduled separately;
 running a checkout's `bin/orchd quota` does not install or restart orchd.
 
@@ -11,6 +11,8 @@ running a checkout's `bin/orchd quota` does not install or restart orchd.
 ```sh
 bin/orchd quota                         # read the shared snapshot, JSON
 bin/orchd quota --refresh               # bounded Codex session fallback
+bin/orchd quota --probe sol             # temporary Codex app-server; quota read only
+bin/orchd quota --probe sonnet          # native Claude /usage; zero inference turns required
 bin/orchd quota --endpoint /path/to/existing/app-server.sock
 bin/orchd quota --ingest claude-statusline < official-statusline-receipt.json
 bin/orchd quota --ingest claude-sdk < official-sdk-event.json
@@ -42,9 +44,11 @@ different providers are not equivalent token quantities.
 
 * [Codex app-server](https://learn.chatgpt.com/docs/app-server): existing initialized
   RPC connections use `account/rateLimits/read` (3-second response timeout).
-  App-server workers collect at startup and consume `account/rateLimits/updated`
-  before thread filtering. All metered buckets are retained. This patch does not
-  start a separate server for quota. CLI socket connection failures are diagnostic
+  App-server workers collect at startup, at each matching turn start/completion,
+  and during idle time under the shared 60-second attempt TTL. They consume
+  `account/rateLimits/updated` before thread filtering. All metered buckets are
+  retained. Explicit `--probe sol` starts a temporary private app-server, reads
+  the account RPC, and terminates it without starting a thread or model turn. CLI socket connection failures are diagnostic
   errors; read RPC failure falls back to sessions.
 * Codex session fallback: inspect only `event_msg` / `token_count.rate_limits`
   within the last 256 KiB of the 20 most recently modified session files. Preserve
@@ -61,8 +65,7 @@ different providers are not equivalent token quantities.
   ingest serialized `RateLimitEvent` (`rate_limit_info` with `rate_limit_type`,
   `utilization`, `resets_at`). Missing utilization is unknown. Sonnet weekly is
   retained separately; opus and overage are ignored. No SDK dependency or paid
-  request is added. Native background workers do not currently deliver these
-  receipts to orchd; Claude stays unknown until an official producer supplies one.
+  request is added. SDK receipts remain supported independently of the native worker collector below.
 
 ## Shadow policy
 
@@ -100,3 +103,68 @@ the run, not a present capacity guarantee.
 Live app-server read/updated and native Claude headless receipt delivery were not
 verified against running services; adapter integration is tested with fixtures.
 No install, restart, merge, global configuration edit or paid inference occurred.
+
+## Worker collection (quota acquisition only)
+
+The archived task 22536b35 design was not present in this public checkout or its
+available git history. This implementation extends the existing P1 observation
+contract above; dispatch selection and `quota_shadow` are unchanged. All previous
+`quota_status` keys remain; providers with observations additionally expose
+`unknown_reasons`. The `state` enum remains `known` / `unknown`; `stale` is a
+window reason after 300 seconds, and `expired TTL` is a reason after 60 seconds.
+
+* **Codex app-server:** force a read on matching `turn/started` and
+  `turn/completed`, even if another worker just refreshed. The supervisor also
+  tries refresh during idle time, with the existing single-flight attempt TTL.
+  Failed reads fall back to bounded session receipts without changing their
+  original timestamps. These account reads cost process/network work, not model
+  tokens. A disconnected/stopped supervisor cannot maintain freshness.
+* **Codex exec:** the existing shell that flushes queued answers now collects
+  quota between CLI exit and flush. It reads `thread.started` from that turn's
+  log, then only that thread's rollout `token_count.rate_limits`. Start and every
+  resume use the same wrapper. Worker errors still flush; telemetry errors are
+  ignored by the wrapper. Token totals never become quota. An idle exec worker
+  has no process: use `quota --probe sol` for an authoritative fresh read; the
+  session fallback alone cannot make old data fresh. The probe starts a temporary
+  private server and tears it down, with a 10-second socket deadline and a
+  3-second read deadline (RPC initialization retains its transport timeout).
+* **Claude native workers:** session-only `--settings` adds command hooks for
+  `SessionStart`, `UserPromptSubmit`, `Stop`, and `StopFailure`. Each runs the
+  checkout/installed collector against the same explicit `ORCHD_HOME`. Existing
+  statusline display and global settings are untouched. The collector launches
+  `claude -p /usage --output-format json`, disables hooks to prevent recursion,
+  disables tools/session persistence, and excludes configured MCP servers.
+  Timeout is 15 seconds; hook timeout is 25 seconds. Failures do not block the
+  worker or feed stdout back into its prompt. Each hook adds CLI startup and a
+  subscription-status network read; there is no periodic idle Claude process.
+  Use `quota --probe sonnet` to refresh an idle worker's subscription.
+
+[Claude's built-in `/usage`](https://code.claude.com/docs/en/interactive-mode)
+reports subscription usage. On locally verified Claude Code 2.1.299 it works in
+print mode as a local command (`local_command=usage`, `num_turns=0`,
+`duration_api_ms=0`, zero cost and zero token usage). The collector requires that
+local-command evidence before accepting the text. This is a version-dependent
+CLI display adapter, not an undocumented credential/API reader. Unsupported
+versions, auth failures, timeouts, nonlocal results and unsupported locales are
+stored as explicit unknown observations with the source and reason; no model
+answer, context usage or approximate local-session breakdown is accepted.
+
+Only the `Current session` and `Current week (all models)` percentages enter the
+five-hour and seven-day windows. Extra per-model rows are not relabelled as
+Sonnet. The supported reset display includes English month/day, 12-hour time and
+an explicit IANA timezone. A missing year is resolved only to a unique future
+reset within the reported window duration; missing/ambiguous/past resets are
+unknown. Displayed minutes are rounded down conservatively and carry the added
+`reset_precision_seconds=60` field. A reset never implies zero usage.
+The statusline and SDK adapters remain available for exact structured receipts.
+
+[Claude command hooks](https://code.claude.com/docs/en/hooks) provide per-session
+and per-turn collection without altering model dispatch. Managed policy or
+`disableAllHooks` can suppress worker hooks; in that case no receipt is refreshed
+and TTL/stale rules still apply. Explicit probes are available for diagnosis.
+
+Local branch validation uses a separate temporary `ORCHD_HOME`. Both native
+probes returned known subscription windows without model inference. Tests cover
+exec thread isolation and receipt age, forced app-server turn reads and idle
+TTL, native Claude parsing/year rollover, unknown/timeout behavior and worker
+hook wiring. No install, restart or merge is part of this change.

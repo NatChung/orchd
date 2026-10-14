@@ -5,12 +5,140 @@ import os
 from unittest.mock import patch
 import io
 import contextlib
+import datetime
 from pathlib import Path
 
 from orchd import quota
 
 
 class QuotaTest(unittest.TestCase):
+    def test_exec_turn_collects_only_its_own_rollout_and_preserves_age(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'ORCHD_CODEX_SESSIONS': tmp}):
+            root = Path(tmp)
+            log = root / 'codex.jsonl'
+            log.write_text('{"type":"thread.started","thread_id":"worker-1"}\n')
+            event = {'timestamp': '1970-01-01T00:16:40Z', 'type': 'event_msg',
+                     'payload': {'type': 'token_count', 'rate_limits': {'primary': {
+                         'used_percent': 42, 'window_minutes': 300, 'resets_at': 2000}}}}
+            (root / 'rollout-one-worker-1.jsonl').write_text(json.dumps(event) + '\n')
+            event['payload']['rate_limits']['primary']['used_percent'] = 99
+            (root / 'rollout-other-worker-2.jsonl').write_text(json.dumps(event) + '\n')
+            cache = quota.Cache(root / 'quota.db')
+            with patch('orchd.quota.time.time', return_value=1001):
+                quota.collect_codex_turn(cache, log)
+            window = cache.status(now=1002)['sol']['windows'][0]
+            self.assertEqual((window['used_percent'], window['age_seconds']), (42, 2))
+            self.assertEqual(cache.status(now=1301)['sol']['windows'][0]['reason'], 'stale')
+
+    def test_app_turn_force_read_bypasses_attempt_ttl_and_idle_read_is_throttled(self):
+        from unittest.mock import Mock
+        from orchd.app_worker import Supervisor
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'ORCHD_HOME': tmp}):
+            supervisor = Supervisor.__new__(Supervisor)
+            supervisor.con = None
+            supervisor.task_id = 'worker'
+            supervisor.rpc = Mock()
+            supervisor.rpc.call.return_value = {'rateLimits': {'primary': {
+                'usedPercent': 20, 'windowDurationMins': 300, 'resetsAt': 2000}}}
+            with patch('orchd.quota.time.time', return_value=1000):
+                supervisor.collect_quota(force=True)
+                supervisor.collect_quota(force=True)
+                supervisor.collect_quota()
+            self.assertEqual(supervisor.rpc.call.call_count, 2)
+            self.assertEqual(quota.Cache().status(now=1001)['sol']['state'], 'known')
+            with patch('orchd.quota.time.time', return_value=1061):
+                supervisor.collect_quota()
+            self.assertEqual(quota.Cache().status(now=1062)['sol']['state'], 'known')
+
+    def test_app_turn_event_writes_rate_limit_receipt(self):
+        from unittest.mock import Mock
+        from orchd.app_worker import Supervisor
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'ORCHD_HOME': tmp}):
+            supervisor = Supervisor.__new__(Supervisor)
+            supervisor.con = None
+            supervisor.task_id = 'worker'
+            supervisor.rpc = Mock()
+            supervisor.rpc.call.return_value = {'rateLimits': {'primary': {
+                'usedPercent': 32, 'windowDurationMins': 300, 'resetsAt': 2000}}}
+            with patch.object(supervisor, 'current', return_value=True), \
+                    patch.object(supervisor, 'task', return_value={'session_id': 'worker'}), \
+                    patch.object(supervisor, 'update'), patch('orchd.app_worker.store.add_message'), \
+                    patch('orchd.quota.time.time', return_value=1000):
+                supervisor.event({'method': 'turn/started', 'params': {
+                    'threadId': 'worker', 'turn': {'id': 'turn'}}})
+            self.assertEqual(quota.Cache().status(now=1001)['sol']['windows'][0]['used_percent'], 32)
+
+    def test_failed_quota_read_does_not_break_app_turn(self):
+        from unittest.mock import Mock
+        from orchd.app_worker import Supervisor
+        supervisor = Supervisor.__new__(Supervisor)
+        supervisor.rpc = Mock()
+        supervisor.rpc.call.side_effect = TimeoutError('offline')
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'ORCHD_HOME': tmp}), \
+                patch('orchd.quota.refresh', side_effect=TimeoutError('offline')):
+            supervisor.collect_quota(force=True)
+
+    def test_claude_timeout_is_unknown_without_numbers(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            with patch('orchd.quota.subprocess.run', side_effect=subprocess.TimeoutExpired('claude', 15)):
+                quota.probe(cache, 'sonnet')
+            status = cache.status()['sonnet']
+            self.assertEqual(status['unknown_reasons'], ['Claude /usage unavailable: TimeoutExpired'])
+            self.assertIsNone(status['windows'][0]['used_percent'])
+
+    def test_claude_usage_native_result_and_concrete_unknown(self):
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            now = datetime.datetime(2026, 12, 31, 22, 0, tzinfo=datetime.timezone.utc).timestamp()
+            display = ('Current session: 13% used · resets Jan 1 at 1am (UTC)\n'
+                       'Current week (all models): 5% used · resets Jan 2 at 12:30pm (UTC)')
+            result = Mock(returncode=0, stdout=json.dumps(dict(result=display, num_turns=0,
+                           local_command='usage', duration_api_ms=0)))
+            with patch('orchd.quota.subprocess.run', return_value=result) as run, \
+                    patch('orchd.quota.time.time', return_value=now):
+                quota.probe(cache, 'sonnet')
+            status = cache.status(now=now + 1)['sonnet']
+            self.assertEqual(status['state'], 'known')
+            self.assertEqual([w['used_percent'] for w in status['windows']], [13, 5])
+            self.assertEqual(status['windows'][0]['reset_at'], now + 10800)
+            self.assertIn('{"disableAllHooks":true}', run.call_args.args[0])
+            result.stdout = json.dumps(dict(result='Unknown command: usage', num_turns=0,
+                                           local_command='usage', duration_api_ms=0))
+            with patch('orchd.quota.subprocess.run', return_value=result), \
+                    patch('orchd.quota.time.time', return_value=now + 2):
+                quota.probe(cache, 'sonnet')
+            status = cache.status(now=now + 3)['sonnet']
+            self.assertEqual(status['state'], 'unknown')
+            self.assertIn('missing subscription windows', status['unknown_reasons'][0])
+            self.assertIsNone(status['windows'][0]['used_percent'])
+
+    def test_claude_usage_refuses_inference_or_guessed_resets(self):
+        from unittest.mock import Mock
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            result = Mock(returncode=0, stdout=json.dumps(dict(result='13%', num_turns=1)))
+            with patch('orchd.quota.subprocess.run', return_value=result):
+                quota.probe(cache, 'sonnet')
+            self.assertIn('zero turns required', cache.status()['sonnet']['unknown_reasons'][0])
+            with self.assertRaises(ValueError):
+                quota.claude_usage(cache, 'Current session: 13% used · resets tomorrow')
+
+    def test_claude_worker_configures_session_only_quota_hooks(self):
+        from orchd.runtime import Runtime
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {'ORCHD_HOME': tmp}):
+            runtime = Runtime()
+            with patch.object(runtime, 'start_claude') as start:
+                runtime.start_worker('/worktree', '/tmp/socket', 'brief', 'claude-sonnet-5-5')
+            args = start.call_args.args[3]
+            settings = json.loads(args[args.index('--settings') + 1])
+            self.assertEqual(set(settings['hooks']), {'SessionStart', 'UserPromptSubmit', 'Stop', 'StopFailure'})
+            command = settings['hooks']['Stop'][0]['hooks'][0]['command']
+            self.assertIn('quota --probe sonnet', command)
+            self.assertIn('ORCHD_HOME=' + tmp, command)
+
     def test_codex_read_and_updated_preserve_buckets(self):
         with tempfile.TemporaryDirectory() as tmp:
             cache = quota.Cache(Path(tmp) / 'quota.db')

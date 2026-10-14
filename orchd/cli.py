@@ -221,6 +221,9 @@ def build_parser():
     quota_parser = sub.add_parser('quota', help='subscription quota observations; never launches inference')
     quota_parser.add_argument('--refresh', action='store_true', help='refresh from Codex session snapshots')
     quota_parser.add_argument('--endpoint', help='existing authorized Codex app-server Unix socket')
+    quota_parser.add_argument('--probe', choices=['sol', 'sonnet'], help='bounded native CLI quota read; no model turn')
+    quota_parser.add_argument('--binary', help='CLI executable for --probe')
+    quota_parser.add_argument('--codex-log', help='collect this completed exec turn from its thread rollout')
     quota_parser.add_argument('--ingest', choices=['claude-statusline', 'claude-sdk'],
                               help='consume an official receipt from stdin; no global config changes')
     goal = sub.add_parser("goal", help="central goals, audit history and markdown snapshot")
@@ -342,6 +345,10 @@ def main(argv=None):
         from orchd import quota
         cache = quota.Cache()
         try:
+            if args.probe:
+                quota.probe(cache, args.probe, args.binary)
+            if args.codex_log:
+                quota.collect_codex_turn(cache, args.codex_log)
             if args.ingest:
                 cache.claude(json.load(sys.stdin), sdk=args.ingest == 'claude-sdk')
             if args.endpoint:

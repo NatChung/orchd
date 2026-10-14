@@ -1,5 +1,6 @@
 """Isolated app-server fixtures; no Codex or live DB access."""
 import json
+import os
 from pathlib import Path
 import queue
 import tempfile
@@ -25,6 +26,9 @@ class FakeRPC:
 class AppBase(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name);self.root.chmod(0o700)
+        self.quota_env=patch.dict(os.environ, {'ORCHD_HOME': str(self.root)})
+        self.quota_env.start()
+        self.addCleanup(self.quota_env.stop)
         self.db=self.root/'db';self.con=store.connect(self.db);self.rt=FakeRuntime();self.rt.exists=lambda _: True
         self.id='app-test';self.gen='a'*32
         self.task=store.create_task(self.con,id=self.id,repo='demo',repo_path='/tmp/demo',title='T',
