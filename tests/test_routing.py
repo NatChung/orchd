@@ -1,4 +1,5 @@
 import json
+import datetime
 import os
 import subprocess
 import sys
@@ -26,7 +27,7 @@ class RoutingTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        env = patch.dict(os.environ, {'ORCHD_HOME': self.tmp.name})
+        env = patch.dict(os.environ, {'ORCHD_HOME': self.tmp.name, 'ORCHD_CLAUDE': str(Path(self.tmp.name) / 'no-claude')})
         env.start()
         self.addCleanup(env.stop)
         self.con = store.connect()
@@ -402,15 +403,46 @@ class RoutingTest(unittest.TestCase):
             core.auto_flush(self.con, self.rt, task['id'], int(task['job_id']), turn_log=log)
         self.assertEqual(len(self.rt.auto_requests), 1)
 
-    def test_sonnet_probe_failure_overwrites_known_then_falls_back(self):
-        self.observe(99, 20)
+    def test_stale_sonnet_refresh_before_selection_uses_actual_capacity(self):
+        now = datetime.datetime(2026, 12, 31, 22, 0, tzinfo=datetime.timezone.utc).timestamp()
+        display = ('Current session: 5% used · resets Jan 1 at 1am (UTC)\n'
+                   'Current week (all models): 5% used · resets Jan 2 at 12:30pm (UTC)')
+        result = Mock(returncode=0, stdout=json.dumps(dict(result=display, num_turns=0,
+                      local_command='usage', duration_api_ms=0)))
+        with patch('orchd.quota.time.time', return_value=now), \
+                patch('orchd.quota.subprocess.run', return_value=result) as run:
+            self.observe(94, 99, age=301)
+            quota.Cache().codex({'rateLimits': {'primary': {'usedPercent': 94,
+                'windowDurationMins': 300, 'resetsAt': now + 10000}}}, now=now)
+            task = self.dispatch()
+            self.assertEqual(quota.Cache().status()['sonnet']['state'], 'known')
+        self.assertEqual(task['model'], core.WORKER_MODELS['sonnet'])
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.kwargs['timeout'], 15)
+        self.assertIn('known capacity', task['model_reason'])
+
+    def test_sonnet_probe_failure_preserves_stale_receipt_and_fallback(self):
+        self.observe(99, 20, age=301)
         cache = quota.Cache()
-        self.assertEqual(cache.status()['sonnet']['state'], 'known')
-        # PR #36's producer intentionally overwrites known receipts on probe failure.
-        cache.unknown('sonnet', 'Claude /usage unavailable', 'claude.usage')
-        self.assertEqual(cache.status()['sonnet']['state'], 'unknown')
+        with cache.connect() as con:
+            before = con.execute("SELECT * FROM buckets WHERE provider='sonnet'").fetchall()
         result = mcp_server.call('dispatch', self.args, 'orch', self.con, self.rt)
+        with cache.connect() as con:
+            after = con.execute("SELECT * FROM buckets WHERE provider='sonnet'").fetchall()
+        self.assertEqual(before, after)
         self.assertEqual(result['status'], 'running')
-        self.assertEqual(result['model'], core.WORKER_MODELS['sonnet'])
-        self.assertTrue(result['quota_shadow']['applied'])
+        self.assertEqual(result['model'], core.WORKER_MODELS['sol'])
         self.assertIn('fallback', result['model_reason'])
+
+    def test_sonnet_probe_minimum_interval_includes_failed_attempts(self):
+        now = time.time()
+        self.observe(99, 20, age=301)
+        with patch('orchd.quota.time.time', return_value=now), \
+                patch('orchd.quota.subprocess.run', side_effect=subprocess.TimeoutExpired('claude', 15)) as run:
+            self.dispatch()
+            self.dispatch()
+            self.assertEqual(run.call_count, 1)
+        with patch('orchd.quota.time.time', return_value=now + quota.SONNET_PROBE_INTERVAL), \
+                patch('orchd.quota.subprocess.run', side_effect=OSError('offline')) as run:
+            self.dispatch()
+            self.assertEqual(run.call_count, 1)
