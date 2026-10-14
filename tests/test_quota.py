@@ -122,9 +122,9 @@ class QuotaTest(unittest.TestCase):
                     patch('orchd.quota.time.time', return_value=now + 2):
                 quota.probe(cache, 'sonnet')
             status = cache.status(now=now + 3)['sonnet']
-            self.assertEqual(status['state'], 'unknown')
-            self.assertIn('missing subscription windows', status['unknown_reasons'][0])
-            self.assertIsNone(status['windows'][0]['used_percent'])
+            self.assertEqual(status['state'], 'known')
+            self.assertEqual([w['used_percent'] for w in status['windows']], [13, 5])
+            self.assertEqual(status['windows'][0]['observed_at'], now)
 
     def test_claude_usage_refuses_inference_or_guessed_resets(self):
         from unittest.mock import Mock

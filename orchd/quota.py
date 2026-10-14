@@ -21,6 +21,7 @@ from . import store
 
 TTL = 60
 MAX_AGE = 300
+SONNET_PROBE_INTERVAL = 60  # Minimum seconds between auto-selection attempts, including failures.
 REFRESH_INTERVAL = 30  # Refresh before observation TTL, leaving room for RPC latency.
 
 
@@ -253,6 +254,9 @@ def probe(cache, provider, binary=None):
                 raise ValueError('CLI /usage did not return a local slash-command result (zero turns required)')
             claude_usage(cache, data.get('result', ''))
         except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as error:
+            # Preserve receipts (and their original age) when a read fails.
+            if cache.status()['sonnet']['windows']:
+                return
             cache.unknown('sonnet', f'Claude /usage unavailable: {type(error).__name__}: {error}'
                           if isinstance(error, ValueError) else f'Claude /usage unavailable: {type(error).__name__}',
                           'claude.cli.usage')
@@ -284,6 +288,36 @@ def probe(cache, provider, binary=None):
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
+
+
+def refresh_sonnet(cache, *, now=None):
+    """Bounded, cross-process single-flight read before auto selection.
+
+    Only unknown/expired telemetry needs a read. Record failed attempts too so
+    unavailable Claude installations cannot add a probe to every dispatch.
+    """
+    import fcntl
+    now = time.time() if now is None else now
+    if cache.status(now=now)['sonnet']['state'] == 'known':
+        return
+    cache.path.parent.mkdir(parents=True, exist_ok=True)
+    with open(cache.path.with_suffix('.sonnet.lock'), 'a+') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        # Another process may have refreshed between our snapshot and lock.
+        if cache.status(now=now)['sonnet']['state'] == 'known':
+            return
+        lock.seek(0)
+        previous = lock.read()
+        if previous and 0 <= now - float(previous) < SONNET_PROBE_INTERVAL:
+            return
+        lock.seek(0)
+        lock.truncate()
+        lock.write(str(now))
+        lock.flush()
+        probe(cache, 'sonnet', os.environ.get('ORCHD_CLAUDE'))
 
 
 def shadow(snapshot, *, backend='exec', task_type=None, author_model=None, now=None,
@@ -341,7 +375,16 @@ def shadow(snapshot, *, backend='exec', task_type=None, author_model=None, now=N
 
 def dispatch_shadow(**kwargs):
     try:
-        return shadow(Cache().status(now=kwargs.get('now')), **kwargs)
+        cache = Cache()
+        if kwargs.get('applied') and kwargs.get('backend', 'exec') != 'app-server':
+            started = time.monotonic()
+            try:
+                refresh_sonnet(cache, now=kwargs.get('now'))
+            except Exception:
+                pass  # Probe/lock/storage failure must not block dispatch.
+            if kwargs.get('now') is not None:
+                kwargs['now'] += time.monotonic() - started
+        return shadow(cache.status(now=kwargs.get('now')), **kwargs)
     except Exception:
         if kwargs.get('applied'):
             return shadow({p: dict(state='unknown', windows=[]) for p in ('sol', 'sonnet')}, **kwargs)

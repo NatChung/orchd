@@ -1,4 +1,4 @@
-"""Dispatch policy over the shared quota snapshot; never collects quota."""
+"""Dispatch policy over the shared quota snapshot; refreshes expired Claude telemetry before auto selection."""
 import json
 import re
 import time
