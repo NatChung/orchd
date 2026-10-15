@@ -481,8 +481,8 @@ def main(argv=None):
                 refs = (args.issue_refs if args.issue_refs is not None else args.issue_ref).split(",")
                 result = entry_threads.read(store.home() / "orchd.db", refs, entry_id=args.entry, limit=args.limit)
             elif args.entry_action == "reconcile":
-                con = store.connect()
-                result = entry.reconcile_all(con, apply=args.apply, backup_dir=store.home() / "backups")
+                result = entry.reconcile_path(store.home() / "orchd.db", apply=args.apply,
+                                              backup_dir=store.home() / "backups")
             else:
                 orch_id = os.environ.get("ORCHD_ORCH_ID")
                 if not orch_id:

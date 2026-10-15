@@ -191,20 +191,14 @@ def sweep_questions(con, entry, actor, reason):
     return [row["id"] for row in stale]
 
 
-def reconcile_all(con, apply=False, backup_dir=None):
-    """One-time, idempotent backfill: move open questions stranded on a previous owner to each entry's owner.
-
-    A dry run only lists them. With apply, the database is copied (SQLite backup API) before the first
-    write, and only when something needs moving, so a second run changes nothing.
-    """
-    moved, backup = [], None
-    entries = con.execute("SELECT * FROM entries ORDER BY id").fetchall()
-    pending = [r["id"] for e in entries for r in con.execute(
+def _pending_strays(con):
+    return [r["id"] for e in con.execute("SELECT * FROM entries ORDER BY id").fetchall() for r in con.execute(
         "SELECT id FROM entry_messages WHERE entry_id=? AND kind='question' AND orch_id<>? "
         f"AND question_state IN ({','.join('?' * len(OPEN_QUESTION_STATES))}) ORDER BY id",
         (e["id"], e["orch_id"], *OPEN_QUESTION_STATES))]
-    if not apply or not pending:
-        return dict(moved=pending if not apply else [], backup=None, applied=False)
+
+
+def _backup(con, backup_dir):
     if backup_dir is None:
         raise ValueError("reconcile --apply needs a backup directory")
     Path(backup_dir).mkdir(parents=True, exist_ok=True)
@@ -214,10 +208,59 @@ def reconcile_all(con, apply=False, backup_dir=None):
         con.backup(dest)
     finally:
         dest.close()
+    return backup
+
+
+def _sweep_all(con):
+    moved = []
     with store.immediate(con):
-        for e in entries:
+        for e in con.execute("SELECT * FROM entries ORDER BY id").fetchall():
             moved += sweep_questions(con, get_entry(con, e["id"]), "orchd", "backfill: entry owner differs")
-    return dict(moved=sorted(moved), backup=str(backup), applied=True)
+    return sorted(moved)
+
+
+def reconcile_all(con, apply=False, backup_dir=None):
+    """One-time, idempotent backfill: move open questions stranded on a previous owner to each entry's owner.
+
+    A dry run only lists them. With apply, the database is copied (SQLite backup API) before the first
+    write, and only when something needs moving, so a second run changes nothing.
+    """
+    pending = _pending_strays(con)
+    if not apply or not pending:
+        return dict(moved=pending if not apply else [], backup=None, applied=False)
+    backup = _backup(con, backup_dir)
+    return dict(moved=_sweep_all(con), backup=str(backup), applied=True)
+
+
+def reconcile_path(path, apply=False, backup_dir=None):
+    """reconcile_all for the CLI: the database file is not touched until a backup exists.
+
+    store.connect adds missing columns, so it must not run for a dry run or before the backup. Both the
+    listing and the backup use a read-only connection; only an apply that has something to move then opens
+    the database normally (which brings an old schema up to date) and sweeps.
+    """
+    path = Path(path)
+    if not path.exists():
+        return dict(moved=[], backup=None, applied=False)
+    ro = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=30)
+    ro.row_factory = sqlite3.Row
+    try:
+        try:
+            pending = _pending_strays(ro)
+        except sqlite3.OperationalError as error:
+            if "no such table" not in str(error):
+                raise
+            pending = []  # a DB that predates entries has nothing stranded
+        if not apply or not pending:
+            return dict(moved=pending if not apply else [], backup=None, applied=False)
+        backup = _backup(ro, backup_dir)
+    finally:
+        ro.close()
+    con = store.connect(path)
+    try:
+        return dict(moved=_sweep_all(con), backup=str(backup), applied=True)
+    finally:
+        con.close()
 
 
 def _checked_question(con, entry, question_id, expected_version, expected_state, *, cleanup=False):

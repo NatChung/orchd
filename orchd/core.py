@@ -1266,15 +1266,13 @@ def _adopt_summary(con, task):
 
 
 def _sweep_entry_questions(con, new_orch):
-    """#60: open questions stranded on a previous owner follow the entry bound to the new Orch. Best effort:
-    the task move already committed, so a failure here never undoes it (`orchd entry reconcile` repeats it)."""
+    """#60: open questions stranded on a previous owner follow the entry bound to the new Orch.
+
+    Runs inside adopt's write transaction, so the entry binding is read under the lock and any error
+    rolls the task move back with it (`orchd entry reconcile` backfills older strandings)."""
     from . import entry
-    try:
-        for bound in con.execute("SELECT * FROM entries WHERE orch_id=?", (new_orch,)).fetchall():
-            with store.immediate(con):
-                entry.sweep_questions(con, bound, "orchd", f"adopt by {new_orch}")
-    except sqlite3.Error:
-        pass
+    for bound in con.execute("SELECT * FROM entries WHERE orch_id=?", (new_orch,)).fetchall():
+        entry.sweep_questions(con, bound, "orchd", f"adopt by {new_orch}")
 
 
 def adopt(con, rt, new_orch, task_ids=(), from_orch=None, force=False):
@@ -1329,7 +1327,7 @@ def adopt(con, rt, new_orch, task_ids=(), from_orch=None, force=False):
         detail = ", ".join(f"{o} is {h['state']} ({h['reason']})" for o, h in blocked.items())
         raise ValueError(f"refusing to adopt: {detail}. Only a confirmed-dead owner moves without --force; "
                          "unknown is not proof the owner is gone")
-    moves = store.AdoptionMoves(target, old_rows)
+    moves = store.AdoptionMoves(target, old_rows, lambda c: _sweep_entry_questions(c, new_orch))
     for t in tasks:
         health = olds[t["orch_thread"]]
         body = f"adopted from {t['orch_thread']} ({health['state']}): {_adopt_summary(con, t)}"
@@ -1337,7 +1335,6 @@ def adopt(con, rt, new_orch, task_ids=(), from_orch=None, force=False):
                                    recipient_orch=new_orch, old_owner_health=health), ensure_ascii=False)
         moves.append((t["id"], t["orch_thread"], body, evidence))
     message_ids = store.move_task_orch(con, moves, new_orch)
-    _sweep_entry_questions(con, new_orch)
     old_notices = {}
     notification_errors = {}
     error_recording_failures = {}
