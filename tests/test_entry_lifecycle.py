@@ -41,6 +41,139 @@ class LifecycleTest(unittest.TestCase):
         return self.ask("Revised synthetic question", supersedes=q, expected_version=version,
                         expected_state=state, reason="clarified wording")
 
+    def test_successor_cancels_old_question_with_audit_and_cas(self):
+        old_orch = self.orch
+        q = self.ask()
+        next_q = self.ask()
+        self.orch = core.start_orch(self.con, self.rt, "opus")["id"]
+        entry.bind(self.con, self.rt, self.orch, force=True)
+        entry.question_transition(self.con, self.rt, "desktop", q, 1, "current", "cancelled",
+                                  actor=f"orch:{self.orch}", reason="obsolete after handover")
+        shown = self.show(q)
+        self.assertEqual(shown["state"], "cancelled")
+        audit = shown["history"][-1]
+        self.assertEqual(audit["actor"], f"orch:{self.orch}")
+        self.assertEqual(audit["reason"], "obsolete after handover")
+        self.assertEqual(audit["original_orch_id"], old_orch)
+        self.assertEqual(self.show(next_q)["state"], "queued")
+        before = self.show(q)
+        with self.assertRaisesRegex(ValueError, "mismatch"):
+            entry.question_transition(self.con, self.rt, "desktop", q, 2, "cancelled", "snoozed",
+                                      actor=f"orch:{self.orch}", reason="stale", revisit_at=0)
+        self.assertEqual(self.show(q), before)
+
+    def task(self):
+        return core.dispatch(self.con, self.rt, orch_thread=self.orch, repo="demo", title="Synthetic task",
+                             instructions="synthetic", done_when="synthetic", model="sonnet",
+                             model_reason="test", task_type="outward")["id"]
+
+    def test_close_cancels_pending_questions_atomically_and_promotes_next(self):
+        task = self.task()
+        answered = self.ask(task_id=task)
+        self.rt.nat_says("desk-1", "Synthetic answer")
+        entry.relay(self.con, self.rt, "desktop", "desk-1", reply_to=answered)
+        snoozed = self.ask(task_id=task)
+        self.transition(snoozed, "snoozed", revisit_at=0)
+        current, queued = self.ask(task_id=task), self.ask(task_id=task)
+        following = self.ask()
+        before = {q: self.show(q) for q in (answered, snoozed)}
+        wakes = len(self.rt.woken)
+        core.close(self.con, self.rt, task)
+        for q in (current, queued):
+            shown = self.show(q)
+            self.assertEqual(shown["state"], "cancelled")
+            self.assertEqual(shown["reason"], "task closed")
+            self.assertEqual(shown["history"][-1]["reason"], "task closed")
+            self.assertEqual(shown["history"][-1]["original_orch_id"], self.orch)
+            self.assertEqual(shown["history"][-1]["actor"], "orchd")
+        self.assertEqual(self.show(following)["state"], "current")
+        self.assertEqual(len(self.rt.woken), wakes + 1)
+        self.assertIn(f"[orchd question {following}]", self.rt.woken[-1][2])
+        for q, shown in before.items():
+            self.assertEqual(self.show(q), shown)
+        histories = {q: self.show(q) for q in (current, queued, following)}
+        core.close(self.con, self.rt, task)
+        self.assertEqual(histories, {q: self.show(q) for q in histories})
+
+    def test_successor_cleans_queued_closed_task_and_missing_owner(self):
+        task = self.task()
+        first = self.ask()
+        cancel, snooze, supersede = [self.ask(task_id=task) for _ in range(3)]
+        # Legacy data: old close left questions queued; the old registry entry is gone.
+        store.update_task(self.con, task, status="closed")
+        original = self.orch
+        self.orch = core.start_orch(self.con, self.rt, "opus")["id"]
+        entry.bind(self.con, self.rt, self.orch, force=True)
+        self.con.execute("DELETE FROM orchs WHERE id=?", (original,))
+        current = self.ask()
+        for q, state in ((cancel, "cancelled"), (snooze, "snoozed")):
+            entry.question_transition(self.con, self.rt, "desktop", q, 1, "queued", state,
+                                      actor=f"orch:{self.orch}", orch_id=self.orch,
+                                      reason="cleanup", revisit_at=0, note="cleanup")
+        revised = self.supersede(supersede, state="queued")
+        for q, state in ((cancel, "cancelled"), (snooze, "snoozed"), (supersede, "superseded")):
+            shown = self.show(q)
+            self.assertEqual(shown["state"], state)
+            self.assertEqual(shown["history"][-1]["original_orch_id"], original)
+            self.assertEqual(shown["history"][-1]["actor"], f"orch:{self.orch}")
+            self.assertTrue(shown["history"][-1]["reason"])
+        self.assertEqual(self.show(current)["state"], "current")
+        self.assertEqual(self.show(first)["state"], "current")  # old queue stays isolated
+        self.assertEqual(self.show(revised)["state"], "queued")
+        before = self.show(supersede)
+        with self.assertRaisesRegex(ValueError, "mismatch"):
+            self.supersede(supersede, version=2, state="superseded")
+        self.assertEqual(self.show(supersede), before)
+        with self.assertRaises(ValueError):
+            entry.submit_answer(self.con, self.rt, "desktop", first, 1, "current", "answer", "key",
+                                orch_id=self.orch)
+
+    def test_cross_entry_cleanup_is_rejected_without_writes(self):
+        q = self.ask()
+        other = core.start_orch(self.con, self.rt, "opus")["id"]
+        entry.bind(self.con, self.rt, other, entry_id="other")
+        before = self.show(q)
+        for state in ("cancelled", "snoozed"):
+            with self.assertRaises(ValueError):
+                entry.question_transition(self.con, self.rt, "other", q, 1, "current", state,
+                                          actor=f"orch:{other}", orch_id=other, reason="cleanup", revisit_at=0)
+        with self.assertRaises(ValueError):
+            entry.ask_nat(self.con, self.rt, other, "revision", supersedes=q, expected_version=1,
+                          expected_state="current", reason="cleanup")
+        self.assertEqual(self.show(q), before)
+
+    def test_close_cleans_all_owners_but_only_promotes_bound_queue(self):
+        task = self.task()
+        old_current, old_queued = self.ask(task_id=task), self.ask(task_id=task)
+        untouched = self.ask()
+        self.orch = core.start_orch(self.con, self.rt, "opus")["id"]
+        entry.bind(self.con, self.rt, self.orch, force=True)
+        current = self.ask()
+        queued = self.ask()
+        # Ownership of a task can change while its earlier questions remain.
+        store.update_task(self.con, task, orch_thread=self.orch)
+        new_question = self.ask(task_id=task)
+        core.close(self.con, self.rt, task)
+        for q in (old_current, old_queued, new_question):
+            self.assertEqual(self.show(q)["state"], "cancelled")
+        self.assertEqual(self.show(untouched)["state"], "queued")
+        self.assertEqual(self.show(current)["state"], "current")
+        self.assertEqual(self.show(queued)["state"], "queued")
+
+    def test_close_question_failure_rolls_back_task_history_and_promotion(self):
+        task = self.task()
+        current = self.ask(task_id=task)
+        following = self.ask()
+        before = {q: self.show(q) for q in (current, following)}
+        with patch("orchd.entry._history", side_effect=sqlite3.OperationalError("synthetic audit failure")):
+            with self.assertRaises(sqlite3.OperationalError):
+                core.close(self.con, self.rt, task)
+        self.assertNotEqual(store.get_task(self.con, task)["status"], "closed")
+        self.assertEqual(before, {q: self.show(q) for q in before})
+        self.assertIsNone(store.latest_message(self.con, task, "close"))
+        core.close(self.con, self.rt, task)
+        self.assertEqual(self.show(following)["state"], "current")
+
     def test_snooze_cancel_and_supersede_promote_fifo_and_deliver(self):
         for action in ("snoozed", "cancelled", "superseded"):
             with self.subTest(action=action):
@@ -164,8 +297,9 @@ class LifecycleTest(unittest.TestCase):
             self.ask(supersedes=q, expected_version=1, expected_state="current")
         other = core.start_orch(self.con, self.rt, "opus")["id"]
         entry.bind(self.con, self.rt, other, force=True)
-        with self.assertRaises(ValueError):
-            self.transition(q, "cancelled", reason="synthetic")
+        with self.assertRaisesRegex(ValueError, "another Orch"):
+            entry.question_transition(self.con, self.rt, "desktop", q, 1, "current", "cancelled",
+                                      actor=f"orch:{self.orch}", orch_id=self.orch, reason="synthetic")
         self.assertEqual(self.show(q)["state"], "current")
 
     def test_supersede_failure_rolls_back_history_and_promotion(self):
@@ -240,6 +374,23 @@ class LifecycleTest(unittest.TestCase):
 
 
 class AdditiveMigrationTest(unittest.TestCase):
+    def test_pre_audit_owner_schema_migrates_without_rewriting_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "legacy.db"
+            old = sqlite3.connect(path)
+            old.executescript(store.SCHEMA.replace("    original_orch_id TEXT,\n", ""))
+            old.execute("INSERT INTO entry_question_history(question_id,version,to_state,actor,reason,created_at) "
+                        "VALUES(1,1,'current','orch:old','ask_nat',123)")
+            old.commit()
+            old.close()
+            for _ in range(2):
+                con = store.connect(path)
+                row = dict(con.execute("SELECT * FROM entry_question_history").fetchone())
+                self.assertIsNone(row.pop("original_orch_id"))
+                self.assertEqual(row, dict(id=1, question_id=1, version=1, from_state=None,
+                                          to_state="current", actor="orch:old", reason="ask_nat", created_at=123))
+                con.close()
+
     def test_old_rows_and_columns_preserved_and_migration_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "old.db"

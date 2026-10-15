@@ -154,6 +154,7 @@ CREATE TABLE IF NOT EXISTS entry_question_history(
     to_state TEXT NOT NULL,
     actor TEXT NOT NULL,
     reason TEXT NOT NULL DEFAULT '',
+    original_orch_id TEXT,
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS entry_question_history_question ON entry_question_history(question_id, id);
@@ -339,6 +340,7 @@ def connect(path=None):
                 con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
         for table, columns in (("intake_content", ("unavailable_reason TEXT",)),
                                ("messages", MESSAGE_COLUMNS), ("entry_messages", ENTRY_MESSAGE_COLUMNS),
+                               ("entry_question_history", ("original_orch_id TEXT",)),
                                ("orchs", ORCH_COLUMNS), ("entry_answer_submissions", SUBMISSION_COLUMNS),
                                ("intake_events", ("excluded_at REAL", "excluded_by TEXT",
                                                   "exclusion_reason TEXT", "exclusion_rule_version TEXT"))):

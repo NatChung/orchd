@@ -954,6 +954,8 @@ def _close_locked(con, rt, task_id, outcome, rating):
         raise RuntimeError(f"close of {task_id} not finished, {step}"
                            + (f", worktree {task['worktree']} left in place" if task["worktree"] else "")
                            + f": {detail}") from None
+    from . import entry
+
     con.execute("BEGIN IMMEDIATE")  # usage + close event + terminal status land together or not at all
     try:
         task = store.get_task(con, task_id)
@@ -967,10 +969,13 @@ def _close_locked(con, rt, task_id, outcome, rating):
             **({"process_cleanup": cleanup} if cleanup else {}))))
         store.update_task(con, task_id, status="closed", **fields,
                           note=(f"worktree kept: {kept}" if kept else None if stale else task["note"]))
+        affected_entries = entry.cancel_task_questions(con, task_id)
         con.execute("COMMIT")
     except BaseException:
         con.execute("ROLLBACK")
         raise
+    for entry_id in affected_entries:
+        entry.deliver_outbound(con, rt, entry_id)
     return dict(task_id=task_id, closed=True,
                 worktree=f"kept at {task['worktree']} ({kept})" if kept else "removed",
                 **({"process_cleanup": cleanup} if cleanup else {}))
