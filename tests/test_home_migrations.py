@@ -174,7 +174,7 @@ class HomeMigrationTest(unittest.TestCase):
         self.assertEqual(len(self.applied()), 4)  # 2 steps x 2 scopes; step completion is scoped to home paths
 
     def test_cli_dry_run_and_migrations_only_need_no_uv_install(self):
-        env = dict(os.environ, **self.env, ORCHD_ROOT=str(self.home / "orch"))
+        env = {**{k: v for k, v in os.environ.items() if not k.startswith("ORCHD_")}, **self.env, "ORCHD_ROOT": str(self.home / "orch")}
         env.pop("ORCHD_ORCH_HOME", None)
         env.pop("ORCHD_INTERFACE_HOME", None)
         def cli(*flags):
@@ -275,15 +275,66 @@ class StartupMigrationTest(unittest.TestCase):
         self.assertEqual(len(self.backups()), 1)
         self.assertEqual(self.file.read_bytes().count(b"orchd:managed:start"), 1)
 
+    def isolated_env(self, **extra):
+        """Child env that cannot reach outside the fixture: no inherited ORCHD_* override survives."""
+        env = {k: v for k, v in os.environ.items() if not k.startswith("ORCHD_")}
+        env.update(HOME=str(self.home), ORCHD_HOME=str(self.home / "state"), ORCHD_AUTO_MIGRATE="1", **extra)
+        return env
+
+    def tree(self):
+        return {p: p.read_bytes() for p in self.home.rglob("*") if p.is_file() and ".db" not in p.name}
+
     def test_mcp_server_startup_applies_stale_rules(self):
         self.stale()
-        env = {**os.environ, "HOME": str(self.home), "ORCHD_HOME": str(self.home / "state"),
-               "ORCHD_AUTO_MIGRATE": "1"}
-        out = subprocess.run([sys.executable, "bin/orchd", "mcp"], input="", env=env, capture_output=True, text=True)
+        out = subprocess.run([sys.executable, "bin/orchd", "mcp"], input="", env=self.isolated_env(),
+                             capture_output=True, text=True)
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertIn(b"orchd:managed:start v=2", self.file.read_bytes())
         self.assertEqual(out.stdout, "")  # stdout is the MCP protocol channel
         self.assertIn("restart", out.stderr.lower())
+
+    def test_inherited_home_overrides_never_write_outside_the_fixture(self):
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        elsewhere = Path(outside.name)
+        (elsewhere / "AGENTS.md").write_bytes(b"outside\n<!-- orchd:managed:start v=1 -->\nold\n<!-- orchd:managed:end -->")
+        before = {p: p.read_bytes() for p in elsewhere.rglob("*") if p.is_file()}
+        self.stale()
+        with patch.dict(os.environ, {"ORCHD_ROOT": outside.name, "ORCHD_ORCH_HOME": outside.name,
+                                     "ORCHD_INTERFACE_HOME": outside.name, "ORCHD_AUTO_MIGRATE": "1"}):
+            env = self.isolated_env()
+        self.assertFalse([k for k in env if k.startswith("ORCHD_") and k not in ("ORCHD_HOME", "ORCHD_AUTO_MIGRATE")])
+        out = subprocess.run([sys.executable, "bin/orchd", "mcp"], input="", env=env, capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual({p: p.read_bytes() for p in elsewhere.rglob("*") if p.is_file()}, before)
+
+    def test_read_only_commands_never_apply_home_migrations(self):
+        """dry-run and read-only commands must leave files, backups and migration state untouched (#58)."""
+        cases = [["orch", "restart", "--dry-run"], ["binding", "--status"], ["stats"],
+                 ["intake", "backlog"], ["intake", "pending"], ["intake", "decisions"]]
+        for argv in cases:
+            with self.subTest(argv=argv):
+                self.home_reset()
+                self.stale()
+                before = self.tree()
+                state = (self.home / "state/home-migrations.db")
+                state_before = migrations.pending(self.home, self.isolated_env())
+                subprocess.run([sys.executable, "bin/orchd", *argv], input="", env=self.isolated_env(),
+                               capture_output=True, text=True)
+                self.assertEqual(self.tree(), before)
+                self.assertEqual(self.backups(), [])
+                self.assertEqual(migrations.pending(self.home, self.isolated_env()), state_before)
+
+    def test_mutating_command_still_applies_home_migrations(self):
+        self.stale()
+        subprocess.run([sys.executable, "bin/orchd", "ack", "nosuchtask"], input="", env=self.isolated_env(),
+                       capture_output=True, text=True)
+        self.assertIn(b"orchd:managed:start v=2", self.file.read_bytes())
+
+    def home_reset(self):
+        import shutil
+        for child in self.home.iterdir():
+            shutil.rmtree(child) if child.is_dir() else child.unlink()
 
 
 class IntakeRuleTemplateTest(unittest.TestCase):

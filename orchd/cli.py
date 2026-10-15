@@ -438,6 +438,20 @@ def _intake_main(args):
     return 1 if result.get("status") == "failed" else 0
 
 
+# Explicit allowlist: these never auto-apply home migrations (they only warn). Anything not listed may write.
+READ_ONLY_INTAKE = ("show", "decisions", "backlog", "pending", "draft-show")
+
+
+def _read_only(args):
+    """True for dry-run and read-only invocations; they must not touch the Orch home (#58)."""
+    cmd = args.cmd
+    return (cmd == "stats"
+            or (cmd == "orch restart" and args.dry_run)
+            or (cmd == "binding" and args.status)
+            or (cmd == "entry-question" and args.question_action == "show")
+            or (cmd == "intake" and args.intake_action in READ_ONLY_INTAKE))
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     if args.cmd == 'quota':
@@ -600,7 +614,7 @@ def main(argv=None):
         print(json.dumps(result, ensure_ascii=False, indent=1))
         return 0
     from orchd import home_migrations  # rules in the Orch home must not lag the installed code (#58)
-    for line in home_migrations.ensure_current(write=args.cmd != "stats"):
+    for line in home_migrations.ensure_current(write=not _read_only(args)):
         print(line, file=sys.stderr)
     if args.cmd == "mcp":
         from orchd import mcp_server
