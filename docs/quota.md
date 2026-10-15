@@ -27,11 +27,14 @@ The shared snapshot is `$ORCHD_HOME/quota.db` (default
 `~/.local/share/orchd/quota.db`), separate from the task DB. Concurrent writers
 upsert each bucket transactionally; older receipts cannot replace newer ones.
 Codex refresh is single-flight with a nonblocking file lock and a 30-second
-attempt TTL. Reads never create or migrate a DB. Observations older than 60
-seconds are unknown; older than 300 seconds are marked stale. Missing/invalid
-percentages, durations, resets, future observation timestamps, and passed resets
-are unknown. The old reset and source remain visible, but `used_percent` becomes
-null. A reset never implies zero usage. A missing Codex secondary is not an
+attempt TTL. Reads never create or migrate a DB. Codex, Claude statusline and
+SDK observations older than 60 seconds are unknown. Native Claude CLI usage
+receipts have a 300-second TTL because they lack continuous refresh and require
+a bounded CLI read. All observations older than 300 seconds are marked stale.
+Claude observation timestamps up to 2 seconds ahead are treated as age zero;
+larger future timestamps remain unknown. Codex future timestamps remain unknown.
+Missing/invalid percentages, durations, resets, and passed resets are unknown.
+The old reset and source remain visible, but `used_percent` becomes null. A reset never implies zero usage. A missing Codex secondary is not an
 invented 5-hour window: some plans report only a weekly primary.
 
 This version supports the machine's single local signed-in subscription scope.
@@ -203,7 +206,8 @@ available git history. This implementation extends the existing P1 observation
 contract above; dispatch selection and `quota_shadow` are unchanged. All previous
 `quota_status` keys remain; providers with observations additionally expose
 `unknown_reasons`. The `state` enum remains `known` / `unknown`; `stale` is a
-window reason after 300 seconds, and `expired TTL` is a reason after 60 seconds.
+window reason after 300 seconds, and `expired TTL` is a reason after 60 seconds
+except for native Claude CLI receipts, which remain valid through 300 seconds.
 
 * **Codex app-server:** force a read on matching `turn/started` and
   `turn/completed`, even if another worker just refreshed. The supervisor also
@@ -263,3 +267,51 @@ samples stayed known with fresh receipt timestamps, without a model turn. Tests 
 exec thread isolation and receipt age, forced app-server turn reads and idle
 TTL, native Claude parsing/year rollover, unknown/timeout behavior and worker
 hook wiring. No install, restart or merge is part of this change.
+
+## Claude auto-selection timing diagnosis (issue #49)
+
+The deterministic regression loop uses temporary homes and synthetic zero-turn
+CLI usage, with no live provider reads:
+
+```sh
+python3 -m unittest tests.test_quota tests.test_routing
+```
+
+Ranked hypotheses and probes:
+
+1. Every negative age is rejected. A receipt 4ms or 28ms ahead of the fixed
+   status clock reproduced `invalid observation time`. The minimal fixture is
+   one native CLI receipt plus `Cache.status(now=...)`; no worker is required.
+2. The selection clock and receipt clock diverge. `routing.select` captured wall
+   time before refresh, then `dispatch_shadow` advanced that value with monotonic
+   elapsed time. `claude_usage` stamped the receipt with wall time after the CLI
+   read. Those clocks are not interchangeable when wall time adjusts; even the
+   capture order can introduce a small offset. A `core.dispatch` fixture with a
+   10-second wall correction during the CLI read reproduced an unknown receipt
+   and sol selection despite available Claude capacity. This establishes the
+   code-path defect, not the exact cause of every reported live millisecond skew.
+3. CLI receipts inherit the streaming collector TTL. A fixed receipt was unknown
+   at 63 and 300 seconds despite future resets. The shared 60-second TTL, rather
+   than malformed usage fields, caused this result.
+
+Each probe was written and run red before its corresponding fix:
+
+* `test_claude_cli_small_future_observation_is_known_with_zero_age`: 3 failed
+  subcases (4ms, 28ms, 2s), then green. Sonnet now clamps at most 2 seconds of
+  negative age to zero; a 30-second future receipt remains invalid.
+* `test_auto_refresh_uses_wall_clock_after_cli_read`: failed `unknown != known`,
+  then green. Normal auto selection leaves time live so status reads wall time
+  after refresh; explicitly supplied simulation times retain their existing
+  monotonic elapsed-time adjustment. A 790-second receipt is refreshed, the
+  resulting dispatch metadata is known at age zero, and sonnet is selected.
+* `test_claude_cli_receipt_has_five_minute_ttl_without_changing_sol`: failed at
+  63 and 300 seconds, then green. Only `sonnet` / `claude.cli.usage` uses a
+  300-second TTL. At 301 or 790 seconds it is still stale and requires refresh;
+  a passed reset still invalidates the receipt. Sol retains its 60-second TTL
+  and strict future timestamp rejection. Statusline/SDK TTLs are unchanged.
+
+Five minutes is a bounded cache policy for a CLI read that may take 15 seconds,
+not a capacity guarantee. Refresh failures preserve original timestamps and
+continue through the existing fallback policy and 60-second attempt throttle.
+No debug instrumentation was added. This change does not install or restart
+orchd, and fixture validation does not establish installed-runtime behavior.
