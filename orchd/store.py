@@ -225,6 +225,61 @@ CREATE TABLE IF NOT EXISTS intake_approvals(
     actor TEXT NOT NULL,
     created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS intake_content(
+    receipt_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    text TEXT,
+    text_sha256 TEXT,
+    text_bytes INTEGER NOT NULL DEFAULT 0,
+    attachments TEXT NOT NULL DEFAULT '[]',
+    created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS intake_suggestions(
+    receipt_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    suggestion_sha256 TEXT NOT NULL,
+    urgency TEXT NOT NULL,
+    body TEXT NOT NULL,
+    producer TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY(receipt_id, revision)
+);
+CREATE TABLE IF NOT EXISTS intake_notifications(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    receipt_id TEXT NOT NULL,
+    owner_orch TEXT NOT NULL,
+    urgency TEXT NOT NULL DEFAULT 'normal',
+    state TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    due_at REAL NOT NULL,
+    delivered_at REAL,
+    error TEXT,
+    created_at REAL NOT NULL,
+    UNIQUE(receipt_id, owner_orch)
+);
+CREATE TABLE IF NOT EXISTS intake_decisions(
+    decision_id TEXT PRIMARY KEY,
+    receipt_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    owner_orch TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    goal_id TEXT,
+    goal_na_reason TEXT,
+    issue_ref TEXT,
+    issue_na_reason TEXT,
+    task_id TEXT,
+    question_id INTEGER,
+    approval TEXT,
+    external_receipt TEXT,
+    state TEXT NOT NULL,
+    request_sha256 TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    created_at REAL NOT NULL,
+    completed_at REAL
+);
+CREATE INDEX IF NOT EXISTS intake_decisions_receipt ON intake_decisions(receipt_id, created_at);
 """
 
 # Columns added after v1. Nullable so old rows and old code keep working against the same DB.

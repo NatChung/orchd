@@ -34,7 +34,7 @@ ISSUE_REF = re.compile(r"(?:github:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Z
 
 ERROR_CODES = ("invalid", "unknown_field", "producer_not_allowed", "account_not_allowed", "unknown_owner",
                "conflict", "not_found", "stale", "expired", "target_mismatch", "invalid_state",
-               "already_claimed", "idempotency_conflict")
+               "already_claimed", "idempotency_conflict", "not_owner")
 
 
 class IntakeError(ValueError):
@@ -152,6 +152,9 @@ def submit(con, payload, *, producer, producers):
     """Durable receipt for one normalized event. Same key and content returns the original receipt as
     `duplicate`; same key with different content is `conflict` and changes nothing. Validation and the
     producer grant run before any write."""
+    if isinstance(payload, dict) and payload.get("version") == 2:  # evidence + suggestions: intake_bridge
+        from . import intake_bridge
+        return intake_bridge.submit(con, payload, producer=producer, producers=producers)
     event, owner = _normalize(payload)
     check_producer(producers, producer, event["provider"], event["account"])
     digest = _content_hash(event)
@@ -263,6 +266,8 @@ def bind_owner(con, receipt_id, owner):
             raise IntakeError("invalid_state", "an acked event keeps its owner")
         con.execute("UPDATE intake_events SET owner_orch=? WHERE receipt_id=?", (owner, receipt_id))
         _log(con, "bind", receipt_id)
+        from . import intake_notify
+        intake_notify.rebind(con, receipt_id, row["owner_orch"], owner)
         return _receipt(_event(con, receipt_id), "bound")
 
 
