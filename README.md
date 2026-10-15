@@ -112,6 +112,8 @@ Accept Claude trust manually in `~/orch/home`, then open `~/orch/interface` in C
 
 For daily use, remember `orch restart` (replace an Orch, including adopt and rebinding its existing Desktop entry), `list` (tasks), `doctor` (checks), and `upgrade` (updates). See the [grouped command reference](docs/commands.md) for every command and flag, worker reporting, and restart/new-computer/upgrade workflows. A worker report marked done still awaits verification; deployment and acceptance are separate decisions.
 
+Entry messages can carry one optional issue ref; `orchd entry thread --issue-refs github:example/project#40 --limit 3 --json` reads recent local question/answer summaries from a private DB copy. See [entry issue threads](docs/entry.md#issue-linked-local-threads) for MCP/CLI writes, tag clearing, privacy and the JSON contract.
+
 See also [CONTEXT.md](CONTEXT.md), [architecture decisions](docs/adr/), [entry](docs/entry.md), [permissions](docs/orch-permissions.md), [goals and board](docs/goals-board.md), and [review/merge policy](docs/review-merge-policy.md).
 
 See [quota observations](docs/quota.md) for `orchd quota`, MCP `quota_status`, official receipts and dispatch shadow advice. Shadow advice does not change the selected model or backend.

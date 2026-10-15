@@ -141,3 +141,74 @@ Desktop 開語音時，聽與說的是即時語音模型，再交給 interface�
 加上 `AGENTS.md`「一字不改重新輸出」的 prompt 沒有改善 Luna。依官方價目，比 Luna 準的選項裡 `gpt-6.1-sol`
 最便宜（$2 / $0.10 快取 / $10 輸出，每 1M token）。入口模型每次收到 Orch 訊息都把內文完整重講一次（文字與語音都一樣；只寫「語音時才唸」時，文字模式下它會不出聲），這份只供收聽；批准以畫面上 orchd 送來的原文為準。
 Operator → Orch 的原文由 orchd 從 rollout 讀，不經模型重打；Orch → Operator 用 `codex queue`，兩條都不受入口模型影響。
+
+
+## Issue-linked local threads
+
+`send_to_nat(text, issue_ref?)` and `ask_nat(text?, task_id?, ..., issue_ref?)`
+accept one optional `github:owner/repo#N` or `jira:KEY-N` reference (positive number).
+When `ask_nat` has a task and no explicit ref, it copies that task's latest issue
+link, including an unlink. Operator replies copy the question's ref when saved;
+plain incoming messages remain untagged. Later task-link changes do not rewrite
+saved messages. Tags describe context, never approval or task completion.
+
+The Orch MCP tool `entry_tag(message_id, issue_ref)` sets a ref, or clears it with
+JSON null. Only messages belonging to the calling Orch on its current binding
+can be tagged, including incoming messages. Rebinding does not grant permission
+to tag a previous Orch's messages. Actual changes append a local
+`entry_message_tags` audit row (old/new ref, actor, time); identical calls do
+nothing. Changing a question's tag later does not rewrite existing replies.
+
+Equivalent CLI writes require the calling Orch's `ORCHD_ORCH_ID` environment:
+
+```sh
+orchd entry send --text 'Progress update' --issue-ref github:example/project#40
+orchd entry ask --text 'Which option?' --task-id TASK_ID --issue-ref jira:DEMO-37
+orchd entry tag MESSAGE_ID --issue-ref github:example/project#40
+orchd entry tag MESSAGE_ID --clear
+```
+
+Read summaries locally, without runtime calls, delivery, inbox consumption or
+migration of the source DB:
+
+```sh
+orchd entry thread --issue-refs github:example/project#40,jira:DEMO-37 --limit 3 --json
+# Single-ref alias and explicit entry selection:
+orchd entry thread --issue-ref github:example/project#40 --entry desktop --json
+```
+
+The reader uses a private DB/WAL copy with `query_only=ON`. It selects only the
+named entry (default `desktop`), including its historical bindings. It never
+includes another entry's messages. Limit is per ref, defaults to 3, and accepts
+1–100. JSON is always printed, with this versioned contract:
+
+```json
+{
+  "schema_version": 1,
+  "entry_id": "desktop",
+  "threads": {
+    "github:example/project#40": {
+      "status": "waiting_nat",
+      "messages": [
+        {"message_id": 123, "at": 1700000000.0, "who": "orch",
+         "direction": "orch→nat", "kind": "question", "text": "Which option?", "full_bytes": 13}
+      ]
+    },
+    "jira:DEMO-37": {"status": "none", "messages": []}
+  }
+}
+```
+
+Messages are newest first (`created_at DESC, id DESC`); `at` is Unix seconds.
+`who` is `orch` or `nat`; direction is `orch→nat` or `nat→orch`.
+`text` is the first 200 Unicode code points, with no added ellipsis;
+`full_bytes` counts the original body's UTF-8 bytes. Status reflects only the
+latest stored speaker: Orch → `waiting_nat`, Operator → `waiting_orch`, no
+messages → `none`. It does not assert delivery, an active question or approval.
+Every requested ref has a result, including empty ones. Invalid refs/limits
+fail with exit 1 and stderr. A DB predating `issue_ref` returns empty threads
+without migrating it; ordinary store startup later adds the nullable column.
+
+Bodies stay in the local DB and local CLI output. Do not publish this output
+or put it into tracker comments or public caches. The snapshot command's body
+policy is unchanged; thread summaries use this separate reader.

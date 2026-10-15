@@ -35,6 +35,7 @@ Orch actions require an explicit subcommand; see `orchd orch --help`.
 import argparse
 import getpass
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -110,6 +111,28 @@ def build_parser():
     how.add_argument("--new", action="store_true", help="start a new Claude Orch and bind the interface to it")
     how.add_argument("--to", metavar="ORCH_ID", help="bind the interface to this live Claude Orch")
     how.add_argument("--status", action="store_true", help="read-only: binding, Orch health, questions, delivery")
+    entry_parser = sub.add_parser("entry", help="entry messages and local-only issue threads")
+    entry_actions = entry_parser.add_subparsers(dest="entry_action", required=True)
+    thread = entry_actions.add_parser("thread", help="read summaries from a private DB/WAL copy")
+    refs = thread.add_mutually_exclusive_group(required=True)
+    refs.add_argument("--issue-refs", help="comma-separated refs")
+    refs.add_argument("--issue-ref", help="single ref")
+    thread.add_argument("--entry", default="desktop")
+    thread.add_argument("--limit", type=int, default=3)
+    thread.add_argument("--json", action="store_true", help="JSON output (also the default)")
+    for action in ("send", "ask", "tag"):
+        command = entry_actions.add_parser(action)
+        if action == "tag":
+            command.add_argument("message_id", type=int)
+            tag_ref = command.add_mutually_exclusive_group(required=True)
+            tag_ref.add_argument("--issue-ref")
+            tag_ref.add_argument("--clear", action="store_true")
+        else:
+            command.add_argument("--text", required=True)
+            command.add_argument("--issue-ref")
+            if action == "ask":
+                command.add_argument("--task-id")
+                command.add_argument("--quote-worker-question", action="store_true")
     questions = sub.add_parser("entry-question", help="explicit question lifecycle and history")
     question_actions = questions.add_subparsers(dest="question_action", required=True)
     for action in ("show", "snooze", "un-snooze", "cancel", "supersede", "answer"):
@@ -375,6 +398,35 @@ def main(argv=None):
 
     if args.cmd == "orch":
         args.cmd = f"orch {args.orch_action}"
+
+    if args.cmd == "entry":
+        import sqlite3
+        from orchd import entry, entry_threads, stats
+        con = None
+        try:
+            if args.entry_action == "thread":
+                refs = (args.issue_refs if args.issue_refs is not None else args.issue_ref).split(",")
+                result = entry_threads.read(store.home() / "orchd.db", refs, entry_id=args.entry, limit=args.limit)
+            else:
+                orch_id = os.environ.get("ORCHD_ORCH_ID")
+                if not orch_id:
+                    raise ValueError("entry writes require ORCHD_ORCH_ID from the calling Orch")
+                con = store.connect()
+                if args.entry_action == "tag":
+                    result = entry.entry_tag(con, orch_id, args.message_id, args.issue_ref)
+                elif args.entry_action == "send":
+                    result = entry.send_to_nat(con, Runtime(), orch_id, args.text, issue_ref=args.issue_ref)
+                else:
+                    result = entry.ask_nat(con, Runtime(), orch_id, args.text, args.task_id,
+                                           args.quote_worker_question, issue_ref=args.issue_ref)
+            print(json.dumps(result, ensure_ascii=False, indent=1))
+            return 0
+        except (ValueError, OSError, sqlite3.Error, stats.SnapshotError) as error:
+            print(f"orchd entry: {error}", file=sys.stderr)
+            return 1
+        finally:
+            if con is not None:
+                con.close()
 
     if args.cmd == "snapshot":
         import sqlite3
