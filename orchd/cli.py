@@ -454,7 +454,8 @@ HOME_POLICY = {
     ("init",): "skip", ("upgrade",): "skip", ("quota",): "skip", ("doctor",): "skip",
     ("config", "show"): "skip", ("config", "get"): "skip", ("config", "set"): "skip", ("config", "unset"): "skip",
     ("binding",): "write",  # --status -> warn
-    ("entry", "thread"): "warn", ("entry", "tag"): "write", ("entry", "send"): "write", ("entry", "ask"): "write",
+    ("entry", "thread"): "warn", ("entry", "reconcile"): "write",  # no --apply -> warn
+    ("entry", "tag"): "write", ("entry", "send"): "write", ("entry", "ask"): "write",
     ("entry-question", "show"): "warn", ("entry-question", "snooze"): "write", ("entry-question", "un-snooze"): "write",
     ("entry-question", "cancel"): "write", ("entry-question", "supersede"): "write", ("entry-question", "answer"): "write",
     ("task-question", "answer"): "write", ("task-question", "dismiss"): "write",
@@ -476,7 +477,8 @@ def _home_policy(args):
     cmd = args.cmd.split()[0]
     action = next((getattr(args, d) for d in ACTION_DEST if getattr(args, d, None)), None)
     policy = HOME_POLICY.get((cmd, action) if action else (cmd,), "write")  # unknown -> write (tests keep the table complete)
-    if policy == "write" and (getattr(args, "dry_run", False) or (cmd == "binding" and args.status)):
+    if policy == "write" and (getattr(args, "dry_run", False) or (cmd == "binding" and args.status)
+                              or (cmd == "entry" and action == "reconcile" and not args.apply)):
         return "warn"
     return policy
 
