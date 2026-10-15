@@ -140,9 +140,10 @@ def message_wire(message_id, orch_id, body):
 
 
 def _history(con, row, state, actor, reason):
-    con.execute("INSERT INTO entry_question_history(question_id,version,from_state,to_state,actor,reason,created_at) "
-                "VALUES(?,?,?,?,?,?,?)", (row["id"], row["version"], row["question_state"], state,
-                                        actor, reason, time.time()))
+    con.execute("INSERT INTO entry_question_history(question_id,version,from_state,to_state,actor,reason,"
+                "created_at,original_orch_id) "
+                "VALUES(?,?,?,?,?,?,?,?)", (row["id"], row["version"], row["question_state"], state,
+                                        actor, reason, time.time(), row["orch_id"]))
 
 
 def _make_current(con, entry, row, actor="orchd", reason="promote earliest queued question"):
@@ -160,12 +161,12 @@ def _promote(con, entry, actor, reason):
             _make_current(con, entry, following[0], actor, reason)
 
 
-def _checked_question(con, entry, question_id, expected_version, expected_state):
+def _checked_question(con, entry, question_id, expected_version, expected_state, *, cleanup=False):
     if type(question_id) is not int or question_id < 1 or type(expected_version) is not int or expected_version < 1:
         raise ValueError("question id and expected version must be positive integers")
     row = _row(con, question_id)
     if (row is None or row["kind"] != "question" or row["entry_id"] != entry["id"]
-            or row["orch_id"] != entry["orch_id"]):
+            or (not cleanup and row["orch_id"] != entry["orch_id"])):
         raise ValueError("question does not belong to the current entry binding")
     if row["version"] != expected_version or row["question_state"] != expected_state:
         raise ValueError("question version/state mismatch; nothing changed")
@@ -211,7 +212,8 @@ def question_transition(con, rt, entry_id, question_id, expected_version, expect
         bound = get_entry(con, entry_id)
         if orch_id is not None and bound["orch_id"] != orch_id:
             raise ValueError("entry belongs to another Orch")
-        row = _checked_question(con, bound, question_id, expected_version, expected_state)
+        row = _checked_question(con, bound, question_id, expected_version, expected_state,
+                                cleanup=state in ("cancelled", "snoozed"))
         if row["question_state"] not in allowed:
             raise ValueError("question cannot transition from this state")
         con.execute("UPDATE entry_messages SET question_state=?, revisit_at=?, note=?, reason=? WHERE id=?",
@@ -225,6 +227,24 @@ def question_transition(con, rt, entry_id, question_id, expected_version, expect
         _promote(con, bound, actor, f"after {state} question {question_id}")
     deliver_outbound(con, rt, entry_id)
     return dict(question_show(con, entry_id, question_id), **_questions(con, bound))
+
+
+def cancel_task_questions(con, task_id):
+    """Cancel pending task questions inside close's transaction; return entries to deliver after commit.
+
+    Owner scopes for answers and delivery stay intact. Old-owner questions may be
+    cleaned up, but only the currently bound owner's queue can be promoted.
+    """
+    rows = con.execute("SELECT * FROM entry_messages WHERE task_id=? AND kind='question' "
+                       "AND question_state IN ('queued','current') ORDER BY id", (task_id,)).fetchall()
+    affected = sorted({row["entry_id"] for row in rows})
+    for row in rows:
+        con.execute("UPDATE entry_messages SET question_state='cancelled',reason='task closed' WHERE id=?",
+                    (row["id"],))
+        _history(con, row, "cancelled", "orchd", "task closed")
+    for entry_id in affected:
+        _promote(con, get_entry(con, entry_id), "orchd", "task closed")
+    return affected
 
 
 def _save_reply(con, bound, question, text, actor, **fields):
@@ -719,7 +739,7 @@ def ask_nat(con, rt, orch_id, text=None, task_id=None, quote_worker_question=Fal
         entry = _entry_of(con, orch_id)
         old = None
         if supersedes is not None:
-            old = _checked_question(con, entry, supersedes, expected_version, expected_state)
+            old = _checked_question(con, entry, supersedes, expected_version, expected_state, cleanup=True)
             if old["question_state"] not in ("current", "queued", "snoozed", "cancelled", "answered"):
                 raise ValueError("question cannot be superseded from this state")
             con.execute("UPDATE entry_messages SET question_state='superseded', reason=? WHERE id=?", (reason, supersedes))
