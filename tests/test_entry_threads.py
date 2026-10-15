@@ -140,6 +140,164 @@ class ThreadTest(unittest.TestCase):
             self.assertIn("issue_ref", schemas[name]["properties"])
 
 
+class QuestionThreadTest(ThreadTest):
+    def task(self):
+        return core.dispatch(self.con, self.rt, orch_thread=self.orch, repo="demo", title="T", instructions="i",
+                             done_when="d", model="sonnet", model_reason="r", task_type="outward")["id"]
+
+    def answer(self, question_id, text="answer"):
+        self.rt.nat_says("desk", text)
+        return entry.relay(self.con, self.rt, "desktop", "desk", reply_to=question_id)["message_id"]
+
+    def run_cli(self, args):
+        out, err = io.StringIO(), io.StringIO()
+        env = {"ORCHD_HOME": self.tmp.name, "ORCHD_ORCH_ID": self.orch}
+        with patch.dict(os.environ, env), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = cli.main(["entry", "thread"] + args)
+            except SystemExit as exit_:
+                code = exit_.code
+        return code, out.getvalue(), err.getvalue()
+
+    def snapshot_files(self, checkpoint=False):
+        if checkpoint:
+            self.con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        return {str(p): p.read_bytes() for p in Path(self.tmp.name).glob("orchd.db*") if p.is_file()}
+
+    def test_contract_full_text_and_reply_without_task_id(self):
+        task = self.task()
+        long = "問" * 450 + "?"
+        q = entry.ask_nat(self.con, self.rt, self.orch, long, task, issue_ref=REF)["question_id"]
+        reply = self.answer(q, "答" * 300)
+        self.con.execute("UPDATE entry_messages SET task_id=NULL WHERE id=?", (reply,))  # direct input carries no task_id
+        before = self.snapshot_files(checkpoint=True)
+        data = entry_threads.read_question(self.path, q)
+        self.assertEqual(self.snapshot_files(), before)
+        self.assertEqual((data["schema_version"], data["status"]), (1, "ok"))
+        self.assertTrue(data["read_at"].endswith("Z"))
+        thread = data["threads"][0]
+        for key in ("question_id", "task_id", "issue_ref", "question_state", "revisit_at", "status", "root_question",
+                    "messages", "complete", "has_more", "next_cursor"):
+            self.assertIn(key, thread)
+        self.assertEqual((thread["question_id"], thread["task_id"], thread["issue_ref"]), (q, task, REF))
+        self.assertEqual(thread["status"], "waiting_orch")
+        self.assertEqual(thread["root_question"], dict(id=q, body=long))
+        self.assertEqual([m["id"] for m in thread["messages"]], [reply, q])
+        self.assertEqual(thread["messages"][0]["text"], "答" * 300)
+        self.assertEqual(thread["messages"][1]["text"], long)
+        self.assertEqual((thread["messages"][0]["reply_to"], thread["messages"][0]["who"]), (q, "nat"))
+        self.assertTrue(thread["complete"] and not thread["has_more"] and thread["next_cursor"] is None)
+
+    def test_same_task_questions_are_isolated(self):
+        task = self.task()
+        first = entry.ask_nat(self.con, self.rt, self.orch, "first", task)["question_id"]
+        r1 = self.answer(first, "a1")
+        second = entry.ask_nat(self.con, self.rt, self.orch, "second", task)["question_id"]
+        r2 = self.answer(second, "a2")
+        by_q = {t["question_id"]: [m["id"] for m in t["messages"]]
+                for t in entry_threads.read_task(self.path, task)["threads"]}
+        self.assertEqual(by_q, {first: [r1, first], second: [r2, second]})
+        self.assertEqual([t["question_id"] for t in entry_threads.read_task(self.path, task)["threads"]], [second, first])
+
+    def test_superseded_chain_visible_from_new_and_old_question(self):
+        task = self.task()
+        old = entry.ask_nat(self.con, self.rt, self.orch, "v1", task)["question_id"]
+        old_reply = self.answer(old, "old answer")
+        new = entry.ask_nat(self.con, self.rt, self.orch, "v2", task, supersedes=old, expected_version=1,
+                            expected_state="answered", reason="changed")["question_id"]
+        for selector in (new, old):
+            thread = entry_threads.read_question(self.path, selector, limit=10)["threads"][0]
+            self.assertEqual((thread["question_id"], thread["question_chain"]), (new, [old, new]))
+            self.assertEqual(thread["root_question"]["id"], old)
+            msgs = {m["id"]: m for m in thread["messages"]}
+            self.assertEqual(set(msgs), {old, old_reply, new})
+            self.assertEqual((msgs[new]["supersedes"], msgs[old]["superseded_by"]), (old, new))
+        self.assertEqual(len(entry_threads.read_task(self.path, task)["threads"]), 1)
+
+    def test_not_found_error_and_missing_history_are_distinct(self):
+        self.assertEqual(entry_threads.read_question(self.path, 999)["status"], "not_found")
+        self.assertEqual(entry_threads.read_task(self.path, "nope")["status"], "not_found")
+        self.assertEqual(self.run_cli(["--question-id", "999"])[0], 3)
+        self.assertEqual(self.run_cli(["--task-id", "nope"])[0], 3)
+        missing = Path(self.tmp.name) / "missing"
+        with patch.dict(os.environ, {"ORCHD_HOME": str(missing)}), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main(["entry", "thread", "--question-id", "1"]), 4)
+        task = self.task()
+        old = entry.ask_nat(self.con, self.rt, self.orch, "v1", task)["question_id"]
+        new = entry.ask_nat(self.con, self.rt, self.orch, "v2", task, supersedes=old, expected_version=1,
+                            expected_state="current", reason="r")["question_id"]
+        self.con.execute("PRAGMA foreign_keys=OFF")
+        self.con.execute("DELETE FROM entry_messages WHERE id=?", (old,))
+        data = entry_threads.read_question(self.path, new)
+        self.assertEqual(data["status"], "partial")
+        self.assertEqual((data["threads"][0]["missing_history"], data["threads"][0]["complete"]), ([old], False))
+        self.assertEqual(self.run_cli(["--question-id", str(new)])[0], 5)
+
+    def test_more_than_100_answered_pages_with_cursor_and_tiebreak(self):
+        task = self.task()
+        target = entry.ask_nat(self.con, self.rt, self.orch, "target", task)["question_id"]
+        base = "INSERT INTO entry_messages(entry_id,orch_id,direction,kind,body,body_bytes,body_sha256,delivery,created_at,reply_to,task_id) "
+        for i in range(120):
+            self.con.execute(base + "VALUES('desktop',?, 'in','reply',?,1,'h','delivered',?,?,?)",
+                             (self.orch, f"r{i}", 1000 + i // 2, target, task))  # pairs share a timestamp
+        for i in range(105):  # unrelated answered noise past the snapshot's 100-row cap
+            entry.ask_nat(self.con, self.rt, self.orch, f"noise{i}", None)
+        self.con.execute("UPDATE entry_messages SET created_at=1 WHERE id=?", (target,))
+        seen, cursor, pages = [], None, 0
+        while True:
+            thread = entry_threads.read_question(self.path, target, limit=50, cursor=cursor)["threads"][0]
+            seen += [m["id"] for m in thread["messages"]]
+            pages += 1
+            cursor = thread["next_cursor"]
+            self.assertEqual(thread["has_more"], cursor is not None)
+            if cursor is None:
+                break
+        self.assertEqual((pages, len(seen), seen[-1]), (3, 121, target))
+        self.assertEqual(seen[:-1], sorted(seen[:-1], reverse=True))  # same created_at: id descending
+        first = entry_threads.read_question(self.path, target, limit=3)["threads"][0]
+        self.assertEqual(len(first["messages"]), 3)
+        self.assertTrue(first["has_more"])
+        with self.assertRaises(entry_threads.CursorError):
+            entry_threads.read_question(self.path, target, cursor="garbage")
+        for limit in (0, 101):
+            with self.assertRaises(entry_threads.CursorError):
+                entry_threads.read_question(self.path, target, limit=limit)
+
+    def test_task_thread_list_pages(self):
+        task = self.task()
+        qs = [entry.ask_nat(self.con, self.rt, self.orch, f"q{i}", task)["question_id"] for i in range(3)]
+        page = entry_threads.read_task(self.path, task, thread_limit=2)
+        self.assertEqual(([t["question_id"] for t in page["threads"]], page["has_more"]), (qs[:0:-1], True))
+        rest = entry_threads.read_task(self.path, task, thread_limit=2, cursor=page["next_cursor"])
+        self.assertEqual(([t["question_id"] for t in rest["threads"]], rest["has_more"], rest["next_cursor"]), ([qs[0]], False, None))
+
+    def test_cli_contract_selectors_and_readonly(self):
+        task = self.task()
+        q = entry.ask_nat(self.con, self.rt, self.orch, "cli", task)["question_id"]
+        before = self.snapshot_files(checkpoint=True)
+        code, out, _ = self.run_cli(["--question-id", str(q), "--limit", "1", "--json"])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["threads"][0]["messages"][0]["text"], "cli")
+        code, out, _ = self.run_cli(["--task-id", task, "--per-question-limit", "1"])
+        self.assertEqual((code, json.loads(out)["task_id"]), (0, task))
+        self.assertEqual(self.snapshot_files(), before)
+        self.assertEqual(self.run_cli(["--question-id", "1", "--task-id", "x"])[0], 2)
+        self.assertEqual(self.run_cli(["--question-id", "1", "--issue-ref", REF])[0], 2)
+        self.assertEqual(self.run_cli(["--question-id", "1", "--per-question-limit", "2"])[0], 2)
+        self.assertEqual(self.run_cli(["--task-id", "x", "--limit", "5"])[0], 2)
+        self.assertEqual(self.run_cli(["--question-id", str(q), "--cursor", "bad"])[0], 2)
+        self.assertEqual(self.run_cli(["--question-id", str(q), "--limit", "0"])[0], 2)
+
+    def test_issue_refs_output_unchanged(self):
+        sent = entry.send_to_nat(self.con, self.rt, self.orch, "中" * 201, issue_ref=REF)["message_id"]
+        self.con.execute("UPDATE entry_messages SET created_at=100")
+        code, out, _ = self.run_cli(["--issue-refs", REF, "--json"])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out), dict(schema_version=1, entry_id="desktop", threads={REF: dict(
+            status="waiting_nat", messages=[dict(message_id=sent, at=100.0, who="orch", direction="orch→nat", kind="message",
+                                                 text="中" * 200, full_bytes=603)])}))
+
+
 class MigrationTest(unittest.TestCase):
     def test_old_database_is_readable_without_migration_then_adds_nullable_ref(self):
         with tempfile.TemporaryDirectory() as directory:

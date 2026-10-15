@@ -117,6 +117,11 @@ def build_parser():
     refs = thread.add_mutually_exclusive_group(required=True)
     refs.add_argument("--issue-refs", help="comma-separated refs")
     refs.add_argument("--issue-ref", help="single ref")
+    refs.add_argument("--question-id", type=int, help="full thread of one question (all versions, replies)")
+    refs.add_argument("--task-id", help="full thread of every question of a task")
+    thread.add_argument("--per-question-limit", type=int, help="with --task-id: messages per question")
+    thread.add_argument("--thread-limit", type=int, help="with --task-id: questions per page")
+    thread.add_argument("--cursor", help="with --question-id/--task-id: next_cursor of the previous page")
     thread.add_argument("--entry", default="desktop")
     thread.add_argument("--limit", type=int, default=3)
     thread.add_argument("--json", action="store_true", help="JSON output (also the default)")
@@ -369,6 +374,32 @@ def _intake_main(args):
     return 1 if result.get("status") == "failed" else 0
 
 
+def _entry_thread_by_question(args, path):
+    """Read-only question/task thread. Exit: 0 ok, 2 bad usage/cursor, 3 not found, 4 read error, 5 partial history."""
+    import sqlite3
+    from orchd import entry_threads, stats
+    by_question = args.question_id is not None
+    misuse = [f"--{n.replace('_', '-')}" for n in (("per_question_limit", "thread_limit") if by_question else ("limit",))
+              if getattr(args, n) is not None and not (n == "limit" and args.limit == 3)]
+    if misuse:
+        print(f"orchd entry thread: {', '.join(misuse)} does not apply to --{'question' if by_question else 'task'}-id", file=sys.stderr)
+        return 2
+    try:
+        if by_question:
+            result = entry_threads.read_question(path, args.question_id, entry_id=args.entry, limit=args.limit, cursor=args.cursor)
+        else:
+            result = entry_threads.read_task(path, args.task_id, entry_id=args.entry, cursor=args.cursor,
+                                             per_question_limit=args.per_question_limit or 3, thread_limit=args.thread_limit or 20)
+    except entry_threads.CursorError as error:
+        print(f"orchd entry: {error}", file=sys.stderr)
+        return 2
+    except (OSError, sqlite3.Error, stats.SnapshotError) as error:
+        print(f"orchd entry: read failed: {error}", file=sys.stderr)
+        return entry_threads.EXIT_CODES["error"]
+    print(json.dumps(result, ensure_ascii=False, indent=1))
+    return entry_threads.EXIT_CODES[result["status"]]
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     if args.cmd == 'quota':
@@ -404,6 +435,8 @@ def main(argv=None):
         from orchd import entry, entry_threads, stats
         con = None
         try:
+            if args.entry_action == "thread" and (args.question_id is not None or args.task_id is not None):
+                return _entry_thread_by_question(args, store.home() / "orchd.db")
             if args.entry_action == "thread":
                 refs = (args.issue_refs if args.issue_refs is not None else args.issue_ref).split(",")
                 result = entry_threads.read(store.home() / "orchd.db", refs, entry_id=args.entry, limit=args.limit)
