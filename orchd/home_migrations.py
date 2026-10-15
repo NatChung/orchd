@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import sqlite3
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -156,3 +157,43 @@ def run(*, home=None, env=None, dry_run=False):
     finally:
         if con:
             con.close()
+
+
+def pending(home=None, env=None):
+    """Step ids not yet applied to the recorded homes. Read-only; [] when orchd was never init'd/upgraded here."""
+    home = Path(home or Path.home())
+    env = os.environ if env is None else env
+    con = connect(home, env, readonly=True)
+    if con is None:
+        return []
+    try:
+        folders = targets(home, env, con)
+        scope = json.dumps({role: str(folder.absolute()) for role, folder in folders.items()}, sort_keys=True)
+        done = {row[0] for row in con.execute("SELECT step FROM applied WHERE scope=?", (scope,))}
+    finally:
+        con.close()
+    return [step for step, _ in STEPS if step not in done]
+
+
+def ensure_current(*, home=None, env=None, write=True):
+    """Startup check (CLI and MCP server): apply stale home rules, or warn. Returns lines for stderr; never raises.
+
+    Applying goes through run(), so it backs up first, keeps bytes outside the managed block, and is serialized
+    by BEGIN IMMEDIATE. ORCHD_AUTO_MIGRATE=0 (or write=False) only warns.
+    """
+    env = os.environ if env is None else env
+    fix = "orchd upgrade --migrations-only"
+    try:
+        todo = pending(home, env)
+        if not todo:
+            return []
+        if not write or env.get("ORCHD_AUTO_MIGRATE") == "0":
+            return [f"orchd: Orch home rules are behind this version ({', '.join(todo)}); run `{fix}`."]
+        code, lines = run(home=home, env=env)
+        if code:
+            return [f"orchd: Orch home rules are behind this version ({', '.join(todo)}) and auto-update failed; run `{fix}`.",
+                    *lines[-2:]]
+        applied = [line for line in lines if line.startswith(("updated:", "restore:"))]
+        return [f"orchd: updated stale Orch home rules ({', '.join(todo)}); restart Orch sessions to load them.", *applied]
+    except Exception as error:
+        return [f"orchd: could not check Orch home rules ({error}); run `{fix}`."]

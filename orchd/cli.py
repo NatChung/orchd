@@ -599,6 +599,9 @@ def main(argv=None):
             return 1
         print(json.dumps(result, ensure_ascii=False, indent=1))
         return 0
+    from orchd import home_migrations  # rules in the Orch home must not lag the installed code (#58)
+    for line in home_migrations.ensure_current(write=args.cmd != "stats"):
+        print(line, file=sys.stderr)
     if args.cmd == "mcp":
         from orchd import mcp_server
         mcp_server.serve(role=args.role, entry_id=args.entry)
