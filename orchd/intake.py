@@ -9,8 +9,10 @@ import hashlib
 import json
 import math
 import re
+import sqlite3
 import time
 import uuid
+from pathlib import Path
 
 from . import store
 
@@ -254,9 +256,22 @@ def exclude(con, receipt_ids, *, reason, rule_version, actor):
         return dict(status="excluded", receipts=results)
 
 
-def bind_owner(con, receipt_id, owner):
+def bind_owner(con, receipt_id, owner, *, only_if_unassigned=False):
+    """Bind (or, as the Operator, re-bind) a received receipt. only_if_unassigned makes the assignment a
+    compare-and-set: the owner IS NULL / state='received' condition is in the UPDATE itself, so a receipt another
+    Orch took after the caller looked is reported `skipped` and never overwritten."""
     with store.immediate(con):
         row = _event(con, receipt_id)
+        if only_if_unassigned:
+            _check_owner(con, owner)
+            changed = con.execute("UPDATE intake_events SET owner_orch=? WHERE receipt_id=? AND state='received' "
+                                  "AND owner_orch IS NULL", (owner, receipt_id)).rowcount
+            if changed != 1:
+                return _receipt(_event(con, receipt_id), "skipped")
+            _log(con, "bind", receipt_id)
+            from . import intake_notify
+            intake_notify.rebind(con, receipt_id, None, owner)
+            return _receipt(_event(con, receipt_id), "bound")
         if row["state"] == "excluded":
             raise IntakeError("invalid_state", "an excluded event cannot be bound")
         _check_owner(con, owner)
@@ -269,6 +284,138 @@ def bind_owner(con, receipt_id, owner):
         from . import intake_notify
         intake_notify.rebind(con, receipt_id, row["owner_orch"], owner)
         return _receipt(_event(con, receipt_id), "bound")
+
+
+def _move_received(con, row, new_owner):
+    """Inside the caller's write transaction: re-point one received receipt and its notification duty."""
+    from . import intake_notify
+    moved = con.execute("UPDATE intake_events SET owner_orch=? WHERE receipt_id=? AND state='received' "
+                        "AND owner_orch IS ?", (new_owner, row["receipt_id"], row["owner_orch"])).rowcount
+    if moved != 1:
+        raise IntakeError("conflict", f"{row['receipt_id']} changed while moving; nothing was moved")
+    _log(con, "adopt-bind", row["receipt_id"])
+    intake_notify.rebind(con, row["receipt_id"], row["owner_orch"], new_owner)
+
+
+def adopt_receipts(con, old_owners, new_orch):
+    """#62: received receipts follow an Orch replacement. Runs inside adopt's write transaction (never opens
+    its own), so any error rolls the task move back too. acked and excluded receipts keep their owner."""
+    old_owners = list(dict.fromkeys(old_owners))
+    if not old_owners:
+        return []
+    rows = con.execute(f"SELECT * FROM intake_events WHERE state='received' AND owner_orch IN ({','.join('?' * len(old_owners))}) "
+                       "ORDER BY id", old_owners).fetchall()
+    for row in rows:
+        _move_received(con, row, new_orch)
+    return [row["receipt_id"] for row in rows]
+
+
+def received_of(con, owners):
+    owners = list(dict.fromkeys(owners))
+    if not owners:
+        return []
+    return [r["receipt_id"] for r in con.execute(
+        f"SELECT receipt_id FROM intake_events WHERE state='received' AND owner_orch IN ({','.join('?' * len(owners))}) "
+        "ORDER BY id", owners)]
+
+
+def take_unassigned(con, receipt_ids, caller):
+    """An Orch takes unowned received receipts for itself (only itself; the caller id is the one identity).
+    Atomic batch: anything owned by someone else or not received rejects the whole call. Own = unchanged."""
+    if (not isinstance(receipt_ids, list) or not receipt_ids
+            or not all(isinstance(r, str) and r for r in receipt_ids)):
+        raise IntakeError("invalid", "receipt_ids must be a non-empty list of receipt ids")
+    from . import intake_notify
+    with store.immediate(con):
+        _check_owner(con, caller)
+        rows = [_event(con, r) for r in dict.fromkeys(receipt_ids)]
+        for row in rows:
+            if row["state"] != "received":
+                raise IntakeError("invalid_state", f"{row['receipt_id']} is {row['state']}; only received events can be taken")
+            if row["owner_orch"] not in (None, caller):
+                raise IntakeError("not_owner", f"{row['receipt_id']} already belongs to another Orch; "
+                                  "only the Operator can re-bind it (orchd intake bind)")
+        results = []
+        for row in rows:
+            if row["owner_orch"] == caller:
+                results.append(_receipt(row, "unchanged"))
+                continue
+            if con.execute("UPDATE intake_events SET owner_orch=? WHERE receipt_id=? AND state='received' "
+                           "AND owner_orch IS NULL", (caller, row["receipt_id"])).rowcount != 1:
+                raise IntakeError("not_owner", f"{row['receipt_id']} was taken by another Orch; nothing was bound")
+            _log(con, "bind", row["receipt_id"])
+            intake_notify.rebind(con, row["receipt_id"], None, caller)
+            results.append(_receipt(_event(con, row["receipt_id"]), "bound"))
+        return dict(status="bound", receipts=results)
+
+
+def _stranded(con, jobs):
+    """Received receipts owned by a stopped or confirmed-dead Orch (same dead rule as adopt). An unknown
+    probe is not proof; unassigned receipts are never touched (no auto-assignment, docs/intake.md)."""
+    from .orch_health import owner_health
+    stranded = []
+    for owner in [r[0] for r in con.execute("SELECT DISTINCT owner_orch FROM intake_events "
+                                            "WHERE state='received' AND owner_orch IS NOT NULL ORDER BY owner_orch")]:
+        orch = store.get_orch(con, owner)
+        if orch is not None and (orch["stopped_at"] is not None or owner_health(orch, jobs)["state"] == "dead"):
+            stranded += con.execute("SELECT * FROM intake_events WHERE state='received' AND owner_orch=? ORDER BY id",
+                                    (owner,)).fetchall()
+    return sorted(stranded, key=lambda r: r["id"])
+
+
+def _reconcile_target(con, jobs):
+    from .orch_health import owner_health
+    bound = con.execute("SELECT orch_id FROM entries WHERE id='desktop'").fetchone()
+    orch = store.get_orch(con, bound["orch_id"]) if bound else None
+    if orch is None:
+        return None, "no desktop binding to a registered Orch"
+    if orch["stopped_at"] is not None:
+        return orch["id"], f"bound orch {orch['id']} is not live (stopped)"
+    state = owner_health(orch, jobs)
+    return orch["id"], None if state["state"] == "alive" else f"bound orch {orch['id']} is not live ({state['reason']})"
+
+
+def reconcile_path(path, apply=False, backup_dir=None, jobs=None):
+    """`orchd intake reconcile`: move received receipts stranded on a stopped/dead Orch to the Orch the Desktop
+    entry is bound to. The listing and the backup use a read-only connection (store.connect migrates the schema,
+    which is a write); only an apply with something to move then opens the database normally."""
+    from . import entry
+    path = Path(path)
+    if not path.exists():
+        return dict(moved=[], backup=None, applied=False, to_orch=None)
+    ro = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=30)
+    ro.row_factory = sqlite3.Row
+    try:
+        try:
+            pending = _stranded(ro, jobs)
+            target, problem = _reconcile_target(ro, jobs)
+        except sqlite3.OperationalError as error:
+            if "no such table" not in str(error):
+                raise
+            pending, target, problem = [], None, None  # a DB that predates intake has nothing stranded
+        ids = [r["receipt_id"] for r in pending]
+        if not apply:
+            return dict(moved=ids, backup=None, applied=False, to_orch=target, target_problem=problem,
+                        from_orch=sorted({r["owner_orch"] for r in pending}))
+        if not pending:
+            return dict(moved=[], backup=None, applied=False, to_orch=target)
+        if problem:
+            raise ValueError(f"cannot reconcile: {problem}; bind a live Orch first (orchd binding --to ID)")
+        backup = entry._backup(ro, backup_dir, "pre-intake-reconcile")
+    finally:
+        ro.close()
+    con = store.connect(path)
+    try:
+        with store.immediate(con):
+            rows = _stranded(con, jobs)  # re-read under the lock
+            target, problem = _reconcile_target(con, jobs)
+            if problem:
+                raise ValueError(f"cannot reconcile: {problem}")
+            for row in rows:
+                _move_received(con, row, target)
+        return dict(moved=[r["receipt_id"] for r in rows], backup=str(backup), applied=True, to_orch=target)
+    finally:
+        con.close()
 
 
 def ack(con, receipt_ids, *, actor="orch"):

@@ -19,7 +19,7 @@
   orchd verify ID [--timeout S]               verifier worker: rerun the verified task's locked command at its locked SHA
   orchd orch list [--all] [--json] [--restore ID]          live/resumable Orchs; --all includes archived/unknown
   orchd orch attach ID [--viewer]                  attach an existing Claude Orch (resume its conversation if idle)
-  orchd intake submit|suggest|pending|bind|ack|exclude|classify|deliver|show|decide|resolve|decisions|backlog|draft|draft-show|approve|claim|receipt|cancel   local intake queue and reply approvals (docs/intake.md)
+  orchd intake submit|suggest|pending|bind|ack|exclude|classify|deliver|show|decide|resolve|decisions|backlog|reconcile|draft|draft-show|approve|claim|receipt|cancel   local intake queue and reply approvals (docs/intake.md)
   orchd list                                  open tasks, worker/Orch health, unread notification failures
   orchd goal add|set|show|list|export --md      central goals, audit history, markdown snapshot
   orchd board --html PATH                     private static project board, no inbox consumption
@@ -225,6 +225,9 @@ def build_parser():
     intake_decisions.add_argument("--state", choices=("intent", "uncertain", "completed", "failed"))
     intake_backlog = intake_actions.add_parser("backlog", help="read-only: queues, unassigned, notification failures, open decisions")
     intake_backlog.add_argument("--owner")
+    intake_reconcile = intake_actions.add_parser("reconcile", help="move received receipts stranded on a stopped/dead Orch to the "
+                                                                 "Orch the Desktop entry is bound to (dry run unless --apply; backs up the DB first)")
+    intake_reconcile.add_argument("--apply", action="store_true")
     intake_pending = intake_actions.add_parser("pending", help="unacked events for an owner; does not consume")
     intake_pending.add_argument("--owner", help="Orch id; omit to list unassigned events")
     intake_pending.add_argument("--limit", type=int, default=100)
@@ -239,6 +242,9 @@ def build_parser():
     intake_bind = intake_actions.add_parser("bind", help="bind an unassigned event to a registered Orch")
     intake_bind.add_argument("--receipt", required=True)
     intake_bind.add_argument("--owner", required=True)
+    intake_bind.add_argument("--only-if-unassigned", action="store_true",
+                             help="atomic: bind only if the receipt is received and still has no owner; otherwise report "
+                                  "skipped and change nothing (never takes a receipt another Orch already owns)")
     intake_ack = intake_actions.add_parser("ack", help="owner durably took responsibility, separate from submit/bind")
     intake_ack.add_argument("receipts", nargs="+")
     intake_ack.add_argument("--actor", choices=("orch", "operator"), default="orch")
@@ -360,6 +366,15 @@ def _notify_urgent(con, result):
             result["notify"] = dict(error=f"{type(error).__name__}: {error}"[:300])
 
 
+def _live_jobs():
+    """Best-effort runtime snapshot; None means unknown (callers then never treat an owner as dead)."""
+    from orchd.runtime import Runtime
+    try:
+        return Runtime().live_jobs()
+    except Exception:
+        return None
+
+
 def _intake_main(args):
     """Every outcome is one JSON receipt on stdout; exit 1 for status=failed. A rejected call writes nothing."""
     import sqlite3
@@ -378,8 +393,11 @@ def _intake_main(args):
         if action == "submit":  # grant check before the DB is even opened: a rejected producer writes nothing
             event = payload if isinstance(payload, dict) else {}
             intake.check_producer(producers, args.producer, event.get("provider"), event.get("account"))
-        con = store.connect()
-        if action == "submit":
+        con = None if action == "reconcile" else store.connect()  # reconcile opens the DB read-only until --apply
+        if action == "reconcile":
+            result = intake.reconcile_path(store.home() / "orchd.db", apply=args.apply,
+                                           backup_dir=store.home() / "backups", jobs=_live_jobs())
+        elif action == "submit":
             result = intake.submit(con, payload, producer=args.producer, producers=producers)
             _notify_urgent(con, result)
         elif action == "suggest":
@@ -397,7 +415,7 @@ def _intake_main(args):
             result = intake_decide.decisions(con, args.receipt, orch_id=args.orch, state=args.state)
         elif action == "backlog":
             from orchd import intake_decide
-            result = intake_decide.backlog(con, owner=args.owner)
+            result = intake_decide.backlog(con, owner=args.owner)  # read-only: no runtime probe
         elif action == "notify-reconcile":
             from . import intake_notify
             result = intake_notify.reconcile(con, args.notification_id, args.attempt,
@@ -413,7 +431,7 @@ def _intake_main(args):
             result = intake.exclude(con, args.receipt, reason=args.reason,
                                     rule_version=args.rule_version, actor=args.actor)
         elif action == "bind":
-            result = intake.bind_owner(con, args.receipt, args.owner)
+            result = intake.bind_owner(con, args.receipt, args.owner, only_if_unassigned=args.only_if_unassigned)
             _notify_urgent(con, result)
         elif action == "ack":
             result = intake.ack(con, args.receipts, actor=args.actor)
@@ -455,6 +473,7 @@ HOME_POLICY = {
     ("config", "show"): "skip", ("config", "get"): "skip", ("config", "set"): "skip", ("config", "unset"): "skip",
     ("binding",): "write",  # --status -> warn
     ("entry", "thread"): "warn", ("entry", "reconcile"): "write",  # no --apply -> warn
+    ("intake", "reconcile"): "write",  # no --apply -> warn
     ("entry", "tag"): "write", ("entry", "send"): "write", ("entry", "ask"): "write",
     ("entry-question", "show"): "warn", ("entry-question", "snooze"): "write", ("entry-question", "un-snooze"): "write",
     ("entry-question", "cancel"): "write", ("entry-question", "supersede"): "write", ("entry-question", "answer"): "write",
@@ -478,7 +497,7 @@ def _home_policy(args):
     action = next((getattr(args, d) for d in ACTION_DEST if getattr(args, d, None)), None)
     policy = HOME_POLICY.get((cmd, action) if action else (cmd,), "write")  # unknown -> write (tests keep the table complete)
     if policy == "write" and (getattr(args, "dry_run", False) or (cmd == "binding" and args.status)
-                              or (cmd == "entry" and action == "reconcile" and not args.apply)):
+                              or (cmd in ("entry", "intake") and action == "reconcile" and not args.apply)):
         return "warn"
     return policy
 

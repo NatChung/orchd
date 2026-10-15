@@ -9,7 +9,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import app_worker, orch_revive, paths, question_summary, store, verify as verification, worker_health
+from . import app_worker, intake, orch_revive, paths, question_summary, store, verify as verification, worker_health
 from .orch_health import owner_health
 from .runtime import (DEFAULT_ORCH_MODEL, ORCH_MODELS, WORKER_MODELS,
                       claude_job_alive, error_detail, worker_kind)
@@ -1278,6 +1278,10 @@ def _sweep_entry_questions(con, new_orch):
 def adopt(con, rt, new_orch, task_ids=(), from_orch=None, force=False):
     """Operator-run (CLI) transfer of open tasks to another Orch. Never automatic.
 
+    Received intake receipts (#62) move with the tasks, in the same transaction: those owned by each old Orch
+    the move names (every owner of the listed tasks, or --from). acked and excluded receipts keep their owner.
+    With --from, an old Orch that has no open task but still has received receipts is adopted too.
+
     An old owner that is alive or unknown is refused unless force; only a confirmed-dead one moves freely.
     Unknown is not live proof. The move commits first, then both Orchs are woken best-effort: a failed wake
     never undoes or repeats the move. The result explicitly says committed, with notification failures
@@ -1292,6 +1296,8 @@ def adopt(con, rt, new_orch, task_ids=(), from_orch=None, force=False):
         raise ValueError(f"unknown orch {new_orch}; the new owner must be registered")
     if target["stopped_at"] is not None:
         raise ValueError(f"orch {new_orch} is stopped")
+    if from_orch == new_orch:
+        raise ValueError(f"orch {new_orch} cannot adopt from itself")
     try:
         jobs = rt.live_jobs()
     except Exception:
@@ -1310,13 +1316,16 @@ def adopt(con, rt, new_orch, task_ids=(), from_orch=None, force=False):
         tasks = [open_by_id[t] for t in task_ids]
     else:
         tasks = [t for t in open_by_id.values() if t["orch_thread"] == from_orch]
-        if not tasks:
-            raise ValueError(f"orch {from_orch} has no open tasks")
+        if not tasks and not intake.received_of(con, [from_orch]):
+            raise ValueError(f"nothing to adopt: orch {from_orch} has no open tasks or received intake receipts")
     for t in tasks:
         if t["orch_thread"] == new_orch:
             raise ValueError(f"task {t['id']} already belongs to {new_orch}")
     olds = {}
     old_rows = {}
+    if from_orch and from_orch != new_orch:  # a task-less adopt (receipts only) is gated like any other
+        old_rows[from_orch] = store.get_orch(con, from_orch)
+        olds[from_orch] = owner_health(old_rows[from_orch], jobs)
     for t in tasks:
         owner = t["orch_thread"]
         if owner not in olds:
@@ -1327,7 +1336,13 @@ def adopt(con, rt, new_orch, task_ids=(), from_orch=None, force=False):
         detail = ", ".join(f"{o} is {h['state']} ({h['reason']})" for o, h in blocked.items())
         raise ValueError(f"refusing to adopt: {detail}. Only a confirmed-dead owner moves without --force; "
                          "unknown is not proof the owner is gone")
-    moves = store.AdoptionMoves(target, old_rows, lambda c: _sweep_entry_questions(c, new_orch))
+    moved_receipts = []
+
+    def in_transaction(c):
+        _sweep_entry_questions(c, new_orch)
+        moved_receipts[:] = intake.adopt_receipts(c, [o for o in olds if o != new_orch], new_orch)
+
+    moves = store.AdoptionMoves(target, old_rows, in_transaction)
     for t in tasks:
         health = olds[t["orch_thread"]]
         body = f"adopted from {t['orch_thread']} ({health['state']}): {_adopt_summary(con, t)}"
@@ -1342,6 +1357,8 @@ def adopt(con, rt, new_orch, task_ids=(), from_orch=None, force=False):
         if health["state"] == "dead":
             continue  # confirmed dead: nobody to tell
         owned = [t for t in tasks if t["orch_thread"] == owner]
+        if not owned:
+            continue  # receipts only: a task-bound notice has no task to hang on
         text = (f"[orchd] Operator moved {len(owned)} task(s) from you to {new_orch}: "
                 + ", ".join(f"{t['repo']}/{t['id']}" for t in owned) + ". They are no longer yours.")
         mid = None
@@ -1394,7 +1411,8 @@ def adopt(con, rt, new_orch, task_ids=(), from_orch=None, force=False):
                             [(new_owner_error, mid) for t, mid in zip(tasks, message_ids) if t in current])
         except Exception as recording_error:
             error_recording_failures[new_orch] = f"{type(recording_error).__name__}: {recording_error}"[:500]
-    return dict(committed=True, adopted=[t["id"] for t in tasks], to_orch=new_orch, forced=bool(force),
+    return dict(committed=True, adopted=[t["id"] for t in tasks], intake_receipts=list(moved_receipts),
+                to_orch=new_orch, forced=bool(force),
                 superseded=superseded, notification_errors=notification_errors,
                 new_owner_error=new_owner_error, error_recording_failures=error_recording_failures,
                 from_orch={o: h["state"] for o, h in olds.items()},

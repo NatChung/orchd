@@ -198,11 +198,11 @@ def _pending_strays(con):
         (e["id"], e["orch_id"], *OPEN_QUESTION_STATES))]
 
 
-def _backup(con, backup_dir):
+def _backup(con, backup_dir, label="pre-question-reconcile"):
     if backup_dir is None:
         raise ValueError("reconcile --apply needs a backup directory")
     Path(backup_dir).mkdir(parents=True, exist_ok=True)
-    backup = Path(backup_dir) / f"orchd-{time.strftime('%Y%m%d-%H%M%S')}-pre-question-reconcile.db"
+    backup = Path(backup_dir) / f"orchd-{time.strftime('%Y%m%d-%H%M%S')}-{label}.db"
     dest = sqlite3.connect(backup)
     try:
         con.backup(dest)

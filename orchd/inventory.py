@@ -24,7 +24,10 @@ def obligations(con, orch_id):
         "SELECT COUNT(*) FROM entry_messages WHERE orch_id=? AND "
         "(read_at IS NULL OR delivery!='delivered' OR question_state IN ('current','queued'))",
         (orch_id,)).fetchone()[0]
-    return dict(notification_count=messages, entry_pending_count=pending, binding_count=entries)
+    intake_received = con.execute("SELECT COUNT(*) FROM intake_events WHERE state='received' AND owner_orch=?",
+                                  (orch_id,)).fetchone()[0]
+    return dict(notification_count=messages, entry_pending_count=pending, binding_count=entries,
+                intake_received_count=intake_received)
 
 
 def _observe(con, row, health, attached, now):
@@ -99,7 +102,8 @@ def render(report, *, all=False):
     if not all:
         dead = sum(r["health"] == "dead" and r["has_obligations"] for r in report["orchs"])
         if dead:
-            lines.append(f"{dead} dead Orch(s) still have tasks, notifications, questions or bindings → orchd adopt")
+            lines.append(f"{dead} dead Orch(s) still have tasks, notifications, questions, received intake or bindings "
+                         "→ orchd adopt (or orchd intake reconcile)")
         unknown = report["counts"]["unknown"]
         if unknown:
             lines.append(f"{unknown} Orch(s) have unknown health (including unverified Codex) → orchd orch list --all")
