@@ -225,6 +225,62 @@ CREATE TABLE IF NOT EXISTS intake_approvals(
     actor TEXT NOT NULL,
     created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS intake_content(
+    receipt_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    text TEXT,
+    unavailable_reason TEXT,
+    text_sha256 TEXT,
+    text_bytes INTEGER NOT NULL DEFAULT 0,
+    attachments TEXT NOT NULL DEFAULT '[]',
+    created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS intake_suggestions(
+    receipt_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    suggestion_sha256 TEXT NOT NULL,
+    urgency TEXT NOT NULL,
+    body TEXT NOT NULL,
+    producer TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY(receipt_id, revision)
+);
+CREATE TABLE IF NOT EXISTS intake_notifications(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    receipt_id TEXT NOT NULL,
+    owner_orch TEXT NOT NULL,
+    urgency TEXT NOT NULL DEFAULT 'normal',
+    state TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    due_at REAL NOT NULL,
+    delivered_at REAL,
+    error TEXT,
+    created_at REAL NOT NULL,
+    UNIQUE(receipt_id, owner_orch)
+);
+CREATE TABLE IF NOT EXISTS intake_decisions(
+    decision_id TEXT PRIMARY KEY,
+    receipt_id TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    action TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    owner_orch TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    goal_id TEXT,
+    goal_na_reason TEXT,
+    issue_ref TEXT,
+    issue_na_reason TEXT,
+    task_id TEXT,
+    question_id INTEGER,
+    approval TEXT,
+    external_receipt TEXT,
+    state TEXT NOT NULL,
+    request_sha256 TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    created_at REAL NOT NULL,
+    completed_at REAL
+);
+CREATE INDEX IF NOT EXISTS intake_decisions_receipt ON intake_decisions(receipt_id, created_at);
 """
 
 # Columns added after v1. Nullable so old rows and old code keep working against the same DB.
@@ -264,27 +320,28 @@ def connect(path=None):
     con = sqlite3.connect(path, timeout=30, isolation_level=None)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
-    con.executescript(SCHEMA)
-    have = {r["name"] for r in con.execute("PRAGMA table_info(tasks)")}
-    for column in TASK_COLUMNS:
-        if column.split()[0] not in have:
-            try:
-                con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
-            except sqlite3.OperationalError:  # another process added it first
-                pass
-    for table, columns in (("messages", MESSAGE_COLUMNS), ("entry_messages", ENTRY_MESSAGE_COLUMNS),
-                           ("orchs", ORCH_COLUMNS), ("entry_answer_submissions", SUBMISSION_COLUMNS),
-                           ("intake_events", ("excluded_at REAL", "excluded_by TEXT",
-                                              "exclusion_reason TEXT", "exclusion_rule_version TEXT"))):
-        have = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
-        for column in columns:
+    try:
+        con.executescript("BEGIN IMMEDIATE;\n" + SCHEMA)
+        have = {r["name"] for r in con.execute("PRAGMA table_info(tasks)")}
+        for column in TASK_COLUMNS:
             if column.split()[0] not in have:
-                try:
+                con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+        for table, columns in (("intake_content", ("unavailable_reason TEXT",)),
+                               ("messages", MESSAGE_COLUMNS), ("entry_messages", ENTRY_MESSAGE_COLUMNS),
+                               ("orchs", ORCH_COLUMNS), ("entry_answer_submissions", SUBMISSION_COLUMNS),
+                               ("intake_events", ("excluded_at REAL", "excluded_by TEXT",
+                                                  "exclusion_reason TEXT", "exclusion_rule_version TEXT"))):
+            have = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
+            for column in columns:
+                if column.split()[0] not in have:
                     con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
-                except sqlite3.OperationalError:  # another process added it first
-                    pass
-    # After the columns exist: on an early-draft DB this index would fail inside SCHEMA.
-    con.execute("CREATE UNIQUE INDEX IF NOT EXISTS entry_messages_source ON entry_messages(source_thread, source_item_id)")
+        # After the columns exist: on an early-draft DB this index would fail inside SCHEMA.
+        con.execute("CREATE UNIQUE INDEX IF NOT EXISTS entry_messages_source ON entry_messages(source_thread, source_item_id)")
+        con.commit()
+    except BaseException:
+        con.rollback()
+        con.close()
+        raise
     return con
 
 

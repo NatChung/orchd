@@ -18,7 +18,7 @@
   orchd verify ID [--timeout S]               verifier worker: rerun the verified task's locked command at its locked SHA
   orchd orch list [--all] [--json] [--restore ID]          live/resumable Orchs; --all includes archived/unknown
   orchd orch attach ID [--viewer]                  attach an existing Claude Orch (resume its conversation if idle)
-  orchd intake submit|pending|bind|ack|exclude|classify|draft|draft-show|approve|claim|receipt|cancel   local intake queue and reply approvals (docs/intake.md)
+  orchd intake submit|suggest|pending|bind|ack|exclude|classify|deliver|show|decide|resolve|decisions|backlog|draft|draft-show|approve|claim|receipt|cancel   local intake queue and reply approvals (docs/intake.md)
   orchd list                                  open tasks, worker/Orch health, unread notification failures
   orchd goal add|set|show|list|export --md      central goals, audit history, markdown snapshot
   orchd board --html PATH                     private static project board, no inbox consumption
@@ -196,6 +196,31 @@ def build_parser():
             command.add_argument("--actor", choices=("orch", "operator"), default="operator" if action == "approve" else "orch")
         if action == "receipt":
             command.add_argument("--actor", choices=("connector", "operator"), default="connector")
+    intake_suggest = intake_actions.add_parser("suggest", help="producer: append a suggestion revision to a v2 event (--file PATH or -)")
+    intake_suggest.add_argument("--file", default="-", help="JSON input; - is stdin")
+    intake_suggest.add_argument("--producer", required=True, help="name granted in [intake.producers.NAME]")
+    intake_suggest.add_argument("--receipt", required=True)
+    intake_deliver = intake_actions.add_parser("deliver", help="wake owners with due intake notifications (retry + recovery scan)")
+    intake_reconcile = intake_actions.add_parser("notify-reconcile", help="reconcile an uncertain wake after transport read-back")
+    intake_reconcile.add_argument("notification_id", type=int)
+    intake_reconcile.add_argument("attempt", type=int)
+    intake_reconcile.add_argument("--delivered", choices=("yes", "no"), required=True)
+    intake_reconcile.add_argument("--detail", required=True)
+    intake_deliver.add_argument("--urgent-only", action="store_true", help="only urgent notifications")
+    intake_event_show = intake_actions.add_parser("show", help="read-only: one v2 event's original text and suggestions (owner or operator)")
+    intake_event_show.add_argument("--receipt", required=True)
+    intake_event_show.add_argument("--as", dest="viewer", required=True, help="owning Orch id, or 'operator'")
+    for action, helptext in (("decide", "Orch: record attach_existing|create_issue|ask_nat|dispatch|record|ignore for an owned receipt (--file PATH or -)"),
+                             ("resolve", "Orch: finish an open decision with read-back evidence (--file PATH or -)")):
+        command = intake_actions.add_parser(action, help=helptext)
+        command.add_argument("--file", default="-", help="JSON input; - is stdin")
+        command.add_argument("--orch", required=True, help="the deciding Orch id (must own the receipt)")
+    intake_decisions = intake_actions.add_parser("decisions", help="read-only: decision trace receipt -> issue/goal/task/question")
+    intake_decisions.add_argument("--receipt")
+    intake_decisions.add_argument("--orch")
+    intake_decisions.add_argument("--state", choices=("intent", "uncertain", "completed", "failed"))
+    intake_backlog = intake_actions.add_parser("backlog", help="read-only: queues, unassigned, notification failures, open decisions")
+    intake_backlog.add_argument("--owner")
     intake_pending = intake_actions.add_parser("pending", help="unacked events for an owner; does not consume")
     intake_pending.add_argument("--owner", help="Orch id; omit to list unassigned events")
     intake_pending.add_argument("--limit", type=int, default=100)
@@ -313,6 +338,23 @@ def build_parser():
     return parser
 
 
+def _notify_urgent(con, result):
+    """After the receipt is committed: urgent intake wakes its owner now. A failed wake never fails the call;
+    the notification stays `uncertain` until explicit transport reconciliation."""
+    from orchd import intake_notify
+    from orchd.runtime import Runtime
+    owner = result.get("owner_orch")
+    if not owner or result.get("status") not in ("received", "duplicate", "suggested", "bound", "unchanged"):
+        return
+    row = con.execute("SELECT 1 FROM intake_notifications WHERE receipt_id=? AND owner_orch=? AND urgency='urgent' "
+                      "AND state IN ('pending','failed')", (result.get("receipt_id"), owner)).fetchone()
+    if row is not None:
+        try:
+            result["notify"] = intake_notify.deliver_due(con, Runtime(), only_urgent=True, owner=owner)
+        except Exception as error:
+            result["notify"] = dict(error=f"{type(error).__name__}: {error}"[:300])
+
+
 def _intake_main(args):
     """Every outcome is one JSON receipt on stdout; exit 1 for status=failed. A rejected call writes nothing."""
     import sqlite3
@@ -321,19 +363,44 @@ def _intake_main(args):
     try:
         action = args.intake_action
         payload = None
-        if action in ("submit", "draft", "approve", "receipt", "classify"):
+        if action in ("submit", "suggest", "decide", "resolve", "draft", "approve", "receipt", "classify"):
             try:
                 text = sys.stdin.read() if args.file == "-" else Path(args.file).read_text(encoding="utf-8")
                 payload = json.loads(text)
             except (OSError, UnicodeError, ValueError) as error:
                 raise intake.IntakeError("invalid", f"cannot read JSON input: {type(error).__name__}") from None
-        producers = config.intake_producers() if action == "submit" else None
+        producers = config.intake_producers() if action in ("submit", "suggest") else None
         if action == "submit":  # grant check before the DB is even opened: a rejected producer writes nothing
             event = payload if isinstance(payload, dict) else {}
             intake.check_producer(producers, args.producer, event.get("provider"), event.get("account"))
         con = store.connect()
         if action == "submit":
             result = intake.submit(con, payload, producer=args.producer, producers=producers)
+            _notify_urgent(con, result)
+        elif action == "suggest":
+            from orchd import intake_bridge
+            result = intake_bridge.suggest(con, args.receipt, payload, producer=args.producer, producers=producers)
+            _notify_urgent(con, result)
+        elif action == "show":
+            from orchd import intake_bridge
+            result = intake_bridge.show(con, args.receipt, args.viewer)
+        elif action in ("decide", "resolve"):
+            from orchd import intake_decide
+            result = getattr(intake_decide, action)(con, payload, orch_id=args.orch)
+        elif action == "decisions":
+            from orchd import intake_decide
+            result = intake_decide.decisions(con, args.receipt, orch_id=args.orch, state=args.state)
+        elif action == "backlog":
+            from orchd import intake_decide
+            result = intake_decide.backlog(con, owner=args.owner)
+        elif action == "notify-reconcile":
+            from . import intake_notify
+            result = intake_notify.reconcile(con, args.notification_id, args.attempt,
+                                             delivered=args.delivered == "yes", detail=args.detail)
+        elif action == "deliver":
+            from orchd import intake_notify
+            from orchd.runtime import Runtime
+            result = dict(status="delivered", **intake_notify.deliver_due(con, Runtime(), only_urgent=args.urgent_only))
         elif action == "pending":
             result = intake.pending(con, args.owner, args.limit, after_id=args.after_id,
                                     high_water_id=args.high_water_id, cursor=args.cursor)
@@ -342,6 +409,7 @@ def _intake_main(args):
                                     rule_version=args.rule_version, actor=args.actor)
         elif action == "bind":
             result = intake.bind_owner(con, args.receipt, args.owner)
+            _notify_urgent(con, result)
         elif action == "ack":
             result = intake.ack(con, args.receipts, actor=args.actor)
         elif action == "classify":
