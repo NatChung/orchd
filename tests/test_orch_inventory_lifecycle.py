@@ -237,7 +237,7 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(set(rows['dead']), {'orch_id', 'kind', 'created_at', 'stopped_at', 'health',
                          'health_reason', 'open_task_count', 'archived', 'archived_at', 'first_seen_dead',
                          'last_verified_dead', 'has_obligations', 'notification_count',
-                         'entry_pending_count', 'binding_count'})
+                         'entry_pending_count', 'binding_count', 'intake_received_count'})
 
     def test_mcp_text_keeps_complete_json_including_dead_unknown_and_archived(self):
         self.orch('dead', stopped=True)

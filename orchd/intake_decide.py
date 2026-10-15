@@ -17,6 +17,7 @@ import time
 import uuid
 
 from . import goals, intake, intake_bridge, issue_links, store
+from .orch_health import owner_health
 
 ACTIONS = ("attach_existing", "create_issue", "ask_nat", "dispatch", "record", "ignore")
 IMMEDIATE = ("attach_existing", "record", "ignore")
@@ -321,15 +322,33 @@ def retention_blocked(con, receipt_id):
                        (receipt_id,)).fetchone() is not None
 
 
-def backlog(con, *, now=None, owner=None):
-    """Read-only operational view: queues by owner (oldest age), unassigned, notification trouble, open decisions."""
+def _queue_state(con, owner, jobs):
+    """unassigned | owner_stopped | owner_dead | assigned. Dead needs a runtime snapshot (jobs); without one an
+    owner that is not stopped reads as assigned rather than guessing."""
+    if owner is None:
+        return "unassigned"
+    orch = store.get_orch(con, owner)
+    if orch is not None and orch["stopped_at"] is not None:
+        return "owner_stopped"
+    if jobs is not None and orch is not None and owner_health(orch, jobs)["state"] == "dead":
+        return "owner_dead"
+    return "assigned"
+
+
+def backlog(con, *, now=None, owner=None, jobs=None):
+    """Read-only operational view: queues by owner (oldest age), unassigned, notification trouble, open decisions.
+
+    With owner set (an Orch asking about itself) its own queue is listed, plus every stopped or dead owner's
+    queue (stranded work it may need to adopt) and the unassigned count (receipts it may take)."""
     now = time.time() if now is None else now
-    queues = []
+    queues, unassigned = [], 0
     for row in con.execute("SELECT owner_orch,COUNT(*) n,MIN(received_at) oldest FROM intake_events "
                            "WHERE state='received' GROUP BY owner_orch ORDER BY owner_orch"):
-        if owner is None or row["owner_orch"] == owner:
-            queues.append(dict(owner=row["owner_orch"], waiting=row["n"],
-                               owner_state="assigned" if row["owner_orch"] else "unassigned",
+        state = _queue_state(con, row["owner_orch"], jobs)
+        if row["owner_orch"] is None:
+            unassigned = row["n"]
+        if owner is None or row["owner_orch"] == owner or state in ("owner_stopped", "owner_dead"):
+            queues.append(dict(owner=row["owner_orch"], waiting=row["n"], owner_state=state,
                                oldest_age_seconds=round(now - row["oldest"], 1)))
     notify = {r["state"]: r["n"] for r in con.execute(
         "SELECT state,COUNT(*) n FROM intake_notifications" + (" WHERE owner_orch=?" if owner else "")
@@ -343,5 +362,5 @@ def backlog(con, *, now=None, owner=None):
                                            "JOIN intake_events e USING(receipt_id) WHERE d.state IN ('intent','uncertain') "
                                            "ORDER BY d.created_at")
                       if owner is None or r["current_owner"] == owner]
-    return dict(status="backlog", queues=queues, notifications=notify, notification_failures=failing,
+    return dict(status="backlog", queues=queues, unassigned=unassigned, notifications=notify, notification_failures=failing,
                 open_decisions=open_decisions)

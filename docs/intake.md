@@ -27,7 +27,8 @@ A malformed section fails closed. Identity comes only from `--producer` plus thi
 |---|---|---|
 | `orchd intake submit --producer P [--file F\|-]` | event JSON | `received` / `duplicate` |
 | `orchd intake pending [--owner ORCH_ID] [--limit N] [--cursor C]` | – | (list; omit `--owner` = unassigned; consumes nothing) |
-| `orchd intake bind --receipt R --owner ORCH_ID` | – | `bound` / `unchanged` |
+| `orchd intake bind --receipt R --owner ORCH_ID [--only-if-unassigned]` | – | `bound` / `unchanged` (`skipped` with the flag) |
+| `orchd intake reconcile [--apply]` | – | dry run lists `moved`; `--apply` backs up the DB, then moves |
 | `orchd intake ack R [R...] [--actor orch\|operator]` | – | `acked` (each receipt `acked`/`duplicate`) |
 | `orchd intake exclude --receipt R [R...] --reason CODE --rule-version V --actor orch\|operator` | – | `excluded` (each receipt `excluded`/`duplicate`) |
 | `orchd intake classify --receipt R [--file F\|-]` | `{classification A-D, level L0-L2, todo_id, issue_ref, project}` | `classified` |
@@ -294,3 +295,18 @@ and reopening after rollback. Older code can ignore the additive tables/column a
 Source adapters (W2/W3), MAP/TODO classification logic (W4), dashboard UI (W5), runner and launchd (W6; including scheduling `orchd intake deliver`), pilot (W7).
 Retention purge (7-day/90-day) is not implemented; the snapshot only warns. Pre-send re-checks (did Nat already
 reply, did the source change) belong to the connector before `claim`.
+
+## Owner changes (#62)
+
+- `bind --only-if-unassigned` is a compare-and-set: the `state='received' AND owner_orch IS NULL` condition is in the
+  UPDATE itself, so a receipt another Orch took after the caller listed the unassigned queue is reported `skipped` and
+  never overwritten. Pollers must use it; plain `bind` is the Operator's re-bind.
+- `orchd adopt` / `orchd orch restart` move the old Orch's `received` receipts to the new Orch in the same transaction
+  as the tasks (`intake_log` kind `adopt-bind`; old notification withdrawn, new one queued). `acked` / `excluded` keep
+  their owner. `adopt --from OLD` also works when OLD has no open task but has received receipts.
+- `orchd intake reconcile` (dry run; `--apply` copies the DB first) moves received receipts owned by a stopped or
+  confirmed-dead Orch to the Orch the Desktop entry is bound to (refused if that Orch is not live). Unassigned receipts
+  are never touched: there is no auto-assignment (`default_owner` is not implemented).
+- MCP `intake_take_unassigned {receipt_ids}` binds unassigned receipts to the caller only (same compare-and-set;
+  another owner rejects the batch with `not_owner`). `intake_backlog` adds `unassigned` and lists queues whose owner is
+  `owner_stopped` / `owner_dead`.

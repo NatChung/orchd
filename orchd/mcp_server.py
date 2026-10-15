@@ -295,8 +295,16 @@ TOOLS.extend([
      "description": "Read-only: your decision trace receipt -> decision -> issue/goal/task/question, with reason and state.",
      "inputSchema": {"type": "object", "properties": {"receipt_id": {"type": "string"}, "state": {"type": "string"}}}},
     {"name": "intake_backlog", "annotations": {"readOnlyHint": True},
-     "description": "Read-only: your waiting receipts and age, unassigned count, notification failures and open decisions.",
+     "description": "Read-only: your waiting receipts and age, the unassigned count, queues whose owner is stopped or dead "
+                    "(owner_state owner_stopped / owner_dead: Operator can move them with orchd adopt or orchd intake "
+                    "reconcile), notification failures and open decisions.",
      "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "intake_take_unassigned", "annotations": {"readOnlyHint": False},
+     "description": "Take unassigned received receipts for yourself (list them with intake_pending unassigned=true). Only "
+                    "binds to you, never to another Orch; a receipt owned by someone else rejects the whole batch (not_owner). "
+                    "Taking does not decide or ack: you are then the owner and decide with intake_decide." + _INTAKE_NOTE,
+     "inputSchema": {"type": "object", "required": ["receipt_ids"], "properties": {
+         "receipt_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1}}}},
 ])
 
 GOAL_PROPERTIES = {key: {"type": "string"} for key in goals.TEXT_FIELDS}
@@ -379,7 +387,7 @@ ENTRY_INSTRUCTIONS = (
     "through and why. delivered never means read or approved.")
 
 
-def intake_call(name, args, thread, con):
+def intake_call(name, args, thread, con, rt=None):
     """The caller's own thread id is the only identity; arguments cannot name another owner or an actor."""
     from . import intake, intake_bridge, intake_decide
     if not thread:
@@ -396,7 +404,13 @@ def intake_call(name, args, thread, con):
     if name == "intake_decisions":
         return intake_decide.decisions(con, args.get("receipt_id"), orch_id=thread, state=args.get("state"))
     if name == "intake_backlog":
-        return intake_decide.backlog(con, owner=thread)
+        try:
+            jobs = rt.live_jobs() if rt is not None else None
+        except Exception:
+            jobs = None  # no runtime snapshot: stopped owners are still flagged, dead ones are not guessed
+        return intake_decide.backlog(con, owner=thread, jobs=jobs)
+    if name == "intake_take_unassigned":
+        return intake.take_unassigned(con, args.get("receipt_ids"), thread)
     raise ValueError(f"unknown tool {name}")
 
 
@@ -413,7 +427,7 @@ def call(name, args, thread, con, rt):
         return (issue_links.link(con, args["task_id"], args["ref"], **options) if name == "task_link"
                 else issue_links.unlink(con, args["task_id"], **options))
     if name.startswith("intake_"):
-        return intake_call(name, args, thread, con)
+        return intake_call(name, args, thread, con, rt)
     if name == "goal_list":
         return goals.list_goals(con, args.get("repo"), args.get("status"))
     if name == "goal_set":
