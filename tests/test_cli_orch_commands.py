@@ -49,6 +49,7 @@ class OrchCommandsTest(unittest.TestCase):
             connect = stack.enter_context(patch("orchd.cli.store.connect", return_value=con))
             stack.enter_context(patch("orchd.cli.store.home", return_value=Path("/mock")))
             stack.enter_context(patch("pathlib.Path.exists", return_value=registry))
+            stack.enter_context(patch("orchd.home_migrations.ensure_current", return_value=[]))  # not under test; Path.exists is faked
             stack.enter_context(patch("orchd.cli.Runtime", return_value=runtime))
             snap = stack.enter_context(patch("orchd.stats.open_snapshot", return_value=snapshot))
             for name in ("core.start_orch", "core.stop_orch", "orch_restart.restart", "inventory.attach", "inventory.restore", "inventory.list_orchs", "inventory.render"):

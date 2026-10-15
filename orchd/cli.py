@@ -438,8 +438,52 @@ def _intake_main(args):
     return 1 if result.get("status") == "failed" else 0
 
 
+# Every leaf subcommand is classified (tests/test_home_migrations.py fails on an unlisted one):
+#   write - applies a stale Orch home migration at startup, then runs
+#   warn  - read-only: only prints the stale-home warning, never writes the home
+#   skip  - does not touch the Orch home rules (init/upgrade manage them; the rest never read the home)
+# Plain `list` is warn: core.list_open only reads.
+HOME_POLICY = {
+    ("mcp",): "write",
+    ("orch", "start"): "write", ("orch", "stop"): "write", ("orch", "restart"): "write",  # --dry-run -> warn
+    ("orch", "list"): "write", ("orch", "attach"): "write",
+    ("init",): "skip", ("upgrade",): "skip", ("quota",): "skip", ("doctor",): "skip",
+    ("config", "show"): "skip", ("config", "get"): "skip", ("config", "set"): "skip", ("config", "unset"): "skip",
+    ("binding",): "write",  # --status -> warn
+    ("entry", "thread"): "warn", ("entry", "tag"): "write", ("entry", "send"): "write", ("entry", "ask"): "write",
+    ("entry-question", "show"): "warn", ("entry-question", "snooze"): "write", ("entry-question", "un-snooze"): "write",
+    ("entry-question", "cancel"): "write", ("entry-question", "supersede"): "write", ("entry-question", "answer"): "write",
+    ("task-question", "answer"): "write", ("task-question", "dismiss"): "write",
+    **{("intake", a): "write" for a in ("submit", "draft", "approve", "receipt", "classify", "suggest", "deliver",
+                                        "notify-reconcile", "decide", "resolve", "exclude", "bind", "ack", "claim", "cancel")},
+    **{("intake", a): "warn" for a in ("show", "decisions", "backlog", "pending", "draft-show")},
+    ("task", "link"): "write", ("task", "unlink"): "write",
+    ("ack",): "write", ("report",): "write", ("progress",): "write", ("flush",): "write",
+    ("watch",): "warn", ("summary",): "warn", ("_auto-retry",): "write", ("ask",): "write", ("verify",): "write", ("close",): "write", ("adopt",): "write",
+    ("list",): "warn", ("stats",): "warn", ("snapshot",): "warn", ("board",): "warn",
+    ("goal", "add"): "write", ("goal", "set"): "write",
+    ("goal", "show"): "warn", ("goal", "list"): "warn", ("goal", "export"): "warn",
+}
+ACTION_DEST = ("orch_action", "entry_action", "question_action", "task_action", "task_question_action",
+               "intake_action", "goal_cmd", "config_action")
+
+
+def _home_policy(args):
+    cmd = args.cmd.split()[0]
+    action = next((getattr(args, d) for d in ACTION_DEST if getattr(args, d, None)), None)
+    policy = HOME_POLICY.get((cmd, action) if action else (cmd,), "write")  # unknown -> write (tests keep the table complete)
+    if policy == "write" and (getattr(args, "dry_run", False) or (cmd == "binding" and args.status)):
+        return "warn"
+    return policy
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    policy = _home_policy(args)
+    if policy != "skip":  # one gate for every entry point: rules in the Orch home must not lag the installed code (#58)
+        from orchd import home_migrations
+        for line in home_migrations.ensure_current(write=policy == "write"):
+            print(line, file=sys.stderr)
     if args.cmd == 'quota':
         from orchd import quota
         cache = quota.Cache()
