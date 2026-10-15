@@ -6,14 +6,14 @@ import time
 import uuid
 from datetime import date, datetime, timezone
 
-from . import store
+from . import issue_links, store
 
 TEXT_FIELDS = ("repo", "type", "intent", "pg", "sprint_goal", "done_when", "evidence", "authority",
                "status", "ball", "blocker", "source", "plan")
 DATE_FIELDS = ("sprint_start", "sprint_end", "follow_up_date", "last_confirmed_date", "deadline",
                "last_progress_date", "waiting_nat_since")
 FIELDS = TEXT_FIELDS + DATE_FIELDS + ("companies", "v", "j")
-INPUT_FIELDS = FIELDS + ("linked_tasks",)
+INPUT_FIELDS = FIELDS + ("linked_tasks", "issues")
 
 
 def validate(fields):
@@ -54,7 +54,31 @@ def validate(fields):
             raise ValueError("linked_tasks must be a list of {task_id, goal_critical: boolean}")
         if len({t["task_id"] for t in links}) != len(links):
             raise ValueError("linked_tasks contains duplicate task ids")
+    if "issues" in out:
+        refs = out["issues"]
+        if not isinstance(refs, list):
+            raise ValueError("issues must be an ordered JSON array; omit to preserve, [] to clear")
+        canonical = []
+        for ref in refs:
+            issue_links.validate_ref(ref)
+            canonical.append(ref.lower() if ref.startswith("github:") else ref)
+        if len(set(canonical)) != len(canonical):
+            raise ValueError("issues contains duplicate canonical refs")
+        out["issues"] = canonical
     return out
+
+
+def issue_scope(con, goal_id):
+    """Complete local membership, with tracker state deliberately unresolved."""
+    available = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='goal_issues'").fetchone() is not None
+    events = con.execute("SELECT id,changes FROM goal_history WHERE goal_id=? ORDER BY id", (goal_id,)).fetchall()
+    configured = any("issues" in json.loads(r["changes"]) for r in events)
+    issues = [dict(issue_ref=r["issue_ref"], position=r["position"], resolution="unresolved") for r in con.execute(
+        "SELECT issue_ref,position FROM goal_issues WHERE goal_id=? AND removed_at IS NULL ORDER BY position,issue_ref",
+        (goal_id,))] if available else None
+    return dict(issues=issues, issue_scope=dict(version=1, available=available, complete=available,
+        state=("set" if configured else "unset") if available else "unsupported",
+        revision=(events[-1]["id"] if events else 0) if available else None))
 
 
 def _record(row):
@@ -63,13 +87,15 @@ def _record(row):
     return out
 
 
-def get(con, goal_id, *, history=False):
+def get(con, goal_id, *, history=False, include_issues=False):
     row = con.execute("SELECT * FROM goals WHERE id=?", (goal_id,)).fetchone()
     if row is None:
         raise KeyError(f"unknown goal {goal_id}")
     out = _record(row)
     out["linked_tasks"] = [dict(t) for t in con.execute(
         "SELECT id AS task_id, title, status, goal_critical FROM tasks WHERE goal_id=? ORDER BY created_at", (goal_id,))]
+    if include_issues:
+        out.update(issue_scope(con, goal_id))
     if history:
         out["history"] = [dict(id=r["id"], actor=r["actor"], created_at=r["created_at"], changes=json.loads(r["changes"]))
                           for r in con.execute("SELECT * FROM goal_history WHERE goal_id=? ORDER BY id", (goal_id,))]
@@ -83,21 +109,25 @@ def list_goals(con, repo=None, status=None):
             clauses.append(f"{key}=?")
             values.append(value)
     where = " WHERE " + " AND ".join(clauses) if clauses else ""
-    return [get(con, r["id"]) for r in con.execute("SELECT id FROM goals" + where + " ORDER BY repo, created_at, id", values)]
+    return [get(con, r["id"], include_issues=True) for r in con.execute("SELECT id FROM goals" + where + " ORDER BY repo, created_at, id", values)]
 
 
-def set_goal(con, goal_id=None, *, actor, **fields):
+def set_goal(con, goal_id=None, *, actor, expected_revision=None, **fields):
     """No id creates a goal; an id updates an existing one. No-op updates add no history."""
     if not isinstance(actor, str) or not actor.strip():
         raise ValueError("goal change requires an actor")
     fields = validate(fields)
     links = fields.pop("linked_tasks", None)
+    issues = fields.pop("issues", None)
     creating = goal_id is None
     if creating and "repo" not in fields:
         raise ValueError("new goal requires repo")
     now = time.time()
     with store.immediate(con):
-        old = None if creating else get(con, goal_id)
+        old = None if creating else get(con, goal_id, include_issues=True)
+        if issues is not None and not creating:
+            if type(expected_revision) is not int or expected_revision != old["issue_scope"]["revision"]:
+                raise ValueError("stale or missing expected_revision; reread goal_list before replacing issues")
         if old and "repo" in fields and fields["repo"] != old["repo"]:
             raise ValueError("a goal's repo is immutable; create a new goal")
         combined = {**(old or {}), **fields}
@@ -126,7 +156,16 @@ def set_goal(con, goal_id=None, *, actor, **fields):
             for link in links:
                 con.execute("UPDATE tasks SET goal_id=?, goal_critical=? WHERE id=?",
                             (goal_id, link["goal_critical"], link["task_id"]))
-        new = get(con, goal_id)
+        if issues is not None:
+            con.execute("UPDATE goal_issues SET removed_at=?,updated_at=? WHERE goal_id=? AND removed_at IS NULL "
+                        "AND issue_ref NOT IN (SELECT value FROM json_each(?))", (now, now, goal_id, json.dumps(issues)))
+            for position, ref in enumerate(issues):
+                con.execute("INSERT INTO goal_issues(goal_id,issue_ref,position,created_at,updated_at) VALUES(?,?,?,?,?) "
+                            "ON CONFLICT(goal_id,issue_ref) DO UPDATE SET position=excluded.position, "
+                            "updated_at=excluded.updated_at,removed_at=NULL "
+                            "WHERE goal_issues.position != excluded.position OR goal_issues.removed_at IS NOT NULL",
+                            (goal_id, ref, position, now, now))
+        new = get(con, goal_id, include_issues=True)
         changed = {k: {"before": None if creating else old[k], "after": new[k]}
                    for k in FIELDS if creating or old[k] != new[k]}
         if links is not None:
@@ -134,11 +173,15 @@ def set_goal(con, goal_id=None, *, actor, **fields):
             after = _links(new)
             if before != after:
                 changed["linked_tasks"] = dict(before=before, after=after)
+        if issues is not None:
+            before = None if creating or old["issue_scope"]["state"] == "unset" else [r["issue_ref"] for r in old["issues"]]
+            if before != issues:
+                changed["issues"] = dict(before=before, after=issues)
         if changed:
             con.execute("UPDATE goals SET updated_at=? WHERE id=?", (now, goal_id))
             con.execute("INSERT INTO goal_history(goal_id,actor,created_at,changes) VALUES(?,?,?,?)",
                         (goal_id, actor, now, json.dumps(changed, ensure_ascii=False)))
-    return get(con, goal_id, history=True)
+    return get(con, goal_id, history=True, include_issues=True)
 
 
 def _links(goal):

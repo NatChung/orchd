@@ -121,18 +121,25 @@ def read(path, *, answered_limit=100, schema_version=1):
             worker_questions.append(item)
         # App receipts are separate evidence, never joined to a reply by body or task status.
         deliveries = [dict(r) for r in con.execute("SELECT * FROM worker_deliveries ORDER BY created_at,id")]
-        goal_rows = [goals.get(con, r["id"], history=True) for r in con.execute(
+        goal_rows = [goals.get(con, r["id"], history=True, include_issues=schema_version == 2) for r in con.execute(
             "SELECT id FROM goals ORDER BY repo,created_at,id")]
         if schema_version == 2:
             for goal in goal_rows:
+                goal["issue_scope_mismatches"] = []
+                members = {item["issue_ref"] for item in goal["issues"] or []}
                 for task in goal["linked_tasks"]:
-                    task["issue_ref"] = current_refs.get(task["task_id"])
+                    ref = current_refs.get(task["task_id"])
+                    task["issue_ref"] = ref
+                    canonical = ref.lower() if ref and ref.startswith("github:") else ref
+                    if goal["issue_scope"]["state"] == "set" and canonical and canonical not in members:
+                        goal["issue_scope_mismatches"].append(dict(task_id=task["task_id"], issue_ref=canonical))
         return dict(generated_at=generated_at, source_db=str(path), schema_version=schema_version,
                     schema_fingerprint=hashlib.sha256(json.dumps(schema).encode()).hexdigest(),
                     answered_limit=answered_limit, goals=goal_rows, tasks=tasks,
                     entry_messages=entry_messages, replies=replies, worker_questions=worker_questions,
                     worker_answers=worker_answers, worker_deliveries=deliveries,
-                    **(dict(issue_links=dict(version=1, available=True, history=link_history),
+                    **(dict(goal_issues=dict(version=1, available="goal_issues" in tables, complete="goal_issues" in tables),
+                            issue_links=dict(version=1, available=True, history=link_history),
                             intake=intake.project(con, tables, generated_at),
                             pending_worker_questions=task_questions.pending(con, task_rows.values()),
                             worker_question_resolutions=task_questions.dismissals(con),
