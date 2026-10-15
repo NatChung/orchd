@@ -18,7 +18,7 @@
   orchd verify ID [--timeout S]               verifier worker: rerun the verified task's locked command at its locked SHA
   orchd orch list [--all] [--json] [--restore ID]          live/resumable Orchs; --all includes archived/unknown
   orchd orch attach ID [--viewer]                  attach an existing Claude Orch (resume its conversation if idle)
-  orchd intake submit|suggest|pending|bind|ack|exclude|classify|deliver|show|draft|draft-show|approve|claim|receipt|cancel   local intake queue and reply approvals (docs/intake.md)
+  orchd intake submit|suggest|pending|bind|ack|exclude|classify|deliver|show|decide|resolve|decisions|backlog|draft|draft-show|approve|claim|receipt|cancel   local intake queue and reply approvals (docs/intake.md)
   orchd list                                  open tasks, worker/Orch health, unread notification failures
   orchd goal add|set|show|list|export --md      central goals, audit history, markdown snapshot
   orchd board --html PATH                     private static project board, no inbox consumption
@@ -205,6 +205,17 @@ def build_parser():
     intake_event_show = intake_actions.add_parser("show", help="read-only: one v2 event's original text and suggestions (owner or operator)")
     intake_event_show.add_argument("--receipt", required=True)
     intake_event_show.add_argument("--as", dest="viewer", required=True, help="owning Orch id, or 'operator'")
+    for action, helptext in (("decide", "Orch: record attach_existing|create_issue|ask_nat|dispatch|record|ignore for an owned receipt (--file PATH or -)"),
+                             ("resolve", "Orch: finish an open decision with read-back evidence (--file PATH or -)")):
+        command = intake_actions.add_parser(action, help=helptext)
+        command.add_argument("--file", default="-", help="JSON input; - is stdin")
+        command.add_argument("--orch", required=True, help="the deciding Orch id (must own the receipt)")
+    intake_decisions = intake_actions.add_parser("decisions", help="read-only: decision trace receipt -> issue/goal/task/question")
+    intake_decisions.add_argument("--receipt")
+    intake_decisions.add_argument("--orch")
+    intake_decisions.add_argument("--state", choices=("intent", "uncertain", "completed", "failed"))
+    intake_backlog = intake_actions.add_parser("backlog", help="read-only: queues, unassigned, notification failures, open decisions")
+    intake_backlog.add_argument("--owner")
     intake_pending = intake_actions.add_parser("pending", help="unacked events for an owner; does not consume")
     intake_pending.add_argument("--owner", help="Orch id; omit to list unassigned events")
     intake_pending.add_argument("--limit", type=int, default=100)
@@ -347,7 +358,7 @@ def _intake_main(args):
     try:
         action = args.intake_action
         payload = None
-        if action in ("submit", "suggest", "draft", "approve", "receipt", "classify"):
+        if action in ("submit", "suggest", "decide", "resolve", "draft", "approve", "receipt", "classify"):
             try:
                 text = sys.stdin.read() if args.file == "-" else Path(args.file).read_text(encoding="utf-8")
                 payload = json.loads(text)
@@ -368,6 +379,15 @@ def _intake_main(args):
         elif action == "show":
             from orchd import intake_bridge
             result = intake_bridge.show(con, args.receipt, args.viewer)
+        elif action in ("decide", "resolve"):
+            from orchd import intake_decide
+            result = getattr(intake_decide, action)(con, payload, orch_id=args.orch)
+        elif action == "decisions":
+            from orchd import intake_decide
+            result = intake_decide.decisions(con, args.receipt, orch_id=args.orch, state=args.state)
+        elif action == "backlog":
+            from orchd import intake_decide
+            result = intake_decide.backlog(con, owner=args.owner)
         elif action == "deliver":
             from orchd import intake_notify
             from orchd.runtime import Runtime

@@ -283,6 +283,11 @@ def ack(con, receipt_ids, *, actor="orch"):
                 raise IntakeError("invalid_state", "an excluded event cannot be acked")
             if row["owner_orch"] is None:
                 raise IntakeError("invalid_state", f"{row['receipt_id']} has no owner; bind one first")
+            if row["state"] != "acked" and row["version"] == 2 and con.execute(
+                    "SELECT 1 FROM intake_decisions WHERE receipt_id=? AND state='completed'",
+                    (row["receipt_id"],)).fetchone() is None:
+                raise IntakeError("invalid_state", f"{row['receipt_id']} is a version-2 event: it is acked by a "
+                                  "completed decision (orchd intake decide / resolve), not by a bare ack")
         results = []
         for row in rows:
             if row["state"] == "acked":
@@ -526,6 +531,7 @@ def project(con, tables, now):
     if not all(t in tables for t in TABLES):
         return dict(version=VERSION, available=False, revision=None, auto_send=AUTO_SEND, warnings=[], sources=[],
                     items=[], drafts=[])
+    from . import intake_decide
     events = con.execute("SELECT * FROM intake_events ORDER BY id DESC LIMIT ?", (ITEM_LIMIT,)).fetchall()[::-1]
     stopped = {r[0] for r in con.execute("SELECT id FROM orchs WHERE stopped_at IS NOT NULL")}
     items, warnings = [], []
@@ -537,6 +543,7 @@ def project(con, tables, now):
         age = now - row["received_at"]
         item["retention"] = ("excluded" if row["state"] == "excluded" else
                              "acked" if row["state"] == "acked" else
+                             "held" if ("intake_decisions" in tables and intake_decide.retention_blocked(con, row["receipt_id"])) else
                              "expired" if age >= RETENTION_SECONDS else
                              "expiring" if age >= RETENTION_SECONDS - WARN_BEFORE_SECONDS else "ok")
         item["draft_refs"] = [dict(draft_id=d["draft_id"], version=d["version"]) for d in con.execute(
