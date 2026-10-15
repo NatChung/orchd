@@ -84,8 +84,11 @@ class DashboardAnswersTest(unittest.TestCase):
         self.assertEqual(self.con.total_changes, before)
         other = core.start_orch(self.con, self.rt, "opus")["id"]
         entry.bind(self.con, self.rt, other, force=True)
-        with self.assertRaises(ValueError):
-            self.submit(q, orch_id=other)
+        with self.assertRaises(ValueError):  # #60: q moved to `other`, so the previous owner no longer answers it
+            self.submit(q, orch_id=self.orch)
+        self.assertEqual(entry._row(self.con, q)["orch_id"], other)
+        self.submit(q, orch_id=other)
+        self.assertEqual(entry._row(self.con, q)["question_state"], "answered")
 
     def test_same_key_different_payload_is_idempotency_conflict_without_writes(self):
         q = self.ask()

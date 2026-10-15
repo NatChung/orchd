@@ -75,6 +75,7 @@ def bind(con, rt, orch_id, entry_id=DEFAULT_ENTRY, force=False):
             con.execute("INSERT INTO entries(id,orch_id,bound_at) VALUES(?,?,?)", (entry_id, orch_id, now))
         elif row["orch_id"] != orch_id:
             con.execute("UPDATE entries SET orch_id=?, bound_at=? WHERE id=?", (orch_id, now, entry_id))
+            sweep_questions(con, get_entry(con, entry_id), "orchd", f"entry rebound to {orch_id}")
     try:  # best effort: the Orch also learns this from its first [orchd entry] wake
         rt.send_uds(orch["socket"], orch["session_id"],
                     f"[orchd entry] Desktop entry {entry_id} is now bound to you. Operator's messages arrive as "
@@ -143,7 +144,8 @@ def _history(con, row, state, actor, reason):
     con.execute("INSERT INTO entry_question_history(question_id,version,from_state,to_state,actor,reason,"
                 "created_at,original_orch_id) "
                 "VALUES(?,?,?,?,?,?,?,?)", (row["id"], row["version"], row["question_state"], state,
-                                        actor, reason, time.time(), row["orch_id"]))
+                                        actor, reason, time.time(),
+                                        dict(row).get("original_orch_id") or row["orch_id"]))
 
 
 def _make_current(con, entry, row, actor="orchd", reason="promote earliest queued question"):
@@ -159,6 +161,63 @@ def _promote(con, entry, actor, reason):
         following = queued_questions(con, entry)
         if following:
             _make_current(con, entry, following[0], actor, reason)
+
+
+OPEN_QUESTION_STATES = ("current", "queued", "snoozed")
+
+
+def sweep_questions(con, entry, actor, reason):
+    """Hand every open question of the entry that sits on another owner to the entry's owner (#60).
+
+    The caller holds the write transaction. History is written before the owner changes, so
+    original_orch_id keeps the asker. One current at most: an incoming current yields to an existing one
+    and queues behind it, in its original queue position. Returns the moved question ids.
+    """
+    stale = con.execute("SELECT * FROM entry_messages WHERE entry_id=? AND kind='question' AND orch_id<>? "
+                        f"AND question_state IN ({','.join('?' * len(OPEN_QUESTION_STATES))}) "
+                        "ORDER BY COALESCE(queue_order,id),id",
+                        (entry["id"], entry["orch_id"], *OPEN_QUESTION_STATES)).fetchall()
+    for row in stale:
+        _history(con, row, row["question_state"], actor, reason)
+        con.execute("UPDATE entry_messages SET orch_id=?, queue_order=COALESCE(queue_order,id), "
+                    "original_orch_id=COALESCE(original_orch_id,?) WHERE id=?", (entry["orch_id"], row["orch_id"], row["id"]))
+        if row["question_state"] == "current" and con.execute(
+                "SELECT 1 FROM entry_messages WHERE entry_id=? AND orch_id=? AND kind='question' "
+                "AND question_state='current' AND id<>?", (entry["id"], entry["orch_id"], row["id"])).fetchone():
+            con.execute("UPDATE entry_messages SET question_state='queued', delivery='held' WHERE id=?", (row["id"],))
+            _history(con, dict(row, orch_id=entry["orch_id"], original_orch_id=row["original_orch_id"] or row["orch_id"]), "queued", actor, "another question is already current")
+    if stale:
+        _promote(con, entry, actor, reason)
+    return [row["id"] for row in stale]
+
+
+def reconcile_all(con, apply=False, backup_dir=None):
+    """One-time, idempotent backfill: move open questions stranded on a previous owner to each entry's owner.
+
+    A dry run only lists them. With apply, the database is copied (SQLite backup API) before the first
+    write, and only when something needs moving, so a second run changes nothing.
+    """
+    moved, backup = [], None
+    entries = con.execute("SELECT * FROM entries ORDER BY id").fetchall()
+    pending = [r["id"] for e in entries for r in con.execute(
+        "SELECT id FROM entry_messages WHERE entry_id=? AND kind='question' AND orch_id<>? "
+        f"AND question_state IN ({','.join('?' * len(OPEN_QUESTION_STATES))}) ORDER BY id",
+        (e["id"], e["orch_id"], *OPEN_QUESTION_STATES))]
+    if not apply or not pending:
+        return dict(moved=pending if not apply else [], backup=None, applied=False)
+    if backup_dir is None:
+        raise ValueError("reconcile --apply needs a backup directory")
+    Path(backup_dir).mkdir(parents=True, exist_ok=True)
+    backup = Path(backup_dir) / f"orchd-{time.strftime('%Y%m%d-%H%M%S')}-pre-question-reconcile.db"
+    dest = sqlite3.connect(backup)
+    try:
+        con.backup(dest)
+    finally:
+        dest.close()
+    with store.immediate(con):
+        for e in entries:
+            moved += sweep_questions(con, get_entry(con, e["id"]), "orchd", "backfill: entry owner differs")
+    return dict(moved=sorted(moved), backup=str(backup), applied=True)
 
 
 def _checked_question(con, entry, question_id, expected_version, expected_state, *, cleanup=False):
@@ -843,7 +902,7 @@ def binding(con, rt, start_orch, new=False, entry_id=DEFAULT_ENTRY):
 
     Reuses the bound Orch unless it is confirmed dead (Q3). One Claude's daemon retired for idling is resumed in
     place (#72). A stopped one is never replaced silently (Q1): that needs new=True, which starts a new Orch and
-    rebinds; the old Orch's open questions stay with it. With no binding yet, it starts one Orch and binds it.
+    rebinds; the old Orch's open questions move to the new one (#60). With no binding yet, it starts one Orch and binds it.
     The folder itself comes from `orchd init`.
     """
     home = paths.interface_home()

@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import shlex
+import sqlite3
 import time
 import uuid
 from pathlib import Path
@@ -1264,6 +1265,18 @@ def _adopt_summary(con, task):
     return "; ".join(parts)
 
 
+def _sweep_entry_questions(con, new_orch):
+    """#60: open questions stranded on a previous owner follow the entry bound to the new Orch. Best effort:
+    the task move already committed, so a failure here never undoes it (`orchd entry reconcile` repeats it)."""
+    from . import entry
+    try:
+        for bound in con.execute("SELECT * FROM entries WHERE orch_id=?", (new_orch,)).fetchall():
+            with store.immediate(con):
+                entry.sweep_questions(con, bound, "orchd", f"adopt by {new_orch}")
+    except sqlite3.Error:
+        pass
+
+
 def adopt(con, rt, new_orch, task_ids=(), from_orch=None, force=False):
     """Operator-run (CLI) transfer of open tasks to another Orch. Never automatic.
 
@@ -1324,6 +1337,7 @@ def adopt(con, rt, new_orch, task_ids=(), from_orch=None, force=False):
                                    recipient_orch=new_orch, old_owner_health=health), ensure_ascii=False)
         moves.append((t["id"], t["orch_thread"], body, evidence))
     message_ids = store.move_task_orch(con, moves, new_orch)
+    _sweep_entry_questions(con, new_orch)
     old_notices = {}
     notification_errors = {}
     error_recording_failures = {}

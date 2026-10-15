@@ -313,7 +313,8 @@ ENTRY_MESSAGE_COLUMNS = ("body_bytes INTEGER", "body_sha256 TEXT", "wire_text TE
                          "source_item_id TEXT", "source_raw TEXT", "source_turn TEXT",
                          "version INTEGER NOT NULL DEFAULT 1", "supersedes INTEGER REFERENCES entry_messages(id)",
                          "superseded_by INTEGER REFERENCES entry_messages(id)", "revisit_at REAL",
-                         "note TEXT", "reason TEXT", "queue_order INTEGER", "notified_at REAL", "issue_ref TEXT")
+                         "note TEXT", "reason TEXT", "queue_order INTEGER", "notified_at REAL", "issue_ref TEXT",
+                         "original_orch_id TEXT")
 
 # Message kinds the Orch reads in its inbox; the rest (dispatch, answer, close, usage) are the event log.
 ORCH_KINDS = ("ack", "progress", "report", "question", "adopt", "task_question_answer", "question_dismissed")

@@ -55,7 +55,8 @@ class LifecycleTest(unittest.TestCase):
         self.assertEqual(audit["actor"], f"orch:{self.orch}")
         self.assertEqual(audit["reason"], "obsolete after handover")
         self.assertEqual(audit["original_orch_id"], old_orch)
-        self.assertEqual(self.show(next_q)["state"], "queued")
+        self.assertEqual(self.show(next_q)["state"], "current")  # #60: the old queue moved, so it is promoted
+        self.assertEqual(self.show(next_q)["history"][-1]["original_orch_id"], old_orch)
         before = self.show(q)
         with self.assertRaisesRegex(ValueError, "mismatch"):
             entry.question_transition(self.con, self.rt, "desktop", q, 2, "cancelled", "snoozed",
@@ -117,16 +118,16 @@ class LifecycleTest(unittest.TestCase):
             self.assertEqual(shown["history"][-1]["original_orch_id"], original)
             self.assertEqual(shown["history"][-1]["actor"], f"orch:{self.orch}")
             self.assertTrue(shown["history"][-1]["reason"])
-        self.assertEqual(self.show(current)["state"], "current")
-        self.assertEqual(self.show(first)["state"], "current")  # old queue stays isolated
+        self.assertEqual(self.show(current)["state"], "queued")
+        self.assertEqual(self.show(first)["state"], "current")  # #60: moved with the entry; the new ask queued behind
         self.assertEqual(self.show(revised)["state"], "queued")
         before = self.show(supersede)
         with self.assertRaisesRegex(ValueError, "mismatch"):
             self.supersede(supersede, version=2, state="superseded")
         self.assertEqual(self.show(supersede), before)
-        with self.assertRaises(ValueError):
-            entry.submit_answer(self.con, self.rt, "desktop", first, 1, "current", "answer", "key",
-                                orch_id=self.orch)
+        # #60: the moved question is the new owner's now, so its answer is accepted.
+        entry.submit_answer(self.con, self.rt, "desktop", first, 1, "current", "answer", "key", orch_id=self.orch)
+        self.assertEqual(self.show(first)["state"], "answered")
 
     def test_cross_entry_cleanup_is_rejected_without_writes(self):
         q = self.ask()
@@ -142,7 +143,7 @@ class LifecycleTest(unittest.TestCase):
                           expected_state="current", reason="cleanup")
         self.assertEqual(self.show(q), before)
 
-    def test_close_cleans_all_owners_but_only_promotes_bound_queue(self):
+    def test_close_cleans_moved_queue_and_promotes_it_first(self):
         task = self.task()
         old_current, old_queued = self.ask(task_id=task), self.ask(task_id=task)
         untouched = self.ask()
@@ -156,8 +157,9 @@ class LifecycleTest(unittest.TestCase):
         core.close(self.con, self.rt, task)
         for q in (old_current, old_queued, new_question):
             self.assertEqual(self.show(q)["state"], "cancelled")
-        self.assertEqual(self.show(untouched)["state"], "queued")
-        self.assertEqual(self.show(current)["state"], "current")
+        # #60: the old queue moved with the entry, so it is promoted ahead of the new owner's own questions.
+        self.assertEqual(self.show(untouched)["state"], "current")
+        self.assertEqual(self.show(current)["state"], "queued")
         self.assertEqual(self.show(queued)["state"], "queued")
 
     def test_close_question_failure_rolls_back_task_history_and_promotion(self):
