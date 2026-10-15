@@ -30,6 +30,30 @@ class NotifyBase(IntakeBase):
 
 
 class OutboxTests(NotifyBase):
+    def test_crash_after_send_is_uncertain_and_not_automatically_retried(self):
+        self.submit2(owner_orch=self.orch)
+        late = self.rows()[0]["created_at"] + 1801
+        def crash(*args):
+            self.rt.sent.append(("synthetic", self.orch, args[-1]))
+            raise SystemExit("crash after transport accepted")
+        with patch.object(intake_notify, "_wake", side_effect=crash):
+            with self.assertRaises(SystemExit):
+                intake_notify.deliver_due(self.con, self.rt, now=late)
+        self.con.close()
+        self.con = store.connect(self.path)
+        intake_notify.deliver_due(self.con, self.rt, now=late + 1)
+        self.assertEqual(len(self.sent_texts()), 1)
+        self.assertEqual(self.rows()[0]["state"], "uncertain")
+        row = self.rows()[0]
+        self.assertIn(f"{row['id']}:1", self.sent_texts()[0])
+        with self.assertRaises(ValueError):
+            intake_notify.reconcile(self.con, row["id"], 0, delivered=True, detail="stale")
+        intake_notify.reconcile(self.con, row["id"], 1, delivered=True, detail="Found wake in transport history")
+        intake_notify.deliver_due(self.con, self.rt, now=late + 2)
+        self.assertEqual(len(self.sent_texts()), 1)
+        self.assertEqual(self.rows()[0]["state"], "delivered")
+
+
     def test_row_is_written_with_the_receipt_and_replay_adds_nothing(self):
         r = self.submit2(owner_orch=self.orch)
         self.assertEqual(len(self.rows()), 1)
@@ -66,17 +90,19 @@ class OutboxTests(NotifyBase):
         self.assertNotIn("Synthetic", text)
         self.assertEqual({r["state"] for r in self.rows()}, {"delivered"})
 
-    def test_wake_failure_marks_failed_keeps_receipt_pending_then_retry_delivers_once(self):
+    def test_wake_failure_requires_reconciliation_before_retry(self):
         rid = self.submit2(owner_orch=self.orch)["receipt_id"]
         self.rt.uds_fails = True
         self.rt.jobs = {}  # job gone: offline
         late = self.rows()[0]["created_at"] + 1801
         result = intake_notify.deliver_due(self.con, self.rt, now=late)
-        self.assertEqual(list(result["failed"]), [self.orch])
+        self.assertEqual(list(result["uncertain"]), [self.orch])
         row = self.rows()[0]
-        self.assertEqual((row["state"], row["attempts"]), ("failed", 1))
+        self.assertEqual((row["state"], row["attempts"]), ("uncertain", 1))
         self.assertTrue(row["error"])
         self.assertEqual(len(intake.pending(self.con, self.orch)["events"]), 1)  # still queued, not acked
+        intake_notify.reconcile(self.con, row["id"], row["attempts"], delivered=False,
+                                detail="Transport read-back confirms no send")
         self.rt.jobs = {"orchjob": {"pid": 4242, "status": "idle"}}
         self.rt.uds_fails = False
         intake_notify.deliver_due(self.con, self.rt, now=late + 5)
@@ -130,7 +156,7 @@ class OutboxTests(NotifyBase):
     def test_acked_or_excluded_receipts_are_never_woken(self):
         rid = self.submit2(owner_orch=self.orch)["receipt_id"]
         intake.exclude(self.con, [rid], reason="out_of_scope", rule_version="r", actor="orch")
-        self.assertEqual(intake_notify.deliver_due(self.con, self.rt, now=9e12), dict(delivered={}, failed={}))
+        self.assertEqual(intake_notify.deliver_due(self.con, self.rt, now=9e12), dict(delivered={}, failed={}, uncertain={}))
         self.assertEqual(self.sent_texts(), [])
         self.assertEqual(self.rows()[0]["state"], "withdrawn")
 
@@ -174,12 +200,16 @@ class NotifyCliTests(CliTests):
         self.assertEqual(self.con.execute("SELECT state FROM intake_notifications WHERE receipt_id=?",
                                           (normal["receipt_id"],)).fetchone()[0], "delivered")  # coalesced into the wake
 
-    def test_failed_urgent_wake_does_not_fail_the_submit_and_deliver_retries(self):
+    def test_ambiguous_urgent_wake_requires_cli_reconciliation(self):
         self.rt.uds_fails = True
         payload = dict(fixture("event_v2_email.json"), owner_orch=self.orch,
                        suggestion=dict(fixture("event_v2_email.json")["suggestion"], triage={"urgency": "urgent"}))
         code, receipt = self.run_cli("submit", "--producer", "email-adapter", stdin=json.dumps(payload))
-        self.assertEqual((code, receipt["status"], list(receipt["notify"]["failed"])), (0, "received", [self.orch]))
+        self.assertEqual((code, receipt["status"], list(receipt["notify"]["uncertain"])), (0, "received", [self.orch]))
+        row = self.con.execute("SELECT * FROM intake_notifications").fetchone()
+        code, result = self.run_cli("notify-reconcile", str(row["id"]), str(row["attempts"]),
+                                    "--delivered", "no", "--detail", "Transport confirms no send")
+        self.assertEqual((code, result["status"]), (0, "reconciled"))
         self.rt.uds_fails = False
         code, result = self.run_cli("deliver")
         self.assertEqual((code, list(result["delivered"])), (0, [self.orch]))

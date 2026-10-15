@@ -274,7 +274,7 @@ TOOLS.extend([
                     "Needs receipt_id, revision (from intake_show), action, reason, idempotency_key, and for issue and goal "
                     "either the ref (issue_ref / goal_id) or the reason it does not apply (issue_na_reason / goal_na_reason). "
                     "dispatch needs both refs (same repo). attach_existing, record and ignore finish and ack/exclude now; "
-                    "create_issue, ask_nat and dispatch return an open decision: do the step, then intake_resolve." + _INTAKE_NOTE,
+                    "create_issue, ask_nat and dispatch return an open decision: do the step, then intake_resolve. For ask_nat copy question_context unchanged into the question body and use the decided issue_ref." + _INTAKE_NOTE,
      "inputSchema": {"type": "object", "required": ["receipt_id", "revision", "action", "reason", "idempotency_key"],
                      "properties": {"receipt_id": {"type": "string"}, "revision": {"type": "integer"},
                                     "action": {"type": "string", "enum": list(("attach_existing", "create_issue", "ask_nat",
@@ -285,7 +285,7 @@ TOOLS.extend([
                                     "approval": {"type": "string", "description": "Reference only; never proof of approval"}}}},
     {"name": "intake_resolve", "annotations": {"readOnlyHint": False},
      "description": "Finish an open decision after the outward step and ack the receipt: create_issue needs issue_ref + "
-                    "external_receipt (the read-back); ask_nat needs question_id; dispatch needs task_id. outcome "
+                    "external_receipt (the read-back); ask_nat needs question_id whose question body includes the returned question_context unchanged and whose issue_ref matches; dispatch needs task_id. outcome "
                     "'uncertain' or 'failed' records the state without acking." + _INTAKE_NOTE,
      "inputSchema": {"type": "object", "required": ["decision_id"], "properties": {
          "decision_id": {"type": "string"}, "outcome": {"type": "string", "enum": ["completed", "uncertain", "failed"]},

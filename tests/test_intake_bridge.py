@@ -3,6 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from orchd import intake, store
 from tests.test_intake import FIX, PRODUCERS, IntakeBase, counts, fixture, table_names
@@ -100,6 +101,7 @@ class ContractTests(BridgeBase):
                            owner_orch="orch-1")["receipt_id"]
         content = intake_bridge.show(self.con, rid, "orch-1")["content"]
         self.assertEqual((content["status"], content["text"]), ("unavailable", None))
+        self.assertEqual(content["unavailable_reason"], "attachment not fetched")
 
     def test_content_visible_only_to_owner_or_operator_and_show_does_not_consume(self):
         from orchd import intake_bridge
@@ -136,6 +138,22 @@ class ContractTests(BridgeBase):
 
 
 class UpgradeTests(unittest.TestCase):
+    def test_migration_failure_rolls_back_all_schema_changes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "old.db"
+            with sqlite3.connect(path) as old:
+                cut = store.SCHEMA.index("CREATE TABLE IF NOT EXISTS intake_content")
+                old.executescript(store.SCHEMA[:cut])
+                before = old.execute("SELECT type,name,sql FROM sqlite_master ORDER BY name").fetchall()
+            broken = store.SCHEMA.replace("CREATE TABLE IF NOT EXISTS intake_decisions(",
+                                         "INVALID MIGRATION; CREATE TABLE IF NOT EXISTS intake_decisions(")
+            with patch.object(store, "SCHEMA", broken):
+                with self.assertRaises(sqlite3.DatabaseError):
+                    store.connect(path)
+            with sqlite3.connect(path) as reopened:
+                self.assertEqual(reopened.execute("SELECT type,name,sql FROM sqlite_master ORDER BY name").fetchall(), before)
+            store.connect(path).close()
+
     def test_existing_db_gains_tables_and_old_rows_still_read(self):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "old.db"

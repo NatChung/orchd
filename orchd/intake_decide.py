@@ -34,10 +34,18 @@ def _sha(payload):
     return intake._sha(json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")))
 
 
+def _question_context(row):
+    return "[orchd intake decision " + json.dumps(
+        {key: row[key] for key in ("decision_id", "receipt_id", "issue_ref", "goal_id")},
+        sort_keys=True, separators=(",", ":")) + "]"
+
+
 def _view(row, status=None):
     out = {k: row[k] for k in row.keys() if k != "request_sha256"}
     out["trace"] = dict(receipt_id=row["receipt_id"], issue_ref=row["issue_ref"], goal_id=row["goal_id"],
                         task_id=row["task_id"], question_id=row["question_id"])
+    if row["action"] == "ask_nat":
+        out["question_context"] = _question_context(row)
     if status:
         out["status"] = status
     return out
@@ -129,6 +137,15 @@ def _complete_receipt(con, row, decision):
                 (row["receipt_id"],))
 
 
+def _check_claim(con, decision):
+    # All receipt mutations except this ledger's own progress invalidate the claim.
+    changed = con.execute("SELECT 1 FROM intake_log WHERE ref=? AND seq>? "
+                          "AND kind NOT IN ('decision','decision_uncertain') LIMIT 1",
+                          (decision["receipt_id"], decision["revision"])).fetchone()
+    if changed:
+        raise intake.IntakeError("stale", "receipt changed since claim; reconcile and terminate before deciding again")
+
+
 def decide(con, payload, *, orch_id):
     """Record a decision as the Orch `orch_id` (over MCP this is the caller's own thread id, never an argument)."""
     _validate_decide(payload)
@@ -139,6 +156,10 @@ def decide(con, payload, *, orch_id):
         if old is not None:
             if old["request_sha256"] != request or old["owner_orch"] != orch_id:
                 raise intake.IntakeError("idempotency_conflict", "idempotency_key was used for a different decision")
+            if old["state"] in OPEN_STATES:
+                if intake._event(con, old["receipt_id"])["owner_orch"] != orch_id:
+                    raise intake.IntakeError("not_owner", "receipt owner changed")
+                _check_claim(con, old)
             return _view(old, "duplicate")
         row = intake._event(con, payload["receipt_id"])
         if row["state"] != "received":
@@ -149,6 +170,7 @@ def decide(con, payload, *, orch_id):
         open_ = con.execute("SELECT * FROM intake_decisions WHERE receipt_id=? AND state IN ('intent','uncertain') "
                             "ORDER BY created_at DESC LIMIT 1", (row["receipt_id"],)).fetchone()
         if open_ is not None:
+            _check_claim(con, open_)
             if open_["action"] == action and open_["owner_orch"] == orch_id:
                 return _view(open_, "pending")  # same intent again: never a second ticket, question or worker
             raise intake.IntakeError("already_claimed", f"decision {open_['decision_id']} ({open_['action']}) is "
@@ -205,6 +227,16 @@ def resolve(con, payload, *, orch_id):
         _issue_ref(payload["issue_ref"])
     with store.immediate(con):
         decision = _decision(con, decision_id)
+        row = intake._event(con, decision["receipt_id"])
+        if row["owner_orch"] != orch_id:
+            raise intake.IntakeError("not_owner", "only the current receipt owner can reconcile")
+        if outcome == "failed" and decision["state"] in OPEN_STATES:
+            if not detail:
+                raise intake.IntakeError("invalid", "termination requires reconciliation detail")
+            con.execute("UPDATE intake_decisions SET state='failed',external_receipt=? WHERE decision_id=?",
+                        (json.dumps(dict(reconciled_by=orch_id, detail=detail, evidence=external)), decision_id))
+            intake._log(con, "decision_failed", row["receipt_id"])
+            return _view(_decision(con, decision_id), "failed")
         if decision["owner_orch"] != orch_id:
             raise intake.IntakeError("not_owner", "only the deciding Orch can resolve its decision")
         if decision["state"] == "completed":
@@ -219,6 +251,7 @@ def resolve(con, payload, *, orch_id):
         row = intake._event(con, decision["receipt_id"])
         if row["state"] != "received" or row["owner_orch"] != orch_id:
             raise intake.IntakeError("stale", "the receipt is no longer yours to resolve")
+        _check_claim(con, decision)
         if outcome != "completed":
             con.execute("UPDATE intake_decisions SET state=?,external_receipt=COALESCE(?,external_receipt) "
                         "WHERE decision_id=?", (outcome, external or detail, decision_id))
@@ -246,10 +279,13 @@ def _evidence(con, decision, payload, external, orch_id):
         question = payload.get("question_id")
         if isinstance(question, bool) or not isinstance(question, int):
             raise intake.IntakeError("invalid", "ask_nat needs question_id of the question you sent")
-        found = con.execute("SELECT orch_id,direction,question_state FROM entry_messages WHERE id=?",
+        found = con.execute("SELECT orch_id,direction,question_state,body,issue_ref,created_at FROM entry_messages WHERE id=?",
                             (question,)).fetchone()
         if found is None or found["direction"] != "out" or found["question_state"] is None or found["orch_id"] != orch_id:
             raise intake.IntakeError("invalid", "question_id is not a question your Orch sent to Nat")
+        if (found["issue_ref"] != decision["issue_ref"] or found["created_at"] < decision["created_at"]
+                or _question_context(decision) not in found["body"]):
+            raise intake.IntakeError("invalid", "question must include this decision's question_context and matching issue_ref")
         out["question_id"] = question
     elif action == "dispatch":
         task_id = intake._text(payload.get("task_id"), "task_id", limit=200)
@@ -298,13 +334,14 @@ def backlog(con, *, now=None, owner=None):
     notify = {r["state"]: r["n"] for r in con.execute(
         "SELECT state,COUNT(*) n FROM intake_notifications" + (" WHERE owner_orch=?" if owner else "")
         + " GROUP BY state", (owner,) if owner else ())}
-    failing = [dict(receipt_id=r["receipt_id"], owner=r["owner_orch"], attempts=r["attempts"], error=r["error"])
-               for r in con.execute("SELECT * FROM intake_notifications WHERE state='failed' ORDER BY id")
+    failing = [dict(notification_id=r["id"], state=r["state"], receipt_id=r["receipt_id"], owner=r["owner_orch"], attempts=r["attempts"], error=r["error"])
+               for r in con.execute("SELECT * FROM intake_notifications WHERE state IN ('failed','uncertain') ORDER BY id")
                if owner is None or r["owner_orch"] == owner]
     open_decisions = [dict(decision_id=r["decision_id"], receipt_id=r["receipt_id"], action=r["action"],
                            state=r["state"], owner=r["owner_orch"], age_seconds=round(now - r["created_at"], 1))
-                      for r in con.execute("SELECT * FROM intake_decisions WHERE state IN ('intent','uncertain') "
-                                           "ORDER BY created_at")
-                      if owner is None or r["owner_orch"] == owner]
+                      for r in con.execute("SELECT d.*,e.owner_orch AS current_owner FROM intake_decisions d "
+                                           "JOIN intake_events e USING(receipt_id) WHERE d.state IN ('intent','uncertain') "
+                                           "ORDER BY d.created_at")
+                      if owner is None or r["current_owner"] == owner]
     return dict(status="backlog", queues=queues, notifications=notify, notification_failures=failing,
                 open_decisions=open_decisions)

@@ -201,6 +201,11 @@ def build_parser():
     intake_suggest.add_argument("--producer", required=True, help="name granted in [intake.producers.NAME]")
     intake_suggest.add_argument("--receipt", required=True)
     intake_deliver = intake_actions.add_parser("deliver", help="wake owners with due intake notifications (retry + recovery scan)")
+    intake_reconcile = intake_actions.add_parser("notify-reconcile", help="reconcile an uncertain wake after transport read-back")
+    intake_reconcile.add_argument("notification_id", type=int)
+    intake_reconcile.add_argument("attempt", type=int)
+    intake_reconcile.add_argument("--delivered", choices=("yes", "no"), required=True)
+    intake_reconcile.add_argument("--detail", required=True)
     intake_deliver.add_argument("--urgent-only", action="store_true", help="only urgent notifications")
     intake_event_show = intake_actions.add_parser("show", help="read-only: one v2 event's original text and suggestions (owner or operator)")
     intake_event_show.add_argument("--receipt", required=True)
@@ -335,7 +340,7 @@ def build_parser():
 
 def _notify_urgent(con, result):
     """After the receipt is committed: urgent intake wakes its owner now. A failed wake never fails the call;
-    the notification stays `failed` for the next `orchd intake deliver`."""
+    the notification stays `uncertain` until explicit transport reconciliation."""
     from orchd import intake_notify
     from orchd.runtime import Runtime
     owner = result.get("owner_orch")
@@ -388,6 +393,10 @@ def _intake_main(args):
         elif action == "backlog":
             from orchd import intake_decide
             result = intake_decide.backlog(con, owner=args.owner)
+        elif action == "notify-reconcile":
+            from . import intake_notify
+            result = intake_notify.reconcile(con, args.notification_id, args.attempt,
+                                             delivered=args.delivered == "yes", detail=args.detail)
         elif action == "deliver":
             from orchd import intake_notify
             from orchd.runtime import Runtime

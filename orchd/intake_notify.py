@@ -98,8 +98,8 @@ def _wake(con, rt, owner, text):
 def deliver_due(con, rt, *, now=None, only_urgent=False, owner=None):
     """Wake each owner with due notifications once, covering everything pending for that owner.
 
-    Runs after commit (never under a write lock). A wake that fails leaves the rows `failed` with the error;
-    the next call retries them. A wake is not an ack: the receipts stay pending until the Orch decides."""
+    Runs after commit (never under a write lock). Before transport, rows become `uncertain`;
+    interrupted or ambiguous sends require explicit reconciliation before retry. A wake is not an ack: the receipts stay pending until the Orch decides."""
     now = time.time() if now is None else now
     sweep(con, now=now)
     where, params = "state IN ('pending','failed') AND due_at<=?", [now]
@@ -110,14 +110,14 @@ def deliver_due(con, rt, *, now=None, only_urgent=False, owner=None):
         params.append(owner)
     owners = [r[0] for r in con.execute(f"SELECT DISTINCT owner_orch FROM intake_notifications WHERE {where} "
                                         "ORDER BY owner_orch", params)]
-    result = dict(delivered={}, failed={})
+    result = dict(delivered={}, failed={}, uncertain={})
     for name in owners:
         with store.task_delivery(con, [f"intake-owner:{name}"]):
             due = con.execute(f"SELECT 1 FROM intake_notifications WHERE {where} AND owner_orch=? LIMIT 1",
                               (*params, name)).fetchone()
             if due is None:  # another consumer delivered while we waited for the lock
                 continue
-            rows = con.execute("SELECT n.id,n.receipt_id,n.urgency FROM intake_notifications n "
+            rows = con.execute("SELECT n.id,n.receipt_id,n.urgency,n.attempts FROM intake_notifications n "
                                "JOIN intake_events e ON e.receipt_id=n.receipt_id AND e.owner_orch=n.owner_orch "
                                "WHERE n.owner_orch=? AND n.state IN ('pending','failed') AND e.state='received' "
                                "ORDER BY n.id", (name,)).fetchall()
@@ -126,14 +126,39 @@ def deliver_due(con, rt, *, now=None, only_urgent=False, owner=None):
             text = wake_text(len(rows), sum(r["urgency"] == URGENT for r in rows), [r["receipt_id"] for r in rows])
             marks = ",".join("?" * len(rows))
             ids = [r["id"] for r in rows]
+            # Commit before crossing the transport boundary. Process death or an ambiguous
+            # exception must never turn into an automatic second send.
+            con.execute(f"UPDATE intake_notifications SET state='uncertain',attempts=attempts+1,"
+                        f"error='delivery outcome unknown; reconcile before retry' WHERE id IN ({marks})", ids)
+            text += " delivery=" + ",".join(
+                f"{r['id']}:{r['attempts'] + 1}"
+                for r in rows)
             try:
                 _wake(con, rt, name, text)
             except Exception as error:
-                con.execute(f"UPDATE intake_notifications SET state='failed',attempts=attempts+1,error=? "
+                con.execute(f"UPDATE intake_notifications SET state='uncertain',error=? "
                             f"WHERE id IN ({marks})", (f"{type(error).__name__}: {error}"[:500], *ids))
-                result["failed"][name] = [r["receipt_id"] for r in rows]
+                result["uncertain"][name] = [r["receipt_id"] for r in rows]
                 continue
-            con.execute(f"UPDATE intake_notifications SET state='delivered',attempts=attempts+1,delivered_at=?,"
+            con.execute(f"UPDATE intake_notifications SET state='delivered',delivered_at=?,"
                         f"error=NULL WHERE id IN ({marks})", (time.time(), *ids))
             result["delivered"][name] = [r["receipt_id"] for r in rows]
     return result
+
+
+def reconcile(con, notification_id, attempt, *, delivered, detail):
+    """Operator read-back: confirm delivery or explicitly authorize retry after checking transport.
+
+    The durable identity is notification id + attempt; CAS prevents a stale reconciliation.
+    A retry may duplicate a wake if the read-back was wrong; no exactly-once claim is made.
+    """
+    if not isinstance(detail, str) or not detail.strip():
+        raise ValueError("reconciliation requires detail")
+    with store.immediate(con):
+        changed = con.execute("UPDATE intake_notifications SET state=?,error=?,delivered_at=? "
+                              "WHERE id=? AND attempts=? AND state='uncertain'",
+                              ("delivered" if delivered else "failed", detail,
+                               time.time() if delivered else None, notification_id, attempt)).rowcount
+        if changed != 1:
+            raise ValueError("stale notification reconciliation")
+    return dict(status="reconciled", notification_id=notification_id, attempt=attempt)

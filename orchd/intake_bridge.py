@@ -230,11 +230,11 @@ def submit(con, payload, *, producer, producers):
              event["source_ref"], event["thread_ref"], event["source_time"], now, producer,
              event["summary"], digest, owner))
         text = content["text"]
-        con.execute("INSERT INTO intake_content(receipt_id,status,text,text_sha256,text_bytes,attachments,created_at) "
-                    "VALUES(?,?,?,?,?,?,?)",
+        con.execute("INSERT INTO intake_content(receipt_id,status,text,text_sha256,text_bytes,attachments,created_at,unavailable_reason) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
                     (receipt_id, content["status"], text, intake._sha(text) if text is not None else None,
                      len(text.encode()) if text is not None else 0,
-                     json.dumps(content["attachments"], ensure_ascii=False), now))
+                     json.dumps(content["attachments"], ensure_ascii=False), now, content["reason"]))
         intake._log(con, "event", receipt_id)
         revision = 0
         if suggestion is not None:
@@ -285,6 +285,7 @@ def show(con, receipt_id, viewer):
     return dict(status="event", trust="third_party_data", event=intake._event_view(row),
                 content=None if content is None else dict(
                     status=content["status"], text=content["text"], text_sha256=content["text_sha256"],
+                    unavailable_reason=content["unavailable_reason"],
                     bytes=content["text_bytes"], attachments=json.loads(content["attachments"])),
                 suggestion=latest[-1]["suggestion"] if latest else None,
                 suggestion_revision=latest[-1]["revision"] if latest else 0,

@@ -112,12 +112,17 @@ class SixActionTests(DecideBase):
         rid = self.receipt()
         d = self.decide(rid, "ask_nat", issue_ref=ISSUE, goal_na_reason="needs Nat to pick a goal")
         self.assertEqual(self.code(lambda: self.resolve(d["decision_id"], question_id=999)), "invalid")
-        asked = entry.ask_nat(self.con, self.rt, self.orch, "【給 Operator 的摘要】\n要你決定：X\n選項：無\n建議：Y\n---詳細---\nd",
+        asked = entry.ask_nat(self.con, self.rt, self.orch, "【給 Operator 的摘要】\n要你決定：X\n選項：無\n建議：Y\n---詳細---\nd" + d["question_context"],
                               None, issue_ref=ISSUE)
         qid = asked["message_id"] if "message_id" in asked else asked["id"]
+        other = self.receipt()
+        unrelated = self.decide(other, "ask_nat", issue_ref=ISSUE, goal_na_reason="needs Nat to pick a goal")
+        self.assertEqual(self.code(lambda: self.resolve(unrelated["decision_id"], question_id=qid)), "invalid")
         done = self.resolve(d["decision_id"], question_id=qid)
         self.assertEqual((done["status"], done["question_id"], self.state(rid)), ("completed", qid, "acked"))
         state = self.con.execute("SELECT question_state FROM entry_messages WHERE id=?", (qid,)).fetchone()[0]
+        trace = intake_decide.decisions(self.con, rid)["decisions"][0]
+        self.assertEqual((trace["trace"]["receipt_id"], trace["question_id"], trace["issue_ref"]), (rid, qid, ISSUE))
         self.assertIn(state, ("current", "queued"))  # still waiting for Nat after the intake was acked
 
     def test_dispatch_needs_same_repo_refs_and_a_matching_task(self):
@@ -150,6 +155,43 @@ class SixActionTests(DecideBase):
 
 
 class GuardTests(DecideBase):
+    def test_ask_nat_rejects_unrelated_old_question(self):
+        old = entry.ask_nat(self.con, self.rt, self.orch, "Unrelated question",
+                            issue_ref="github:other/project#999")
+        rid = self.receipt()
+        d = self.decide(rid, "ask_nat", issue_ref=ISSUE, goal_id=self.goal)
+        self.assertEqual(self.code(lambda: self.resolve(d["decision_id"], question_id=old["message_id"])), "invalid")
+        self.assertEqual(self.state(rid), "received")
+
+    def test_resolve_rejects_owner_roundtrip_and_new_suggestion(self):
+        store.register_orch(self.con, "orch-2", "claude")
+        for change in ("owner", "suggestion"):
+            with self.subTest(change=change):
+                rid = self.receipt()
+                d = self.decide(rid, "create_issue", goal_na_reason="clarify")
+                if change == "owner":
+                    intake.bind_owner(self.con, rid, "orch-2")
+                    intake.bind_owner(self.con, rid, self.orch)
+                else:
+                    intake_bridge.suggest(self.con, rid, {"triage": {"urgency": "urgent"}},
+                                          producer="email-adapter", producers=PRODUCERS)
+                self.assertEqual(self.code(lambda: self.resolve(d["decision_id"], issue_ref=ISSUE,
+                                                                external_receipt="read back")), "stale")
+                self.assertEqual(self.state(rid), "received")
+
+    def test_current_owner_can_terminate_and_reconcile_transferred_intent(self):
+        rid = self.receipt()
+        d = self.decide(rid, "create_issue", goal_na_reason="clarify")
+        store.register_orch(self.con, "orch-2", "claude")
+        intake.bind_owner(self.con, rid, "orch-2")
+        self.assertEqual(self.code(lambda: self.resolve(d["decision_id"], outcome="failed", detail="reconciled: no external effect")), "not_owner")
+        done = self.resolve(d["decision_id"], orch="orch-2", outcome="failed",
+                            detail="Reconciled external system: no issue created")
+        self.assertEqual(done["state"], "failed")
+        self.assertEqual(json.loads(done["external_receipt"])["reconciled_by"], "orch-2")
+        next_ = self.decide(rid, "create_issue", orch="orch-2", goal_na_reason="clarify")
+        self.assertNotEqual(next_["decision_id"], d["decision_id"])
+
     def test_stale_revision_is_refused_and_a_suggestion_bumps_it(self):
         rid = self.receipt()
         seen = intake_bridge.receipt_revision(self.con, rid)
@@ -180,7 +222,7 @@ class GuardTests(DecideBase):
         first = self.decide(rid2, "create_issue", key="c", revision=rev2, goal_na_reason="y")
         self.assertEqual(self.code(lambda: self.decide(rid2, "ask_nat", key="d", revision=rev2, issue_na_reason="x",
                                                        goal_na_reason="y")), "already_claimed")
-        self.resolve(first["decision_id"], outcome="failed")
+        self.resolve(first["decision_id"], outcome="failed", detail="reconciled: no external effect")
         self.assertEqual(self.code(lambda: self.decide(rid2, "record", key="e", revision=rev2, issue_na_reason="x",
                                                        goal_na_reason="y")), "stale")
 
@@ -227,7 +269,7 @@ class GuardTests(DecideBase):
         rid = self.receipt()
         self.decide(rid, "record", issue_na_reason="x", goal_na_reason="y")
         late = self.con.execute("SELECT created_at FROM intake_notifications").fetchone()[0] + 99999
-        self.assertEqual(intake_notify.deliver_due(self.con, self.rt, now=late), dict(delivered={}, failed={}))
+        self.assertEqual(intake_notify.deliver_due(self.con, self.rt, now=late), dict(delivered={}, failed={}, uncertain={}))
 
     def test_open_decision_is_never_labeled_expired_or_purgeable(self):
         rid = self.receipt()
@@ -276,7 +318,7 @@ class QueryTests(DecideBase):
         owners = {q["owner_state"]: q for q in report["queues"]}
         self.assertEqual((owners["assigned"]["waiting"], owners["unassigned"]["waiting"]), (1, 1))
         self.assertGreater(owners["unassigned"]["oldest_age_seconds"], 0)
-        self.assertEqual(report["notifications"], {"failed": 1})
+        self.assertEqual(report["notifications"], {"uncertain": 1})
         self.assertEqual(report["notification_failures"][0]["receipt_id"], a)
         self.assertEqual(report["open_decisions"][0]["state"], "intent")
         self.assertEqual(self.state(b), "received")

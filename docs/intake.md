@@ -217,14 +217,19 @@ command keep working unchanged. Nothing here changes runtime, launchd or the ins
 One `intake_notifications` row per (receipt, owner), written in the same transaction as the submit or bind, so a
 crash cannot lose it (replay adds nothing; a rebind withdraws the old owner's row and queues the new owner).
 `orchd intake deliver` (also the recovery scan: it first creates missing rows for every received event that has an
-owner, including v1 events and every owner queue) wakes each owner **once** for everything pending:
+owner, including v1 events and every owner queue) batches pending notifications per owner:
 
 * urgent (suggested `triage.urgency=urgent`) is due immediately and `submit`/`suggest`/`bind` try it right after commit;
   normal is due after a batch window, default 30 minutes. An upgrade to urgent makes a pending row due now; a row
   already delivered is never re-sent, and urgency never goes down.
-* A wake that cannot reach the Orch (offline, socket gone, revive failed) leaves the row `failed` with the error;
-  the next `deliver` retries. A retired Claude Orch is revived like the entry does. A wake is never an ack: the
-  receipts stay in `intake pending` until the Orch decides.
+* Before transport, the rows are durably marked `uncertain` and their attempt counters incremented. Wake text
+  carries delivery identities `notification_id:attempt`. A crash or exception leaves an uncertain outcome,
+  visible in `intake backlog` with the notification id, attempt and error. `deliver` never automatically retries
+  uncertain rows. A retired Claude Orch is revived like the entry does. A wake never acks a receipt.
+* After checking transport history, use `orchd intake notify-reconcile ID ATTEMPT --delivered yes|no --detail TEXT`.
+  `yes` confirms delivery; `no` authorizes retry by changing the row to `failed`. The id and attempt are a CAS;
+  stale reconciliation is rejected. A mistaken negative read-back can cause a duplicate wake. This protocol
+  records uncertainty; it does not claim exactly-once transport or receiver deduplication.
 * Wake text starts `[orchd intake] third-party data:` and names counts and receipt ids only, never the text; it never
   imitates an Operator entry message. Unassigned receipts have no one to wake; they show in `intake backlog`.
 
@@ -242,7 +247,7 @@ neither; null refs are allowed only with a stated reason), optional `approval` (
 | `record` | reasons | at `decide`: acks |
 | `ignore` | reasons | at `decide`: excludes (`exclusion_reason` = decision id) |
 | `create_issue` | `issue_ref` empty | at `resolve`: `issue_ref` + `external_receipt` (the read-back) |
-| `ask_nat` | refs or reasons | at `resolve`: `question_id` of a question your Orch sent |
+| `ask_nat` | refs or reasons | at `resolve`: matching `question_id` with this decision’s `question_context` |
 | `dispatch` | github `issue_ref` and `goal_id` of the same repo | at `resolve`: your `task_id`, on that goal, linked to that issue |
 
 `create_issue`, `ask_nat` and `dispatch` record an **intent** first. The Orch does the outward step, then `resolve`
@@ -251,6 +256,20 @@ records the state without acking (`uncertain` stays open and blocks retention; `
 A crash after the outward step leaves the open intent; repeating the same action returns it (`status: pending`)
 instead of creating a second ticket, question or worker, and `resolve` completes it after the Orch reads back what
 exists. This is recoverable and reconcilable, not exactly-once across systems.
+
+For `ask_nat`, copy the returned `question_context` unchanged into the question body and use the decided
+`issue_ref` when calling `ask_nat`. Resolution checks that the question is your Orch’s outgoing question, was
+created after the intent, has the same issue ref, and contains the exact receipt/decision/issue/goal context.
+The decision saves the question id and keeps those associations in its trace. A different receipt’s question,
+even for the same issue, cannot complete this decision.
+
+If ownership changes or a new suggestion invalidates an open intent, first read back the external system.
+The **current receipt owner** can call `resolve` with `outcome: failed` and a non-empty `detail` describing that
+reconciliation, even if another Orch created the intent. This never acks; it preserves the original decision
+and records the reconciling owner, detail and optional external evidence. Then decide again using the current
+revision, adopting any external issue/task already found rather than repeating the outward action. Old owners
+are refused. Completion checks every intervening receipt mutation (including A→B→A); ledger-only uncertain
+progress does not invalidate a claim.
 
 Guards: compare-and-set on the receipt's revision (newest `intake_log` row for it, so a new suggestion, bind or
 decision makes older reads `stale`) and on the owner (`not_owner` after a rebind or on an unassigned receipt);
@@ -264,10 +283,11 @@ An unresolved decision shows as `retention: held` in the snapshot (retention pur
 
 ### Additive migration
 
-New tables only (`intake_content`, `intake_suggestions`, `intake_notifications`, `intake_decisions`), created by
-`store.connect` with `CREATE TABLE IF NOT EXISTS`; no existing column, row or key changes, and an older database
-opens and reads as before (`UpgradeTests` builds one from the pre-change schema). Rollback leaves the new tables
-in place; older code ignores them.
+`store.connect` adds the bridge tables and the nullable `intake_content.unavailable_reason` column. Source
+unavailability reasons are retained and returned by `intake show`. Existing rows and keys are preserved.
+Schema creation, column additions and indexes run in one `BEGIN IMMEDIATE` transaction; any failure rolls back
+the whole upgrade and closes the connection. Isolated upgrade tests cover success, injected schema failure,
+and reopening after rollback. Older code can ignore the additive tables/column after a successful upgrade.
 
 ## Outside this package
 

@@ -229,6 +229,7 @@ CREATE TABLE IF NOT EXISTS intake_content(
     receipt_id TEXT PRIMARY KEY,
     status TEXT NOT NULL,
     text TEXT,
+    unavailable_reason TEXT,
     text_sha256 TEXT,
     text_bytes INTEGER NOT NULL DEFAULT 0,
     attachments TEXT NOT NULL DEFAULT '[]',
@@ -319,27 +320,28 @@ def connect(path=None):
     con = sqlite3.connect(path, timeout=30, isolation_level=None)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA journal_mode=WAL")
-    con.executescript(SCHEMA)
-    have = {r["name"] for r in con.execute("PRAGMA table_info(tasks)")}
-    for column in TASK_COLUMNS:
-        if column.split()[0] not in have:
-            try:
-                con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
-            except sqlite3.OperationalError:  # another process added it first
-                pass
-    for table, columns in (("messages", MESSAGE_COLUMNS), ("entry_messages", ENTRY_MESSAGE_COLUMNS),
-                           ("orchs", ORCH_COLUMNS), ("entry_answer_submissions", SUBMISSION_COLUMNS),
-                           ("intake_events", ("excluded_at REAL", "excluded_by TEXT",
-                                              "exclusion_reason TEXT", "exclusion_rule_version TEXT"))):
-        have = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
-        for column in columns:
+    try:
+        con.executescript("BEGIN IMMEDIATE;\n" + SCHEMA)
+        have = {r["name"] for r in con.execute("PRAGMA table_info(tasks)")}
+        for column in TASK_COLUMNS:
             if column.split()[0] not in have:
-                try:
+                con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
+        for table, columns in (("intake_content", ("unavailable_reason TEXT",)),
+                               ("messages", MESSAGE_COLUMNS), ("entry_messages", ENTRY_MESSAGE_COLUMNS),
+                               ("orchs", ORCH_COLUMNS), ("entry_answer_submissions", SUBMISSION_COLUMNS),
+                               ("intake_events", ("excluded_at REAL", "excluded_by TEXT",
+                                                  "exclusion_reason TEXT", "exclusion_rule_version TEXT"))):
+            have = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
+            for column in columns:
+                if column.split()[0] not in have:
                     con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
-                except sqlite3.OperationalError:  # another process added it first
-                    pass
-    # After the columns exist: on an early-draft DB this index would fail inside SCHEMA.
-    con.execute("CREATE UNIQUE INDEX IF NOT EXISTS entry_messages_source ON entry_messages(source_thread, source_item_id)")
+        # After the columns exist: on an early-draft DB this index would fail inside SCHEMA.
+        con.execute("CREATE UNIQUE INDEX IF NOT EXISTS entry_messages_source ON entry_messages(source_thread, source_item_id)")
+        con.commit()
+    except BaseException:
+        con.rollback()
+        con.close()
+        raise
     return con
 
 
