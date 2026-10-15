@@ -127,6 +127,14 @@ CREATE TABLE IF NOT EXISTS entry_messages(
     delivered_at REAL,
     read_at REAL
 );
+CREATE TABLE IF NOT EXISTS entry_message_tags(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id INTEGER NOT NULL REFERENCES entry_messages(id),
+    old_ref TEXT,
+    issue_ref TEXT,
+    actor TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS entry_question_history(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     question_id INTEGER NOT NULL REFERENCES entry_messages(id),
@@ -237,7 +245,7 @@ ENTRY_MESSAGE_COLUMNS = ("body_bytes INTEGER", "body_sha256 TEXT", "wire_text TE
                          "source_item_id TEXT", "source_raw TEXT", "source_turn TEXT",
                          "version INTEGER NOT NULL DEFAULT 1", "supersedes INTEGER REFERENCES entry_messages(id)",
                          "superseded_by INTEGER REFERENCES entry_messages(id)", "revisit_at REAL",
-                         "note TEXT", "reason TEXT", "queue_order INTEGER", "notified_at REAL")
+                         "note TEXT", "reason TEXT", "queue_order INTEGER", "notified_at REAL", "issue_ref TEXT")
 
 # Message kinds the Orch reads in its inbox; the rest (dispatch, answer, close, usage) are the event log.
 ORCH_KINDS = ("ack", "progress", "report", "question", "adopt", "task_question_answer", "question_dismissed")

@@ -234,6 +234,14 @@ TOOLS += [
          "reason": {"type": "string"}}}},
 ]
 
+for tool in TOOLS:
+    if tool["name"] in ("send_to_nat", "ask_nat"):
+        tool["inputSchema"]["properties"]["issue_ref"] = {
+            "type": "string", "description": "Optional github:owner/repo#N or jira:KEY-N; ask defaults to the task's current link."}
+TOOLS.append({"name": "entry_tag", "description": "Set or clear one issue ref on your current binding's message; audited and idempotent.",
+              "inputSchema": {"type": "object", "required": ["message_id", "issue_ref"], "properties": {
+                  "message_id": {"type": "integer"}, "issue_ref": {"type": ["string", "null"]}}}})
+
 for action in ("snooze", "cancel"):
     properties = {"question_id": {"type": "integer"}, "expected_version": {"type": "integer", "minimum": 1},
                   "expected_state": {"type": "string"}}
@@ -376,12 +384,14 @@ def call(name, args, thread, con, rt):
     if name == "entry_inbox":
         return entry.inbox(con, thread, rt)
     if name == "send_to_nat":
-        return entry.send_to_nat(con, rt, thread, args.get("text"))
+        return entry.send_to_nat(con, rt, thread, args.get("text"), issue_ref=args.get("issue_ref"))
     if name == "ask_nat":
         return entry.ask_nat(con, rt, thread, args.get("text"), args.get("task_id"),
                              bool(args.get("quote_worker_question")), supersedes=args.get("supersedes"),
                              expected_version=args.get("expected_version"), expected_state=args.get("expected_state"),
-                             reason=args.get("reason"))
+                             reason=args.get("reason"), issue_ref=args.get("issue_ref"))
+    if name == "entry_tag":
+        return entry.entry_tag(con, thread, args["message_id"], args["issue_ref"])
     if name in ("entry_question_show", "entry_question_snooze", "entry_question_cancel"):
         bound = entry._entry_of(con, thread)
         if name == "entry_question_show":

@@ -18,7 +18,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from . import entry_attachments, orch_revive, paths, question_summary, store
+from . import entry_attachments, issue_links, orch_revive, paths, question_summary, store
 from .orch_health import owner_health
 
 DEFAULT_ENTRY = "desktop"
@@ -232,7 +232,7 @@ def _save_reply(con, bound, question, text, actor, **fields):
     con.execute("UPDATE entry_messages SET question_state='answered' WHERE id=?", (question["id"],))
     _history(con, question, "answered", actor, "reply_to")
     message_id = _insert(con, bound, "in", "reply", text, reply_to=question["id"],
-                         task_id=question["task_id"], source_message_id=question["source_message_id"], **fields)
+                         task_id=question["task_id"], issue_ref=question["issue_ref"], source_message_id=question["source_message_id"], **fields)
     _promote(con, bound, "orchd", "promote earliest queued question")
     return message_id
 
@@ -667,22 +667,26 @@ def _deliver_result(con, rt, entry, message_id):
     return result
 
 
-def send_to_nat(con, rt, orch_id, text):
+def send_to_nat(con, rt, orch_id, text, *, issue_ref=None):
     """Orch tool: a plain message to Operator, queued into the entry's Desktop thread byte for byte."""
     if not isinstance(text, str) or not text.strip():
         raise ValueError("send_to_nat needs non-empty text")
+    if issue_ref is not None:
+        issue_links.validate_ref(issue_ref)
     entry = _entry_of(con, orch_id)
     with store.immediate(con):
-        message_id = _insert(con, entry, "out", "message", text)
+        message_id = _insert(con, entry, "out", "message", text, issue_ref=issue_ref)
         con.execute("UPDATE entry_messages SET wire_text=? WHERE id=?", (message_wire(message_id, orch_id, text),
                                                                           message_id))
     return dict(_deliver_result(con, rt, entry, message_id), **_questions(con, entry))
 
 
 def ask_nat(con, rt, orch_id, text=None, task_id=None, quote_worker_question=False, *,
-            supersedes=None, expected_version=None, expected_state=None, reason=None, actor=None):
+            supersedes=None, expected_version=None, expected_state=None, reason=None, actor=None, issue_ref=None):
     """Orch tool: one question to Operator. Only one is open at a time; the rest wait in order (Q2)."""
     entry = _entry_of(con, orch_id)
+    if issue_ref is not None:
+        issue_links.validate_ref(issue_ref)
     source_message_id = None
     parts = [text] if isinstance(text, str) and text.strip() else []
     summary_body = text if parts else None
@@ -690,6 +694,9 @@ def ask_nat(con, rt, orch_id, text=None, task_id=None, quote_worker_question=Fal
         task = store.get_task(con, task_id)
         if task["orch_thread"] != orch_id:
             raise ValueError(f"task {task_id} belongs to another Orch")
+        if issue_ref is None:
+            links = issue_links.history(con, task_id)
+            issue_ref = links[-1]["ref"] if links else None
         latest = store.latest_message(con, task_id, "question")
         source_message_id = latest["id"] if latest is not None else None
         if quote_worker_question:
@@ -719,7 +726,7 @@ def ask_nat(con, rt, orch_id, text=None, task_id=None, quote_worker_question=Fal
             _history(con, old, "superseded", actor, reason)
             _promote(con, entry, actor, f"after superseded question {supersedes}")
         busy = current_question(con, entry) is not None
-        question_id = _insert(con, entry, "out", "question", body, task_id=task_id,
+        question_id = _insert(con, entry, "out", "question", body, task_id=task_id, issue_ref=issue_ref,
                               queue_order=_queue_tail(con),
                               source_message_id=source_message_id,
                               version=old["version"] + 1 if old else 1, supersedes=supersedes,
@@ -851,3 +858,20 @@ def binding(con, rt, start_orch, new=False, entry_id=DEFAULT_ENTRY):
                 codex_trusted="unknown" if trusted is None else trusted,
                 next=(f"Open {home} in the Codex Desktop app (permissions: interface) and start talking."
                       if trusted else f"Run `orchd init` to trust {home} in Codex, then open it in the Desktop app."))
+
+
+def entry_tag(con, orch_id, message_id, issue_ref):
+    """Tag or clear a message on the caller's current binding; audit actual changes only."""
+    if issue_ref is not None:
+        issue_links.validate_ref(issue_ref)
+    with store.immediate(con):
+        bound = _entry_of(con, orch_id)
+        row = _row(con, message_id)
+        if row is None or row["entry_id"] != bound["id"] or row["orch_id"] != orch_id:
+            raise ValueError("message does not belong to this Orch's current binding")
+        changed = row["issue_ref"] != issue_ref
+        if changed:
+            con.execute("UPDATE entry_messages SET issue_ref=? WHERE id=?", (issue_ref, message_id))
+            con.execute("INSERT INTO entry_message_tags(message_id,old_ref,issue_ref,actor,created_at) VALUES(?,?,?,?,?)",
+                        (message_id, row["issue_ref"], issue_ref, f"orch:{orch_id}", time.time()))
+    return dict(message_id=message_id, issue_ref=issue_ref, changed=changed)
