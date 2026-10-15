@@ -177,6 +177,23 @@ orchd entry thread --issue-refs github:example/project#40,jira:DEMO-37 --limit 3
 orchd entry thread --issue-ref github:example/project#40 --entry desktop --json
 ```
 
+### Full question / task threads
+
+```sh
+orchd entry thread --question-id 4294 --limit 3 --json
+orchd entry thread --task-id 5ae39f5b --per-question-limit 3 [--thread-limit 20] --json
+```
+
+Same read-only private copy, but full untruncated text, not limited to the snapshot's 100 answered rows.
+A thread is one question identity: every version in its `supersedes`/`superseded_by` chain (any version
+resolves to the latest; `root_question` is the oldest, `question_chain` lists all) plus replies whose
+`reply_to` is in the chain (direct-input replies carry no `task_id`). Questions of the same task never mix.
+Messages are newest first (`created_at` desc, then `id` desc), UTC `at`; `has_more`/`next_cursor` page
+older messages (`--question-id ... --cursor`); `--task-id` pages the thread list the same way.
+Top-level `status` and exit code: `ok` 0, usage/bad cursor 2, `not_found` 3 (empty `threads`),
+read error 4 (stderr), `partial` 5 (a chain link is missing; `missing_history`, `complete: false`).
+Selectors are mutually exclusive with each other and with `--issue-ref(s)`, whose output is unchanged.
+
 The reader uses a private DB/WAL copy with `query_only=ON`. It selects only the
 named entry (default `desktop`), including its historical bindings. It never
 includes another entry's messages. Limit is per ref, defaults to 3, and accepts
