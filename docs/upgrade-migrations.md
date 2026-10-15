@@ -25,7 +25,7 @@ orchd upgrade --migrations-only  # 只有 migration 失敗時重試，跳過程�
 
 ## 備份、失敗與還原
 
-每次覆寫前，先在原檔旁建立 `AGENTS.md.orchd-backup-YYYYMMDD-HHMMSS-<唯一後綴>`，保存原文與權限。新檔沒有前一份可備份。摘要列出更新的檔案、備份與還原方式：把備份複製回摘要列出的原檔位置；若是新建檔，刪掉新檔即可。還原檔案不會撤銷已完成 step 的 DB 紀錄，因此同版本不會自動再次覆蓋還原內容。
+每次覆寫前，先把原文與權限備份到 orchd state 目錄（與 `home-migrations.sqlite3` 同一處，`ORCHD_HOME` 或 `~/.local/share/orchd`）下的 `backups/<role>/AGENTS.md.YYYYMMDD-HHMMSS-<唯一後綴>`（`<role>` 為 `home` 或 `interface`），不會在 Orch home 的 git repo 裡留下檔案。舊版本曾在原檔旁留下 `AGENTS.md.orchd-backup-*`，升級不會自動刪除，確認不需要後可手動刪掉。新檔沒有前一份可備份。摘要列出更新的檔案、備份與還原方式：把備份複製回摘要列出的原檔位置；若是新建檔，刪掉新檔即可。還原檔案不會撤銷已完成 step 的 DB 紀錄，因此同版本不會自動再次覆蓋還原內容。
 
 step 以穩定 id、home/interface 路徑組合和套用時間記在上述 SQLite，不根據家目錄標記猜進度。各 step 依序執行，全部檔案處理成功才標記；失敗停在當前 step，已成功的前置 steps 保留。失敗前已更新的檔案和備份也保留，重試辨識區塊，不重複附加。併發執行透過 state DB 的寫入 transaction 序列化。
 

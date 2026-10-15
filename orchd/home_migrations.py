@@ -24,8 +24,12 @@ CREATE TABLE IF NOT EXISTS applied(step TEXT NOT NULL, scope TEXT NOT NULL,
 """
 
 
+def state_dir(home, env):
+    return Path(env.get("ORCHD_HOME") or Path(home) / ".local/share/orchd").absolute()
+
+
 def state_path(home, env):
-    return (Path(env.get("ORCHD_HOME") or Path(home) / ".local/share/orchd") / "home-migrations.sqlite3").absolute()
+    return state_dir(home, env) / "home-migrations.sqlite3"
 
 
 def connect(home, env, *, readonly=False):
@@ -72,12 +76,13 @@ def updated(original, template):
     return original[:start] + block + original[end + len(END):], False
 
 
-def write_file(file, content):
-    """Backup before atomic replacement; preserve an existing file's permissions."""
+def write_file(file, content, backup_dir):
+    """Backup into backup_dir (outside the repo) before atomic replacement; preserve an existing file's permissions."""
     file.parent.mkdir(parents=True, exist_ok=True)
     backup = None
     if file.exists():
-        fd, name = tempfile.mkstemp(prefix=file.name + ".orchd-backup-" + time.strftime("%Y%m%d-%H%M%S") + "-", dir=file.parent)
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(prefix=file.name + "." + time.strftime("%Y%m%d-%H%M%S") + "-", dir=backup_dir)
         os.close(fd)
         backup = Path(name)
         shutil.copy2(file, backup)
@@ -95,7 +100,7 @@ def write_file(file, content):
     return backup
 
 
-def update_rules(folders, dry_run, lines):
+def update_rules(folders, dry_run, lines, backup_root):
     for role, folder in folders.items():
         file = folder / "AGENTS.md"
         if file.is_symlink():
@@ -112,7 +117,7 @@ def update_rules(folders, dry_run, lines):
             lines.extend(difflib.unified_diff(original.decode().splitlines(), content.decode().splitlines(),
                                              fromfile=str(file), tofile=str(file) + " (managed)", lineterm=""))
         else:
-            backup = write_file(file, content)
+            backup = write_file(file, content, backup_root / role)
             lines.append(f"updated: {file}; backup: {backup or 'none (new file)'}")
             lines.append(f"restore: copy {backup} over {file}" if backup else f"restore: remove newly created {file}")
 
@@ -136,7 +141,7 @@ def run(*, home=None, env=None, dry_run=False):
                 lines.append(f"{step}: already applied")
                 continue
             lines.append(f"{step}: {'preview' if dry_run else 'applying'}")
-            action(folders, dry_run, lines)
+            action(folders, dry_run, lines, state_dir(home, env) / "backups")
             if not dry_run:
                 con.execute("INSERT INTO applied VALUES(?, ?, ?)", (step, scope, time.time()))
                 con.commit()
