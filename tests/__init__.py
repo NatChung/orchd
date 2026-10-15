@@ -5,3 +5,5 @@ _cfg = _tempfile.TemporaryDirectory()
 _atexit.register(_cfg.cleanup)
 _os.environ["ORCHD_CONFIG_FILE"] = _os.path.join(_cfg.name, "config.toml")
 _os.environ.pop("ORCHD_WORKER_MODEL", None)
+# Tests never rewrite the developer's real Orch home at startup; startup-migration tests opt in explicitly.
+_os.environ["ORCHD_AUTO_MIGRATE"] = "0"
