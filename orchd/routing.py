@@ -56,9 +56,10 @@ def limited(error):
 
 
 def select(con, *, backend=None, task_type=None, author_model=None, now=None):
-    now = time.time() if now is None else now
+    # Keep an omitted time live: CLI receipts use wall time after the read.
+    cutoff_now = time.time() if now is None else now
     recent = set()
-    for row in con.execute("SELECT body FROM messages WHERE kind='rate_limit' AND created_at>=?", (now - COOLDOWN,)):
+    for row in con.execute("SELECT body FROM messages WHERE kind='rate_limit' AND created_at>=?", (cutoff_now - COOLDOWN,)):
         recent.add(json.loads(row['body'])['provider'])
     return quota.dispatch_shadow(backend=backend or 'exec', task_type=task_type, author_model=author_model,
                                  now=now, applied=True, recent_limited=recent)

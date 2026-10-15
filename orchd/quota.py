@@ -21,6 +21,8 @@ from . import store
 
 TTL = 60
 MAX_AGE = 300
+SONNET_CLI_TTL = 300  # Bounded CLI reads lack the continuous Codex refresh stream.
+SONNET_CLOCK_SKEW = 2  # Tolerate small wall-clock/receipt races, never large future dates.
 SONNET_PROBE_INTERVAL = 60  # Minimum seconds between auto-selection attempts, including failures.
 REFRESH_INTERVAL = 30  # Refresh before observation TTL, leaving room for RPC latency.
 
@@ -80,11 +82,14 @@ class Cache:
         with contextlib.closing(sqlite3.connect(self.path.resolve().as_uri() + '?mode=ro', uri=True, timeout=2)) as con:
             rows = con.execute('SELECT provider,id,observed,source,windows FROM buckets ORDER BY provider,id').fetchall()
         for provider, bucket, observed, source, encoded in rows:
+            ttl = SONNET_CLI_TTL if provider == 'sonnet' and source == 'claude.cli.usage' else TTL
             age = now - observed
+            if provider == 'sonnet' and -SONNET_CLOCK_SKEW <= age < 0:
+                age = 0
             for window in json.loads(encoded) or [dict(name='unreported')]:
                 used, reset, duration = (window.get(k) for k in ('used_percent', 'reset_at', 'window_seconds'))
                 reason = ('invalid observation time' if age < 0 else 'stale' if age > MAX_AGE else
-                          'expired TTL' if age > TTL else 'missing or invalid fields'
+                          'expired TTL' if age > ttl else 'missing or invalid fields'
                           if not (number(used) and 0 <= used <= 100 and number(reset) and
                                   number(duration) and duration > 0) else
                           'reset passed; refresh required' if reset <= now else None)

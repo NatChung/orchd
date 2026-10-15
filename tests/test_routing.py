@@ -403,6 +403,31 @@ class RoutingTest(unittest.TestCase):
             core.auto_flush(self.con, self.rt, task['id'], int(task['job_id']), turn_log=log)
         self.assertEqual(len(self.rt.auto_requests), 1)
 
+    def test_auto_refresh_uses_wall_clock_after_cli_read(self):
+        now = datetime.datetime(2026, 12, 31, 22, 0, tzinfo=datetime.timezone.utc).timestamp()
+        clock = [now]
+        display = ('Current session: 5% used · resets Jan 1 at 1am (UTC)\n'
+                   'Current week (all models): 11% used · resets Jan 2 at 12:30pm (UTC)')
+
+        def read_usage(*args, **kwargs):
+            clock[0] += 10  # Wall clock corrects while the bounded CLI read runs.
+            return Mock(returncode=0, stdout=json.dumps(dict(result=display, num_turns=0,
+                        local_command='usage', duration_api_ms=0)))
+
+        with patch('orchd.quota.time.time', side_effect=lambda: clock[0]), \
+                patch('orchd.quota.time.monotonic', return_value=100), \
+                patch('orchd.quota.subprocess.run', side_effect=read_usage):
+            self.observe(94, 99, age=790)
+            quota.Cache().codex({'rateLimits': {'primary': {'usedPercent': 94,
+                'windowDurationMins': 300, 'resetsAt': now + 10000}}}, now=now)
+            task = self.dispatch()
+        msg = self.con.execute("SELECT body FROM messages WHERE task_id=? AND kind='dispatch'",
+                               (task['id'],)).fetchone()
+        snapshot = json.loads(msg['body'])['quota_shadow']['quota']
+        self.assertEqual(snapshot['sonnet']['state'], 'known')
+        self.assertEqual(snapshot['sonnet']['windows'][0]['age_seconds'], 0)
+        self.assertEqual(task['model'], core.WORKER_MODELS['sonnet'])
+
     def test_stale_sonnet_refresh_before_selection_uses_actual_capacity(self):
         now = datetime.datetime(2026, 12, 31, 22, 0, tzinfo=datetime.timezone.utc).timestamp()
         display = ('Current session: 5% used · resets Jan 1 at 1am (UTC)\n'

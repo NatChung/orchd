@@ -12,6 +12,46 @@ from orchd import quota
 
 
 class QuotaTest(unittest.TestCase):
+    def test_claude_cli_small_future_observation_is_known_with_zero_age(self):
+        now = datetime.datetime(2026, 12, 31, 22, 0, tzinfo=datetime.timezone.utc).timestamp()
+        display = ('Current session: 5% used · resets Jan 1 at 1am (UTC)\n'
+                   'Current week (all models): 11% used · resets Jan 2 at 12:30pm (UTC)')
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            for skew in (.004, .028, 2):
+                with self.subTest(skew=skew):
+                    quota.claude_usage(cache, display, now=now + skew)
+                    window = cache.status(now=now)['sonnet']['windows'][0]
+                    self.assertEqual((window['state'], window['age_seconds'], window['used_percent']),
+                                     ('known', 0, 5))
+            quota.claude_usage(cache, display, now=now + 30)
+            self.assertEqual(cache.status(now=now)['sonnet']['windows'][0]['reason'],
+                             'invalid observation time')
+
+    def test_claude_cli_receipt_has_five_minute_ttl_without_changing_sol(self):
+        now = datetime.datetime(2026, 12, 31, 22, 0, tzinfo=datetime.timezone.utc).timestamp()
+        display = ('Current session: 5% used · resets Jan 1 at 1am (UTC)\n'
+                   'Current week (all models): 11% used · resets Jan 2 at 12:30pm (UTC)')
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            quota.claude_usage(cache, display, now=now)
+            cache.codex({'rateLimits': {'primary': {'usedPercent': 20,
+                'windowDurationMins': 300, 'resetsAt': now + 10000}}}, now=now)
+            for age in (63, 300):
+                with self.subTest(age=age):
+                    self.assertEqual(cache.status(now=now + age)['sonnet']['state'], 'known')
+            for age in (301, 790):
+                with self.subTest(age=age):
+                    self.assertEqual(cache.status(now=now + age)['sonnet']['windows'][0]['reason'],
+                                     'stale')
+            self.assertEqual(cache.status(now=now + 63)['sol']['windows'][0]['reason'], 'expired TTL')
+            self.assertEqual(cache.status(now=now - .004)['sol']['windows'][0]['reason'],
+                             'invalid observation time')
+            # The reset boundary still wins over the longer CLI TTL.
+            quota.claude_usage(cache, display, now=now + 10799)
+            self.assertEqual(cache.status(now=now + 10800)['sonnet']['windows'][0]['reason'],
+                             'reset passed; refresh required')
+
     def test_empty_rpc_payload_cannot_overwrite_known_quota(self):
         with tempfile.TemporaryDirectory() as tmp:
             cache = quota.Cache(Path(tmp) / 'quota.db')
