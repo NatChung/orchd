@@ -262,8 +262,8 @@ def suggest(con, receipt_id, suggestion, *, producer, producers):
         revision, appended = _add_suggestion(con, receipt_id, suggestion, producer)
         if appended:
             intake_notify.upgrade(con, receipt_id, _suggestion_urgency(suggestion))
-    return dict(status="suggested" if appended else "unchanged", receipt_id=receipt_id, suggestion_revision=revision,
-                urgency=_suggestion_urgency(suggestion))
+    return dict(status="suggested" if appended else "unchanged", receipt_id=receipt_id, owner_orch=row["owner_orch"],
+                suggestion_revision=revision, urgency=_suggestion_urgency(suggestion))
 
 
 def suggestions(con, receipt_id):
