@@ -291,11 +291,12 @@ def build_parser():
         else:
             mutation.add_argument("goal_id")
         mutation.add_argument("--actor", default=f"operator:{getpass.getuser()}", help="audit actor; MCP records Orch id")
+        mutation.add_argument("--expected-revision", type=int, help="issue_scope.revision; required to replace existing issues")
         mutation.add_argument("--fields", type=json.loads, default={}, help="JSON object; null clears optional fields")
         for field in goals.INPUT_FIELDS:
             if field == "repo":
                 continue
-            kind = json.loads if field in ("companies", "linked_tasks") else float if field == "v" else int if field == "j" else str
+            kind = json.loads if field in ("companies", "linked_tasks", "issues") else float if field == "v" else int if field == "j" else str
             mutation.add_argument("--" + field.replace("_", "-"), type=kind, default=argparse.SUPPRESS)
     goal_sub.add_parser("show").add_argument("goal_id")
     goal_list = goal_sub.add_parser("list")
@@ -533,10 +534,10 @@ def main(argv=None):
                     raise ValueError("--fields must be a JSON object")
                 fields = dict(args.fields)
                 fields.update({k: getattr(args, k) for k in goals.INPUT_FIELDS if hasattr(args, k)})
-                print(json.dumps(goals.set_goal(con, getattr(args, "goal_id", None), actor=args.actor, **fields),
+                print(json.dumps(goals.set_goal(con, getattr(args, "goal_id", None), actor=args.actor, expected_revision=args.expected_revision, **fields),
                                  ensure_ascii=False, indent=1))
             elif args.goal_cmd == "show":
-                print(json.dumps(goals.get(con, args.goal_id, history=True), ensure_ascii=False, indent=1))
+                print(json.dumps(goals.get(con, args.goal_id, history=True, include_issues=True), ensure_ascii=False, indent=1))
             elif args.goal_cmd == "list":
                 print(json.dumps(goals.list_goals(con, args.repo, args.status), ensure_ascii=False, indent=1))
             else:

@@ -229,3 +229,12 @@ MCP warnings appear only in the result, after validation succeeds; they are not
 also printed to stderr. Warnings do not mean the question was rejected or approved.
 
 家目錄規則會在程式更新後自動以版本化步驟更新；managed 區塊外原文保留，覆寫前備份。旗標、自訂路徑與舊版首次更新步驟見[家目錄 migration](upgrade-migrations.md)。
+
+## 目標的有序 issue 清單
+
+`goal add/set --issues '["github:example/project#1","jira:DEMO-2"]'` 整份替換清單；
+省略不改、`[]` 明確清空，拒絕 null 與重複 canonical ref。現有目標另帶
+`--expected-revision N`，N 取 goal_list/show 的 `issue_scope.revision`；過期就重讀。
+MCP 同用 `goal_set({goal_id, expected_revision, fields: {issues: [...]}})`。
+Dashboard 用 `snapshot --json --schema-version 2`，區分未支援、尚未設定與已確認空清單。
+詳見 [goal scope 契約](goals-board.md#ordered-issue-scope-refs-48)；部署、正式 DB 升級及重啟另行核准。

@@ -65,6 +65,17 @@ CREATE TABLE IF NOT EXISTS goal_history(
     changes TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS goal_history_goal ON goal_history(goal_id, id);
+CREATE TABLE IF NOT EXISTS goal_issues(
+    goal_id TEXT NOT NULL REFERENCES goals(id),
+    issue_ref TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK(position >= 0),
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    removed_at REAL,
+    PRIMARY KEY(goal_id, issue_ref)
+);
+CREATE INDEX IF NOT EXISTS goal_issues_active_order
+    ON goal_issues(goal_id, removed_at, position, issue_ref);
 CREATE TABLE IF NOT EXISTS worker_deliveries(
     id TEXT PRIMARY KEY, task_id TEXT NOT NULL, generation TEXT NOT NULL,
     thread_id TEXT NOT NULL, turn_id TEXT, message_ids TEXT NOT NULL,

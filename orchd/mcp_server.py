@@ -309,18 +309,23 @@ GOAL_PROPERTIES.update(companies={"type": "array", "items": {"type": "string"}},
 GOAL_PROPERTIES["linked_tasks"] = {"type": "array", "description": "Explicit replacement; omit to preserve links, [] to unlink all",
     "items": {"type": "object", "required": ["task_id", "goal_critical"], "additionalProperties": False,
               "properties": {"task_id": {"type": "string"}, "goal_critical": {"type": "boolean"}}}}
+GOAL_PROPERTIES["issues"] = {"type": "array", "items": {"type": "string"},
+    "description": "Operator-confirmed ordered refs (github:owner/repo#N or jira:KEY-N). Entire replacement: "
+                   "omit to preserve, [] to clear; null/duplicates rejected. GitHub owner/repo becomes lowercase. "
+                   "Use expected_revision from goal_list; does not alter task/entry/intake links."}
 GOAL_PROPERTIES["type"]["enum"] = ["goal", "continuous"]
 GOAL_PROPERTIES["status"]["enum"] = ["active", "waiting", "paused", "done"]
 TOOLS += [
     {"name": "goal_list", "annotations": {"readOnlyHint": True},
-     "description": "Read central project goals and linked tasks; includes paused/done. No inbox consumption.",
+     "description": "Read central project goals, ordered issues, issue_scope revision/state, and linked tasks; includes paused/done. No inbox consumption.",
      "inputSchema": {"type": "object", "properties": {
          "repo": {"type": "string"}, "status": {"type": "string", "enum": ["active", "waiting", "paused", "done"]}}}},
     {"name": "goal_set", "annotations": {"readOnlyHint": False},
      "description": "Create (omit goal_id, supply repo) or update a central goal. Records caller, time and before/after history. "
-                    "Only record Operator-approved V; no automatic value judgment.",
+                    "Only record Operator-approved V and issue scope; no automatic value judgment. Attach/remove/reorder via fields.issues (entire ordered replacement). Existing goals require expected_revision for issues; stale writes fail, reread goal_list. No-op adds no history.",
      "inputSchema": {"type": "object", "required": ["fields"], "properties": {
          "goal_id": {"type": "string"},
+         "expected_revision": {"type": "integer", "description": "Required when replacing existing goal issues; issue_scope.revision from goal_list"},
          "fields": {"type": "object", "additionalProperties": False, "properties": GOAL_PROPERTIES}}}},
 ]
 
@@ -414,7 +419,7 @@ def call(name, args, thread, con, rt):
     if name == "goal_set":
         if not thread:
             raise ValueError("goal_set needs the caller's thread id for history")
-        return goals.set_goal(con, args.get("goal_id"), actor=f"orch:{thread}", **args.get("fields", {}))
+        return goals.set_goal(con, args.get("goal_id"), actor=f"orch:{thread}", expected_revision=args.get("expected_revision"), **args.get("fields", {}))
     if name == "dispatch":
         t = core.dispatch(con, rt, orch_thread=thread, repo=args["repo"], title=args["title"],
                           instructions=args["instructions"], done_when=args["done_when"],

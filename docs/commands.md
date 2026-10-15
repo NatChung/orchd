@@ -82,6 +82,16 @@ Both `--since` flags use local HH:MM today. `watch` starts after the last messag
 
 `snapshot` requires `--json`. It includes goals/history, open tasks, entry questions/reply metadata and separate worker question/answer evidence. `--answered-limit` is non-negative and defaults to 100; it limits only recent answered entry questions, while current/queued questions (including held) remain unlimited. Historical bindings and closed task links stay visible. Worker questions await Orch triage; worker confirmation/execution remains unknown. The output includes `generated_at`, `source_db`, output contract `schema_version` and actual database `schema_fingerprint`. Missing, corrupt or incomplete databases produce an error and a non-zero exit code.
 
+### Ordered goal scope
+
+`goal add/set --issues '["github:example/project#1","jira:DEMO-2"]'` replaces the
+ordered issue scope; omit to preserve, `[]` to clear. Existing goals require
+`--expected-revision N` from `issue_scope.revision` returned by goal_list/show.
+MCP uses `goal_set({goal_id, expected_revision, fields: {issues: [...]}})`.
+Dashboard reads use `snapshot --json --schema-version 2`; the additive capability
+distinguishes unsupported, unset and explicitly empty scope without migration.
+See [goal scope and upgrade contract](goals-board.md#ordered-issue-scope-refs-48).
+
 ### Parent references: CLI, MCP and snapshot v2
 
 These behaviors match main `9bfb35a`. REF is `github:owner/repo#N` or

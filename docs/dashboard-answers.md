@@ -263,3 +263,49 @@ is unchanged. See [ask format and example](commands.md#worker-ask-summary).
   "summary": "【給 Operator 的摘要】\n要你決定：是否送出？\n選項：A 送出／B 暫緩\n建議：選 A，測試已通過。"
 }
 ```
+
+### Ordered goal issues (v2 addition)
+
+Snapshot v2 adds `goal_issues: {version: 1, available: boolean, complete: boolean}`
+and, per goal, `issues`, `issue_scope`, and `issue_scope_mismatches`. Existing v2
+fields and the default v1 output are preserved. Old v2 consumers can ignore these
+additions; new consumers must check the capability rather than infer support from
+`schema_version` or a single hardcoded schema fingerprint.
+
+`issues` is the complete, unpaginated array of active memberships, ordered by
+`position, issue_ref`. Each item has `issue_ref` (canonical string), `position`
+(zero-based integer), and `resolution: "unresolved"`. No tracker is contacted,
+issue content copied, status inferred, or missing issue silently dropped.
+
+`issue_scope` has `version: 1`, `available`, `complete`, `state` and `revision`:
+
+| State | Meaning | issues | revision |
+| --- | --- | --- | --- |
+| `unsupported` | Source DB lacks goal_issues; no migration attempted | null | null |
+| `unset` | Table exists but no explicit scope confirmation in history | [] | latest goal history id, or 0 |
+| `set` | Explicit scope confirmed, including a deliberately empty list | ordered array, possibly [] | latest goal history id |
+
+`complete` means all local membership rows were returned, not that tracker state
+is known or Operator has confirmed scope. It and `available` are false when the
+table is absent. A query failure produces a nonzero CLI error, not an empty scope.
+An older binary missing the capability means unsupported, not confirmed empty.
+
+`linked_tasks` remains complete regardless of membership. On a configured scope,
+`issue_scope_mismatches` lists `{task_id, issue_ref}` for linked tasks with a known
+canonical issue outside the scope; missing task refs remain unknown. No task is
+hidden or moved, and dispatch never changes membership. Keep shared refs identifiable
+across goals and deduplicate by canonical identity for project totals/backlog.
+
+Dashboard presentation still owns the fixed buckets: needs Operator decision,
+in progress, not started, complete; sort within each bucket by position. Effective
+Nat questions take precedence, then open workers. Completion requires tracker
+closed plus known task cleanup; unknown tracker/task state stays unknown. Worker
+questions awaiting Orch do not become Nat decisions. Keep last-good tracker data
+and mark stale on tracker failure; the local unresolved flag never means open or
+closed. Issue descriptions and the first nonempty `白話：` line remain tracker data.
+Fallback to title/number when that line is missing. None of this change modifies
+the dashboard.
+
+Like all snapshot data, this extension reads only the existing verified private
+DB/WAL copy with `query_only=ON`: no store.connect, migration, inbox consumption,
+delivery, binding writes, cache/log writes, or outward sends.
