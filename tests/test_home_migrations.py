@@ -20,6 +20,9 @@ class HomeMigrationTest(unittest.TestCase):
     def run_migrations(self, **kw):
         return migrations.run(home=self.home, env=self.env, **kw)
 
+    def backups(self, role):
+        return self.home / "state/backups" / role
+
     def existing(self, text):
         self.file.parent.mkdir(parents=True, exist_ok=True)
         self.file.write_bytes(text)
@@ -42,9 +45,11 @@ class HomeMigrationTest(unittest.TestCase):
         content = self.file.read_bytes()
         self.assertTrue(content.startswith(original))
         self.assertEqual(content.count(b"orchd:managed:start"), 1)
-        backups = list(self.file.parent.glob("AGENTS.md.orchd-backup-*"))
+        backups = list(self.backups("home").glob("AGENTS.md.*"))
         self.assertEqual(len(backups), 1)
         self.assertEqual(backups[0].read_bytes(), original)
+        self.assertEqual(backups[0].parent, (self.home / "state/backups/home").absolute())
+        self.assertEqual(list(self.file.parent.glob("*orchd-backup*")), [])
         self.assertEqual(self.file.stat().st_mode & 0o777, 0o640)
         self.assertIn("原檔已有的相同規則可以手動刪掉", "\n".join(lines))
         self.assertIn(str(backups[0]), "\n".join(lines))
@@ -52,7 +57,7 @@ class HomeMigrationTest(unittest.TestCase):
         self.assertEqual(self.applied(), [("orch-rules-v1",)])
         self.assertEqual(self.run_migrations()[0], 0)
         self.assertEqual(self.file.read_bytes(), content)
-        self.assertEqual(list(self.file.parent.glob("AGENTS.md.orchd-backup-*")), backups)
+        self.assertEqual(list(self.backups("home").glob("AGENTS.md.*")), backups)
 
     def test_block_update_keeps_outside_bytes_and_future_step_order(self):
         prefix, suffix = b"local before\r\n", b"\r\nlocal after without newline"
@@ -96,10 +101,10 @@ class HomeMigrationTest(unittest.TestCase):
     def test_partial_failure_retries_without_duplicate_append(self):
         self.existing(b"local")
         real_write = migrations.write_file
-        def fail_interface(file, content):
+        def fail_interface(file, content, backup_dir):
             if file.parent.name == "interface":
                 raise OSError("disk full")
-            return real_write(file, content)
+            return real_write(file, content, backup_dir)
         with patch.object(migrations, "write_file", side_effect=fail_interface):
             code, lines = self.run_migrations()
         self.assertEqual(code, 1)
@@ -107,7 +112,8 @@ class HomeMigrationTest(unittest.TestCase):
         self.assertIn("backup:", "\n".join(lines))
         self.assertEqual(self.run_migrations()[0], 0)
         self.assertEqual(self.file.read_bytes().count(b"orchd:managed:start"), 1)
-        self.assertEqual(len(list(self.file.parent.glob("AGENTS.md.orchd-backup-*"))), 1)
+        self.assertEqual(len(list(self.backups("home").glob("AGENTS.md.*"))), 1)
+        self.assertEqual(list(self.home.rglob("*orchd-backup-*")), [])
 
     def test_failed_atomic_write_preserves_original_and_reports_backup(self):
         self.existing(b"local")
@@ -116,12 +122,12 @@ class HomeMigrationTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(self.file.read_bytes(), b"local")
         self.assertEqual(self.applied(), [])
-        backup = next(self.file.parent.glob("AGENTS.md.orchd-backup-*"))
+        backup = next(self.backups("home").glob("AGENTS.md.*"))
         self.assertEqual(backup.read_bytes(), b"local")
         self.assertIn(str(backup), "\n".join(lines))
 
     def test_ordered_steps_keep_successful_predecessors_on_failure(self):
-        def fail(folders, dry_run, lines):
+        def fail(folders, dry_run, lines, backup_root):
             raise OSError("step two failed")
         with patch.object(migrations, "STEPS", (("one", migrations.update_rules), ("two", fail))):
             self.assertEqual(self.run_migrations()[0], 1)
@@ -165,3 +171,14 @@ class HomeMigrationTest(unittest.TestCase):
         self.assertEqual(applied.returncode, 0, applied.stderr)
         self.assertTrue(self.file.exists())
         self.assertIn("already applied", cli("--migrations-only").stdout)
+
+    def test_roles_do_not_overwrite_each_other_and_no_backup_beside_original(self):
+        self.existing(b"home")
+        interface = self.home / "orch/interface/AGENTS.md"
+        interface.parent.mkdir(parents=True)
+        interface.write_bytes(b"interface")
+        self.assertEqual(self.run_migrations()[0], 0)
+        self.assertEqual(next(self.backups("home").glob("AGENTS.md.*")).read_bytes(), b"home")
+        self.assertEqual(next(self.backups("interface").glob("AGENTS.md.*")).read_bytes(), b"interface")
+        for folder in (self.file.parent, interface.parent):
+            self.assertEqual([p.name for p in folder.iterdir() if "orchd-backup" in p.name], [])
