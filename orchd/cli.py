@@ -7,6 +7,7 @@
                                               stop, confirm death, start, adopt, and rebind Desktop
   orchd init [--from OLD_ORCH_HOME] [--no-trust]   create ~/orch/home and ~/orch/interface, trust them in Codex
   orchd upgrade                               reinstall the uv-installed orchd at its source's newest commit
+  orchd entry reconcile [--apply]             move open entry questions stranded on an old owner to the entry's owner (#60)
   orchd binding [--new | --to ORCH_ID | --status] [--entry NAME]
                                               bind ~/orch/interface to a live Claude Orch (starts one if none);
                                               --new starts a new one, --to binds a given one, --status only reads
@@ -120,6 +121,9 @@ def build_parser():
     thread.add_argument("--entry", default="desktop")
     thread.add_argument("--limit", type=int, default=3)
     thread.add_argument("--json", action="store_true", help="JSON output (also the default)")
+    reconcile = entry_actions.add_parser("reconcile", help="move open questions stranded on a previous owner to the "
+                                                       "entry's owner (dry run unless --apply; backs up the DB first)")
+    reconcile.add_argument("--apply", action="store_true")
     for action in ("send", "ask", "tag"):
         command = entry_actions.add_parser(action)
         if action == "tag":
@@ -450,7 +454,8 @@ HOME_POLICY = {
     ("init",): "skip", ("upgrade",): "skip", ("quota",): "skip", ("doctor",): "skip",
     ("config", "show"): "skip", ("config", "get"): "skip", ("config", "set"): "skip", ("config", "unset"): "skip",
     ("binding",): "write",  # --status -> warn
-    ("entry", "thread"): "warn", ("entry", "tag"): "write", ("entry", "send"): "write", ("entry", "ask"): "write",
+    ("entry", "thread"): "warn", ("entry", "reconcile"): "write",  # no --apply -> warn
+    ("entry", "tag"): "write", ("entry", "send"): "write", ("entry", "ask"): "write",
     ("entry-question", "show"): "warn", ("entry-question", "snooze"): "write", ("entry-question", "un-snooze"): "write",
     ("entry-question", "cancel"): "write", ("entry-question", "supersede"): "write", ("entry-question", "answer"): "write",
     ("task-question", "answer"): "write", ("task-question", "dismiss"): "write",
@@ -472,7 +477,8 @@ def _home_policy(args):
     cmd = args.cmd.split()[0]
     action = next((getattr(args, d) for d in ACTION_DEST if getattr(args, d, None)), None)
     policy = HOME_POLICY.get((cmd, action) if action else (cmd,), "write")  # unknown -> write (tests keep the table complete)
-    if policy == "write" and (getattr(args, "dry_run", False) or (cmd == "binding" and args.status)):
+    if policy == "write" and (getattr(args, "dry_run", False) or (cmd == "binding" and args.status)
+                              or (cmd == "entry" and action == "reconcile" and not args.apply)):
         return "warn"
     return policy
 
@@ -520,6 +526,9 @@ def main(argv=None):
             if args.entry_action == "thread":
                 refs = (args.issue_refs if args.issue_refs is not None else args.issue_ref).split(",")
                 result = entry_threads.read(store.home() / "orchd.db", refs, entry_id=args.entry, limit=args.limit)
+            elif args.entry_action == "reconcile":
+                result = entry.reconcile_path(store.home() / "orchd.db", apply=args.apply,
+                                              backup_dir=store.home() / "backups")
             else:
                 orch_id = os.environ.get("ORCHD_ORCH_ID")
                 if not orch_id:

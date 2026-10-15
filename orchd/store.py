@@ -313,7 +313,8 @@ ENTRY_MESSAGE_COLUMNS = ("body_bytes INTEGER", "body_sha256 TEXT", "wire_text TE
                          "source_item_id TEXT", "source_raw TEXT", "source_turn TEXT",
                          "version INTEGER NOT NULL DEFAULT 1", "supersedes INTEGER REFERENCES entry_messages(id)",
                          "superseded_by INTEGER REFERENCES entry_messages(id)", "revisit_at REAL",
-                         "note TEXT", "reason TEXT", "queue_order INTEGER", "notified_at REAL", "issue_ref TEXT")
+                         "note TEXT", "reason TEXT", "queue_order INTEGER", "notified_at REAL", "issue_ref TEXT",
+                         "original_orch_id TEXT")
 
 # Message kinds the Orch reads in its inbox; the rest (dispatch, answer, close, usage) are the event log.
 ORCH_KINDS = ("ack", "progress", "report", "question", "adopt", "task_question_answer", "question_dismissed")
@@ -392,8 +393,9 @@ def task_delivery(con, task_ids, timeout=65):
 
 class AdoptionMoves(list):
     """Move tuples plus the registry snapshots validated against the runtime probe."""
-    def __init__(self, target, owners):
+    def __init__(self, target, owners, in_transaction=None):
         super().__init__()
+        self.in_transaction = in_transaction  # run inside the move's write transaction; its error rolls back
         self.target = dict(target)
         self.owners = {owner: dict(row) if row is not None else None for owner, row in owners.items()}
 
@@ -531,7 +533,8 @@ def move_task_orch(con, moves, to_orch):
     moves: [(task_id, expected_from_orch, body, evidence)]. Only tasks.orch_thread changes: messages
     (and their read_at), worktree, branch, job and worker process stay as they were. Any failure, or a task
     that closed or changed owner since the caller looked, rolls the whole batch back. Returns the adopt
-    message ids in order.
+    message ids in order. moves.in_transaction(con), if set (AdoptionMoves), runs inside the same write transaction after the
+    moves; whatever it raises rolls the moves back too.
     """
     marks = ",".join("?" * len(OPEN))
     with task_delivery(con, [m[0] for m in moves]), immediate(con):
@@ -559,6 +562,8 @@ def move_task_orch(con, moves, to_orch):
                 raise ValueError(f"task {task_id} changed owner or closed while adopting; nothing was moved")
             ids.append(add_message(con, task_id, "adopt", body, evidence))
             con.execute("UPDATE messages SET recipient_orch=? WHERE id=?", (to_orch, ids[-1]))
+        if getattr(moves, "in_transaction", None) is not None:
+            moves.in_transaction(con)
         return ids
 
 

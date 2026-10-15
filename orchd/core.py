@@ -4,6 +4,7 @@ import fcntl
 import json
 import os
 import shlex
+import sqlite3
 import time
 import uuid
 from pathlib import Path
@@ -1264,6 +1265,16 @@ def _adopt_summary(con, task):
     return "; ".join(parts)
 
 
+def _sweep_entry_questions(con, new_orch):
+    """#60: open questions stranded on a previous owner follow the entry bound to the new Orch.
+
+    Runs inside adopt's write transaction, so the entry binding is read under the lock and any error
+    rolls the task move back with it (`orchd entry reconcile` backfills older strandings)."""
+    from . import entry
+    for bound in con.execute("SELECT * FROM entries WHERE orch_id=?", (new_orch,)).fetchall():
+        entry.sweep_questions(con, bound, "orchd", f"adopt by {new_orch}")
+
+
 def adopt(con, rt, new_orch, task_ids=(), from_orch=None, force=False):
     """Operator-run (CLI) transfer of open tasks to another Orch. Never automatic.
 
@@ -1316,7 +1327,7 @@ def adopt(con, rt, new_orch, task_ids=(), from_orch=None, force=False):
         detail = ", ".join(f"{o} is {h['state']} ({h['reason']})" for o, h in blocked.items())
         raise ValueError(f"refusing to adopt: {detail}. Only a confirmed-dead owner moves without --force; "
                          "unknown is not proof the owner is gone")
-    moves = store.AdoptionMoves(target, old_rows)
+    moves = store.AdoptionMoves(target, old_rows, lambda c: _sweep_entry_questions(c, new_orch))
     for t in tasks:
         health = olds[t["orch_thread"]]
         body = f"adopted from {t['orch_thread']} ({health['state']}): {_adopt_summary(con, t)}"

@@ -368,6 +368,36 @@ class StartupMigrationTest(unittest.TestCase):
                 self.assertEqual(migrations.pending(self.home, self.isolated_env()), state)
                 self.assertEqual(self.backups(), [])
 
+    def reconcile_db(self):
+        import sqlite3
+        db = self.home / "state/orchd.db"
+        db.parent.mkdir(parents=True, exist_ok=True)
+        con = sqlite3.connect(db)
+        con.execute("CREATE TABLE t(x)")
+        con.commit()
+        con.close()
+        return db
+
+    def test_entry_reconcile_preview_warns_without_writing_home_or_db(self):
+        self.stale()
+        db = self.reconcile_db()
+        before, state, dbbytes = self.file.read_bytes(), migrations.pending(self.home, self.isolated_env()), db.read_bytes()
+        out = subprocess.run([sys.executable, "bin/orchd", "entry", "reconcile"], input="", env=self.isolated_env(),
+                             capture_output=True, text=True)
+        self.assertEqual(self.file.read_bytes(), before)
+        self.assertEqual(migrations.pending(self.home, self.isolated_env()), state)
+        self.assertEqual(self.backups(), [])
+        self.assertEqual(db.read_bytes(), dbbytes)
+        self.assertNotEqual(out.stderr, "")  # the stale-home warning
+
+    def test_entry_reconcile_apply_migrates_home_with_backup(self):
+        self.stale()
+        self.reconcile_db()
+        subprocess.run([sys.executable, "bin/orchd", "entry", "reconcile", "--apply"], input="", env=self.isolated_env(),
+                       capture_output=True, text=True)
+        self.assertIn(b"orchd:managed:start v=2", self.file.read_bytes())
+        self.assertEqual(len(self.backups()), 1)
+
     def test_every_cli_subcommand_has_a_home_migration_policy(self):
         """New subcommands must be classified (write / warn / skip) or this fails."""
         import argparse
