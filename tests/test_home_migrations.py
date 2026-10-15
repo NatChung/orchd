@@ -331,6 +331,53 @@ class StartupMigrationTest(unittest.TestCase):
                        capture_output=True, text=True)
         self.assertIn(b"orchd:managed:start v=2", self.file.read_bytes())
 
+    def test_early_return_mutating_entries_apply_home_migrations(self):
+        """goal add/set and entry send/ask/tag return before any later hook; they must still migrate (#59)."""
+        cases = [["goal", "add", "example"], ["goal", "set", "g1"],
+                 ["entry", "send", "--text", "hi"], ["entry", "ask", "--text", "hi"], ["entry", "tag", "1", "--issue-ref", "x#1"]]
+        for argv in cases:
+            with self.subTest(argv=argv):
+                self.home_reset()
+                self.stale()
+                subprocess.run([sys.executable, "bin/orchd", *argv], input="", env=self.isolated_env(),
+                               capture_output=True, text=True)
+                self.assertIn(b"orchd:managed:start v=2", self.file.read_bytes())
+                self.assertEqual(len(self.backups()), 1)
+
+    def test_early_return_read_only_entries_only_warn(self):
+        cases = [["goal", "list"], ["goal", "show", "g1"], ["goal", "export", "r"], ["board", "/dev/null"],
+                 ["snapshot"], ["list"], ["entry", "thread", "--issue-ref", "x#1"], ["entry-question", "show", "1"]]
+        for argv in cases:
+            with self.subTest(argv=argv):
+                self.home_reset()
+                self.stale()
+                before, state = self.file.read_bytes(), migrations.pending(self.home, self.isolated_env())
+                subprocess.run([sys.executable, "bin/orchd", *argv], input="", env=self.isolated_env(),
+                               capture_output=True, text=True)
+                self.assertEqual(self.file.read_bytes(), before)  # other files (e.g. a probed CLI's own dotfile) are not home rules
+                self.assertEqual(migrations.pending(self.home, self.isolated_env()), state)
+                self.assertEqual(self.backups(), [])
+
+    def test_every_cli_subcommand_has_a_home_migration_policy(self):
+        """New subcommands must be classified (write / warn / skip) or this fails."""
+        import argparse
+        from orchd import cli
+
+        def leaves(parser, path=()):
+            subs = [a for a in parser._actions if isinstance(a, argparse._SubParsersAction)]
+            if not subs:
+                yield path
+                return
+            for name, child in subs[0].choices.items():
+                yield from leaves(child, path + (name,))
+        found = set(leaves(cli.build_parser()))
+        self.assertTrue(found)
+        self.assertEqual(found - set(cli.HOME_POLICY), set(), "unclassified subcommands")
+        self.assertEqual(set(cli.HOME_POLICY) - found, set(), "policy entries for removed subcommands")
+        self.assertLessEqual(set(cli.HOME_POLICY.values()), {"write", "warn", "skip"})
+        self.assertEqual(cli.HOME_POLICY[("init",)], "skip")
+        self.assertEqual(cli.HOME_POLICY[("upgrade",)], "skip")
+
     def home_reset(self):
         import shutil
         for child in self.home.iterdir():
