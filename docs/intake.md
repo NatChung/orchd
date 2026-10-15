@@ -231,7 +231,7 @@ owner, including v1 events and every owner queue) batches pending notifications 
   stale reconciliation is rejected. A mistaken negative read-back can cause a duplicate wake. This protocol
   records uncertainty; it does not claim exactly-once transport or receiver deduplication.
 * Wake text starts `[orchd intake] third-party data:` and names counts and receipt ids only, never the text; it never
-  imitates an Operator entry message. Unassigned receipts have no one to wake; they show in `intake backlog`.
+  imitates an Operator entry message. It ends with a reminder of the handling rule (also in the Orch home managed block, `orch-rules-v2`): an intake message is automatic, so the Orch decides the project, opens or merges into an issue with a plain-language summary and source, classifies it (to do / record only / needs Operator decision), does not reply to the source and does not ask the Operator per message; decisions are batched as a decision card on the issue. Outward replies still need Operator approval unless a standing authorization exists. Unassigned receipts have no one to wake; they show in `intake backlog`.
 
 ### Decisions
 

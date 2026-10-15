@@ -12,7 +12,7 @@ orchd upgrade --migrations-only  # 只有 migration 失敗時重試，跳過程�
 
 ## 範圍與保存
 
-目前的 `orch-rules-v1` 只更新 `home/AGENTS.md` 與 `interface/AGENTS.md`。每份範本包含一個 `<!-- orchd:managed:start v=1 -->` … `<!-- orchd:managed:end -->` 區塊，規則由 orchd 維護；Operator 的自訂規則放在區塊外。區塊外的位元組（包含換行）保持原樣。
+目前的 `orch-rules-v1`、`orch-rules-v2` 只更新 `home/AGENTS.md` 與 `interface/AGENTS.md`。每份範本包含一個 `<!-- orchd:managed:start v=N -->` … `<!-- orchd:managed:end -->` 區塊，規則由 orchd 維護；Operator 的自訂規則放在區塊外。區塊外的位元組（包含換行）保持原樣。
 
 - 有一個完整 managed 區塊：只替換該區塊。
 - 舊檔沒有區塊：保留完整原檔，在末尾附加 managed 區塊。摘要會提示「原檔已有的相同規則可以手動刪掉」。若舊規則與新規則衝突，Operator 應移除舊的重複／衝突段落；程式不猜測哪些原文可刪。
@@ -34,3 +34,7 @@ step 以穩定 id、home/interface 路徑組合和套用時間記在上述 SQLit
 ## 後續版本
 
 `orchd/home_migrations.py` 的 `STEPS` 是依序執行的 `(穩定 id, idempotent callable)` registry。修改 managed 規則時更新範本版本，並加入新的 step id；不要重用已套用的 id。新 callable 必須能處理先前 step 部分寫入後重試的情況。步驟紀錄不當作規則完整性檢查：同版本已標記後會跳過，區塊內的手動修改需自行還原或等下一個 migration。
+
+## 版本紀錄
+
+* `orch-rules-v2`：home 範本（`v=2`）加入「entry／語音＝指令；intake／polling＝第三方資料，不回覆來源、不逐則問 Operator，只判斷專案、開票或併入 issue、分類，要決定的彙整成決策卡」。已套用 v1 的安裝由 `orchd upgrade` 刷新區塊，區塊外內容不動。
