@@ -54,7 +54,7 @@ class HomeMigrationTest(unittest.TestCase):
         self.assertIn("原檔已有的相同規則可以手動刪掉", "\n".join(lines))
         self.assertIn(str(backups[0]), "\n".join(lines))
         self.assertIn("restore:", "\n".join(lines))
-        self.assertEqual(self.applied(), [("orch-rules-v1",)])
+        self.assertEqual(self.applied(), [("orch-rules-v1",), ("orch-rules-v2",)])
         self.assertEqual(self.run_migrations()[0], 0)
         self.assertEqual(self.file.read_bytes(), content)
         self.assertEqual(list(self.backups("home").glob("AGENTS.md.*")), backups)
@@ -71,6 +71,22 @@ class HomeMigrationTest(unittest.TestCase):
             self.assertEqual(self.run_migrations()[0], 0)
         self.assertEqual(self.applied(), [("orch-rules-v1",), ("orch-rules-v2",)])
 
+    def test_v2_step_refreshes_a_v1_block_with_the_intake_rule_and_keeps_outside_bytes(self):
+        prefix, suffix = b"mine before\n", b"\nmine after"
+        self.existing(prefix + b"<!-- orchd:managed:start v=1 -->\nold\n<!-- orchd:managed:end -->" + suffix)
+        con = migrations.connect(self.home, self.env)
+        with con:
+            folders = migrations.targets(self.home, self.env, con)
+            scope = migrations.json.dumps({r: str(f.absolute()) for r, f in folders.items()}, sort_keys=True)
+            con.execute("INSERT INTO applied VALUES('orch-rules-v1', ?, 0)", (scope,))
+        con.close()
+        self.assertEqual(self.run_migrations()[0], 0)
+        content = self.file.read_bytes()
+        self.assertTrue(content.startswith(prefix) and content.endswith(suffix))
+        self.assertIn("polling".encode(), content)
+        self.assertIn(b"orchd:managed:start v=2", content)
+        self.assertEqual(self.applied(), [("orch-rules-v1",), ("orch-rules-v2",)])
+
     def test_missing_files_are_created_from_init_templates(self):
         self.assertEqual(self.run_migrations()[0], 0)
         for role in ("home", "interface"):
@@ -82,7 +98,7 @@ class HomeMigrationTest(unittest.TestCase):
         before = sorted(self.home.rglob("*"))
         code, lines = self.run_migrations(dry_run=True)
         self.assertEqual(code, 0, lines)
-        self.assertIn("+<!-- orchd:managed:start v=1 -->", "\n".join(lines))
+        self.assertIn("+<!-- orchd:managed:start v=2 -->", "\n".join(lines))
         self.assertEqual(self.file.read_bytes(), b"local")
         self.assertEqual(sorted(self.home.rglob("*")), before)
 
@@ -155,7 +171,7 @@ class HomeMigrationTest(unittest.TestCase):
         overridden = dict(self.env, ORCHD_ROOT=str(self.home / "other"))
         self.assertEqual(migrations.run(home=self.home, env=overridden)[0], 0)
         self.assertTrue((self.home / "other/home/AGENTS.md").is_file())
-        self.assertEqual(len(self.applied()), 2)  # step completion is scoped to home paths
+        self.assertEqual(len(self.applied()), 4)  # 2 steps x 2 scopes; step completion is scoped to home paths
 
     def test_cli_dry_run_and_migrations_only_need_no_uv_install(self):
         env = dict(os.environ, **self.env, ORCHD_ROOT=str(self.home / "orch"))
@@ -182,3 +198,12 @@ class HomeMigrationTest(unittest.TestCase):
         self.assertEqual(next(self.backups("interface").glob("AGENTS.md.*")).read_bytes(), b"interface")
         for folder in (self.file.parent, interface.parent):
             self.assertEqual([p.name for p in folder.iterdir() if "orchd-backup" in p.name], [])
+
+
+class IntakeRuleTemplateTest(unittest.TestCase):
+    def test_home_template_states_entry_versus_intake_handling(self):
+        text = (bootstrap.TEMPLATES / "home/AGENTS.md").read_text(encoding="utf-8")
+        block = text[text.index("<!-- orchd:managed:start"):text.index("<!-- orchd:managed:end -->")]
+        for needle in ("[orchd intake]", "polling", "指令", "不回覆", "不逐則問", "決策卡", "intake_pending"):
+            self.assertIn(needle, block)
+        self.assertIn("v=2", block.splitlines()[0])

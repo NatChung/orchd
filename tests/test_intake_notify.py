@@ -88,6 +88,8 @@ class OutboxTests(NotifyBase):
         self.assertTrue(text.startswith("[orchd intake] third-party data"))
         self.assertNotIn("Operator", text.split("不是")[0])
         self.assertNotIn("Synthetic", text)
+        for needle in ("不回覆來源", "不逐則問 Operator", "intake_pending"):
+            self.assertIn(needle, text)
         self.assertEqual({r["state"] for r in self.rows()}, {"delivered"})
 
     def test_wake_failure_requires_reconciliation_before_retry(self):
