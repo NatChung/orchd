@@ -459,7 +459,7 @@ HOME_POLICY = {
     **{("intake", a): "warn" for a in ("show", "decisions", "backlog", "pending", "draft-show")},
     ("task", "link"): "write", ("task", "unlink"): "write",
     ("ack",): "write", ("report",): "write", ("progress",): "write", ("flush",): "write",
-    ("watch",): "write", ("summary",): "write", ("_auto-retry",): "write", ("ask",): "write", ("verify",): "write", ("close",): "write", ("adopt",): "write",
+    ("watch",): "warn", ("summary",): "warn", ("_auto-retry",): "write", ("ask",): "write", ("verify",): "write", ("close",): "write", ("adopt",): "write",
     ("list",): "warn", ("stats",): "warn", ("snapshot",): "warn", ("board",): "warn",
     ("goal", "add"): "write", ("goal", "set"): "write",
     ("goal", "show"): "warn", ("goal", "list"): "warn", ("goal", "export"): "warn",

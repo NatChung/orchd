@@ -311,19 +311,29 @@ class StartupMigrationTest(unittest.TestCase):
     def test_read_only_commands_never_apply_home_migrations(self):
         """dry-run and read-only commands must leave files, backups and migration state untouched (#58)."""
         cases = [["orch", "restart", "--dry-run"], ["binding", "--status"], ["stats"],
-                 ["intake", "backlog"], ["intake", "pending"], ["intake", "decisions"]]
+                 ["intake", "backlog"], ["intake", "pending"], ["intake", "decisions"],
+                 ["summary"], ["watch"]]  # summary/watch are read-only (orchd/watch.py)
         for argv in cases:
             with self.subTest(argv=argv):
                 self.home_reset()
                 self.stale()
                 before = self.tree()
-                state = (self.home / "state/home-migrations.db")
                 state_before = migrations.pending(self.home, self.isolated_env())
-                subprocess.run([sys.executable, "bin/orchd", *argv], input="", env=self.isolated_env(),
-                               capture_output=True, text=True)
+                try:  # watch never exits on its own
+                    subprocess.run([sys.executable, "bin/orchd", *argv], input="", env=self.isolated_env(),
+                                   capture_output=True, text=True, timeout=8)
+                except subprocess.TimeoutExpired:
+                    pass
                 self.assertEqual(self.tree(), before)
                 self.assertEqual(self.backups(), [])
                 self.assertEqual(migrations.pending(self.home, self.isolated_env()), state_before)
+
+    def test_missing_state_db_is_silent_even_if_exists_is_mocked(self):
+        """A fresh machine has no migration DB: no error, no files, even when Path.exists lies."""
+        env, nowhere = self.isolated_env(), Path(self.home) / "nowhere"
+        with patch("pathlib.Path.exists", return_value=True):
+            self.assertEqual(migrations.pending(nowhere, env), [])
+            self.assertEqual(migrations.ensure_current(home=nowhere, env=env), [])
 
     def test_mutating_command_still_applies_home_migrations(self):
         self.stale()

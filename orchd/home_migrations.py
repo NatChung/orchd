@@ -36,7 +36,12 @@ def state_path(home, env):
 def connect(home, env, *, readonly=False):
     file = state_path(home, env)
     if readonly:
-        return sqlite3.connect(file.as_uri() + "?mode=ro", uri=True) if file.exists() else None
+        try:  # no state DB (fresh machine) means nothing was ever recorded: not an error
+            return sqlite3.connect(file.as_uri() + "?mode=ro", uri=True) if file.exists() else None
+        except sqlite3.OperationalError:
+            if file.is_file():
+                raise
+            return None
     file.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(file, timeout=30)
     con.executescript(SCHEMA)
