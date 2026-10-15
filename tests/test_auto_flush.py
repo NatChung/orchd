@@ -325,7 +325,7 @@ class TurnWrapperTest(unittest.TestCase):
                         break
                     time.sleep(0.05)
             lines = trace.read_text().splitlines()
-            self.assertEqual(lines[0], "codex exec resume --json --dangerously-bypass-approvals-and-sandbox "
+            self.assertEqual(lines[0], "codex exec resume --json --dangerously-bypass-approvals-and-sandbox -c features.memories=false "
                                        "-m gpt-6.1-sol th-1 hello world")
             self.assertEqual(lines[1], f"orchd quota --codex-log {log}")
             self.assertEqual(lines[2], f"orchd flush abc123 --after-pid {pid} --turn-log {log}")

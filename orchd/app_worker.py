@@ -23,6 +23,7 @@ import psutil
 from . import store
 from .app_transport import RPC, RPCError
 from .processes import cleanup_processes, task_processes
+from .runtime import CODEX_MEMORIES_OFF
 
 BACKEND = 'app-server'
 TERMINAL = ('completed', 'failed', 'interrupted')
@@ -175,6 +176,10 @@ def start(con, rt, task, prompt, model, pending=(), brief=None):
         # The supervisor publishes server identity before any RPC/start. Preserve rows/pending on failure.
         stop(con, store.get_task(con, task['id']))
         raise
+
+
+def app_server_command(task):
+    return [task['codex_bin'],*CODEX_MEMORIES_OFF,'app-server','--listen','unix://'+task['endpoint']]
 
 
 class Supervisor:
@@ -476,7 +481,7 @@ class Supervisor:
         signal.signal(signal.SIGINT,lambda *_:setattr(self,'stopping',True))
         try:
             with open(directory/'server.log','a') as out:
-                self.server=subprocess.Popen([task['codex_bin'],'app-server','--listen','unix://'+task['endpoint']],
+                self.server=subprocess.Popen(app_server_command(task),
                     cwd=task['worktree'],stdout=out,stderr=out,stdin=subprocess.DEVNULL,start_new_session=True)
             self.server_identity=identity(self.server.pid)
             self.update(server_identity=self.server_identity)

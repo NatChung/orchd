@@ -32,7 +32,10 @@ ORCH_TOOLS = ",".join((
     "Glob", "Grep", "ListAgents", "NotebookEdit", "Read", "ReportFindings", "ScheduleWakeup",
     "SendMessage", "Skill", "TaskStop", "ToolSearch", "WebSearch", "Write", "Artifact", "AskUserQuestion",
 ))
-CODEX_FLAGS = ["--json", "--dangerously-bypass-approvals-and-sandbox"]
+# Codex memory consolidation would start a background agent in an orchd worker's session (issue #50).
+# Per-process override only; the user's ~/.codex/config.toml stays untouched.
+CODEX_MEMORIES_OFF = ["-c", "features.memories=false"]
+CODEX_FLAGS = ["--json", "--dangerously-bypass-approvals-and-sandbox", *CODEX_MEMORIES_OFF]
 USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 
 
