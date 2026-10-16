@@ -85,6 +85,28 @@ class EntryTest(unittest.TestCase):
         self.assertEqual(again["message_id"], first["message_id"])
         self.assertEqual(len(self.rt.sent), 1)
 
+    def test_segmented_current_turn_is_relayed_verbatim_once(self):
+        root = Path(self.tmp.name) / "sessions"
+        root.mkdir()
+        old = {"type": "event_msg", "payload": {"type": "item_completed", "turn_id": "old-turn",
+               "item": {"type": "UserMessage", "id": "old-item", "content": [{"type": "text", "text": "old"}]}}}
+        new = {"type": "event_msg", "payload": {"type": "item_completed", "turn_id": "current-turn",
+               "item": {"type": "UserMessage", "id": "current-item", "content": [{"type": "text", "text": BODY}]}}}
+        (root / "rollout-2026-10-01T00-00-00-desk-1.jsonl").write_text(json.dumps(old) + "\n")
+        segment = root / "rollout-2026-10-02T00-00-00-desk-1_segment-A.jsonl"
+        segment.write_text("\n".join(json.dumps(x) for x in [
+            {"type": "session_meta", "payload": {"id": "desk-1"}}, old, new]) + "\n")
+        with patch.dict(os.environ, {"ORCHD_CODEX_SESSIONS": str(root)}), \
+                patch.object(self.rt, "codex_user_messages", side_effect=Runtime().codex_user_messages):
+            first = self.relay(turn_id="current-turn")
+            again = self.relay(turn_id="current-turn")
+        self.assertEqual(first["status"], "delivered")
+        self.assertEqual(again["status"], "duplicate")
+        self.assertEqual(first["message_id"], again["message_id"])
+        self.assertEqual(len(self.rt.sent), 1)
+        self.assertEqual(entry.inbox(self.con, self.orch)["messages"][0]["body"], BODY)
+        self.assertEqual(entry.inbox(self.con, self.orch)["messages"], [])
+
     def test_turn_without_persisted_source_is_not_replaced_by_an_older_message(self):
         self.rt.nat_says("desk-1", "old", turn="turn-1")
         self.relay(turn_id="turn-1")
@@ -630,6 +652,38 @@ class BindingCliTest(unittest.TestCase):
 
 
 class RolloutSourceTest(unittest.TestCase):
+    def test_merges_archived_base_and_active_segments_in_order_without_duplicate_items(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "sessions"
+            active = root / "2026/10/02"
+            archive = Path(tmp) / "archived_sessions"
+            active.mkdir(parents=True)
+            archive.mkdir()
+
+            def write(path, items, thread="thread-X"):
+                records = [{"type": "session_meta", "payload": {"id": thread}}]
+                records += [{"type": "event_msg", "payload": {"type": "item_completed", "turn_id": turn,
+                            "item": {"type": "UserMessage", "id": item, "content": content}}}
+                            for turn, item, content in items]
+                path.write_text("".join(json.dumps(r) + "\n" for r in records))
+
+            old = ("t1", "i1", [{"type": "text", "text": "old"}])
+            new = ("t2", "i2", [{"type": "text", "text": BODY},
+                                  {"type": "local_image", "path": "/synthetic/input.png"}])
+            write(archive / "rollout-2026-10-01T00-00-00-thread-X.jsonl", [old])
+            write(active / "rollout-2026-10-02T00-00-00-thread-X_segment-A.jsonl", [old, new])
+            write(active / "rollout-2026-10-03T00-00-00-thread-X_segment-B.jsonl", [new,
+                  ("t3", "i3", [{"type": "text", "text": "latest"}])])
+            write(active / "rollout-2026-10-04T00-00-00-thread-X_segment-C.jsonl",
+                  [("foreign-turn", "foreign-item", [{"type": "text", "text": "wrong thread"}])], "thread-Y")
+            with patch.dict(os.environ, {"ORCHD_CODEX_SESSIONS": str(root)}):
+                got = Runtime().codex_user_messages("thread-X")
+            self.assertEqual(got, [
+                {"turn_id": "t1", "item_id": "i1", "text": "old"},
+                {"turn_id": "t2", "item_id": "i2", "text": BODY, "local_images": ["/synthetic/input.png"]},
+                {"turn_id": "t3", "item_id": "i3", "text": "latest"},
+            ])
+
     def test_reads_user_messages_exactly_from_the_rollout(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = str(Path(tmp) / "sessions")
