@@ -29,6 +29,22 @@ CREATE TABLE IF NOT EXISTS tasks(
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
+-- Durable external interface tables; no changes to Entry/intake schemas.
+CREATE TABLE IF NOT EXISTS interfaces(
+    id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, orch_id TEXT NOT NULL,
+    token_hash TEXT NOT NULL, expires_at REAL NOT NULL, idle_seconds INTEGER NOT NULL,
+    disabled INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS interface_requests(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, interface_id TEXT NOT NULL, orch_id TEXT NOT NULL,
+    conversation TEXT NOT NULL, request_key TEXT NOT NULL, body TEXT NOT NULL,
+    created_at REAL NOT NULL, wake_at REAL, wake_error TEXT, reply TEXT, ack_at REAL,
+    wake_attempts INTEGER NOT NULL DEFAULT 0, wake_due_at REAL NOT NULL DEFAULT 0,
+    UNIQUE(interface_id, conversation, request_key)
+);
+CREATE INDEX IF NOT EXISTS interface_request_owner ON interface_requests(orch_id, id) WHERE reply IS NULL;
+CREATE INDEX IF NOT EXISTS interface_reply_route ON interface_requests(interface_id, conversation, id) WHERE reply IS NOT NULL AND ack_at IS NULL;
+CREATE INDEX IF NOT EXISTS interface_wake_due ON interface_requests(wake_due_at, id) WHERE wake_at IS NULL AND reply IS NULL;
 CREATE TABLE IF NOT EXISTS goals(
     id TEXT PRIMARY KEY,
     repo TEXT NOT NULL,

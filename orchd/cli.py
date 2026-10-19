@@ -67,6 +67,10 @@ def build_parser():
     mcp = sub.add_parser("mcp")
     mcp.add_argument("--role", choices=["orch", "entry"], default="orch")
     mcp.add_argument("--entry", default="desktop", help="entry name (with --role entry)")
+    interface = sub.add_parser("interface", help="Shared-Orch adapter CLI; JSON stdin/stdout")
+    interface_actions = interface.add_subparsers(dest="interface_action", required=True)
+    for action in ("register", "submit", "fetch", "ack", "deregister"):
+        interface_actions.add_parser(action, help="read a JSON object from stdin")
     orch = sub.add_parser("orch", help="start, stop, restart, list or attach an Orch")
     def start_options(command):
         command.add_argument("--model", default=DEFAULT_ORCH_MODEL,
@@ -467,6 +471,7 @@ def _intake_main(args):
 # Plain `list` is warn: core.list_open only reads.
 HOME_POLICY = {
     ("mcp",): "write",
+    **{("interface", a): "skip" for a in ("register", "submit", "fetch", "ack", "deregister")},
     ("orch", "start"): "write", ("orch", "stop"): "write", ("orch", "restart"): "write",  # --dry-run -> warn
     ("orch", "list"): "write", ("orch", "attach"): "write",
     ("init",): "skip", ("upgrade",): "skip", ("quota",): "skip", ("doctor",): "skip",
@@ -488,7 +493,7 @@ HOME_POLICY = {
     ("goal", "add"): "write", ("goal", "set"): "write",
     ("goal", "show"): "warn", ("goal", "list"): "warn", ("goal", "export"): "warn",
 }
-ACTION_DEST = ("orch_action", "entry_action", "question_action", "task_action", "task_question_action",
+ACTION_DEST = ("interface_action", "orch_action", "entry_action", "question_action", "task_action", "task_question_action",
                "intake_action", "goal_cmd", "config_action")
 
 
@@ -509,6 +514,25 @@ def main(argv=None):
         from orchd import home_migrations
         for line in home_migrations.ensure_current(write=policy == "write"):
             print(line, file=sys.stderr)
+    if args.cmd == "interface":
+        from orchd import interface
+        import sqlite3
+        con = None
+        try:
+            payload = json.load(sys.stdin)
+            if not isinstance(payload, dict):
+                raise ValueError("expected JSON object")
+            con = store.connect()
+            action = getattr(interface, args.interface_action)
+            result = action(con, Runtime(), **payload) if args.interface_action == "submit" else action(con, **payload)
+            print(json.dumps(result, ensure_ascii=False))
+            return 0
+        except (ValueError, TypeError, OSError, sqlite3.Error) as error:
+            print(json.dumps(dict(error=type(error).__name__, message=str(error))))
+            return 1
+        finally:
+            if con is not None:
+                con.close()
     if args.cmd == 'quota':
         from orchd import quota
         cache = quota.Cache()
