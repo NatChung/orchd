@@ -56,8 +56,12 @@ def reachability(con, rt, orch_id):
     return owner_health(orch, jobs)
 
 
-def bind(con, rt, orch_id, entry_id=DEFAULT_ENTRY, force=False):
-    """Operator-run. Binds the entry to one Claude Orch; rebinding to another Orch needs force."""
+def bind(con, rt, orch_id, entry_id=DEFAULT_ENTRY, force=False, *, in_transaction=None):
+    """Operator-run. Binds the entry to one Claude Orch; rebinding needs force.
+
+    Restart may supply a short database-only hook to move interfaces in the same
+    transaction. A hook or binding failure rolls back both ownership changes.
+    """
     orch = store.get_orch(con, orch_id)
     if orch is None:
         raise ValueError(f"unknown orch {orch_id}")
@@ -68,6 +72,8 @@ def bind(con, rt, orch_id, entry_id=DEFAULT_ENTRY, force=False):
         raise ValueError(f"orch {orch_id} is offline ({health['reason']}); start one with `orchd orch start` first")
     now = time.time()
     with store.immediate(con):
+        if in_transaction is not None:
+            in_transaction(con)
         row = con.execute("SELECT * FROM entries WHERE id=?", (entry_id,)).fetchone()
         if row is not None and row["orch_id"] != orch_id and not force:
             raise ValueError(f"entry {entry_id} is bound to {row['orch_id']}; rebinding it needs force (`orchd binding --to`)")

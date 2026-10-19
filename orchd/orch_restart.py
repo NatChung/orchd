@@ -1,5 +1,5 @@
 """Operator-only restart sequence. Never infers death from registry bookkeeping."""
-from . import core, entry, intake, inventory, store
+from . import core, entry, intake, interface, inventory, store
 from .orch_health import owner_health
 from .runtime import ORCH_MODELS
 
@@ -32,6 +32,7 @@ def restart(con, rt, old_id=None, model=None, dry_run=False):
                 f"orchd orch start --model {model} --no-attach",
                 f"orchd adopt NEW_ID --from {old_id}; check committed and notification errors"
                 if tasks or receipts else "skip adopt if there are still no open tasks or received intake receipts",
+                "migrate all interfaces and unanswered requests to NEW_ID (preserve tokens and reply routes)",
                 "orchd binding --to NEW_ID; orchd binding --status" if rebind else "leave Desktop binding alone",
             ])
             return result
@@ -84,20 +85,41 @@ def restart(con, rt, old_id=None, model=None, dry_run=False):
             result["adopt"] = dict(skipped=True, reason="no open tasks or received intake receipts")
         result["steps"].append(dict(step="adopt", **result["adopt"]))
 
-        if rebind:
-            result["step"] = "binding"
-            remedy = f"orchd binding --status; orchd binding --to {new_id}; orchd binding --status"
-            current = con.execute("SELECT orch_id FROM entries WHERE id='desktop'").fetchone()
-            if current is None or current["orch_id"] != old_id:
-                raise ValueError("Desktop binding changed during restart; inspect it before rebinding")
-            result["binding"] = entry.bind(con, rt, new_id, force=True)
-            result["step"] = "binding-status"
-            result["binding_status"] = entry.snapshot(con, rt)
-            if result["binding_status"]["orch_id"] != new_id:
-                raise ValueError("Desktop binding read-back does not match the new Orch")
-            if result["binding"].get("notice") != "sent":
-                raise ValueError("binding committed but the new Orch's binding notice failed")
-            result["steps"].append(dict(step="binding", **result["binding_status"]))
+        # Serialize ownership changes with wakes, without holding SQLite's write
+        # lock across transport. Submits serialize with the migration transaction.
+        migrated = 0
+
+        def migrate(c):
+            nonlocal migrated
+            if rebind:
+                current = c.execute("SELECT orch_id FROM entries WHERE id='desktop'").fetchone()
+                if current is None or current["orch_id"] != old_id:
+                    raise ValueError("Desktop binding changed during restart; inspect it before rebinding")
+            migrated = interface.migrate_owner(c, old_id, new_id)
+
+        with store.task_delivery(con, ["interface-owner"]):
+            if rebind:
+                result["step"] = "binding"
+                remedy = f"orchd binding --status; orchd binding --to {new_id}; orchd binding --status"
+                current = con.execute("SELECT orch_id FROM entries WHERE id='desktop'").fetchone()
+                if current is None or current["orch_id"] != old_id:
+                    raise ValueError("Desktop binding changed during restart; inspect it before rebinding")
+                result["binding"] = entry.bind(con, rt, new_id, force=True, in_transaction=migrate)
+                result["interfaces_migrated"] = migrated
+                result["step"] = "binding-status"
+                result["binding_status"] = entry.snapshot(con, rt)
+                if result["binding_status"]["orch_id"] != new_id:
+                    raise ValueError("Desktop binding read-back does not match the new Orch")
+                if result["binding"].get("notice") != "sent":
+                    raise ValueError("binding committed but the new Orch's binding notice failed")
+                result["steps"].append(dict(step="binding", **result["binding_status"]))
+            else:
+                result["step"] = "interfaces"
+                with store.immediate(con):
+                    migrate(con)
+                result["interfaces_migrated"] = migrated
+        # The durable sweep also recovers interruption before this best-effort wake.
+        result["interface_wakes"] = interface.sweep(con, rt)
         result.update(status="done", step="done", first_prompt="盤點上次")
     except Exception as error:
         result.update(error=f"{type(error).__name__}: {error}", manual_recovery=remedy)

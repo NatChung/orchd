@@ -24,11 +24,16 @@ The following shapes show required fields; optional fields are described below.
 | `ack` | `{"name":"slack","token":"secret","conversation":"channel/thread","request_id":1}` | `{"acked":true,"request_id":1}` |
 | `deregister` | `{"name":"slack","token":"secret"}` | `{"deregistered":true}` |
 
-The first registration fixes the shared owner for all interfaces, including after
-expiry/deregistration. A second owner is rejected. Re-registering a name requires
+The first registration sets the shared owner for all interfaces, including after
+expiry/deregistration. `orchd orch restart` moves all registrations and requests
+to the replacement Orch, atomically with the Desktop rebind when present.
+Existing tokens, leases, disabled state, request IDs and reply destinations remain
+unchanged. Unanswered requests are woken again for the new owner; pending replies
+remain fetchable and ackable. No schema migration or adapter re-registration is
+needed. A second owner is rejected. Re-registering a name requires
 its existing token; identity and pending replies cannot be taken over. Tokens are
 random adapter credentials; only SHA-256 hashes are stored. Local same-user DB
-access remains trusted. Token rotation and owner migration are outside v1.
+access remains trusted. Token rotation and standalone owner rebinding are outside v1.
 
 `register` optionally takes `idle_seconds` (integer 1..604800, default 3600).
 Registration renews admission. New accepted submissions and polls refresh an
@@ -88,7 +93,8 @@ Identical submit retries respect that deadline. `wake_error` is a sanitized
 exception class, not rejection of the stored request. Recovery uses `_notify_orch`,
 including existing Claude same-session revival and Codex queue behavior. An
 explicitly stopped/missing owner is never restarted by the sweeper. Its pending
-requests remain; there is no automatic owner rebind or failover. Replies already
+requests remain until an Operator restarts the owner; there is no automatic
+owner rebind or failover. Replies already
 produced require no further wake.
 
 Notifications are at least once: a crash after transport but before recording

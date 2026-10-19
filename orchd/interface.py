@@ -65,6 +65,21 @@ def deregister(con, *, name, token):
     return dict(deregistered=True)
 
 
+def migrate_owner(con, old_id, new_id):
+    """Restart hook: caller holds interface ownership delivery lock and a transaction.
+
+    Move every registration, including inactive ones. Request destinations and
+    credentials stay immutable; only the processing owner and wake state change.
+    """
+    _owner(con, new_id)
+    moved = con.execute('UPDATE interfaces SET orch_id=? WHERE orch_id=?', (new_id, old_id)).rowcount
+    # A wake accepted by the old session does not notify its replacement.
+    con.execute('UPDATE interface_requests SET wake_at=NULL,wake_error=NULL,wake_attempts=0,wake_due_at=0 '
+                'WHERE orch_id=? AND reply IS NULL', (old_id,))
+    con.execute('UPDATE interface_requests SET orch_id=? WHERE orch_id=?', (new_id, old_id))
+    return moved
+
+
 def submit(con, rt, *, name, token, conversation, request_key, text):
     for value in (conversation, request_key, text):
         _text(value)
@@ -92,7 +107,7 @@ def submit(con, rt, *, name, token, conversation, request_key, text):
 
 def wake(con, rt, request_id):
     """At-least-once notification; a crash after send can repeat the notification."""
-    with store.task_delivery(con, [f'interface-wake:{request_id}']):
+    with store.task_delivery(con, ['interface-owner', f'interface-wake:{request_id}']):
         row = con.execute('SELECT * FROM interface_requests WHERE id=?', (request_id,)).fetchone()
         if row['wake_at'] is not None or row['reply'] is not None:
             return None
