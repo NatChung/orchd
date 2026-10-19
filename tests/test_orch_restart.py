@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from orchd import cli, core, entry, orch_restart, store
+from orchd import cli, core, entry, interface, orch_restart, store
 from orchd.runtime import ORCH_MODELS
 from tests.test_orchd import FakeRuntime
 
@@ -210,3 +210,163 @@ class RestartTest(unittest.TestCase):
         self.assertEqual(out["step"], "binding")
         self.assertEqual(out["status"], "failed")
         self.assertEqual(entry.get_entry(self.con, "desktop")["orch_id"], "other")
+
+    def adapter(self, name="adapter"):
+        registration = interface.register(self.con, name=name, orch_id="old")
+        return dict(name=name, token=registration["token"])
+
+    def submit(self, auth, key="one", con=None):
+        return interface.submit(con or self.con, self.rt, **auth, conversation="thread",
+                                request_key=key, text="question")
+
+    def test_restart_moves_all_interfaces_preserving_tokens_and_inactive_leases(self):
+        active = self.adapter()
+        disabled = self.adapter("disabled")
+        self.adapter("expired")
+        interface.deregister(self.con, **disabled)
+        self.con.execute("UPDATE interfaces SET expires_at=0 WHERE name='expired'")
+        before = [dict(row) for row in self.con.execute("SELECT * FROM interfaces ORDER BY name")]
+        out = self.run_restart()
+        self.assertEqual(out["status"], "done", out)
+        self.assertEqual(out["interfaces_migrated"], 3)
+        after = [dict(row) for row in self.con.execute("SELECT * FROM interfaces ORDER BY name")]
+        self.assertEqual(after, [dict(row, orch_id=out["new_orch"]) for row in before])
+        interface.register(self.con, **active, orch_id=out["new_orch"])
+        interface.register(self.con, name="new-adapter", orch_id=out["new_orch"])
+        with self.assertRaises(ValueError):
+            interface.register(self.con, name="wrong-owner", orch_id="old")
+        with self.assertRaisesRegex(ValueError, "inactive"):
+            self.submit(disabled)
+        with patch.object(core, "_notify_orch") as notify:
+            self.assertIsNone(self.submit(active)["wake_error"])
+            self.assertEqual(notify.call_args.args[2], out["new_orch"])
+
+    def test_restart_preserves_pending_replies_and_immutable_origin_routes(self):
+        auth = self.adapter()
+        rid = self.submit(auth)["request_id"]
+        interface.reply(self.con, "old", request_id=rid, text="answer")
+        before = dict(self.con.execute("SELECT * FROM interface_requests WHERE id=?", (rid,)).fetchone())
+        out = self.run_restart()
+        self.assertEqual(out["status"], "done", out)
+        after = dict(self.con.execute("SELECT * FROM interface_requests WHERE id=?", (rid,)).fetchone())
+        self.assertEqual(after, dict(before, orch_id=out["new_orch"]))
+        self.assertEqual(interface.fetch(self.con, **auth, conversation="thread"),
+                         [dict(request_id=rid, conversation="thread", reply="answer")])
+        self.assertEqual(self.submit(auth)["request_id"], rid)
+        for _ in range(2):
+            interface.ack(self.con, **auth, conversation="thread", request_id=rid)
+        self.assertEqual(interface.fetch(self.con, **auth, conversation="thread"), [])
+
+    def test_restart_rewakes_unanswered_requests_including_previously_delivered(self):
+        auth = self.adapter()
+        delivered = self.submit(auth)["request_id"]
+        with patch.object(interface, "wake", return_value="OSError"):
+            pending = self.submit(auth, "pending")["request_id"]
+        with patch.object(core, "_notify_orch") as notify:
+            out = self.run_restart()
+        self.assertEqual(out["status"], "done", out)
+        self.assertEqual(out["interface_wakes"], {delivered: None, pending: None})
+        self.assertEqual([call.args[2] for call in notify.call_args_list], [out["new_orch"]] * 2)
+        self.assertEqual([r["id"] for r in interface.requests(self.con, out["new_orch"])], [delivered, pending])
+        interface.reply(self.con, out["new_orch"], request_id=pending, text="recovered")
+        self.assertEqual(interface.fetch(self.con, **auth, conversation="thread")[0]["request_id"], pending)
+
+    def test_interface_move_rolls_back_with_binding(self):
+        self.adapter()
+        original = interface.migrate_owner
+
+        def fail(*args):
+            original(*args)
+            raise OSError("migration failed")
+
+        with patch.object(interface, "migrate_owner", side_effect=fail):
+            out = self.run_restart()
+        self.assertEqual(out["status"], "failed")
+        self.assertEqual(entry.get_entry(self.con, "desktop")["orch_id"], "old")
+        self.assertEqual(self.con.execute("SELECT orch_id FROM interfaces").fetchone()[0], "old")
+
+    def test_restart_unbound_orch_still_migrates_interfaces(self):
+        auth = self.adapter()
+        self.con.execute("DELETE FROM entries")
+        out = self.run_restart(old_id="old")
+        self.assertEqual(out["status"], "done", out)
+        self.assertEqual(out["interfaces_migrated"], 1)
+        self.assertIsNone(self.submit(auth)["wake_error"])
+
+    def test_restart_serializes_with_submit_committed_before_wake(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+        auth = self.adapter()
+        committed, resume = Event(), Event()
+        original = interface.wake
+
+        def pause(con, rt, rid):
+            committed.set()
+            if not resume.wait(10):
+                raise TimeoutError("restart did not finish")
+            return original(con, rt, rid)
+
+        def send():
+            con = store.connect(self.path)
+            try:
+                with patch.object(interface, "wake", side_effect=pause):
+                    return self.submit(auth, con=con)
+            finally:
+                con.close()
+
+        # Restart's sweep must use the real wake rather than the paused submit.
+        original_sweep = interface.sweep
+        def sweep(con, rt):
+            with patch.object(interface, "wake", original):
+                return original_sweep(con, rt)
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(send)
+            try:
+                self.assertTrue(committed.wait(10))
+                with patch.object(interface, "sweep", side_effect=sweep):
+                    out = self.run_restart()
+                self.assertEqual(out["status"], "done", out)
+            finally:
+                resume.set()
+            receipt = future.result(timeout=10)
+        self.assertIsNone(receipt["wake_error"])
+        row = self.con.execute("SELECT * FROM interface_requests WHERE id=?", (receipt["request_id"],)).fetchone()
+        self.assertEqual(row["orch_id"], out["new_orch"])
+        self.assertIsNotNone(row["wake_at"])
+
+    def test_submit_during_migration_waits_and_uses_new_owner(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+        auth = self.adapter()
+        ready, submit_now, started = Event(), Event(), Event()
+        original = interface.migrate_owner
+
+        def send():
+            con = store.connect(self.path)
+            try:
+                ready.set()
+                if not submit_now.wait(10):
+                    raise TimeoutError("migration did not start")
+                started.set()
+                return self.submit(auth, con=con)
+            finally:
+                con.close()
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(send)
+            try:
+                self.assertTrue(ready.wait(10))
+                def migrate(*args):
+                    submit_now.set()
+                    self.assertTrue(started.wait(10))
+                    return original(*args)
+                with patch.object(interface, "migrate_owner", side_effect=migrate):
+                    out = self.run_restart()
+                self.assertEqual(out["status"], "done", out)
+            finally:
+                submit_now.set()
+            receipt = future.result(timeout=10)
+        self.assertIsNone(receipt["wake_error"])
+        self.assertEqual(self.con.execute("SELECT orch_id FROM interface_requests WHERE id=?",
+                                         (receipt["request_id"],)).fetchone()[0], out["new_orch"])
