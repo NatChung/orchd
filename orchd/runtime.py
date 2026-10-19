@@ -633,32 +633,58 @@ class Runtime:
         not stripped or normalized, so a stored copy is byte-exact. Structured local_image paths are kept separately;
         arbitrary paths in text are not attachments. A user role is not proof the text came from Operator:
         `codex queue` writes the same records. [] when the rollout is missing. An archived thread's rollout moves to
-        the sibling archived_sessions/ (Desktop archives a conversation when it is closed), so look there too."""
+        the sibling archived_sessions/ (Desktop archives a conversation when it is closed), so look there too.
+        Merge timestamped continuation segments and deduplicate their overlapping item IDs."""
         root = Path(os.environ.get("ORCHD_CODEX_SESSIONS", Path.home() / ".codex" / "sessions"))
-        files = (sorted(root.glob(f"**/rollout-*-{thread}.jsonl"))
-                 or sorted((root.parent / "archived_sessions").glob(f"rollout-*-{thread}.jsonl")))
-        if not files:
-            return []
-        found = []
-        for line in files[0].read_bytes().splitlines():
-            try:
-                record = json.loads(line)
-            except ValueError:
-                continue
-            payload = record.get("payload") if isinstance(record, dict) else None
-            if record.get("type") != "event_msg" or not isinstance(payload, dict) or payload.get("type") != "item_completed":
-                continue
-            item = payload.get("item") or {}
-            if item.get("type") != "UserMessage" or not isinstance(item.get("content"), list):
-                continue
-            text = "".join(c.get("text", "") for c in item["content"]
-                           if isinstance(c, dict) and c.get("type") in ("text", "Text", "input_text"))
-            message = {"turn_id": payload.get("turn_id"), "item_id": item.get("id"), "text": text}
-            images = [c["path"] for c in item["content"] if isinstance(c, dict)
-                      and c.get("type") == "local_image" and isinstance(c.get("path"), str)]
-            if images:
-                message["local_images"] = images
-            found.append(message)
+        # Desktop may continue a thread in timestamped THREAD_SEGMENT rollouts.
+        # Include archived bases even when active segments exist; keep event item IDs
+        # stable so relay's (source_thread, source_item_id) uniqueness still applies.
+        files = set()
+        for directory in (root, root.parent / "archived_sessions"):
+            for pattern in (f"**/rollout-*-{thread}.jsonl", f"**/rollout-*-{thread}_*.jsonl"):
+                files.update(directory.glob(pattern))
+        found, seen = [], set()
+        for path in sorted(files, key=lambda p: (p.name, str(p))):
+            lines = path.read_bytes().splitlines()
+            if lines:
+                try:
+                    header = json.loads(lines[0])
+                except ValueError:
+                    header = None
+                if isinstance(header, dict) and header.get("type") == "session_meta":
+                    metadata = header.get("payload")
+                    if not isinstance(metadata, dict) or metadata.get("id") != thread:
+                        continue
+            for line in lines:
+                try:
+                    record = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                payload = record.get("payload")
+                if record.get("type") != "event_msg" or not isinstance(payload, dict) or payload.get("type") != "item_completed":
+                    continue
+                if payload.get("thread_id") not in (None, thread):
+                    continue
+                item = payload.get("item") or {}
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") != "UserMessage" or not isinstance(item.get("content"), list):
+                    continue
+                item_id = item.get("id")
+                if item_id and item_id in seen:
+                    continue
+                if item_id:
+                    seen.add(item_id)
+                text = "".join(c.get("text", "") for c in item["content"]
+                               if isinstance(c, dict) and c.get("type") in ("text", "Text", "input_text"))
+                message = {"turn_id": payload.get("turn_id"), "item_id": item.get("id"), "text": text}
+                images = [c["path"] for c in item["content"] if isinstance(c, dict)
+                          and c.get("type") == "local_image" and isinstance(c.get("path"), str)]
+                if images:
+                    message["local_images"] = images
+                found.append(message)
         return found
 
     def open_app_viewer(self, database, task):
