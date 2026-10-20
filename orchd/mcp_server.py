@@ -49,7 +49,7 @@ TOOLS = [
          "model": {"type": "string", "enum": [*WORKER_MODELS, "auto"],
                    "description": "Optional. Omitted = the default from orchd config (ORCHD_WORKER_MODEL, then "
                                   "config.toml; factory sonnet); see `orchd config show`. "
-                                  "auto = apply quota-shadow-v1 capacity/reset-time score, 95% margin; tie/unknown prefers sol, recent rate limits excluded. "
+                                  "auto = apply quota-shadow-v1 remaining-percent score (more remaining wins, within 5 points ties to sol), 95% margin; tie/unknown prefers sol, recent rate limits excluded. "
                                   "Auto sol rate-limit failures retry sonnet once per task and notify inbox; explicit models only notify. "
                                   "sonnet = Claude Sonnet 5.5; sol = GPT-6.1 Sol on Codex"},
          "goal_id": {"type": "string", "description": "Central goal id; must belong to repo"},

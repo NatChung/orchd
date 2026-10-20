@@ -342,6 +342,31 @@ class QuotaTest(unittest.TestCase):
         cache.claude({'rate_limits': {'five_hour': {'used_percentage': 20, 'resets_at': now + 2000},
             'seven_day': {'used_percentage': 50, 'resets_at': now + 5000}}}, now=now)
 
+    def _score_pick(self, sol, sonnet):
+        """sol: [used%...] per window (5h, 7d); sonnet likewise; reset times far apart on purpose."""
+        now = 1000
+        snap = {}
+        for p, used in (('sol', sol), ('sonnet', sonnet)):
+            snap[p] = dict(state='known', windows=[dict(state='known', used_percent=u, reset_at=now + r)
+                                                   for u, r in zip(used, (3600, 600000))])
+        return quota.shadow(snap, now=now, applied=True)
+
+    def test_remaining_percent_balances_usage(self):
+        self.assertEqual(self._score_pick([1], [10, 14])['selected_alias'], 'sol')
+        self.assertEqual(self._score_pick([30], [90, 20])['selected_alias'], 'sol')
+        result = self._score_pick([60], [10, 10])
+        self.assertEqual(result['selected_alias'], 'sonnet')
+        self.assertIn('remaining-percent score', result['reason'])
+
+    def test_remaining_percent_tie_margin_prefers_sol(self):
+        self.assertEqual(self._score_pick([40], [36])['selected_alias'], 'sol')
+        self.assertEqual(self._score_pick([40], [35])['selected_alias'], 'sol')   # exactly 5 apart
+        self.assertEqual(self._score_pick([40], [34])['selected_alias'], 'sonnet')  # 6 apart
+        self.assertEqual(self._score_pick([60], [40])['selected_alias'], 'sonnet')
+
+    def test_remaining_percent_keeps_95_cap(self):
+        self.assertEqual(self._score_pick([96], [80])['selected_alias'], 'sonnet')
+
     def test_unknown_sol_is_preferred_over_known_sonnet(self):
         with tempfile.TemporaryDirectory() as tmp:
             cache = quota.Cache(Path(tmp) / 'quota.db')

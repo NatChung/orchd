@@ -126,7 +126,7 @@ class RoutingTest(unittest.TestCase):
         self.observe(95)
         task = self.dispatch()
         self.assertEqual(task['model'], core.WORKER_MODELS['sonnet'])
-        self.assertIn('remaining capacity/reset-time score', task['model_reason'])
+        self.assertIn('remaining-percent score', task['model_reason'])
         msg = self.con.execute("SELECT body FROM messages WHERE task_id=? AND kind='dispatch'", (task['id'],)).fetchone()
         applied = json.loads(msg['body'])['quota_shadow']
         self.assertTrue(applied['applied'])
