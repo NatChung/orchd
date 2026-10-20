@@ -272,7 +272,13 @@ class QuotaTest(unittest.TestCase):
                     contextlib.redirect_stdout(io.StringIO()) as out:
                 self.assertEqual(main(['quota', '--ingest', 'claude-statusline']), 0)
                 self.assertEqual(json.loads(out.getvalue())['sonnet']['state'], 'known')
+                quota.Cache().record_attempt('sonnet', 1000, .5,
+                    dict(error_class='TimeoutError', message='timeout'))
+                with contextlib.redirect_stdout(io.StringIO()) as diagnostic_out:
+                    self.assertEqual(main(['quota']), 0)
                 status = mcp_server.call('quota_status', {}, None, None, None)
+                self.assertEqual(status, json.loads(diagnostic_out.getvalue()))
+                self.assertEqual(status['sonnet']['refresh']['error']['message'], 'timeout')
                 self.assertEqual(status['sonnet']['windows'][0]['used_percent'], 20)
 
     def test_app_server_account_events_are_not_thread_filtered(self):
@@ -427,6 +433,86 @@ class QuotaTest(unittest.TestCase):
                 self.assertFalse(quota.refresh_background(cache, now=1001))
                 self.assertTrue(quota.refresh_background(cache, now=1000 + quota.BACKGROUND_PERIOD))
 
+    def test_provider_diagnostics_survive_repeated_failure_and_recovery(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            self._sonnet_known(cache, 1000)
+            for now in range(4000, 4900, 60):
+                with patch.object(quota, 'refresh') as refresh, \
+                        patch.object(quota, '_run', return_value=subprocess.CompletedProcess(
+                            [], 1, '', 'Authorization: Bearer SECRET network timeout')), \
+                        patch.object(quota.time, 'time', return_value=now):
+                    refresh.side_effect = lambda *a, **k: cache.codex({'rateLimits': {'primary': {
+                        'usedPercent': 10, 'windowDurationMins': 300, 'resetsAt': 100000}}}, now=now)
+                    quota.refresh_background(cache, now=now)
+            status = cache.status(now=4900)
+            diag = status['sonnet']['refresh']
+            self.assertEqual(diag['last_attempt_at'], 4840)
+            self.assertIsNone(diag['last_success_at'])
+            self.assertEqual(len(diag['history']), quota.DIAGNOSTIC_HISTORY)
+            self.assertIn('timeout', diag['error']['message'])
+            self.assertNotIn('SECRET', json.dumps(status))
+            self.assertEqual(status['sonnet']['windows'][0]['observed_at'], 1000)
+            self.assertIsNone(status['sol']['refresh']['error'])
+            now = datetime.datetime(2026, 12, 31, 22, tzinfo=datetime.timezone.utc).timestamp()
+            display = ('Current session: 13% used · resets Jan 1 at 1am (UTC)\n'
+                       'Current week (all models): 5% used · resets Jan 2 at 12:30pm (UTC)')
+            result = subprocess.CompletedProcess([], 0, json.dumps(dict(result=display,
+                num_turns=0, local_command='usage', duration_api_ms=0)), '')
+            with patch.object(quota, '_run', return_value=result), \
+                    patch.object(quota.time, 'time', return_value=now):
+                quota.probe(cache, 'sonnet')
+            diag = quota.Cache(cache.path).status(now=now)['sonnet']['refresh']
+            self.assertIsNone(diag['error'])
+            self.assertEqual(diag['last_success_at'], now)
+            self.assertEqual(len(diag['history']), quota.DIAGNOSTIC_HISTORY)
+            self.assertIsNotNone(diag['history'][-2]['error'])
+            with patch.object(quota, '_run', side_effect=TimeoutError('SECRET')), \
+                    patch.object(quota.time, 'time', return_value=now + 60):
+                quota.probe(cache, 'sonnet')
+            status = cache.status(now=now + 60)['sonnet']
+            self.assertEqual(status['refresh']['last_success_at'], now)
+            self.assertIsNotNone(status['refresh']['error'])
+            self.assertEqual(status['windows'][0]['observed_at'], now)
+
+    def test_diagnostic_read_is_backward_compatible_and_read_only(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            self.assertIsNone(cache.status()['sonnet']['refresh']['last_attempt_at'])
+            self.assertFalse(cache.path.exists())
+            with sqlite3.connect(cache.path) as con:
+                con.execute('CREATE TABLE buckets (provider TEXT, id TEXT, observed REAL, source TEXT, windows TEXT)')
+            before = cache.path.read_bytes()
+            self.assertEqual(cache.status()['sonnet']['refresh']['history'], [])
+            self.assertEqual(cache.path.read_bytes(), before)
+            cache.path.with_suffix('.periodic.lock').write_text(json.dumps(dict(attempt=1000, success=1000)))
+            with patch.object(quota, 'probe') as probe:
+                self.assertFalse(quota.refresh_background(cache, now=1001))
+                probe.assert_not_called()
+            cache.record_attempt('sonnet', 1000, .25, dict(error_class='TimeoutError', message='timeout'))
+            with patch.dict(os.environ, {'ORCHD_QUOTA_REFRESH_SECONDS': '0'}):
+                status = cache.status(now=1400)['sonnet']
+                self.assertFalse(status['refresher']['enabled'])
+                self.assertFalse(status['refresher']['process_running'])
+            self.assertTrue(status['refresher']['scheduling_gap'])
+            self.assertEqual(status['refresher']['seconds_since_attempt'], 400)
+            self.assertEqual(status['refresh']['duration_seconds'], .25)
+
+    def test_refresh_exception_is_diagnostic_and_preserves_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            cache.codex({'rateLimits': {'primary': {'usedPercent': 10,
+                'windowDurationMins': 300, 'resetsAt': 10000}}}, now=1000)
+            with patch.object(quota, 'refresh', side_effect=OSError('private path SECRET')), \
+                    patch.object(quota, 'probe', return_value=False):
+                quota.refresh_background(cache, now=4000)
+            status = cache.status(now=4000)['sol']
+            self.assertEqual(status['windows'][0]['observed_at'], 1000)
+            self.assertEqual(status['refresh']['error']['error_class'], 'OSError')
+            self.assertNotIn('SECRET', json.dumps(status))
+
     def test_dispatch_reads_cache_without_probing_sol(self):
         real = quota.Cache
         with tempfile.TemporaryDirectory() as tmp, patch.object(quota, 'probe') as probe, \
@@ -452,11 +538,15 @@ class QuotaTest(unittest.TestCase):
             self.clock = 1000
             with patch.object(quota, 'probe', self._fake_sol_probe(calls)):
                 self.assertTrue(quota.refresh_background(cache, now=1000))
-                self.assertFalse(quota.refresh_background(cache, now=1150))
-                self.assertFalse(quota.refresh_background(cache, now=1000 + quota.BACKGROUND_PERIOD - 1))
-                self.assertEqual(calls.count('sonnet'), 1)
+                # Sonnet alone retries after its failed attempt; healthy sol stays gated.
+                self.assertFalse(quota.refresh_background(cache, now=1059))
+                self.assertTrue(quota.refresh_background(cache, now=1150))
+                self.assertTrue(quota.refresh_background(cache, now=1000 + quota.BACKGROUND_PERIOD - 1))
+                self.assertEqual(calls.count('sol'), 1)
+                self.assertEqual(calls.count('sonnet'), 3)
                 self.assertTrue(quota.refresh_background(cache, now=1000 + quota.BACKGROUND_PERIOD))
-                self.assertEqual(calls.count('sonnet'), 2)
+                self.assertEqual(calls.count('sol'), 1)
+                self.assertEqual(calls.count('sonnet'), 3)
 
     def test_failed_refresh_retries_only_after_probe_interval(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -538,6 +628,10 @@ class QuotaTest(unittest.TestCase):
         with patch('threading.Thread.start', side_effect=RuntimeError('cannot start new thread')), \
                 contextlib.redirect_stderr(io.StringIO()):
             self.assertIsNone(quota.start_background(interval=3600))
+            with tempfile.TemporaryDirectory() as tmp:
+                status = quota.Cache(Path(tmp) / 'quota.db').status()['sonnet']['refresher']
+                self.assertFalse(status['process_running'])
+                self.assertEqual(status['startup_error']['error_class'], 'RuntimeError')
             mcp_server.serve(stdin=io.StringIO('{"jsonrpc":"2.0","id":1,"method":"ping"}\n'),
                              stdout=out, con=object(), rt=object())
         self.assertIn('"id": 1', out.getvalue())

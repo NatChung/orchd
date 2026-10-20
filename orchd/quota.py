@@ -30,6 +30,7 @@ MAX_AGE = 1800
 SONNET_CLI_TTL = 900  # Bounded CLI reads lack the continuous Codex refresh stream.
 SONNET_CLOCK_SKEW = 2  # Tolerate small wall-clock/receipt races, never large future dates.
 SONNET_PROBE_INTERVAL = 60  # Minimum seconds between auto-selection attempts, including failures.
+DIAGNOSTIC_HISTORY = 10  # Completed attempts retained per provider.
 REFRESH_INTERVAL = 30  # Refresh before observation TTL, leaving room for RPC latency.
 
 
@@ -46,7 +47,21 @@ class Cache:
         con = sqlite3.connect(self.path, timeout=2)
         con.execute('CREATE TABLE IF NOT EXISTS buckets (provider TEXT, id TEXT, observed REAL, '
                     'source TEXT, windows TEXT, PRIMARY KEY(provider,id))')
+        con.execute('CREATE TABLE IF NOT EXISTS refresh_diagnostics (provider TEXT PRIMARY KEY, data TEXT)')
         return con
+
+    def record_attempt(self, provider, started, duration, error):
+        with contextlib.closing(self.connect()) as con, con:
+            con.execute('BEGIN IMMEDIATE')
+            row = con.execute('SELECT data FROM refresh_diagnostics WHERE provider=?', (provider,)).fetchone()
+            previous = json.loads(row[0]) if row else {}
+            entry = dict(attempt_at=started, duration_seconds=duration, error=error)
+            data = dict(last_attempt_at=started,
+                        last_success_at=started if error is None else previous.get('last_success_at'),
+                        duration_seconds=duration, error=error,
+                        history=(previous.get('history', []) + [entry])[-DIAGNOSTIC_HISTORY:])
+            con.execute('INSERT INTO refresh_diagnostics VALUES (?,?) ON CONFLICT(provider) '
+                        'DO UPDATE SET data=excluded.data', (provider, json.dumps(data)))
 
     def put(self, provider, bucket, windows, source, now):
         with contextlib.closing(self.connect()) as con, con:
@@ -83,10 +98,26 @@ class Cache:
         now = time.time() if now is None else now
         result = {p: dict(state='unknown', reason='no official quota observation', windows=[])
                   for p in ('sol', 'sonnet')}
+        for value in result.values():
+            value['refresh'] = dict(last_attempt_at=None, last_success_at=None,
+                                    duration_seconds=None, error=None, history=[])
+            value['refresher'] = dict(process_running=_background is not None and _background.is_alive(),
+                                      enabled=period() > 0, period_seconds=period(),
+                                      startup_error=_background_error,
+                                      seconds_since_attempt=None, scheduling_gap=None)
         if not self.path.exists():
             return result
         with contextlib.closing(sqlite3.connect(self.path.resolve().as_uri() + '?mode=ro', uri=True, timeout=2)) as con:
             rows = con.execute('SELECT provider,id,observed,source,windows FROM buckets ORDER BY provider,id').fetchall()
+            if con.execute("SELECT 1 FROM sqlite_master WHERE name='refresh_diagnostics'").fetchone():
+                for provider, data in con.execute('SELECT provider,data FROM refresh_diagnostics'):
+                    if provider in result:
+                        result[provider]['refresh'] = json.loads(data)
+        for value in result.values():
+            attempt = value['refresh']['last_attempt_at']
+            value['refresher']['seconds_since_attempt'] = None if attempt is None else max(0, now - attempt)
+            value['refresher']['scheduling_gap'] = (None if attempt is None else
+                now - attempt > period() + SONNET_PROBE_INTERVAL)
         for provider, bucket, observed, source, encoded in rows:
             ttl = SONNET_CLI_TTL if provider == 'sonnet' and source == 'claude.cli.usage' else TTL
             age = now - observed
@@ -296,7 +327,33 @@ def _reap_children():
         _reap(process)
 
 
+def sanitized_error(error):
+    """Never persist arbitrary exception text, commands, paths or provider output."""
+    message = str(error).lower()
+    category = next((label for pattern, label in (
+        ('timeout', 'timeout'), ('timed out', 'timeout'),
+        ('auth', 'authentication failed'), ('login', 'authentication failed'),
+        ('network', 'network failure'), ('connect', 'connection failure'),
+        ('missing subscription', 'unsupported usage display'),
+        ('zero turns required', 'local command required; zero turns required'),
+        ('exited', 'CLI exited unsuccessfully')) if pattern in message), 'quota read failed')
+    return dict(error_class=type(error).__name__, message=category)
+
+
 def probe(cache, provider, binary=None):
+    started, clock = time.time(), time.monotonic()
+    error = None
+    try:
+        error = _probe(cache, provider, binary)
+    except Exception as exc:
+        error = exc
+    if not _stopping():
+        cache.record_attempt(provider, started, max(0, time.monotonic() - clock),
+                             sanitized_error(error) if error else None)
+    return error is None
+
+
+def _probe(cache, provider, binary=None):
     """Explicit bounded CLI reads; no model turn, credentials or global edits."""
     if provider == 'sonnet':
         from .runtime import launch_env
@@ -309,7 +366,7 @@ def probe(cache, provider, binary=None):
             if _stopping():
                 return  # Shutting down: a killed probe is not an observation.
             if result.returncode:
-                raise ValueError(f'CLI /usage exited {result.returncode}')
+                raise ValueError(f'CLI /usage exited {result.returncode}: {result.stderr}')
             data = json.loads(result.stdout)
             if (data.get('is_error') or data.get('num_turns') != 0 or
                     data.get('local_command') != 'usage' or data.get('duration_api_ms') != 0):
@@ -317,11 +374,14 @@ def probe(cache, provider, binary=None):
             claude_usage(cache, data.get('result', ''))
         except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as error:
             # Preserve receipts (and their original age) when a read fails.
-            if _stopping() or cache.status()['sonnet']['windows']:
-                return
-            cache.unknown('sonnet', f'Claude /usage unavailable: {type(error).__name__}: {error}'
+            if _stopping():
+                return error
+            if cache.status()['sonnet']['windows']:
+                return error
+            cache.unknown('sonnet', f'Claude /usage unavailable: {type(error).__name__}: {sanitized_error(error)["message"]}'
                           if isinstance(error, ValueError) else f'Claude /usage unavailable: {type(error).__name__}',
                           'claude.cli.usage')
+            return error
         return
     from .app_transport import RPC
     with tempfile.TemporaryDirectory(prefix='orchd-quota-') as tmp:
@@ -344,8 +404,9 @@ def probe(cache, provider, binary=None):
             rpc = RPC(endpoint)
             cache.codex(rpc.call('account/rateLimits/read', {}, timeout=3), source='codex.probe.read')
         except Exception as error:
-            if not _stopping():
+            if not _stopping() and not cache.status()['sol']['windows']:
                 cache.unknown('sol', f'Codex rateLimits/read unavailable: {type(error).__name__}', 'codex.probe.read')
+            return error
         finally:
             if rpc is not None:
                 rpc.close()
@@ -363,10 +424,10 @@ def period():
 
 
 def refresh_background(cache, *, now=None, binary=None, claude=None):
-    """Read both providers at most once per period for the whole machine.
+    """Gate successful reads per provider per period for the whole machine.
 
-    The shared state file (`quota.periodic.lock`) holds the time of the last
-    successful refresh and of the last attempt. Whoever holds the exclusive
+    The shared state file (`quota.periodic.lock`) holds per-provider success
+    and attempt times, plus legacy aggregate timestamps. Whoever holds the exclusive
     lock runs the reads (so a background tick and a dispatch-triggered wake
     never overlap); everyone else, in any process, skips while the last
     success is younger than one period, and while a failed attempt is younger
@@ -388,50 +449,83 @@ def refresh_background(cache, *, now=None, binary=None, claude=None):
                 state = json.loads(lock.read() or '{}')
                 success, attempt = float(state.get('success', -math.inf)), float(state.get('attempt', -math.inf))
             except (ValueError, TypeError, AttributeError):
+                state = {}
                 success = attempt = -math.inf
-            if 0 <= now - success < period() or 0 <= now - attempt < min(SONNET_PROBE_INTERVAL, period()):
+            providers = state.get('providers', {})
+            if not providers and (0 <= now - success < period() or
+                    0 <= now - attempt < min(SONNET_PROBE_INTERVAL, period())):
                 return False
-            for read in (lambda: refresh(cache, force=True, now=now),
-                         lambda: cache.status(now=now)['sol']['state'] == 'known' or probe(cache, 'sol', binary),
-                         lambda: probe(cache, 'sonnet', claude or os.environ.get('ORCHD_CLAUDE'))):
+            attempted = False
+            for provider in ('sol', 'sonnet'):
                 if _stopping():
                     return False
+                previous = providers.get(provider, {})
+                last_success = previous.get('success', -math.inf)
+                last_attempt = previous.get('attempt', -math.inf)
+                if (0 <= now - last_success < period() or
+                        0 <= now - last_attempt < min(SONNET_PROBE_INTERVAL, period())):
+                    continue
+                attempted = True
+                started = time.monotonic()
                 try:
-                    read()
-                except Exception:
-                    pass  # Unknown quota never blocks dispatch; the next period retries.
+                    if provider == 'sol':
+                        refresh(cache, force=True, now=now)
+                        ok = cache.status(now=now)['sol']['state'] == 'known'
+                        if ok:
+                            cache.record_attempt(provider, now, time.monotonic() - started, None)
+                        else:
+                            ok = probe(cache, provider, binary)
+                    else:
+                        ok = probe(cache, provider, claude or os.environ.get('ORCHD_CLAUDE'))
+                    # Older collectors may not return an explicit outcome.
+                    if ok is None:
+                        ok = cache.status(now=now)[provider]['state'] == 'known'
+                        cache.record_attempt(provider, now, time.monotonic() - started,
+                            None if ok else dict(error_class='Unavailable', message='no known quota receipt'))
+                except Exception as error:
+                    ok = False
+                    cache.record_attempt(provider, now, time.monotonic() - started, sanitized_error(error))
+                providers[provider] = dict(attempt=now, **({'success': now} if ok else
+                    {'success': last_success} if last_success > -math.inf else {}))
+            if not attempted:
+                return False
             snapshot = cache.status(now=now)
             if _stopping():
                 return False
             ok = any(snapshot[p]['state'] == 'known' for p in ('sol', 'sonnet'))
-            state = dict(attempt=now, success=now if ok else (success if success > -math.inf else None))
+            all_ok = all(providers.get(p, {}).get('success') == now for p in ('sol', 'sonnet'))
+            state = dict(attempt=now, providers=providers,
+                         success=now if all_ok else (success if success > -math.inf else None))
             lock.seek(0)
             lock.truncate()
             lock.write(json.dumps({k: v for k, v in state.items() if v is not None}))
             lock.flush()
             return ok
-    except Exception:
+    except Exception as error:
+        print(f'orchd: quota refresh unavailable: {sanitized_error(error)}', file=sys.stderr)
         return False
 
 
 _background = None
+_background_error = None
 _wake = None
 
 
 def start_background(cache=None, *, interval=None):
     """Start (once per process) a daemon thread running refresh_background periodically."""
-    global _background, _stop, _wake
+    global _background, _stop, _wake, _background_error
     interval = period() if interval is None else interval
     if interval <= 0 or (_background is not None and _background.is_alive()):
         return _background
+    _background_error = None
     stop, wake = _stop, _wake = threading.Event(), threading.Event()
 
     def loop():
         while not stop.is_set():
             try:
                 refresh_background(cache or Cache())
-            except Exception:
-                pass
+            except Exception as error:
+                print(f'orchd: quota refresh loop failed: {sanitized_error(error)}', file=sys.stderr)
             wake.wait(interval)  # a dispatch seeing unknown quota may wake us early
             wake.clear()
             # Waking never bypasses the gate: refresh_background still enforces one read per period.
@@ -440,7 +534,8 @@ def start_background(cache=None, *, interval=None):
     try:
         thread.start()
     except Exception as error:  # e.g. RuntimeError: cannot start new thread
-        print(f'orchd: quota background refresh not started: {error}', file=sys.stderr)
+        _background_error = sanitized_error(error)
+        print(f'orchd: quota background refresh not started: {sanitized_error(error)}', file=sys.stderr)
         _background = _stop = _wake = None  # nothing runs; dispatch just sees unknown quota
         return None
     _background = thread
