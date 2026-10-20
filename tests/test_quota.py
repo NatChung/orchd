@@ -507,6 +507,21 @@ class QuotaTest(unittest.TestCase):
             return False
         return True
 
+    def test_thread_start_failure_is_tolerated_by_serve_and_stop(self):
+        from orchd import mcp_server
+        out = io.StringIO()
+        with patch('threading.Thread.start', side_effect=RuntimeError('cannot start new thread')), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertIsNone(quota.start_background(interval=3600))
+            mcp_server.serve(stdin=io.StringIO('{"jsonrpc":"2.0","id":1,"method":"ping"}\n'),
+                             stdout=out, con=object(), rt=object())
+        self.assertIn('"id": 1', out.getvalue())
+        quota.stop_background()  # safe with no started thread
+        self.assertIsNone(quota._background)
+        quota._background = quota.threading.Thread(target=lambda: None)
+        quota.stop_background()  # must not raise "cannot join thread before it is started"
+        self.assertIsNone(quota._background)
+
     def test_stop_background_terminates_probe_subprocess_and_joins_thread(self):
         with tempfile.TemporaryDirectory() as tmp:
             script, pidfile = self._fake_claude(tmp)

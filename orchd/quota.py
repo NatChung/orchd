@@ -15,6 +15,7 @@ import re
 import signal
 import subprocess
 import tempfile
+import sys
 import threading
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -435,8 +436,14 @@ def start_background(cache=None, *, interval=None):
             wake.clear()
             # Waking never bypasses the gate: refresh_background still enforces one read per period.
 
-    _background = threading.Thread(target=loop, name='orchd-quota-refresh', daemon=True)
-    _background.start()
+    thread = threading.Thread(target=loop, name='orchd-quota-refresh', daemon=True)
+    try:
+        thread.start()
+    except Exception as error:  # e.g. RuntimeError: cannot start new thread
+        print(f'orchd: quota background refresh not started: {error}', file=sys.stderr)
+        _background = _stop = _wake = None  # nothing runs; dispatch just sees unknown quota
+        return None
+    _background = thread
     return _background
 
 
@@ -449,7 +456,7 @@ def stop_background(timeout=5):
     if _wake is not None:
         _wake.set()
     _reap_children()
-    if thread is not None and thread is not threading.current_thread():
+    if thread is not None and thread.ident is not None and thread is not threading.current_thread():
         thread.join(timeout)
         _reap_children()
     if thread is None or not thread.is_alive():

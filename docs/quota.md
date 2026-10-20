@@ -31,7 +31,8 @@ attempt TTL. Reads never create or migrate a DB. Codex, Claude statusline and
 SDK observations older than 900 seconds are unknown. Native Claude CLI usage
 receipts also have a 900-second TTL. All observations older than 1800 seconds are
 marked stale. A background refresher (below) re-reads every 300 seconds, so one
-missed period never makes quota unknown; dispatch only reads the cache.
+missed period usually keeps the cache usable, but an expired reset, a failed read
+or an old receipt can still make quota unknown; dispatch only reads the cache.
 
 ### Periodic background refresh
 
@@ -42,7 +43,8 @@ session tail (no new process) and, if sol is still unknown, from one bounded
 
 - **Dispatch never probes.** Auto selection only reads the cache; empty or
   expired telemetry is unknown. In that case dispatch wakes the background thread
-  (no wait) so the cache is warm for the next dispatch. A process without the
+  (no wait) as an asynchronous best-effort nudge. If the period gate skips it or the
+  probe fails, the next dispatch can still read unknown. A process without the
   thread (for example a CLI dispatch) just treats the quota as unknown.
 - **One refresh per period per machine.** `quota.periodic.lock` holds the time of
   the last successful refresh and the last attempt. Whoever takes the exclusive
@@ -54,7 +56,8 @@ session tail (no new process) and, if sol is still unknown, from one bounded
   after 3 seconds) and joins the thread (5 second timeout). A killed probe is not
   recorded as an observation.
 
-Failures are swallowed and never block dispatch.
+Failures, including a failure to start the thread at all, are swallowed (logged to
+stderr) and never block dispatch or stop the MCP server.
 Claude observation timestamps up to 2 seconds ahead are treated as age zero;
 larger future timestamps remain unknown. Codex future timestamps remain unknown.
 Missing/invalid percentages, durations, resets, and passed resets are unknown.

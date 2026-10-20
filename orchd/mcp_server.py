@@ -615,7 +615,10 @@ def serve(stdin=sys.stdin, stdout=sys.stdout, con=None, rt=None, role="orch", en
     con = con or store.connect()
     rt = rt or Runtime()
     if role != "entry":
-        quota.start_background()  # Dispatch only reads the cache; this keeps it warm.
+        try:
+            quota.start_background()  # Dispatch only reads the cache; this keeps it warm.
+        except Exception as error:
+            print(f'orchd: quota background refresh unavailable: {error}', file=sys.stderr)
     try:
         for line in stdin:
             if not line.strip():
