@@ -12,8 +12,10 @@ import sqlite3
 import time
 import os
 import re
+import signal
 import subprocess
 import tempfile
+import threading
 from zoneinfo import ZoneInfo
 from pathlib import Path
 
@@ -244,16 +246,67 @@ def claude_usage(cache, text, now=None):
     cache.put('sonnet', 'subscription', windows, 'claude.cli.usage', now)
 
 
+_stop = None  # threading.Event once a background refresher exists
+_children = set()
+_children_lock = threading.Lock()
+
+
+def _stopping():
+    return _stop is not None and _stop.is_set()
+
+
+def _reap(process, grace=3):
+    """Terminate a probe process group, escalating to kill; never raises."""
+    if process.poll() is not None:
+        return
+    for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, grace)):
+        try:
+            os.killpg(process.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            with contextlib.suppress(Exception):
+                process.send_signal(sig)
+        try:
+            process.wait(timeout=wait)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def _run(cmd, timeout, **kwargs):
+    """subprocess.run replacement whose child is registered so stop_background can reap it."""
+    process = subprocess.Popen(cmd, start_new_session=True, **kwargs)
+    with _children_lock:
+        _children.add(process)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except BaseException:
+        _reap(process)
+        raise
+    finally:
+        with _children_lock:
+            _children.discard(process)
+    return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+
+
+def _reap_children():
+    with _children_lock:
+        children = list(_children)
+    for process in children:
+        _reap(process)
+
+
 def probe(cache, provider, binary=None):
     """Explicit bounded CLI reads; no model turn, credentials or global edits."""
     if provider == 'sonnet':
         from .runtime import launch_env
         try:
-            result = subprocess.run([binary or 'claude', '-p', '/usage', '--output-format', 'json',
+            result = _run([binary or 'claude', '-p', '/usage', '--output-format', 'json',
                 '--tools', '', '--no-session-persistence', '--setting-sources', '',
                 '--settings', '{"disableAllHooks":true}', '--strict-mcp-config',
                 '--mcp-config', '{"mcpServers":{}}'], env=launch_env(),
-                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15)
+            if _stopping():
+                return  # Shutting down: a killed probe is not an observation.
             if result.returncode:
                 raise ValueError(f'CLI /usage exited {result.returncode}')
             data = json.loads(result.stdout)
@@ -263,7 +316,7 @@ def probe(cache, provider, binary=None):
             claude_usage(cache, data.get('result', ''))
         except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as error:
             # Preserve receipts (and their original age) when a read fails.
-            if cache.status()['sonnet']['windows']:
+            if _stopping() or cache.status()['sonnet']['windows']:
                 return
             cache.unknown('sonnet', f'Claude /usage unavailable: {type(error).__name__}: {error}'
                           if isinstance(error, ValueError) else f'Claude /usage unavailable: {type(error).__name__}',
@@ -276,26 +329,29 @@ def probe(cache, provider, binary=None):
         rpc = None
         try:
             process = subprocess.Popen([binary or 'codex', 'app-server', '--listen', 'unix://' + endpoint],
-                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True)
+            with _children_lock:
+                _children.add(process)
             deadline = time.monotonic() + 10
             while not Path(endpoint).exists():
+                if _stopping():
+                    raise TimeoutError('stopped')
                 if process.poll() is not None or time.monotonic() >= deadline:
                     raise TimeoutError('Codex quota app-server did not publish socket')
                 time.sleep(.05)
             rpc = RPC(endpoint)
             cache.codex(rpc.call('account/rateLimits/read', {}, timeout=3), source='codex.probe.read')
         except Exception as error:
-            cache.unknown('sol', f'Codex rateLimits/read unavailable: {type(error).__name__}', 'codex.probe.read')
+            if not _stopping():
+                cache.unknown('sol', f'Codex rateLimits/read unavailable: {type(error).__name__}', 'codex.probe.read')
         finally:
             if rpc is not None:
                 rpc.close()
-            if process is not None and process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
+            if process is not None:
+                _reap(process)
+                with _children_lock:
+                    _children.discard(process)
 
 
 def period():
@@ -306,12 +362,16 @@ def period():
 
 
 def refresh_background(cache, *, now=None, binary=None, claude=None):
-    """One periodic read of both providers; failures are tolerated, never raised.
+    """Read both providers at most once per period for the whole machine.
 
-    Sol prefers the Codex session tail (no new process) and falls back to the
-    bounded app-server probe only when that leaves sol unknown. Sonnet uses the
-    bounded /usage probe. A cross-process timestamp lock keeps concurrent Orch
-    processes from reading more than once per period.
+    The shared state file (`quota.periodic.lock`) holds the time of the last
+    successful refresh and of the last attempt. Whoever holds the exclusive
+    lock runs the reads (so a background tick and a dispatch-triggered wake
+    never overlap); everyone else, in any process, skips while the last
+    success is younger than one period, and while a failed attempt is younger
+    than SONNET_PROBE_INTERVAL. Sol prefers the Codex session tail and probes
+    app-server only if that leaves it unknown; sonnet uses the bounded /usage
+    probe. Failures are tolerated, never raised.
     """
     import fcntl
     now = time.time() if now is None else now
@@ -323,80 +383,85 @@ def refresh_background(cache, *, now=None, binary=None, claude=None):
             except BlockingIOError:
                 return False
             lock.seek(0)
-            previous = lock.read()
             try:
-                if previous and 0 <= now - float(previous) < period() / 2:
-                    return False
-            except ValueError:
-                pass
-            lock.seek(0)
-            lock.truncate()
-            lock.write(str(now))
-            lock.flush()
+                state = json.loads(lock.read() or '{}')
+                success, attempt = float(state.get('success', -math.inf)), float(state.get('attempt', -math.inf))
+            except (ValueError, TypeError, AttributeError):
+                success = attempt = -math.inf
+            if 0 <= now - success < period() or 0 <= now - attempt < min(SONNET_PROBE_INTERVAL, period()):
+                return False
             for read in (lambda: refresh(cache, force=True, now=now),
                          lambda: cache.status(now=now)['sol']['state'] == 'known' or probe(cache, 'sol', binary),
                          lambda: probe(cache, 'sonnet', claude or os.environ.get('ORCHD_CLAUDE'))):
+                if _stopping():
+                    return False
                 try:
                     read()
                 except Exception:
                     pass  # Unknown quota never blocks dispatch; the next period retries.
-            return True
+            snapshot = cache.status(now=now)
+            if _stopping():
+                return False
+            ok = any(snapshot[p]['state'] == 'known' for p in ('sol', 'sonnet'))
+            state = dict(attempt=now, success=now if ok else (success if success > -math.inf else None))
+            lock.seek(0)
+            lock.truncate()
+            lock.write(json.dumps({k: v for k, v in state.items() if v is not None}))
+            lock.flush()
+            return ok
     except Exception:
         return False
 
 
 _background = None
+_wake = None
 
 
 def start_background(cache=None, *, interval=None):
     """Start (once per process) a daemon thread running refresh_background periodically."""
-    import threading
-    global _background
+    global _background, _stop, _wake
     interval = period() if interval is None else interval
     if interval <= 0 or (_background is not None and _background.is_alive()):
         return _background
+    stop, wake = _stop, _wake = threading.Event(), threading.Event()
 
     def loop():
-        while True:
+        while not stop.is_set():
             try:
                 refresh_background(cache or Cache())
             except Exception:
                 pass
-            time.sleep(interval)
+            wake.wait(interval)  # a dispatch seeing unknown quota may wake us early
+            wake.clear()
+            # Waking never bypasses the gate: refresh_background still enforces one read per period.
 
     _background = threading.Thread(target=loop, name='orchd-quota-refresh', daemon=True)
     _background.start()
     return _background
 
 
-def refresh_sonnet(cache, *, now=None):
-    """Bounded, cross-process single-flight read before auto selection.
+def stop_background(timeout=5):
+    """Stop the refresher thread and reap any probe subprocess; safe if never started."""
+    global _background, _stop, _wake
+    thread = _background
+    if _stop is not None:
+        _stop.set()
+    if _wake is not None:
+        _wake.set()
+    _reap_children()
+    if thread is not None and thread is not threading.current_thread():
+        thread.join(timeout)
+        _reap_children()
+    if thread is None or not thread.is_alive():
+        _background = _stop = _wake = None  # nothing left running: a later start is fresh
 
-    Only unknown/expired telemetry needs a read. Record failed attempts too so
-    unavailable Claude installations cannot add a probe to every dispatch.
-    """
-    import fcntl
-    now = time.time() if now is None else now
-    if cache.status(now=now)['sonnet']['state'] == 'known':
-        return
-    cache.path.parent.mkdir(parents=True, exist_ok=True)
-    with open(cache.path.with_suffix('.sonnet.lock'), 'a+') as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return
-        # Another process may have refreshed between our snapshot and lock.
-        if cache.status(now=now)['sonnet']['state'] == 'known':
-            return
-        lock.seek(0)
-        previous = lock.read()
-        if previous and 0 <= now - float(previous) < SONNET_PROBE_INTERVAL:
-            return
-        lock.seek(0)
-        lock.truncate()
-        lock.write(str(now))
-        lock.flush()
-        probe(cache, 'sonnet', os.environ.get('ORCHD_CLAUDE'))
+
+def request_refresh():
+    """Wake the background refresher (if this process runs one); never blocks."""
+    if _wake is not None and _background is not None and _background.is_alive() and not _stopping():
+        _wake.set()
+        return True
+    return False
 
 
 def shadow(snapshot, *, backend='exec', task_type=None, author_model=None, now=None,
@@ -462,13 +527,12 @@ def dispatch_shadow(**kwargs):
     try:
         cache = Cache()
         if kwargs.get('applied') and kwargs.get('backend', 'exec') != 'app-server':
-            started = time.monotonic()
-            try:
-                refresh_sonnet(cache, now=kwargs.get('now'))
-            except Exception:
-                pass  # Probe/lock/storage failure must not block dispatch.
-            if kwargs.get('now') is not None:
-                kwargs['now'] += time.monotonic() - started
+            # Dispatch only reads the cache. Empty/expired telemetry is unknown; wake the
+            # background refresher for next time instead of probing while the caller waits.
+            snapshot = cache.status(now=kwargs.get('now'))
+            if any(snapshot[p]['state'] != 'known' for p in ('sol', 'sonnet')):
+                request_refresh()
+            return shadow(snapshot, **kwargs)
         return shadow(cache.status(now=kwargs.get('now')), **kwargs)
     except Exception:
         if kwargs.get('applied'):

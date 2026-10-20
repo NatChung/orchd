@@ -38,10 +38,23 @@ missed period never makes quota unknown; dispatch only reads the cache.
 Each Orch MCP server process runs a daemon thread that, every
 `ORCHD_QUOTA_REFRESH_SECONDS` (default 300; 0 disables), reads sol from the Codex
 session tail (no new process) and, if sol is still unknown, from one bounded
-`codex app-server` probe, then reads sonnet via the bounded `/usage` probe. A
-cross-process lock and timestamp (`quota.periodic.lock`) keep several Orch
-processes to one read per period. Failures are swallowed and never block
-dispatch; the next period retries.
+`codex app-server` probe, then reads sonnet via the bounded `/usage` probe.
+
+- **Dispatch never probes.** Auto selection only reads the cache; empty or
+  expired telemetry is unknown. In that case dispatch wakes the background thread
+  (no wait) so the cache is warm for the next dispatch. A process without the
+  thread (for example a CLI dispatch) just treats the quota as unknown.
+- **One refresh per period per machine.** `quota.periodic.lock` holds the time of
+  the last successful refresh and the last attempt. Whoever takes the exclusive
+  lock runs the reads; all others (other Orch processes, a dispatch wake) skip
+  while the last success is younger than one period, or a failed attempt is
+  younger than 60 seconds.
+- **Clean shutdown.** `serve()` calls `quota.stop_background()` on exit: it sets a
+  stop event, terminates any running probe process group (SIGTERM, then SIGKILL
+  after 3 seconds) and joins the thread (5 second timeout). A killed probe is not
+  recorded as an observation.
+
+Failures are swallowed and never block dispatch.
 Claude observation timestamps up to 2 seconds ahead are treated as age zero;
 larger future timestamps remain unknown. Codex future timestamps remain unknown.
 Missing/invalid percentages, durations, resets, and passed resets are unknown.

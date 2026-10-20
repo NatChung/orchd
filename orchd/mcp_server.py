@@ -616,10 +616,14 @@ def serve(stdin=sys.stdin, stdout=sys.stdout, con=None, rt=None, role="orch", en
     rt = rt or Runtime()
     if role != "entry":
         quota.start_background()  # Dispatch only reads the cache; this keeps it warm.
-    for line in stdin:
-        if not line.strip():
-            continue
-        reply = handle(json.loads(line), con, rt, role, entry_id)
-        if reply is not None:
-            stdout.write(json.dumps(reply, ensure_ascii=False) + "\n")
-            stdout.flush()
+    try:
+        for line in stdin:
+            if not line.strip():
+                continue
+            reply = handle(json.loads(line), con, rt, role, entry_id)
+            if reply is not None:
+                stdout.write(json.dumps(reply, ensure_ascii=False) + "\n")
+                stdout.flush()
+    finally:
+        if role != "entry":
+            quota.stop_background()  # No orphaned probe subprocess outlives the server.
