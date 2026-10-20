@@ -137,7 +137,7 @@ class RoutingTest(unittest.TestCase):
         self.assertEqual(core.inbox(self.con, 'orch')[0]['model_reason'], task['model_reason'])
 
     def test_unknown_and_stale_fallback_record_reason(self):
-        for age in (None, 301):
+        for age in (None, quota.TTL + 1):
             if age is not None:
                 self.observe(99, age=age)
             task = self.dispatch()
@@ -417,7 +417,7 @@ class RoutingTest(unittest.TestCase):
         with patch('orchd.quota.time.time', side_effect=lambda: clock[0]), \
                 patch('orchd.quota.time.monotonic', return_value=100), \
                 patch('orchd.quota.subprocess.run', side_effect=read_usage):
-            self.observe(94, 99, age=790)
+            self.observe(94, 99, age=quota.TTL + 1)
             quota.Cache().codex({'rateLimits': {'primary': {'usedPercent': 94,
                 'windowDurationMins': 300, 'resetsAt': now + 10000}}}, now=now)
             task = self.dispatch()
@@ -436,7 +436,7 @@ class RoutingTest(unittest.TestCase):
                       local_command='usage', duration_api_ms=0)))
         with patch('orchd.quota.time.time', return_value=now), \
                 patch('orchd.quota.subprocess.run', return_value=result) as run:
-            self.observe(94, 99, age=301)
+            self.observe(94, 99, age=quota.TTL + 1)
             quota.Cache().codex({'rateLimits': {'primary': {'usedPercent': 94,
                 'windowDurationMins': 300, 'resetsAt': now + 10000}}}, now=now)
             task = self.dispatch()
@@ -447,7 +447,7 @@ class RoutingTest(unittest.TestCase):
         self.assertIn('known capacity', task['model_reason'])
 
     def test_sonnet_probe_failure_preserves_stale_receipt_and_fallback(self):
-        self.observe(99, 20, age=301)
+        self.observe(99, 20, age=quota.TTL + 1)
         cache = quota.Cache()
         with cache.connect() as con:
             before = con.execute("SELECT * FROM buckets WHERE provider='sonnet'").fetchall()
@@ -461,7 +461,7 @@ class RoutingTest(unittest.TestCase):
 
     def test_sonnet_probe_minimum_interval_includes_failed_attempts(self):
         now = time.time()
-        self.observe(99, 20, age=301)
+        self.observe(99, 20, age=quota.TTL + 1)
         with patch('orchd.quota.time.time', return_value=now), \
                 patch('orchd.quota.subprocess.run', side_effect=subprocess.TimeoutExpired('claude', 15)) as run:
             self.dispatch()

@@ -19,9 +19,12 @@ from pathlib import Path
 
 from . import store
 
-TTL = 60
-MAX_AGE = 300
-SONNET_CLI_TTL = 300  # Bounded CLI reads lack the continuous Codex refresh stream.
+# Observations are refreshed in the background every BACKGROUND_PERIOD seconds, so TTL must outlast a
+# period plus probe latency (3x margin); the 7-day windows move slowly, so this stays accurate enough.
+BACKGROUND_PERIOD = 300  # Default; ORCHD_QUOTA_REFRESH_SECONDS overrides, 0 disables.
+TTL = 900
+MAX_AGE = 1800
+SONNET_CLI_TTL = 900  # Bounded CLI reads lack the continuous Codex refresh stream.
 SONNET_CLOCK_SKEW = 2  # Tolerate small wall-clock/receipt races, never large future dates.
 SONNET_PROBE_INTERVAL = 60  # Minimum seconds between auto-selection attempts, including failures.
 REFRESH_INTERVAL = 30  # Refresh before observation TTL, leaving room for RPC latency.
@@ -295,6 +298,77 @@ def probe(cache, provider, binary=None):
                     process.wait()
 
 
+def period():
+    try:
+        return float(os.environ.get('ORCHD_QUOTA_REFRESH_SECONDS', BACKGROUND_PERIOD))
+    except ValueError:
+        return float(BACKGROUND_PERIOD)
+
+
+def refresh_background(cache, *, now=None, binary=None, claude=None):
+    """One periodic read of both providers; failures are tolerated, never raised.
+
+    Sol prefers the Codex session tail (no new process) and falls back to the
+    bounded app-server probe only when that leaves sol unknown. Sonnet uses the
+    bounded /usage probe. A cross-process timestamp lock keeps concurrent Orch
+    processes from reading more than once per period.
+    """
+    import fcntl
+    now = time.time() if now is None else now
+    try:
+        cache.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache.path.with_suffix('.periodic.lock'), 'a+') as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False
+            lock.seek(0)
+            previous = lock.read()
+            try:
+                if previous and 0 <= now - float(previous) < period() / 2:
+                    return False
+            except ValueError:
+                pass
+            lock.seek(0)
+            lock.truncate()
+            lock.write(str(now))
+            lock.flush()
+            for read in (lambda: refresh(cache, force=True, now=now),
+                         lambda: cache.status(now=now)['sol']['state'] == 'known' or probe(cache, 'sol', binary),
+                         lambda: probe(cache, 'sonnet', claude or os.environ.get('ORCHD_CLAUDE'))):
+                try:
+                    read()
+                except Exception:
+                    pass  # Unknown quota never blocks dispatch; the next period retries.
+            return True
+    except Exception:
+        return False
+
+
+_background = None
+
+
+def start_background(cache=None, *, interval=None):
+    """Start (once per process) a daemon thread running refresh_background periodically."""
+    import threading
+    global _background
+    interval = period() if interval is None else interval
+    if interval <= 0 or (_background is not None and _background.is_alive()):
+        return _background
+
+    def loop():
+        while True:
+            try:
+                refresh_background(cache or Cache())
+            except Exception:
+                pass
+            time.sleep(interval)
+
+    _background = threading.Thread(target=loop, name='orchd-quota-refresh', daemon=True)
+    _background.start()
+    return _background
+
+
 def refresh_sonnet(cache, *, now=None):
     """Bounded, cross-process single-flight read before auto selection.
 
@@ -347,7 +421,13 @@ def shadow(snapshot, *, backend='exec', task_type=None, author_model=None, now=N
             usable.append((score, provider == 'sol', provider))
     selected = max(usable)[2] if usable else None
     reason = ('review requires another provider; ' if review else '')
-    if selected:
+    sol_used = max((w['used_percent'] for w in snapshot['sol']['windows']
+                    if w.get('state') == 'known' and number(w.get('used_percent'))), default=None)
+    if (selected == 'sonnet' and 'sol' in allowed and 'sol' not in recent_limited and snapshot['sol']['state'] != 'known'
+            and (sol_used is None or sol_used < 95)):
+        selected = 'sol'
+        reason += 'sol quota unknown (expired/stale); prefer sol, not limited or full; no capacity guarantee'
+    elif selected:
         reason += 'known capacity with 5% margin; remaining capacity/reset-time score (provisional)'
     elif applied and allowed:
         # Apply the same policy's fallback rather than queueing on absent telemetry.

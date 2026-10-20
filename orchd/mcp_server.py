@@ -16,7 +16,7 @@ import re
 import sys
 import traceback
 
-from . import core, entry, goals, inventory, issue_links, question_summary, store, verify as verification
+from . import core, entry, goals, inventory, issue_links, question_summary, quota, store, verify as verification
 from .runtime import WORKER_MODELS, Runtime
 
 TOOLS = [
@@ -614,6 +614,8 @@ def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY):
 def serve(stdin=sys.stdin, stdout=sys.stdout, con=None, rt=None, role="orch", entry_id=entry.DEFAULT_ENTRY):
     con = con or store.connect()
     rt = rt or Runtime()
+    if role != "entry":
+        quota.start_background()  # Dispatch only reads the cache; this keeps it warm.
     for line in stdin:
         if not line.strip():
             continue
