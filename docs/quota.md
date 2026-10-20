@@ -46,18 +46,49 @@ session tail (no new process) and, if sol is still unknown, from one bounded
   (no wait) as an asynchronous best-effort nudge. If the period gate skips it or the
   probe fails, the next dispatch can still read unknown. A process without the
   thread (for example a CLI dispatch) just treats the quota as unknown.
-- **One refresh per period per machine.** `quota.periodic.lock` holds the time of
-  the last successful refresh and the last attempt. Whoever takes the exclusive
-  lock runs the reads; all others (other Orch processes, a dispatch wake) skip
-  while the last success is younger than one period, or a failed attempt is
-  younger than 60 seconds.
+- **One refresh per period per provider per machine.** `quota.periodic.lock`
+  keeps independent attempt and success times for sol and sonnet. The exclusive
+  lock prevents overlapping refreshes. Successful reads gate that provider for
+  one period; failures gate only that provider for 60 seconds (or the configured
+  period if shorter). The thread still ticks every 300 seconds by default;
+  dispatch wakes can retry failures sooner without re-reading healthy providers.
+  Healthy sol never marks a failed sonnet read successful.
 - **Clean shutdown.** `serve()` calls `quota.stop_background()` on exit: it sets a
   stop event, terminates any running probe process group (SIGTERM, then SIGKILL
   after 3 seconds) and joins the thread (5 second timeout). A killed probe is not
   recorded as an observation.
 
-Failures, including a failure to start the thread at all, are swallowed (logged to
-stderr) and never block dispatch or stop the MCP server.
+Failures never block dispatch or stop the MCP server. `quota_status` (MCP) and
+`orchd quota` (CLI) expose the same extra fields under **each provider**:
+
+- `refresh.last_attempt_at`, `last_success_at` (Unix seconds),
+  `duration_seconds` (monotonic elapsed time), and `error` (exception class plus
+  a fixed, short message category). A later success sets `error` to null.
+- `refresh.history`: the last ten completed attempts for that provider, oldest
+  first, including errors after recovery. Probe stderr is classified into bounded
+  categories such as timeout, authentication failure, or connection failure;
+  raw stderr, exception messages, credentials and commands are never stored.
+- `refresher.enabled`, `period_seconds`, `process_running`, `startup_error`,
+  `seconds_since_attempt`, and `scheduling_gap`. Running and startup error refer
+  only to the **calling process**: CLI and Entry normally have no thread, while
+  Orch MCP owns one. They do not establish that another process is alive.
+  A gap means no completed provider attempt within one period plus the 60-second
+  retry interval; it is evidence of missing attempts, not proof of a scheduler
+  fault. Null attempt/gap means no diagnostic evidence yet. An explicit error
+  identifies a failed read; a disabled period or absent local thread explains
+  why that process is not refreshing. Diagnose auth/network/scheduling at that
+  captured boundary rather than inferring a historical cause from a fresh read.
+
+Diagnostics live in an additive `refresh_diagnostics(provider, data)` SQLite
+table in `quota.db`, separate from `buckets`. Existing databases are upgraded
+only on writes; read-only status accepts the old schema and never creates or
+migrates a database. Existing receipt fields and original timestamps survive
+failed probes, so receipt age continues to increase. The periodic lock JSON
+adds a `providers` map and retains legacy `attempt`/`success` keys; old lock
+files remain readable. Legacy aggregate success now requires both providers.
+Refresh/loop errors that prevent diagnostic storage are classified on stderr.
+No scoring, TTL/MAX_AGE, or default refresh-period values change.
+
 Claude observation timestamps up to 2 seconds ahead are treated as age zero;
 larger future timestamps remain unknown. Codex future timestamps remain unknown.
 Missing/invalid percentages, durations, resets, and passed resets are unknown.
@@ -273,7 +304,8 @@ print mode as a local command (`local_command=usage`, `num_turns=0`,
 local-command evidence before accepting the text. This is a version-dependent
 CLI display adapter, not an undocumented credential/API reader. Unsupported
 versions, auth failures, timeouts, nonlocal results and unsupported locales are
-stored as explicit unknown observations with the source and reason; no model
+recorded in diagnostics while preserving any previous receipt; without a previous
+receipt they are stored as explicit unknown observations with the source and reason; no model
 answer, context usage or approximate local-session breakdown is accepted.
 
 Only the `Current session` and `Current week (all models)` percentages enter the
