@@ -148,6 +148,108 @@ class InterfaceTest(unittest.TestCase):
         self.assertTrue(result['isError'])
         self.assertEqual(self.fetch(), [])
 
+    def both(self, **extra):
+        return api.fetch(self.con, **self.auth(self.a), conversation='one', kinds=['interim', 'final'], **extra)
+
+    def test_interim_then_final_delivered_in_order_once_each(self):
+        rid = self.submit()['request_id']
+        api.reply(self.con, 'orch-A', request_id=rid, text='working', kind='interim')
+        self.assertEqual([r['id'] for r in api.requests(self.con, 'orch-A')], [rid])
+        self.assertEqual(api.requests(self.con, 'orch-A')[0]['interim'], 'working')
+        self.assertEqual(self.both(), [dict(request_id=rid, conversation='one', kind='interim', reply='working')])
+        api.reply(self.con, 'orch-A', request_id=rid, text='done')
+        self.assertEqual(api.requests(self.con, 'orch-A'), [])
+        both = [dict(request_id=rid, conversation='one', kind='interim', reply='working'),
+                dict(request_id=rid, conversation='one', kind='final', reply='done')]
+        self.assertEqual(self.both(), both)
+        self.assertEqual(self.both(), both)  # fetch does not consume
+        ack = dict(self.auth(self.a), conversation='one', request_id=rid)
+        self.assertEqual(api.ack(self.con, **ack, kind='interim')['kind'], 'interim')
+        api.ack(self.con, **ack, kind='interim')
+        self.assertEqual(self.both(), both[1:])
+        api.ack(self.con, **ack)
+        self.assertEqual(self.both(), [])
+
+    def test_interim_ack_survives_reopen_and_final_only_unchanged(self):
+        first, second = self.submit(key='1')['request_id'], self.submit(key='2')['request_id']
+        api.reply(self.con, 'orch-A', request_id=second, text='b-final')
+        api.reply(self.con, 'orch-A', request_id=first, text='a-interim', kind='interim')
+        api.ack(self.con, **self.auth(self.a), conversation='one', request_id=first, kind='interim')
+        self.con.close()
+        self.con = store.connect()
+        self.assertEqual(self.both(), [dict(request_id=second, conversation='one', kind='final', reply='b-final')])
+        self.assertEqual(self.fetch(), [dict(request_id=second, conversation='one', reply='b-final')])
+
+    def test_old_adapter_never_sees_interim_and_cannot_ack_it_as_final(self):
+        rid = self.submit()['request_id']
+        api.reply(self.con, 'orch-A', request_id=rid, text='working', kind='interim')
+        self.assertEqual(self.fetch(), [])
+        with self.assertRaises(ValueError):
+            api.ack(self.con, **self.auth(self.a), conversation='one', request_id=rid)
+        api.reply(self.con, 'orch-A', request_id=rid, text='done')
+        self.assertEqual(self.fetch(), [dict(request_id=rid, conversation='one', reply='done')])
+        with self.assertRaises(ValueError):
+            api.fetch(self.con, **self.auth(self.a), conversation='one', kinds=['interim'])
+
+    def test_duplicate_conflicting_and_late_replies(self):
+        rid = self.submit()['request_id']
+        reply = lambda text, kind='final': api.reply(self.con, 'orch-A', request_id=rid, text=text, kind=kind)
+        reply('i', 'interim')
+        reply('i', 'interim')
+        with self.assertRaisesRegex(ValueError, 'interim reply already'):
+            reply('other', 'interim')
+        reply('f')
+        reply('f')
+        with self.assertRaisesRegex(ValueError, 'different content'):
+            reply('g')
+        late = self.submit(key='2')['request_id']
+        api.reply(self.con, 'orch-A', request_id=late, text='only final')
+        with self.assertRaisesRegex(ValueError, 'final reply already'):
+            api.reply(self.con, 'orch-A', request_id=late, text='too late', kind='interim')
+        self.assertEqual(self.both()[-1]['reply'], 'only final')
+        reply('i', 'interim')  # identical interim retry after final stays idempotent
+        with self.assertRaises(ValueError):
+            reply('z', 'bogus')
+
+    def test_mcp_interface_reply_kind_default_final(self):
+        rid = self.submit()['request_id']
+        self.assertFalse(self.mcp('interface_reply', dict(request_id=rid, text='p', kind='interim')).get('isError'))
+        self.assertTrue(self.mcp('interface_reply', dict(request_id=rid, text='p', kind='nope'))['isError'])
+        self.assertFalse(self.mcp('interface_reply', dict(request_id=rid, text='f')).get('isError'))
+        self.assertTrue(self.mcp('interface_reply', dict(request_id=rid, text='late', kind='interim'))['isError'])
+        self.assertEqual([r['kind'] for r in self.both()], ['interim', 'final'])
+
+    def test_additive_migration_on_existing_db(self):
+        rid = self.submit()['request_id']
+        api.reply(self.con, 'orch-A', request_id=rid, text='old final')
+        self.con.execute('DROP INDEX interface_interim_route')
+        self.con.execute('ALTER TABLE interface_requests DROP COLUMN interim_ack_at')
+        self.con.execute('ALTER TABLE interface_requests DROP COLUMN interim')
+        self.con.close()
+        self.con = store.connect()
+        self.con = store.connect()  # idempotent
+        self.assertEqual(self.fetch(), [dict(request_id=rid, conversation='one', reply='old final')])
+        rid2 = self.submit(key='2')['request_id']
+        api.reply(self.con, 'orch-A', request_id=rid2, text='i', kind='interim')
+        self.assertEqual(len(self.both()), 2)
+
+    def test_interim_suppresses_original_owner_pending_wake(self):
+        self.rt.wake_fails = True
+        rid = self.submit()['request_id']
+        api.reply(self.con, 'orch-A', request_id=rid, text='working', kind='interim')
+        self.rt.wake_fails = False
+        with mock.patch.object(api.time, 'time', return_value=9e12), mock.patch.object(core, '_notify_orch') as notify:
+            self.assertEqual(api.sweep(self.con, self.rt), {})
+            self.assertIsNone(api.wake(self.con, self.rt, rid))
+        notify.assert_not_called()
+        # owner migration still re-wakes the replacement owner
+        store.register_orch(self.con, 'orch-C', 'codex')
+        with store.immediate(self.con):
+            api.migrate_owner(self.con, 'orch-A', 'orch-C')
+        with mock.patch.object(core, '_notify_orch') as notify:
+            self.assertEqual(api.sweep(self.con, self.rt), {rid: None})
+        self.assertEqual(notify.call_args.args[2], 'orch-C')
+
     def test_failed_codex_wake_persists_then_identical_retry_wakes(self):
         self.rt.wake_fails = True
         first = self.submit()
