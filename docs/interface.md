@@ -46,7 +46,7 @@ text conflicts. Admission and dedupe run in one SQLite immediate transaction.
 Fetch does not consume replies. A final reply has the stable identity `request_id`;
 an adapter that opts into interims (`kinds`) must use `(request_id, kind)`, since an
 interim and the final share a `request_id` and deduping by it alone would drop the final.
-Adapters should record delivery by this ID and ack after delivery; repeated fetch,
+Adapters should record delivery by that identity and ack after delivery; repeated fetch,
 ack, and lost responses preserve the same state across database restart. Exactly
 once delivery to an external service is the consumer's responsibility.
 
