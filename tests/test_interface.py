@@ -233,6 +233,23 @@ class InterfaceTest(unittest.TestCase):
         api.reply(self.con, 'orch-A', request_id=rid2, text='i', kind='interim')
         self.assertEqual(len(self.both()), 2)
 
+    def test_interim_suppresses_original_owner_pending_wake(self):
+        self.rt.wake_fails = True
+        rid = self.submit()['request_id']
+        api.reply(self.con, 'orch-A', request_id=rid, text='working', kind='interim')
+        self.rt.wake_fails = False
+        with mock.patch.object(api.time, 'time', return_value=9e12), mock.patch.object(core, '_notify_orch') as notify:
+            self.assertEqual(api.sweep(self.con, self.rt), {})
+            self.assertIsNone(api.wake(self.con, self.rt, rid))
+        notify.assert_not_called()
+        # owner migration still re-wakes the replacement owner
+        store.register_orch(self.con, 'orch-C', 'codex')
+        with store.immediate(self.con):
+            api.migrate_owner(self.con, 'orch-A', 'orch-C')
+        with mock.patch.object(core, '_notify_orch') as notify:
+            self.assertEqual(api.sweep(self.con, self.rt), {rid: None})
+        self.assertEqual(notify.call_args.args[2], 'orch-C')
+
     def test_failed_codex_wake_persists_then_identical_retry_wakes(self):
         self.rt.wake_fails = True
         first = self.submit()

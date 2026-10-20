@@ -187,7 +187,10 @@ def reply(con, orch_id, *, request_id, text, kind='final'):
         elif row['interim'] is None:
             if row['reply'] is not None:
                 raise ValueError('interim reply refused: final reply already recorded')
-            con.execute('UPDATE interface_requests SET interim=? WHERE id=?', (text, request_id))
+            # The owner is acting on the request: its pending wake is moot. migrate_owner
+            # clears wake_at for unanswered requests, so a replacement owner is still woken.
+            con.execute('UPDATE interface_requests SET interim=?,wake_at=COALESCE(wake_at,?),wake_error=NULL WHERE id=?',
+                        (text, time.time(), request_id))
     # No recipient argument, Desktop calls or transport: route is frozen at submission.
     return dict(request_id=request_id, interface_id=row['interface_id'], conversation=row['conversation'])
 
