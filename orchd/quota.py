@@ -471,6 +471,10 @@ def request_refresh():
     return False
 
 
+# Remaining-percent scores this close (percentage points) count as a tie; ties prefer sol.
+TIE_MARGIN = 5
+
+
 def shadow(snapshot, *, backend='exec', task_type=None, author_model=None, now=None,
            applied=False, recent_limited=()):
     """One shared selection policy, optionally applied; never a quota reservation."""
@@ -488,10 +492,13 @@ def shadow(snapshot, *, backend='exec', task_type=None, author_model=None, now=N
         value = snapshot[provider]
         windows = value['windows']
         if provider not in recent_limited and value['state'] == 'known' and windows and all(w['used_percent'] < 95 for w in windows):
-            # Most constrained window's remaining percentage per second until reset.
-            score = min((95 - w['used_percent']) / max(1, w['reset_at'] - now) for w in windows)
-            usable.append((score, provider == 'sol', provider))
-    selected = max(usable)[2] if usable else None
+            # Most constrained window's remaining percentage (below the 95% cap).
+            usable.append((min(95 - w['used_percent'] for w in windows), provider == 'sol', provider))
+    selected = None
+    if usable:
+        best = max(usable)[0]
+        # Scores within TIE_MARGIN of the best are a tie: prefer sol, then the higher score.
+        selected = max((u for u in usable if best - u[0] <= TIE_MARGIN), key=lambda u: (u[1], u[0]))[2]
     reason = ('review requires another provider; ' if review else '')
     sol_used = max((w['used_percent'] for w in snapshot['sol']['windows']
                     if w.get('state') == 'known' and number(w.get('used_percent'))), default=None)
@@ -500,7 +507,7 @@ def shadow(snapshot, *, backend='exec', task_type=None, author_model=None, now=N
         selected = 'sol'
         reason += 'sol quota unknown (expired/stale); prefer sol, not limited or full; no capacity guarantee'
     elif selected:
-        reason += 'known capacity with 5% margin; remaining capacity/reset-time score (provisional)'
+        reason += 'known capacity with 5% margin; remaining-percent score (balances usage; provisional)'
     elif applied and allowed:
         # Apply the same policy's fallback rather than queueing on absent telemetry.
         used = {p: max((w['used_percent'] for w in snapshot[p]['windows']

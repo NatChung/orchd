@@ -101,8 +101,10 @@ different providers are not equivalent token quantities.
 
 Explicit/omitted-model dispatch has `applied=false` and policy `quota-shadow-v1`.
 Auto dispatch applies this same policy as described below. Known capacity
-uses a provisional 5% margin and the minimum remaining-percentage / seconds-to-reset
-score across all observed windows/buckets. Similar scores favor sol. This has no
+uses a provisional 5% margin and the minimum remaining percentage (95 - used_percent)
+across all observed windows/buckets as the score; the provider with more remaining
+wins, which balances usage between sol and sonnet. Scores within 5 percentage points
+(`quota.TIE_MARGIN`) are a tie and favor sol. This has no
 task-effort estimates or running-task reservations, so it is for calibration only.
 Unknown ordinary quota falls back to a labelled sol preference; known exhausted
 windows suggest waiting. App-server permits only sol. A review of `verifies`
@@ -119,11 +121,11 @@ caller's explicit model, even when it recommends waiting.
 ## Applied auto policy and parallel tasks
 
 `dispatch(model="auto", ...)` calls the same **quota-shadow-v1** policy with
-`applied=true`. Known usable capacity retains the original minimum
-`(95 - used_percent) / seconds_to_reset` score across windows, picking the highest
-score (remaining capacity relative to time until reset, not remaining percentage);
-ties prefer sol. If sol is unknown (expired TTL/stale/unreadable), not recently
-rate-limited and not known at >=95%, sol is preferred even when sonnet is known. Thus known-capacity routing may choose sonnet even before
+`applied=true`. Known usable capacity scores each provider by its minimum
+`95 - used_percent` across windows (remaining percentage, no reset-time weighting),
+picking the highest score so sol and sonnet usage stays balanced; scores within 5
+percentage points tie and prefer sol. If sol is unknown (expired TTL/stale/unreadable), not recently
+rate-limited and not known at >=95%, sol is preferred even when sonnet is known. Known-capacity routing may still choose sonnet before
 sol is full, as the existing shadow policy recommends. The **95% threshold** is
 unchanged. An observed sol rate-limit failure excludes sol for **10 minutes**.
 Unknown/stale/unreadable quota does not block ordinary tasks: prefer sol absent
@@ -192,7 +194,7 @@ installation. A run on this branch produced:
 
 ```text
 a: sol full -> claude-sonnet-5-5; quota-shadow-v1 applied=true;
-   reason: known capacity with 5% margin; remaining capacity/reset-time score
+   reason: known capacity with 5% margin; remaining-percent score
 b: quota unknown -> gpt-6.1-sol; reason: quota unknown/stale; fallback
 c: group b8105e07c6c9a; pids [53019, 53024]; simultaneous_alive=true;
    distinct_git_worktrees=true; grouped_tasks=2
