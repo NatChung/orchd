@@ -28,9 +28,36 @@ The shared snapshot is `$ORCHD_HOME/quota.db` (default
 upsert each bucket transactionally; older receipts cannot replace newer ones.
 Codex refresh is single-flight with a nonblocking file lock and a 30-second
 attempt TTL. Reads never create or migrate a DB. Codex, Claude statusline and
-SDK observations older than 60 seconds are unknown. Native Claude CLI usage
-receipts have a 300-second TTL because they lack continuous refresh and require
-a bounded CLI read. All observations older than 300 seconds are marked stale.
+SDK observations older than 900 seconds are unknown. Native Claude CLI usage
+receipts also have a 900-second TTL. All observations older than 1800 seconds are
+marked stale. A background refresher (below) re-reads every 300 seconds, so one
+missed period usually keeps the cache usable, but an expired reset, a failed read
+or an old receipt can still make quota unknown; dispatch only reads the cache.
+
+### Periodic background refresh
+
+Each Orch MCP server process runs a daemon thread that, every
+`ORCHD_QUOTA_REFRESH_SECONDS` (default 300; 0 disables), reads sol from the Codex
+session tail (no new process) and, if sol is still unknown, from one bounded
+`codex app-server` probe, then reads sonnet via the bounded `/usage` probe.
+
+- **Dispatch never probes.** Auto selection only reads the cache; empty or
+  expired telemetry is unknown. In that case dispatch wakes the background thread
+  (no wait) as an asynchronous best-effort nudge. If the period gate skips it or the
+  probe fails, the next dispatch can still read unknown. A process without the
+  thread (for example a CLI dispatch) just treats the quota as unknown.
+- **One refresh per period per machine.** `quota.periodic.lock` holds the time of
+  the last successful refresh and the last attempt. Whoever takes the exclusive
+  lock runs the reads; all others (other Orch processes, a dispatch wake) skip
+  while the last success is younger than one period, or a failed attempt is
+  younger than 60 seconds.
+- **Clean shutdown.** `serve()` calls `quota.stop_background()` on exit: it sets a
+  stop event, terminates any running probe process group (SIGTERM, then SIGKILL
+  after 3 seconds) and joins the thread (5 second timeout). A killed probe is not
+  recorded as an observation.
+
+Failures, including a failure to start the thread at all, are swallowed (logged to
+stderr) and never block dispatch or stop the MCP server.
 Claude observation timestamps up to 2 seconds ahead are treated as age zero;
 larger future timestamps remain unknown. Codex future timestamps remain unknown.
 Missing/invalid percentages, durations, resets, and passed resets are unknown.
@@ -94,7 +121,9 @@ caller's explicit model, even when it recommends waiting.
 `dispatch(model="auto", ...)` calls the same **quota-shadow-v1** policy with
 `applied=true`. Known usable capacity retains the original minimum
 `(95 - used_percent) / seconds_to_reset` score across windows, picking the highest
-score; ties prefer sol. Thus known-capacity routing may choose sonnet even before
+score (remaining capacity relative to time until reset, not remaining percentage);
+ties prefer sol. If sol is unknown (expired TTL/stale/unreadable), not recently
+rate-limited and not known at >=95%, sol is preferred even when sonnet is known. Thus known-capacity routing may choose sonnet even before
 sol is full, as the existing shadow policy recommends. The **95% threshold** is
 unchanged. An observed sol rate-limit failure excludes sol for **10 minutes**.
 Unknown/stale/unreadable quota does not block ordinary tasks: prefer sol absent
@@ -206,8 +235,7 @@ available git history. This implementation extends the existing P1 observation
 contract above; dispatch selection and `quota_shadow` are unchanged. All previous
 `quota_status` keys remain; providers with observations additionally expose
 `unknown_reasons`. The `state` enum remains `known` / `unknown`; `stale` is a
-window reason after 300 seconds, and `expired TTL` is a reason after 60 seconds
-except for native Claude CLI receipts, which remain valid through 300 seconds.
+window reason after 1800 seconds, and `expired TTL` is a reason after 900 seconds.
 
 * **Codex app-server:** force a read on matching `turn/started` and
   `turn/completed`, even if another worker just refreshed. The supervisor also

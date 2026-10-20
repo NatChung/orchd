@@ -16,7 +16,7 @@ import re
 import sys
 import traceback
 
-from . import core, entry, goals, inventory, issue_links, question_summary, store, verify as verification
+from . import core, entry, goals, inventory, issue_links, question_summary, quota, store, verify as verification
 from .runtime import WORKER_MODELS, Runtime
 
 TOOLS = [
@@ -614,10 +614,19 @@ def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY):
 def serve(stdin=sys.stdin, stdout=sys.stdout, con=None, rt=None, role="orch", entry_id=entry.DEFAULT_ENTRY):
     con = con or store.connect()
     rt = rt or Runtime()
-    for line in stdin:
-        if not line.strip():
-            continue
-        reply = handle(json.loads(line), con, rt, role, entry_id)
-        if reply is not None:
-            stdout.write(json.dumps(reply, ensure_ascii=False) + "\n")
-            stdout.flush()
+    if role != "entry":
+        try:
+            quota.start_background()  # Dispatch only reads the cache; this keeps it warm.
+        except Exception as error:
+            print(f'orchd: quota background refresh unavailable: {error}', file=sys.stderr)
+    try:
+        for line in stdin:
+            if not line.strip():
+                continue
+            reply = handle(json.loads(line), con, rt, role, entry_id)
+            if reply is not None:
+                stdout.write(json.dumps(reply, ensure_ascii=False) + "\n")
+                stdout.flush()
+    finally:
+        if role != "entry":
+            quota.stop_background()  # No orphaned probe subprocess outlives the server.

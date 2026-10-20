@@ -1,3 +1,4 @@
+import time
 import tempfile
 import unittest
 import json
@@ -9,6 +10,9 @@ import datetime
 from pathlib import Path
 
 from orchd import quota
+
+
+REAL_CACHE = quota.Cache
 
 
 class QuotaTest(unittest.TestCase):
@@ -37,14 +41,15 @@ class QuotaTest(unittest.TestCase):
             quota.claude_usage(cache, display, now=now)
             cache.codex({'rateLimits': {'primary': {'usedPercent': 20,
                 'windowDurationMins': 300, 'resetsAt': now + 10000}}}, now=now)
-            for age in (63, 300):
+            for age in (63, quota.TTL):
                 with self.subTest(age=age):
                     self.assertEqual(cache.status(now=now + age)['sonnet']['state'], 'known')
-            for age in (301, 790):
+            for age in (quota.TTL + 1, quota.MAX_AGE):
                 with self.subTest(age=age):
                     self.assertEqual(cache.status(now=now + age)['sonnet']['windows'][0]['reason'],
-                                     'stale')
-            self.assertEqual(cache.status(now=now + 63)['sol']['windows'][0]['reason'], 'expired TTL')
+                                     'expired TTL')
+            self.assertEqual(cache.status(now=now + quota.MAX_AGE + 1)['sonnet']['windows'][0]['reason'], 'stale')
+            self.assertEqual(cache.status(now=now + quota.TTL + 1)['sol']['windows'][0]['reason'], 'expired TTL')
             self.assertEqual(cache.status(now=now - .004)['sol']['windows'][0]['reason'],
                              'invalid observation time')
             # The reset boundary still wins over the longer CLI TTL.
@@ -79,7 +84,7 @@ class QuotaTest(unittest.TestCase):
                 quota.collect_codex_turn(cache, log)
             window = cache.status(now=1002)['sol']['windows'][0]
             self.assertEqual((window['used_percent'], window['age_seconds']), (42, 2))
-            self.assertEqual(cache.status(now=1301)['sol']['windows'][0]['reason'], 'stale')
+            self.assertEqual(cache.status(now=1000 + quota.MAX_AGE + 1)['sol']['windows'][0]['reason'], 'stale')
 
     def test_app_turn_force_read_bypasses_attempt_ttl_and_idle_read_is_throttled(self):
         from unittest.mock import Mock
@@ -133,7 +138,7 @@ class QuotaTest(unittest.TestCase):
         import subprocess
         with tempfile.TemporaryDirectory() as tmp:
             cache = quota.Cache(Path(tmp) / 'quota.db')
-            with patch('orchd.quota.subprocess.run', side_effect=subprocess.TimeoutExpired('claude', 15)):
+            with patch('orchd.quota._run', side_effect=subprocess.TimeoutExpired('claude', 15)):
                 quota.probe(cache, 'sonnet')
             status = cache.status()['sonnet']
             self.assertEqual(status['unknown_reasons'], ['Claude /usage unavailable: TimeoutExpired'])
@@ -148,7 +153,7 @@ class QuotaTest(unittest.TestCase):
                        'Current week (all models): 5% used · resets Jan 2 at 12:30pm (UTC)')
             result = Mock(returncode=0, stdout=json.dumps(dict(result=display, num_turns=0,
                            local_command='usage', duration_api_ms=0)))
-            with patch('orchd.quota.subprocess.run', return_value=result) as run, \
+            with patch('orchd.quota._run', return_value=result) as run, \
                     patch('orchd.quota.time.time', return_value=now):
                 quota.probe(cache, 'sonnet')
             status = cache.status(now=now + 1)['sonnet']
@@ -158,7 +163,7 @@ class QuotaTest(unittest.TestCase):
             self.assertIn('{"disableAllHooks":true}', run.call_args.args[0])
             result.stdout = json.dumps(dict(result='Unknown command: usage', num_turns=0,
                                            local_command='usage', duration_api_ms=0))
-            with patch('orchd.quota.subprocess.run', return_value=result), \
+            with patch('orchd.quota._run', return_value=result), \
                     patch('orchd.quota.time.time', return_value=now + 2):
                 quota.probe(cache, 'sonnet')
             status = cache.status(now=now + 3)['sonnet']
@@ -171,7 +176,7 @@ class QuotaTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cache = quota.Cache(Path(tmp) / 'quota.db')
             result = Mock(returncode=0, stdout=json.dumps(dict(result='13%', num_turns=1)))
-            with patch('orchd.quota.subprocess.run', return_value=result):
+            with patch('orchd.quota._run', return_value=result):
                 quota.probe(cache, 'sonnet')
             self.assertIn('zero turns required', cache.status()['sonnet']['unknown_reasons'][0])
             with self.assertRaises(ValueError):
@@ -212,11 +217,11 @@ class QuotaTest(unittest.TestCase):
             cache = quota.Cache(Path(tmp) / 'quota.db')
             cache.claude({'rate_limits': {'five_hour': {'used_percentage': 23.5, 'resets_at': 2000},
                                          'seven_day': {'used_percentage': 41.2, 'resets_at': 3000}}}, now=1000)
-            self.assertEqual(cache.status(now=1060)['sonnet']['state'], 'known')
-            window = cache.status(now=1061)['sonnet']['windows'][0]
+            self.assertEqual(cache.status(now=1000 + quota.TTL)['sonnet']['state'], 'known')
+            window = cache.status(now=1000 + quota.TTL + 1)['sonnet']['windows'][0]
             self.assertEqual((window['state'], window['used_percent'], window['reason']),
                              ('unknown', None, 'expired TTL'))
-            self.assertEqual(cache.status(now=1301)['sonnet']['windows'][0]['reason'], 'stale')
+            self.assertEqual(cache.status(now=1000 + quota.MAX_AGE + 1)['sonnet']['windows'][0]['reason'], 'stale')
             cache.claude({'rate_limit_info': {'rate_limit_type': 'seven_day_sonnet',
                                              'utilization': .5, 'resets_at': 4000}}, sdk=True, now=1302)
             self.assertEqual(next(w for w in cache.status(now=1303)['sonnet']['windows'] if w['name'] == 'seven_day_sonnet')['used_percent'], 50)
@@ -235,7 +240,7 @@ class QuotaTest(unittest.TestCase):
             cache = quota.Cache(root / 'quota.db')
             quota.refresh(cache, sessions=sessions, now=1001)
             self.assertEqual(cache.status(now=1002)['sol']['windows'][0]['age_seconds'], 2)
-            self.assertEqual(cache.status(now=1061)['sol']['windows'][0]['state'], 'unknown')
+            self.assertEqual(cache.status(now=1000 + quota.TTL + 1)['sol']['windows'][0]['state'], 'unknown')
 
     def test_shadow_dispatch_preserves_explicit_model_and_records_review_rule(self):
         from orchd import core, store
@@ -332,3 +337,234 @@ class QuotaTest(unittest.TestCase):
             cache.codex({'rateLimitsByLimitId': {'codex': {}, 'other': {'primary': {
                 'usedPercent': 10, 'windowDurationMins': 300, 'resetsAt': 2000}}}}, now=1000)
             self.assertEqual(cache.status(now=1001)['sol']['state'], 'unknown')
+
+    def _sonnet_known(self, cache, now):
+        cache.claude({'rate_limits': {'five_hour': {'used_percentage': 20, 'resets_at': now + 2000},
+            'seven_day': {'used_percentage': 50, 'resets_at': now + 5000}}}, now=now)
+
+    def test_unknown_sol_is_preferred_over_known_sonnet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            cache.codex({'rateLimits': {'primary': {'usedPercent': 10,
+                'windowDurationMins': 300, 'resetsAt': 100000}}}, now=1000)
+            self._sonnet_known(cache, 1000 + quota.TTL + 100)
+            now = 1000 + quota.TTL + 101
+            snapshot = cache.status(now=now)
+            self.assertEqual(snapshot['sol']['unknown_reasons'], ['expired TTL'])
+            for applied in (True, False):
+                result = quota.shadow(snapshot, now=now, applied=applied)
+                self.assertEqual(result['selected_alias'], 'sol')
+                self.assertIn('prefer sol', result['reason'])
+            self.assertEqual(quota.shadow(cache.status(now=1000 + quota.MAX_AGE + 101), now=now)['selected_alias'], 'sol')
+
+    def test_recent_limited_unknown_sol_selects_sonnet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            self._sonnet_known(cache, 1000)
+            result = quota.shadow(cache.status(now=1001), now=1001, applied=True, recent_limited=('sol',))
+            self.assertEqual(result['selected_alias'], 'sonnet')
+
+    def test_known_full_sol_is_not_preferred_when_unknown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            cache.codex({'rateLimits': {'primary': {'usedPercent': 96,
+                'windowDurationMins': 300, 'resetsAt': 5000},
+                'secondary': None}}, now=1000)
+            self._sonnet_known(cache, 1000)
+            self.assertEqual(quota.shadow(cache.status(now=1001), now=1001)['selected_alias'], 'sonnet')
+
+    def test_ttl_boundary_and_period_margin(self):
+        self.assertGreaterEqual(quota.TTL, 3 * quota.BACKGROUND_PERIOD)
+        self.assertGreater(quota.MAX_AGE, quota.TTL)
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            cache.codex({'rateLimits': {'primary': {'usedPercent': 10,
+                'windowDurationMins': 300, 'resetsAt': 100000}}}, now=1000)
+            self.assertEqual(cache.status(now=1000 + quota.TTL)['sol']['state'], 'known')
+            self.assertEqual(cache.status(now=1000 + quota.TTL + 1)['sol']['state'], 'unknown')
+
+    def test_background_refresh_updates_cache_and_tolerates_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            calls = []
+
+            def fake_probe(c, provider, binary=None):
+                calls.append(provider)
+                if provider == 'sol':
+                    c.codex({'rateLimits': {'primary': {'usedPercent': 10,
+                        'windowDurationMins': 300, 'resetsAt': 4000}}}, now=1000)
+                else:
+                    raise OSError('claude missing')
+            with patch.object(quota, 'probe', fake_probe):
+                self.assertTrue(quota.refresh_background(cache, now=1000, binary='x'))
+                self.assertEqual(calls, ['sol', 'sonnet'])
+                self.assertEqual(cache.status(now=1001)['sol']['state'], 'known')
+                self.assertFalse(quota.refresh_background(cache, now=1001))
+                self.assertTrue(quota.refresh_background(cache, now=1000 + quota.BACKGROUND_PERIOD))
+
+    def test_dispatch_reads_cache_without_probing_sol(self):
+        real = quota.Cache
+        with tempfile.TemporaryDirectory() as tmp, patch.object(quota, 'probe') as probe, \
+                patch.object(quota, 'Cache', lambda: real(Path(tmp) / 'quota.db')):
+            self._sonnet_known(quota.Cache(), 1000)
+            result = quota.dispatch_shadow(applied=True, now=1001)
+            self.assertEqual(result['selected_alias'], 'sol')
+            probe.assert_not_called()
+
+    def _fake_sol_probe(self, calls):
+        def fake_probe(c, provider, binary=None):
+            calls.append(provider)
+            if provider == 'sol':
+                c.codex({'rateLimits': {'primary': {'usedPercent': 10,
+                    'windowDurationMins': 300, 'resetsAt': 10 ** 6}}}, now=self.clock)
+        return fake_probe
+
+    def test_refresh_is_deduplicated_for_a_whole_period_across_gates(self):
+        # t=1000 refreshes; t=1150 (same 300s period, different caller) must not.
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            calls = []
+            self.clock = 1000
+            with patch.object(quota, 'probe', self._fake_sol_probe(calls)):
+                self.assertTrue(quota.refresh_background(cache, now=1000))
+                self.assertFalse(quota.refresh_background(cache, now=1150))
+                self.assertFalse(quota.refresh_background(cache, now=1000 + quota.BACKGROUND_PERIOD - 1))
+                self.assertEqual(calls.count('sonnet'), 1)
+                self.assertTrue(quota.refresh_background(cache, now=1000 + quota.BACKGROUND_PERIOD))
+                self.assertEqual(calls.count('sonnet'), 2)
+
+    def test_failed_refresh_retries_only_after_probe_interval(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            calls = []
+            with patch.object(quota, 'probe', lambda c, p, b=None: calls.append(p)):
+                self.assertFalse(quota.refresh_background(cache, now=1000))
+                n = len(calls)
+                self.assertFalse(quota.refresh_background(cache, now=1000 + quota.SONNET_PROBE_INTERVAL - 1))
+                self.assertEqual(len(calls), n)
+                quota.refresh_background(cache, now=1000 + quota.SONNET_PROBE_INTERVAL)
+                self.assertGreater(len(calls), n)
+
+    def test_concurrent_refresh_never_overlaps_and_probes_once(self):
+        import threading
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'quota.db'
+            calls, inside, gate = [], threading.Event(), threading.Event()
+            self.clock = 1000
+            base = self._fake_sol_probe(calls)
+
+            def slow(c, provider, binary=None):
+                base(c, provider, binary)
+                if provider == 'sonnet':
+                    inside.set()
+                    gate.wait(5)
+            results = []
+            with patch.object(quota, 'probe', slow):
+                first = threading.Thread(target=lambda: results.append(quota.refresh_background(quota.Cache(path), now=1000)))
+                first.start()
+                self.assertTrue(inside.wait(5))
+                # A second gate (another process/thread) while the first is mid-probe backs off.
+                self.assertFalse(quota.refresh_background(quota.Cache(path), now=1000))
+                gate.set()
+                first.join(5)
+                self.assertFalse(quota.refresh_background(quota.Cache(path), now=1001))
+            self.assertEqual(results, [True])
+            self.assertEqual(calls.count('sonnet'), 1)
+
+    def test_request_refresh_wakes_running_background_only(self):
+        self.assertFalse(quota.request_refresh())  # no refresher in this process
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            seen = []
+            with patch.object(quota, 'refresh_background', lambda c, **k: seen.append(1)):
+                quota.start_background(cache, interval=3600)
+                try:
+                    deadline = time.time() + 5
+                    while not seen and time.time() < deadline:
+                        time.sleep(.01)
+                    self.assertTrue(quota.request_refresh())
+                    deadline = time.time() + 5
+                    while len(seen) < 2 and time.time() < deadline:
+                        time.sleep(.01)
+                    self.assertEqual(len(seen), 2)
+                finally:
+                    quota.stop_background()
+            self.assertFalse(quota.request_refresh())
+
+    def _fake_claude(self, tmp):
+        """Executable that records its pid then sleeps, standing in for a hung `claude /usage`."""
+        pidfile = Path(tmp) / 'pid'
+        script = Path(tmp) / 'claude'
+        script.write_text(f'#!/bin/sh\necho $$ > {pidfile}\nsleep 60\n')
+        script.chmod(0o755)
+        return script, pidfile
+
+    @staticmethod
+    def _alive(pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    def test_thread_start_failure_is_tolerated_by_serve_and_stop(self):
+        from orchd import mcp_server
+        out = io.StringIO()
+        with patch('threading.Thread.start', side_effect=RuntimeError('cannot start new thread')), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertIsNone(quota.start_background(interval=3600))
+            mcp_server.serve(stdin=io.StringIO('{"jsonrpc":"2.0","id":1,"method":"ping"}\n'),
+                             stdout=out, con=object(), rt=object())
+        self.assertIn('"id": 1', out.getvalue())
+        quota.stop_background()  # safe with no started thread
+        self.assertIsNone(quota._background)
+        quota._background = quota.threading.Thread(target=lambda: None)
+        quota.stop_background()  # must not raise "cannot join thread before it is started"
+        self.assertIsNone(quota._background)
+
+    def test_stop_background_terminates_probe_subprocess_and_joins_thread(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            script, pidfile = self._fake_claude(tmp)
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            with patch.dict(os.environ, {'ORCHD_CLAUDE': str(script)}), \
+                    patch.object(quota, 'refresh', lambda *a, **k: None):
+                thread = quota.start_background(cache, interval=3600)
+                deadline = time.time() + 10
+                while not pidfile.exists() and time.time() < deadline:
+                    time.sleep(.02)
+                self.assertTrue(pidfile.exists(), 'probe subprocess never started')
+                pid = int(pidfile.read_text())
+                self.assertTrue(self._alive(pid))
+                started = time.time()
+                quota.stop_background(timeout=10)
+                self.assertLess(time.time() - started, 10)
+                self.assertFalse(thread.is_alive())
+                deadline = time.time() + 5
+                while self._alive(pid) and time.time() < deadline:
+                    time.sleep(.02)
+                self.assertFalse(self._alive(pid), 'probe subprocess outlived stop_background')
+                # A killed probe is not recorded as an observation.
+                self.assertEqual(cache.status()['sonnet']['windows'], [])
+
+    def test_serve_end_stops_background_and_probe(self):
+        import io
+        from orchd import mcp_server, store
+        with tempfile.TemporaryDirectory() as tmp:
+            script, pidfile = self._fake_claude(tmp)
+            with patch.dict(os.environ, {'ORCHD_CLAUDE': str(script), 'ORCHD_HOME': tmp}), \
+                    patch.object(quota, 'Cache', lambda: REAL_CACHE(Path(tmp) / 'quota.db')), \
+                    patch.object(quota, 'refresh', lambda *a, **k: None):
+                class Lines:  # stdin that waits for the probe to start, then ends
+                    def __iter__(inner):
+                        deadline = time.time() + 10
+                        while not pidfile.exists() and time.time() < deadline:
+                            time.sleep(.02)
+                        return iter(())
+                mcp_server.serve(stdin=Lines(), stdout=io.StringIO(), con=object(), rt=object())
+                self.assertTrue(pidfile.exists())
+                pid = int(pidfile.read_text())
+                deadline = time.time() + 5
+                while self._alive(pid) and time.time() < deadline:
+                    time.sleep(.02)
+                self.assertFalse(self._alive(pid))
+                self.assertFalse(quota._background)
