@@ -257,6 +257,19 @@ class RestartTest(unittest.TestCase):
             interface.ack(self.con, **auth, conversation="thread", request_id=rid)
         self.assertEqual(interface.fetch(self.con, **auth, conversation="thread"), [])
 
+    def test_restart_carries_pending_interim_and_accepts_final_from_new_owner(self):
+        auth = self.adapter()
+        rid = self.submit(auth)["request_id"]
+        interface.reply(self.con, "old", request_id=rid, text="working", kind="interim")
+        out = self.run_restart()
+        self.assertEqual(out["status"], "done", out)
+        both = ["interim", "final"]
+        self.assertEqual(interface.fetch(self.con, **auth, conversation="thread", kinds=both),
+                         [dict(request_id=rid, conversation="thread", kind="interim", reply="working")])
+        self.assertEqual([r["id"] for r in interface.requests(self.con, out["new_orch"])], [rid])
+        interface.reply(self.con, out["new_orch"], request_id=rid, text="done")
+        self.assertEqual([r["kind"] for r in interface.fetch(self.con, **auth, conversation="thread", kinds=both)], both)
+
     def test_restart_rewakes_unanswered_requests_including_previously_delivered(self):
         auth = self.adapter()
         delivered = self.submit(auth)["request_id"]

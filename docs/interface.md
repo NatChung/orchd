@@ -20,8 +20,8 @@ The following shapes show required fields; optional fields are described below.
 | --- | --- | --- |
 | `register` | `{"name":"slack","orch_id":"existing-orch"}` | `{"interface_id":"opaque-id","name":"slack","orch_id":"existing-orch","token":"secret"}` |
 | `submit` | `{"name":"slack","token":"secret","conversation":"channel/thread","request_key":"event-id","text":"question"}` | `{"request_id":1,"duplicate":false,"wake_error":null}` |
-| `fetch` | `{"name":"slack","token":"secret","conversation":"channel/thread"}` | `[{"request_id":1,"conversation":"channel/thread","reply":"answer"}]` |
-| `ack` | `{"name":"slack","token":"secret","conversation":"channel/thread","request_id":1}` | `{"acked":true,"request_id":1}` |
+| `fetch` | `{"name":"slack","token":"secret","conversation":"channel/thread"}` (optional `"kinds":["interim","final"]`) | `[{"request_id":1,"conversation":"channel/thread","reply":"answer"}]` |
+| `ack` | `{"name":"slack","token":"secret","conversation":"channel/thread","request_id":1}` (optional `"kind":"interim"`) | `{"acked":true,"request_id":1}` |
 | `deregister` | `{"name":"slack","token":"secret"}` | `{"deregistered":true}` |
 
 The first registration sets the shared owner for all interfaces, including after
@@ -54,12 +54,39 @@ once delivery to an external service is the consumer's responsibility.
   requests belonging to the calling Orch: `[{"id":1,"interface_id":"opaque-id",
   "conversation":"channel/thread","body":"question","created_at":123.0,
   "trust":"external_untrusted"}]`. Both arguments are optional.
-- `interface_reply({"request_id":1,"text":"answer"})` persists one reply and
+- `interface_reply({"request_id":1,"text":"answer"})` persists the final reply and
   returns `{"request_id":1,"interface_id":"opaque-id",
-  "conversation":"channel/thread"}`. Only these two input fields are accepted.
+  "conversation":"channel/thread"}`. Accepted input fields are `request_id`,
+  `text` and optional `kind` (`"final"` default, or `"interim"`; see below).
   Destination comes entirely from stored origin. Same-text retries succeed;
   changed-text retries conflict, including after ack. This path never calls
   Desktop Entry transport. Existing Orch caller identity rules apply.
+
+## Interim and final replies
+
+A request has at most one `interim` reply and exactly one `final` reply.
+`interface_reply` without `kind` is the final, so existing callers are unchanged.
+
+- `kind:"interim"` is optional and may be sent once, before the final (e.g. to
+  acknowledge long work). It is immutable: the same text is an idempotent retry,
+  different text conflicts. After a final exists a new interim is refused (an
+  identical retry of the already-recorded interim still succeeds).
+- `kind:"final"` behaves as before: same text idempotent, different text conflicts.
+- `interface_requests` lists a request until its final exists. After an interim it
+  stays listed and carries an `interim` field with the recorded text (null before).
+
+Adapter side (compatibility): `fetch` without `kinds` returns only finals, in the
+original row shape (`request_id`, `conversation`, `reply`, no `kind`), so an
+adapter written for single replies never sees an interim and cannot post it as the
+answer. An adapter that supports interims passes `"kinds":["interim","final"]`;
+rows then carry `kind`, ordered by `request_id` with a request's interim before its
+final. `limit` counts requests, so a page can hold up to twice as many rows. Each
+reply is acked separately: `ack` takes `kind` (default `final`; its result adds
+`kind` only for `interim`). Acking an interim does not ack the final, and acking
+`interim` when none exists is an error. Interim delivery state survives restart
+like any other reply state; `orchd orch restart` moves pending interims with their
+requests, and a request that has only an interim is woken again for the new owner,
+which can still send the final.
 
 Both request listing and CLI fetch take optional `after_id` (nonnegative integer,
 default 0) and `limit` (integer 1..100, default 100). Results are ordered by ID.
@@ -103,7 +130,10 @@ backoff is persisted before transport. A wake contains a receipt ID and untruste
 label, never the external body. Successful transport means notification accepted,
 not proof the model processed a turn. Live host startup/latency is not guaranteed.
 
-Persistence adds only `interfaces` and `interface_requests` plus their indexes;
+Persistence adds only `interfaces` and `interface_requests` plus their indexes.
+Interim support adds two nullable columns (`interim`, `interim_ack_at`) and one
+partial index to `interface_requests`, applied additively when the database is
+opened; existing rows and replies are untouched and need no adapter change.
 Desktop Entry and intake tables and behavior are unchanged.
 
 ## Accepted shared-Orch risk

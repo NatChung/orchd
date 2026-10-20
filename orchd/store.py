@@ -358,6 +358,7 @@ def connect(path=None):
         for table, columns in (("intake_content", ("unavailable_reason TEXT",)),
                                ("messages", MESSAGE_COLUMNS), ("entry_messages", ENTRY_MESSAGE_COLUMNS),
                                ("entry_question_history", ("original_orch_id TEXT",)),
+                               ("interface_requests", ("interim TEXT", "interim_ack_at REAL")),
                                ("orchs", ORCH_COLUMNS), ("entry_answer_submissions", SUBMISSION_COLUMNS),
                                ("intake_events", ("excluded_at REAL", "excluded_by TEXT",
                                                   "exclusion_reason TEXT", "exclusion_rule_version TEXT"))):
@@ -366,6 +367,8 @@ def connect(path=None):
                 if column.split()[0] not in have:
                     con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
         # After the columns exist: on an early-draft DB this index would fail inside SCHEMA.
+        con.execute("CREATE INDEX IF NOT EXISTS interface_interim_route ON interface_requests(interface_id, conversation, id) "
+                    "WHERE interim IS NOT NULL AND interim_ack_at IS NULL")
         con.execute("CREATE UNIQUE INDEX IF NOT EXISTS entry_messages_source ON entry_messages(source_thread, source_item_id)")
         con.commit()
     except BaseException:

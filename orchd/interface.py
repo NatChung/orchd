@@ -149,53 +149,100 @@ def _page(after_id, limit):
         raise ValueError('after_id must be a nonnegative integer; limit must be 1..100')
 
 
+def _kind(value):
+    if value not in ('interim', 'final'):
+        raise ValueError("kind must be 'interim' or 'final'")
+    return value
+
+
 def requests(con, orch_id, *, after_id=0, limit=100):
+    """Requests still awaiting a final reply; an interim reply does not remove one."""
     _page(after_id, limit)
     _owner(con, orch_id)
     return [dict(row, trust='external_untrusted') for row in con.execute(
-        'SELECT id,interface_id,conversation,body,created_at FROM interface_requests WHERE orch_id=? AND reply IS NULL AND id>? ORDER BY id LIMIT ?',
+        'SELECT id,interface_id,conversation,body,created_at,interim FROM interface_requests WHERE orch_id=? AND reply IS NULL AND id>? ORDER BY id LIMIT ?',
         (orch_id, after_id, limit))]
 
 
-def reply(con, orch_id, *, request_id, text):
+def reply(con, orch_id, *, request_id, text, kind='final'):
+    """Record the optional interim (at most one, immutable) or the single final reply.
+
+    Same-kind same-text retries are idempotent; different text conflicts. An interim
+    is refused once a final exists, unless it repeats the recorded interim text.
+    """
     _request_id(request_id)
     _text(text)
+    _kind(kind)
     with store.immediate(con):
         _owner(con, orch_id)
         row = con.execute('SELECT * FROM interface_requests WHERE id=? AND orch_id=?', (request_id, orch_id)).fetchone()
         if row is None:
             raise ValueError('request not owned by this Orch')
-        if row['reply'] is not None and row['reply'] != text:
-            raise ValueError('reply already recorded with different content')
-        con.execute('UPDATE interface_requests SET reply=? WHERE id=?', (text, request_id))
+        if kind == 'final':
+            if row['reply'] is not None and row['reply'] != text:
+                raise ValueError('reply already recorded with different content')
+            con.execute('UPDATE interface_requests SET reply=? WHERE id=?', (text, request_id))
+        elif row['interim'] is not None and row['interim'] != text:
+            raise ValueError('interim reply already recorded with different content')
+        elif row['interim'] is None:
+            if row['reply'] is not None:
+                raise ValueError('interim reply refused: final reply already recorded')
+            con.execute('UPDATE interface_requests SET interim=? WHERE id=?', (text, request_id))
     # No recipient argument, Desktop calls or transport: route is frozen at submission.
     return dict(request_id=request_id, interface_id=row['interface_id'], conversation=row['conversation'])
 
 
-def fetch(con, *, name, token, conversation, after_id=0, limit=100):
+def _kinds(kinds):
+    if kinds is None:
+        return ('final',)
+    if (not isinstance(kinds, list) or not kinds or len(set(kinds)) != len(kinds)
+            or not set(kinds) <= {'interim', 'final'} or 'final' not in kinds):
+        raise ValueError("kinds must be ['final'] or ['interim','final']")
+    return tuple(kinds)
+
+
+def fetch(con, *, name, token, conversation, after_id=0, limit=100, kinds=None):
+    """Unacked replies by request id; an interim precedes its final.
+
+    Without `kinds` only finals are returned, in the original row shape (no `kind` field).
+    An adapter declares interim support with kinds=['interim','final']. `limit`
+    counts requests, so one request may yield two rows.
+    """
     _page(after_id, limit)
     _text(conversation)
+    legacy = kinds is None
+    kinds = _kinds(kinds)
     with store.immediate(con):
         row = _auth(con, name, token)
         # Polling keeps an active lease alive, but cannot reactivate an expired lease.
         con.execute('UPDATE interfaces SET expires_at=? WHERE id=? AND disabled=0 AND expires_at>?',
                     (time.time() + row['idle_seconds'], row['id'], time.time()))
-        result = [dict(r) for r in con.execute(
-            'SELECT id AS request_id,conversation,reply FROM interface_requests WHERE interface_id=? AND conversation=? AND reply IS NOT NULL AND ack_at IS NULL AND id>? ORDER BY id LIMIT ?',
-            (row['id'], conversation, after_id, limit))]
+        want_interim = 'interim' in kinds
+        result = []
+        for r in con.execute(
+                'SELECT id,reply,ack_at,interim,interim_ack_at FROM interface_requests WHERE interface_id=? AND conversation=? '
+                'AND id>? AND ((reply IS NOT NULL AND ack_at IS NULL) OR (? AND interim IS NOT NULL AND interim_ack_at IS NULL)) '
+                'ORDER BY id LIMIT ?', (row['id'], conversation, after_id, int(want_interim), limit)):
+            if want_interim and r['interim'] is not None and r['interim_ack_at'] is None:
+                result.append(dict(request_id=r['id'], conversation=conversation, kind='interim', reply=r['interim']))
+            if r['reply'] is not None and r['ack_at'] is None:
+                # Legacy callers keep the original row shape (no kind field).
+                item = dict(request_id=r['id'], conversation=conversation, reply=r['reply'])
+                result.append(item if legacy else dict(item, kind='final'))
     return result
 
 
-def ack(con, *, name, token, conversation, request_id):
+def ack(con, *, name, token, conversation, request_id, kind='final'):
     _request_id(request_id)
     _text(conversation)
+    column, text = ('ack_at', 'reply') if _kind(kind) == 'final' else ('interim_ack_at', 'interim')
     with store.immediate(con):
         row = _auth(con, name, token)
-        updated = con.execute('UPDATE interface_requests SET ack_at=COALESCE(ack_at,?) WHERE id=? AND interface_id=? AND conversation=? AND reply IS NOT NULL',
+        updated = con.execute(f'UPDATE interface_requests SET {column}=COALESCE({column},?) WHERE id=? AND interface_id=? AND conversation=? AND {text} IS NOT NULL',
                               (time.time(), request_id, row['id'], conversation)).rowcount
         if not updated:
-            raise ValueError('no reply in this interface/conversation')
-    return dict(acked=True, request_id=request_id)
+            raise ValueError(f'no {kind} reply in this interface/conversation')
+    return dict(acked=True, request_id=request_id) if kind == 'final' else dict(acked=True, request_id=request_id, kind=kind)
 
 
 def main(argv=None):
