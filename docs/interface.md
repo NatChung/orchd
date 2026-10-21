@@ -7,7 +7,8 @@ local registration, there are no interface requests or wakes.
 
 ## JSON CLI reference
 
-Run `orchd interface VERB` with one JSON object on stdin. Stdout contains one JSON
+Adapter verbs run as `orchd interface VERB` with one JSON object on stdin.
+The local Operator `list` and `rebind` commands below use flags and require no stdin. Stdout contains one JSON
 value; success exits 0, errors exit 1 with
 `{"error":"ValueError","message":"..."}`. No TTY or prompts are needed.
 Text fields must be nonblank strings of at most 65536 characters. Keep tokens
@@ -33,7 +34,7 @@ remain fetchable and ackable. No schema migration or adapter re-registration is
 needed. A second owner is rejected. Re-registering a name requires
 its existing token; identity and pending replies cannot be taken over. Tokens are
 random adapter credentials; only SHA-256 hashes are stored. Local same-user DB
-access remains trusted. Token rotation and standalone owner rebinding are outside v1.
+access remains trusted. Token rotation is outside v1. Standalone owner migration is described below.
 
 `register` optionally takes `idle_seconds` (integer 1..604800, default 3600).
 Registration renews admission. New accepted submissions and polls refresh an
@@ -49,6 +50,75 @@ interim and the final share a `request_id` and deduping by it alone would drop t
 Adapters should record delivery by that identity and ack after delivery; repeated fetch,
 ack, and lost responses preserve the same state across database restart. Exactly
 once delivery to an external service is the consumer's responsibility.
+
+## Operator migration and recovery (#81 phase 2)
+
+From a trusted local Operator shell, use the same `ORCHD_HOME` as the adapter.
+These commands are local control-plane operations, never MCP tools. `rebind`
+rejects calling Orch/worker environments (`ORCHD_ORCH_ID` or `ORCHD_WORKTREE`).
+This is the existing same-user trust boundary, not authentication against a
+local user who can edit the database or environment.
+
+```sh
+orchd interface list
+orchd interface rebind --from OLD_ORCH_ID --to NEW_ORCH_ID --dry-run
+# Review the source, target, affected interfaces and unanswered count, then apply:
+orchd interface rebind --from OLD_ORCH_ID --to NEW_ORCH_ID
+orchd interface list
+```
+
+`list` prints a JSON array with `interface_id`, `name`, `orch_id`, `disabled`,
+`unanswered`, `pending_final`, `pending_interim`, and `pending_no_reply` per
+interface, including disabled and expired registrations. Counts reflect stored,
+unacked delivery state; dismissed requests suppress their unsent interims.
+It never prints credentials, refreshes leases, or acknowledges replies.
+
+`rebind` requires distinct, explicit registered source and target IDs. All
+registrations, including disabled ones, must still belong to the named source.
+A missing/stopped target is refused; source health may be unknown or stopped.
+Codex and Claude owners work in either direction. No health probe or runtime
+liveness claim is made: the target must exist and have no `stopped_at` marker.
+Neither Orch is stopped; tasks, intake, and Desktop Entry binding stay untouched.
+
+Dry-run validates the same conditions and returns `status:"dry-run"`, the old
+and new IDs, an interface snapshot, and the unanswered count without changing
+ownership, leases or wake state. Applying is the explicit Operator confirmation.
+It repeats validation under the existing `interface-owner` delivery lock and one
+SQLite immediate transaction. A stale source, failed validation or interruption
+before commit leaves ownership unchanged. Tokens, interface/request IDs, lease
+expiry, disabled state, routing, reply text, dismissals and ack state survive.
+Unanswered requests (including interim-only requests) have wake/backoff state
+reset for the new owner. Final/dismissed requests do not wake again.
+
+In-flight old-owner wakes finish before the move. A final/interim reply or ack
+committed before the transaction is retained. After commit, old-owner replies
+and dismissals fail the stored request-owner check; CLI acks carrying the old
+`ORCHD_ORCH_ID` fail the interface-owner check. Adapter token acks remain valid,
+since the adapter's identity and pending deliveries survive the move. An already
+running model turn cannot be recalled; its late writes are refused. Already
+fetched adapter output may still be delivered and must retain the consumer's
+existing `(request_id, kind)` deduplication.
+
+An apply result reports `status:"done"`, `committed:true`, `interfaces_migrated`
+and best-effort `interface_wakes`. A per-request error or top-level `wake_error`
+means ownership committed but notification needs recovery; do not repeat the
+forward migration. The supervised recovery runner retries durable pending wakes,
+including a crash immediately after commit. Inspect `interface list` after an
+interrupted CLI to establish the current owner. Notifications remain at least
+once: a crash after transport may repeat a wake, never create a new request.
+
+To restore the original owner (which must still be registered and not stopped):
+
+```sh
+orchd interface rebind --from NEW_ORCH_ID --to OLD_ORCH_ID --dry-run
+orchd interface rebind --from NEW_ORCH_ID --to OLD_ORCH_ID
+orchd interface list
+```
+
+Rollback preserves replies produced by the temporary owner and wakes only work
+still unanswered. Existing `orchd orch restart` behavior remains unchanged:
+it stops/replaces a Claude Orch and migrates interfaces with its other state.
+Standalone rebind is the tool for an interface-only Codex ↔ Claude trial.
 
 ## Normal Orch tools and paging
 

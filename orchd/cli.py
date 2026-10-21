@@ -71,6 +71,11 @@ def build_parser():
     interface_actions = interface.add_subparsers(dest="interface_action", required=True)
     for action in ("register", "submit", "fetch", "ack", "deregister"):
         interface_actions.add_parser(action, help="read a JSON object from stdin")
+    interface_actions.add_parser("list", help="read-only interface owners and pending counts; no tokens")
+    rebind = interface_actions.add_parser("rebind", help="Operator-only: move all interfaces without stopping either Orch")
+    rebind.add_argument("--from", dest="old_id", required=True, metavar="OLD_ORCH_ID")
+    rebind.add_argument("--to", dest="new_id", required=True, metavar="NEW_ORCH_ID")
+    rebind.add_argument("--dry-run", action="store_true")
     orch = sub.add_parser("orch", help="start, stop, restart, list or attach an Orch")
     def start_options(command):
         command.add_argument("--model", default=DEFAULT_ORCH_MODEL,
@@ -471,7 +476,7 @@ def _intake_main(args):
 # Plain `list` is warn: core.list_open only reads.
 HOME_POLICY = {
     ("mcp",): "write",
-    **{("interface", a): "skip" for a in ("register", "submit", "fetch", "ack", "deregister")},
+    **{("interface", a): "skip" for a in ("register", "submit", "fetch", "ack", "deregister", "list", "rebind")},
     ("orch", "start"): "write", ("orch", "stop"): "write", ("orch", "restart"): "write",  # --dry-run -> warn
     ("orch", "list"): "write", ("orch", "attach"): "write",
     ("init",): "skip", ("upgrade",): "skip", ("quota",): "skip", ("doctor",): "skip",
@@ -519,12 +524,22 @@ def main(argv=None):
         import sqlite3
         con = None
         try:
-            payload = json.load(sys.stdin)
-            if not isinstance(payload, dict):
-                raise ValueError("expected JSON object")
+            if args.interface_action == "rebind" and (os.environ.get("ORCHD_ORCH_ID") or os.environ.get("ORCHD_WORKTREE")):
+                raise ValueError("interface rebind is Operator-only; run from a trusted local Operator shell")
             con = store.connect()
-            action = getattr(interface, args.interface_action)
-            result = action(con, Runtime(), **payload) if args.interface_action == "submit" else action(con, **payload)
+            if args.interface_action == "list":
+                result = interface.list_interfaces(con)
+            elif args.interface_action == "rebind":
+                result = interface.rebind(con, Runtime(), old_id=args.old_id, new_id=args.new_id, dry_run=args.dry_run)
+            else:
+                payload = json.load(sys.stdin)
+                if not isinstance(payload, dict):
+                    raise ValueError("expected JSON object")
+                action = getattr(interface, args.interface_action)
+                if args.interface_action == "ack":
+                    # Identity comes from the calling Orch, never adapter JSON.
+                    payload['orch_id'] = os.environ.get("ORCHD_ORCH_ID") or None
+                result = action(con, Runtime(), **payload) if args.interface_action == "submit" else action(con, **payload)
             print(json.dumps(result, ensure_ascii=False))
             return 0
         except (ValueError, TypeError, OSError, sqlite3.Error) as error:
