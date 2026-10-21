@@ -80,6 +80,55 @@ def migrate_owner(con, old_id, new_id):
     return moved
 
 
+def list_interfaces(con):
+    """Credential-free snapshot; never refreshes leases or consumes delivery state."""
+    return [dict(row) for row in con.execute(
+        'SELECT i.id AS interface_id,i.name,i.orch_id,i.disabled,'
+        'COUNT(CASE WHEN r.id IS NOT NULL AND r.reply IS NULL AND r.dismissed_at IS NULL THEN 1 END) AS unanswered,'
+        'COUNT(CASE WHEN r.reply IS NOT NULL AND r.ack_at IS NULL THEN 1 END) AS pending_final,'
+        'COUNT(CASE WHEN r.interim IS NOT NULL AND r.interim_ack_at IS NULL '
+        'AND r.dismissed_at IS NULL THEN 1 END) AS pending_interim,'
+        'COUNT(CASE WHEN r.dismissed_at IS NOT NULL AND r.dismiss_ack_at IS NULL THEN 1 END) AS pending_no_reply '
+        'FROM interfaces i LEFT JOIN interface_requests r ON r.interface_id=i.id '
+        'GROUP BY i.id ORDER BY i.name')]
+
+
+def rebind(con, rt, *, old_id, new_id, dry_run=False):
+    """Trusted local control plane only, deliberately not exposed as an MCP tool.
+
+    A committed old-owner reply wins before the move. All later old-owner writes
+    fail ownership checks. Adapter credentials and delivery acknowledgements survive.
+    """
+    _text(old_id)
+    _text(new_id)
+    if old_id == new_id:
+        raise ValueError('source and target must differ')
+    with store.task_delivery(con, ['interface-owner']), store.immediate(con):
+        # Source may be stopped/unknown: this operation never revives or stops it.
+        if store.get_orch(con, old_id) is None:
+            raise ValueError('source Orch missing')
+        _owner(con, new_id)
+        snapshot = list_interfaces(con)
+        if not snapshot or any(row['orch_id'] != old_id for row in snapshot):
+            raise ValueError('source must own all registered interfaces (including disabled)')
+        result = dict(status='dry-run' if dry_run else 'done', old_orch=old_id,
+                      new_orch=new_id, interfaces=snapshot,
+                      interfaces_migrated=0 if dry_run else len(snapshot),
+                      unanswered=sum(row['unanswered'] for row in snapshot))
+        if not dry_run:
+            migrate_owner(con, old_id, new_id)
+    if not dry_run:
+        # Durable wake state recovers a crash here. Transport never holds the DB lock.
+        result['committed'] = True
+        try:
+            result['interface_wakes'] = sweep(con, rt)
+        except Exception as error:
+            # Ownership already committed; report this separately so callers do
+            # not mistake a recovery-runner failure for a rolled-back migration.
+            result['wake_error'] = type(error).__name__
+    return result
+
+
 def submit(con, rt, *, name, token, conversation, request_key, text):
     for value in (conversation, request_key, text):
         _text(value)
@@ -263,7 +312,7 @@ def fetch(con, *, name, token, conversation, after_id=0, limit=100, kinds=None):
     return result
 
 
-def ack(con, *, name, token, conversation, request_id, kind='final'):
+def ack(con, *, name, token, conversation, request_id, kind='final', orch_id=None):
     _request_id(request_id)
     _text(conversation)
     if kind == 'no_reply':
@@ -272,6 +321,8 @@ def ack(con, *, name, token, conversation, request_id, kind='final'):
         column, text = ('ack_at', 'reply') if _kind(kind) == 'final' else ('interim_ack_at', 'interim')
     with store.immediate(con):
         row = _auth(con, name, token)
+        if orch_id is not None and row['orch_id'] != orch_id:
+            raise ValueError('interface not owned by this Orch')
         updated = con.execute(f'UPDATE interface_requests SET {column}=COALESCE({column},?) WHERE id=? AND interface_id=? AND conversation=? AND {text} IS NOT NULL',
                               (time.time(), request_id, row['id'], conversation)).rowcount
         if not updated:
