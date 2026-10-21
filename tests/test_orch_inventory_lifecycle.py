@@ -234,7 +234,7 @@ class LifecycleTest(unittest.TestCase):
         rows = {row['orch_id']: row for row in report['orchs']}
         self.assertEqual(set(rows), {'dead', 'codex'})
         self.assertTrue(rows['dead']['archived'])
-        self.assertEqual(set(rows['dead']), {'orch_id', 'kind', 'created_at', 'stopped_at', 'health',
+        self.assertEqual(set(rows['dead']), {'orch_id', 'kind', 'created_at', 'stopped_at', 'health', 'capabilities',
                          'health_reason', 'open_task_count', 'archived', 'archived_at', 'first_seen_dead',
                          'last_verified_dead', 'has_obligations', 'notification_count',
                          'entry_pending_count', 'binding_count', 'intake_received_count'})
@@ -254,7 +254,7 @@ class LifecycleTest(unittest.TestCase):
         self.assertTrue(rows['dead']['archived'])
         self.assertEqual(rows['codex']['health'], 'unknown')
         for row in rows.values():
-            self.assertTrue({'orch_id', 'kind', 'created_at', 'stopped_at', 'health',
+            self.assertTrue({'orch_id', 'kind', 'created_at', 'stopped_at', 'health', 'capabilities',
                              'health_reason', 'open_task_count'} <= row.keys())
         self.assertEqual(store.list_orchs(self.con)[0]['id'], 'dead')
 

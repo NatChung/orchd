@@ -101,6 +101,10 @@ def build_parser():
     restart_options(restart)
     listing = actions.add_parser("list", help="list live/resumable Orchs")
     list_options(listing)
+    probe = actions.add_parser("register-codex-probe", help="register a managed Codex app-server health probe")
+    probe.add_argument("orch_id")
+    probe.add_argument("--pid", required=True, type=int, help="app-server PID, never a turn exec PID")
+    probe.add_argument("--endpoint", required=True, help="owned app-server socket in a private directory")
     attachment = actions.add_parser("attach", help="attach an existing Claude Orch")
     attach_options(attachment)
 
@@ -474,6 +478,7 @@ HOME_POLICY = {
     **{("interface", a): "skip" for a in ("register", "submit", "fetch", "ack", "deregister")},
     ("orch", "start"): "write", ("orch", "stop"): "write", ("orch", "restart"): "write",  # --dry-run -> warn
     ("orch", "list"): "write", ("orch", "attach"): "write",
+    ("orch", "register-codex-probe"): "write",
     ("init",): "skip", ("upgrade",): "skip", ("quota",): "skip", ("doctor",): "skip",
     ("config", "show"): "skip", ("config", "get"): "skip", ("config", "set"): "skip", ("config", "unset"): "skip",
     ("binding",): "write",  # --status -> warn
@@ -713,14 +718,17 @@ def main(argv=None):
             return 1
         print(json.dumps(report, ensure_ascii=False, indent=1) if args.json else stats.format_table(report))
         return 0
-    if args.cmd in ("orch list", "orch attach"):
+    if args.cmd in ("orch list", "orch attach", "orch register-codex-probe"):
         from orchd import inventory
         if not (store.home() / "orchd.db").exists():
             print("orchd: no registry DB", file=sys.stderr)
             return 1
         con = store.connect()
         try:
-            if args.cmd == "orch attach":
+            if args.cmd == "orch register-codex-probe":
+                from orchd import codex_orch
+                print(json.dumps(codex_orch.register(con, args.orch_id, args.pid, args.endpoint)))
+            elif args.cmd == "orch attach":
                 inventory.attach(con, Runtime(), args.orch_id, viewer=args.viewer)
             elif args.restore:
                 inventory.restore(con, args.restore)

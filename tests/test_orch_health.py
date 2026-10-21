@@ -81,7 +81,7 @@ class OrchHealthTest(unittest.TestCase):
 
     def test_codex_unregistered_missing_job_and_unsupported_owner_are_unknown(self):
         for owner, kind, job, reason in (
-            ("codex", "codex", "not-a-claude-job", "codex_unverified"),
+            ("codex", "codex", "not-a-claude-job", "codex_probe_unsupported"),
             ("legacy", None, None, "owner_unregistered"),
             ("no-job", "claude", None, "job_missing"),
             ("future", "future", "owner-job", "kind_unsupported"),
@@ -91,7 +91,7 @@ class OrchHealthTest(unittest.TestCase):
             self.task(owner)
         self.rt.jobs = {}
         rows = {r["orch_thread"]: r for r in core.list_open(self.con, self.rt)}
-        for owner, reason in (("codex", "codex_unverified"), ("legacy", "owner_unregistered"),
+        for owner, reason in (("codex", "codex_probe_unsupported"), ("legacy", "owner_unregistered"),
                               ("no-job", "job_missing"), ("future", "kind_unsupported")):
             self.assertEqual(rows[owner]["owner_health"], {"state": "unknown", "reason": reason})
 
