@@ -66,7 +66,7 @@ once delivery to an external service is the consumer's responsibility.
 
 ## Interim and final replies
 
-A request has at most one `interim` reply and exactly one `final` reply.
+A request has at most one `interim` reply and one terminal outcome (`final` or `no_reply`).
 `interface_reply` without `kind` is the final, so existing callers are unchanged.
 
 - `kind:"interim"` is optional and may be sent once, before the final (e.g. to
@@ -74,7 +74,7 @@ A request has at most one `interim` reply and exactly one `final` reply.
   different text conflicts. After a final exists a new interim is refused (an
   identical retry of the already-recorded interim still succeeds).
 - `kind:"final"` behaves as before: same text idempotent, different text conflicts.
-- `interface_requests` lists a request until its final exists. After an interim it
+- `interface_requests` lists a request until its terminal outcome exists. After an interim it
   stays listed and carries an `interim` field with the recorded text (null before).
 
 Adapter side (compatibility): `fetch` without `kinds` returns only finals, in the
@@ -97,6 +97,46 @@ empty page. Cursors do not consume anything. Start each subsequent polling cycle
 at 0: replies may be produced out of request order, so permanently saving a high
 fetch cursor would miss an older request answered later. Acked replies and
 answered requests disappear from their respective listings without shifting IDs.
+
+## Silent closure (`no_reply`)
+
+`interface_dismiss({"request_id":1,"reason":"no answer needed"})` is an Orch-only
+MCP tool. It returns `{"request_id":1,"kind":"no_reply","terminal":true}` and
+never invokes external transport. Reason is required nonblank text (up to 65536
+characters), stored with `dismissed_at` in the local database for audit only.
+A same-reason retry succeeds without changing the timestamp; a different reason
+conflicts. Final and dismissal are mutually exclusive, serialized in the same
+SQLite transaction: neither can replace the other. All interim/final writes are
+refused after dismissal. Previously delivered messages cannot be recalled.
+
+Consumers opt in via CLI fetch `"kinds":["interim","final","no_reply"]` or
+`["final","no_reply"]`. A dismissed request yields only:
+
+```json
+{"request_id":1,"conversation":"channel/thread","kind":"no_reply","terminal":true}
+```
+
+There is no `reply`, `text`, or `reason` field. This event suppresses any unsent
+interim and repeats until CLI `ack` with `"kind":"no_reply"`. Ack is idempotent,
+scoped to credentials and conversation, and refused before dismissal. The ack
+result includes `kind:"no_reply"`. All state survives database reopen and owner
+restart. Dismissed requests disappear from `interface_requests`; duplicate submit,
+sweeper and owner migration do not wake them. Dismissal serializes with live wakes.
+Three nullable columns (`dismissed_at`, `dismiss_reason`, `dismiss_ack_at`) are
+migrated additively on database open; existing replies are preserved.
+
+On `no_reply`, consumers must durably cancel holding timers and suppress all
+outgoing sends for that request, then ack. Retry ack after a crash. Deduplicate by
+`(request_id, kind)`; process terminal events before starting timers or sending
+queued interims. A fetched interim already in flight may race with dismissal;
+consumer send coordination is required. Unknown kinds must fail closed: send no
+message or fallback status and retain for upgrade/operator handling.
+
+Legacy fetch (no `kinds`, or only interim/final) never sees dismissed requests,
+including their unsent interims. Its row schema stays unchanged. A legacy consumer
+cannot learn dismissal or stop its own automatic holding timer: upgrade consumer
+support before using dismissal. End-to-end silence requires that consumer change;
+this repository implements only the Orch contract.
 
 ## Required recovery runner
 

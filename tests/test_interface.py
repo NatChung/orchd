@@ -219,6 +219,130 @@ class InterfaceTest(unittest.TestCase):
         self.assertTrue(self.mcp('interface_reply', dict(request_id=rid, text='late', kind='interim'))['isError'])
         self.assertEqual([r['kind'] for r in self.both()], ['interim', 'final'])
 
+    def silent(self, **extra):
+        return api.fetch(self.con, **self.auth(self.a), conversation='one',
+                         kinds=['interim', 'final', 'no_reply'], **extra)
+
+    def test_dismiss_silent_event_suppresses_interim_and_legacy_text(self):
+        rid = self.submit()['request_id']
+        api.reply(self.con, 'orch-A', request_id=rid, text='queued progress', kind='interim')
+        result = self.mcp('interface_dismiss', dict(request_id=rid, reason='no answer needed'))
+        self.assertFalse(result.get('isError'))
+        expected = [dict(request_id=rid, conversation='one', kind='no_reply', terminal=True)]
+        self.assertEqual(self.silent(), expected)
+        self.assertEqual(self.silent(), expected)
+        self.assertEqual(self.fetch(), [])
+        self.assertEqual(self.both(), [])
+        self.assertEqual(api.requests(self.con, 'orch-A'), [])
+        row = self.con.execute('SELECT * FROM interface_requests WHERE id=?', (rid,)).fetchone()
+        self.assertIsNone(row['reply'])
+        self.assertEqual(row['dismiss_reason'], 'no answer needed')
+        self.assertIsNotNone(row['dismissed_at'])
+        self.con.close()
+        self.con = store.connect()
+        self.assertEqual(self.silent(), expected)
+        self.assertEqual(self.con.execute('SELECT dismiss_reason FROM interface_requests WHERE id=?',
+                                         (rid,)).fetchone()[0], 'no answer needed')
+
+    def test_dismiss_idempotent_and_terminal_conflicts(self):
+        rid = self.submit()['request_id']
+        for _ in range(2):
+            api.dismiss(self.con, 'orch-A', request_id=rid, reason='skip')
+        stamp = self.con.execute('SELECT dismissed_at FROM interface_requests WHERE id=?', (rid,)).fetchone()[0]
+        with self.assertRaisesRegex(ValueError, 'different reason'):
+            api.dismiss(self.con, 'orch-A', request_id=rid, reason='changed')
+        for kind in ('interim', 'final'):
+            with self.assertRaisesRegex(ValueError, 'dismissed'):
+                api.reply(self.con, 'orch-A', request_id=rid, text='answer', kind=kind)
+        api.dismiss(self.con, 'orch-A', request_id=rid, reason='skip')
+        self.assertEqual(self.con.execute('SELECT dismissed_at FROM interface_requests WHERE id=?', (rid,)).fetchone()[0], stamp)
+        final = self.submit(key='final')['request_id']
+        api.reply(self.con, 'orch-A', request_id=final, text='done')
+        with self.assertRaisesRegex(ValueError, 'final reply'):
+            api.dismiss(self.con, 'orch-A', request_id=final, reason='skip')
+
+    def test_dismiss_ack_is_scoped_repeat_safe_and_durable(self):
+        rid = self.submit()['request_id']
+        ack = dict(self.auth(self.a), conversation='one', request_id=rid, kind='no_reply')
+        with self.assertRaises(ValueError):
+            api.ack(self.con, **ack)
+        api.dismiss(self.con, 'orch-A', request_id=rid, reason='skip')
+        for wrong in (dict(ack, conversation='two'), dict(ack, **self.auth(self.b)), dict(ack, kind='final')):
+            with self.assertRaises(ValueError):
+                api.ack(self.con, **wrong)
+        for _ in range(2):
+            self.assertEqual(api.ack(self.con, **ack), dict(acked=True, request_id=rid, kind='no_reply'))
+        self.con.close()
+        self.con = store.connect()
+        self.assertEqual(self.silent(), [])
+        api.dismiss(self.con, 'orch-A', request_id=rid, reason='skip')
+        self.assertEqual(self.silent(), [])
+
+    def test_concurrent_final_and_dismiss_have_one_terminal_winner(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        rid = self.submit()['request_id']
+        barrier = Barrier(2)
+
+        def finish(kind):
+            con = store.connect()
+            try:
+                barrier.wait(timeout=5)
+                if kind == 'final':
+                    api.reply(con, 'orch-A', request_id=rid, text='done')
+                else:
+                    api.dismiss(con, 'orch-A', request_id=rid, reason='skip')
+                return kind
+            except ValueError:
+                return None
+            finally:
+                con.close()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(finish, ['final', 'no_reply']))
+        winner, = [r for r in results if r is not None]
+        self.assertEqual([r['kind'] for r in self.silent()], [winner])
+        row = self.con.execute('SELECT reply,dismissed_at FROM interface_requests WHERE id=?', (rid,)).fetchone()
+        self.assertNotEqual(row['reply'] is None, row['dismissed_at'] is None)
+
+    def test_dismiss_validation_and_orch_only_mcp(self):
+        rid = self.submit()['request_id']
+        for args in (dict(request_id=rid, reason=' '), dict(request_id=rid),
+                     dict(request_id=rid, reason='skip', text='send'), dict(request_id=True, reason='skip')):
+            self.assertTrue(self.mcp('interface_dismiss', args)['isError'])
+        self.assertTrue(self.mcp('interface_dismiss', dict(request_id=rid, reason='skip'), role='entry')['isError'])
+        with self.assertRaises(ValueError):
+            api.dismiss(self.con, 'orch-B', request_id=rid, reason='skip')
+        self.assertEqual(self.silent(), [])
+
+    def test_dismiss_stops_wake_sweep_duplicate_and_owner_migration(self):
+        rid = self.submit()['request_id']
+        api.dismiss(self.con, 'orch-A', request_id=rid, reason='skip')
+        self.con.execute('UPDATE interface_requests SET wake_at=NULL,wake_due_at=0 WHERE id=?', (rid,))
+        before = len(self.rt.woken)
+        self.assertTrue(self.submit()['duplicate'])
+        self.assertEqual(api.sweep(self.con, self.rt), {})
+        api.migrate_owner(self.con, 'orch-A', 'orch-B')
+        self.assertEqual(api.requests(self.con, 'orch-B'), [])
+        self.assertEqual(api.sweep(self.con, self.rt), {})
+        self.assertIsNone(api.wake(self.con, self.rt, rid))
+        self.assertEqual(len(self.rt.woken), before)
+        self.assertEqual(self.silent()[0]['kind'], 'no_reply')
+
+    def test_dismiss_additive_migration_preserves_old_final(self):
+        rid = self.submit()['request_id']
+        api.reply(self.con, 'orch-A', request_id=rid, text='old final')
+        for column in ('dismissed_at', 'dismiss_reason', 'dismiss_ack_at'):
+            self.con.execute(f'ALTER TABLE interface_requests DROP COLUMN {column}')
+        self.con.close()
+        self.con = store.connect()
+        self.assertEqual(self.fetch()[0]['reply'], 'old final')
+        new = self.submit(key='new')['request_id']
+        api.dismiss(self.con, 'orch-A', request_id=new, reason='skip')
+        self.con.close()
+        self.con = store.connect()
+        self.assertEqual([r.get('kind') for r in self.silent()], ['final', 'no_reply'])
+
     def test_additive_migration_on_existing_db(self):
         rid = self.submit()['request_id']
         api.reply(self.con, 'orch-A', request_id=rid, text='old final')
@@ -480,6 +604,15 @@ class InterfaceTest(unittest.TestCase):
         for _ in range(2):
             self.assertEqual(run('ack', dict(**auth, conversation='cli-conv', request_id=rid))[0], 0)
         self.assertEqual(run('fetch', dict(**auth, conversation='cli-conv')), (0, []))
+        code, receipt = run('submit', dict(**auth, conversation='cli-conv', request_key='silent', text='no response'))
+        self.assertEqual(code, 0)
+        rid = receipt['request_id']
+        self.assertNotIn('isError', self.mcp('interface_dismiss', dict(request_id=rid, reason='skip')))
+        payload = dict(**auth, conversation='cli-conv', kinds=['final', 'no_reply'])
+        self.assertEqual(run('fetch', payload), (0, [dict(request_id=rid, conversation='cli-conv', kind='no_reply', terminal=True)]))
+        self.assertEqual(run('ack', dict(**auth, conversation='cli-conv', request_id=rid, kind='no_reply')),
+                         (0, dict(acked=True, request_id=rid, kind='no_reply')))
+        self.assertEqual(run('fetch', payload), (0, []))
         self.assertEqual(run('deregister', auth), (0, dict(deregistered=True)))
         self.assertEqual(run('fetch', {**auth, 'token': 'wrong', 'conversation': 'cli-conv'})[0], 1)
 
