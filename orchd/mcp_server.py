@@ -98,8 +98,8 @@ TOOLS = [
                     "App-server worker_alive is alive/idle/active/unknown/dead; uncertain_delivery flags held receipts. "
                     "Legacy worker_alive null: unknown, or a Codex worker between turns (it asked or reported and can "
                     "still be answered); false: its process ended without a report. "
-                    "owner_health is independent: alive/dead from a successful Claude job probe, unknown "
-                    "when unverified (including Codex owners). notification_delivery shows unread counts "
+                    "owner_health is independent: Claude job probes or registered Codex app-server probes supply evidence; unknown "
+                    "when unverified (including Desktop/exec Codex owners). notification_delivery shows unread counts "
                     "and safe wake-failure metadata without consuming inbox or revealing message content. "
                     "Includes model_reason, group_id, auto_model and auto_retry_count; optional group_id filters a batch. This does not adopt tasks or change their owner.",
      "inputSchema": {"type": "object", "properties": {"group_id": {"type": "string"}}}},

@@ -1,7 +1,7 @@
 """Read-only Orch health from a runtime snapshot, independent of worker health.
 
 Registry timestamps are bookkeeping, not liveness proof. Claude job membership
-is the available probe; Codex threads have no equivalent probe here.
+and explicitly registered private Codex app-servers supply process evidence.
 """
 
 LIVE_STATUSES = ("idle", "waiting", "busy")
@@ -11,7 +11,8 @@ def owner_health(orch, jobs):
     state, reason = "unknown", "owner_unregistered"
     if orch is not None:
         if orch["kind"] == "codex":
-            reason = "codex_unverified"
+            from .codex_orch import probe
+            return probe(orch)
         elif orch["kind"] != "claude":
             reason = "kind_unsupported"
         elif not orch["job_id"]:

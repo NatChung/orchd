@@ -2,7 +2,7 @@
 import time
 from contextlib import nullcontext
 
-from . import orch_revive, store
+from . import codex_orch, orch_revive, store
 from .orch_health import owner_health, session_health
 
 
@@ -77,7 +77,8 @@ def list_orchs(con, rt, *, observe=False, now=None):
             counts[health["state"]] += 1
             orchs.append(dict(orch_id=row["id"], kind=row["kind"], created_at=row["created_at"],
                               stopped_at=row["stopped_at"], health=health["state"],
-                              health_reason=health["reason"], open_task_count=row["open_task_count"],
+                              health_reason=health["reason"], capabilities=codex_orch.capabilities(row),
+                              open_task_count=row["open_task_count"],
                               archived=current["archived_at"] is not None,
                               archived_at=current["archived_at"], first_seen_dead=current["first_seen_dead"],
                               last_verified_dead=current["last_verified_dead"], has_obligations=attached, **links))
