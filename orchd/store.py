@@ -358,7 +358,7 @@ def connect(path=None):
         for table, columns in (("intake_content", ("unavailable_reason TEXT",)),
                                ("messages", MESSAGE_COLUMNS), ("entry_messages", ENTRY_MESSAGE_COLUMNS),
                                ("entry_question_history", ("original_orch_id TEXT",)),
-                               ("interface_requests", ("interim TEXT", "interim_ack_at REAL")),
+                               ("interface_requests", ("interim TEXT", "interim_ack_at REAL", "dismissed_at REAL", "dismiss_reason TEXT", "dismiss_ack_at REAL")),
                                ("orchs", ORCH_COLUMNS), ("entry_answer_submissions", SUBMISSION_COLUMNS),
                                ("intake_events", ("excluded_at REAL", "excluded_by TEXT",
                                                   "exclusion_reason TEXT", "exclusion_rule_version TEXT"))):

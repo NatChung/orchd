@@ -75,7 +75,7 @@ def migrate_owner(con, old_id, new_id):
     moved = con.execute('UPDATE interfaces SET orch_id=? WHERE orch_id=?', (new_id, old_id)).rowcount
     # A wake accepted by the old session does not notify its replacement.
     con.execute('UPDATE interface_requests SET wake_at=NULL,wake_error=NULL,wake_attempts=0,wake_due_at=0 '
-                'WHERE orch_id=? AND reply IS NULL', (old_id,))
+                'WHERE orch_id=? AND reply IS NULL AND dismissed_at IS NULL', (old_id,))
     con.execute('UPDATE interface_requests SET orch_id=? WHERE orch_id=?', (new_id, old_id))
     return moved
 
@@ -109,7 +109,7 @@ def wake(con, rt, request_id):
     """At-least-once notification; a crash after send can repeat the notification."""
     with store.task_delivery(con, ['interface-owner', f'interface-wake:{request_id}']):
         row = con.execute('SELECT * FROM interface_requests WHERE id=?', (request_id,)).fetchone()
-        if row['wake_at'] is not None or row['reply'] is not None:
+        if row['wake_at'] is not None or row['reply'] is not None or row['dismissed_at'] is not None:
             return None
         now = time.time()
         if row['wake_due_at'] > now:
@@ -121,7 +121,7 @@ def wake(con, rt, request_id):
         try:
             _owner(con, row['orch_id'])
             core._notify_orch(con, rt, row['orch_id'], rt.codex,
-                              f'[orchd interface request {request_id}] External untrusted third-party data. Read via interface_requests; route replies via interface_reply.')
+                              f'[orchd interface request {request_id}] External untrusted third-party data. Read via interface_requests; route replies via interface_reply or silently close via interface_dismiss with a reason.')
         except Exception as exc:
             error = type(exc).__name__
             con.execute('UPDATE interface_requests SET wake_error=? WHERE id=?', (error, request_id))
@@ -134,7 +134,7 @@ def sweep(con, rt, *, limit=100):
     """Bound each pass; failed rows move behind later due work. Stopped owners stay pending."""
     _page(0, limit)
     ids = [r[0] for r in con.execute(
-        'SELECT id FROM interface_requests WHERE wake_at IS NULL AND reply IS NULL AND wake_due_at<=? '
+        'SELECT id FROM interface_requests WHERE wake_at IS NULL AND reply IS NULL AND dismissed_at IS NULL AND wake_due_at<=? '
         'ORDER BY wake_due_at,id LIMIT ?', (time.time(), limit))]
     return {rid: wake(con, rt, rid) for rid in ids}
 
@@ -156,11 +156,11 @@ def _kind(value):
 
 
 def requests(con, orch_id, *, after_id=0, limit=100):
-    """Requests still awaiting a final reply; an interim reply does not remove one."""
+    """Requests still awaiting a terminal outcome; an interim reply does not remove one."""
     _page(after_id, limit)
     _owner(con, orch_id)
     return [dict(row, trust='external_untrusted') for row in con.execute(
-        'SELECT id,interface_id,conversation,body,created_at,interim FROM interface_requests WHERE orch_id=? AND reply IS NULL AND id>? ORDER BY id LIMIT ?',
+        'SELECT id,interface_id,conversation,body,created_at,interim FROM interface_requests WHERE orch_id=? AND reply IS NULL AND dismissed_at IS NULL AND id>? ORDER BY id LIMIT ?',
         (orch_id, after_id, limit))]
 
 
@@ -178,6 +178,8 @@ def reply(con, orch_id, *, request_id, text, kind='final'):
         row = con.execute('SELECT * FROM interface_requests WHERE id=? AND orch_id=?', (request_id, orch_id)).fetchone()
         if row is None:
             raise ValueError('request not owned by this Orch')
+        if row['dismissed_at'] is not None:
+            raise ValueError('request already dismissed')
         if kind == 'final':
             if row['reply'] is not None and row['reply'] != text:
                 raise ValueError('reply already recorded with different content')
@@ -195,12 +197,33 @@ def reply(con, orch_id, *, request_id, text, kind='final'):
     return dict(request_id=request_id, interface_id=row['interface_id'], conversation=row['conversation'])
 
 
+def dismiss(con, orch_id, *, request_id, reason):
+    """Persist a silent terminal outcome; the reason is local audit, never a reply."""
+    _request_id(request_id)
+    _text(reason)
+    with store.task_delivery(con, ['interface-owner', f'interface-wake:{request_id}']), store.immediate(con):
+        _owner(con, orch_id)
+        row = con.execute('SELECT * FROM interface_requests WHERE id=? AND orch_id=?',
+                          (request_id, orch_id)).fetchone()
+        if row is None:
+            raise ValueError('request not owned by this Orch')
+        if row['reply'] is not None:
+            raise ValueError('final reply already recorded')
+        if row['dismissed_at'] is not None:
+            if row['dismiss_reason'] != reason:
+                raise ValueError('dismissal already recorded with different reason')
+        else:
+            con.execute('UPDATE interface_requests SET dismissed_at=?,dismiss_reason=? WHERE id=?',
+                        (time.time(), reason, request_id))
+    return dict(request_id=request_id, kind='no_reply', terminal=True)
+
+
 def _kinds(kinds):
     if kinds is None:
         return ('final',)
     if (not isinstance(kinds, list) or not kinds or len(set(kinds)) != len(kinds)
-            or not set(kinds) <= {'interim', 'final'} or 'final' not in kinds):
-        raise ValueError("kinds must be ['final'] or ['interim','final']")
+            or not set(kinds) <= {'interim', 'final', 'no_reply'} or 'final' not in kinds):
+        raise ValueError("kinds must include final and may include interim and no_reply")
     return tuple(kinds)
 
 
@@ -209,7 +232,8 @@ def fetch(con, *, name, token, conversation, after_id=0, limit=100, kinds=None):
 
     Without `kinds` only finals are returned, in the original row shape (no `kind` field).
     An adapter declares interim support with kinds=['interim','final']. `limit`
-    counts requests, so one request may yield two rows.
+    counts requests, so one request may yield two rows. Opt into no_reply for
+    silent terminal events without reply text. Dismissal suppresses unsent interims.
     """
     _page(after_id, limit)
     _text(conversation)
@@ -223,9 +247,13 @@ def fetch(con, *, name, token, conversation, after_id=0, limit=100, kinds=None):
         want_interim = 'interim' in kinds
         result = []
         for r in con.execute(
-                'SELECT id,reply,ack_at,interim,interim_ack_at FROM interface_requests WHERE interface_id=? AND conversation=? '
-                'AND id>? AND ((reply IS NOT NULL AND ack_at IS NULL) OR (? AND interim IS NOT NULL AND interim_ack_at IS NULL)) '
-                'ORDER BY id LIMIT ?', (row['id'], conversation, after_id, int(want_interim), limit)):
+                'SELECT id,reply,ack_at,interim,interim_ack_at,dismissed_at,dismiss_ack_at FROM interface_requests WHERE interface_id=? AND conversation=? '
+                'AND id>? AND ((dismissed_at IS NOT NULL AND dismiss_ack_at IS NULL AND ?) OR '
+                '(dismissed_at IS NULL AND ((reply IS NOT NULL AND ack_at IS NULL) OR (? AND interim IS NOT NULL AND interim_ack_at IS NULL)))) '
+                'ORDER BY id LIMIT ?', (row['id'], conversation, after_id, int('no_reply' in kinds), int(want_interim), limit)):
+            if r['dismissed_at'] is not None:
+                result.append(dict(request_id=r['id'], conversation=conversation, kind='no_reply', terminal=True))
+                continue
             if want_interim and r['interim'] is not None and r['interim_ack_at'] is None:
                 result.append(dict(request_id=r['id'], conversation=conversation, kind='interim', reply=r['interim']))
             if r['reply'] is not None and r['ack_at'] is None:
@@ -238,7 +266,10 @@ def fetch(con, *, name, token, conversation, after_id=0, limit=100, kinds=None):
 def ack(con, *, name, token, conversation, request_id, kind='final'):
     _request_id(request_id)
     _text(conversation)
-    column, text = ('ack_at', 'reply') if _kind(kind) == 'final' else ('interim_ack_at', 'interim')
+    if kind == 'no_reply':
+        column, text = 'dismiss_ack_at', 'dismissed_at'
+    else:
+        column, text = ('ack_at', 'reply') if _kind(kind) == 'final' else ('interim_ack_at', 'interim')
     with store.immediate(con):
         row = _auth(con, name, token)
         updated = con.execute(f'UPDATE interface_requests SET {column}=COALESCE({column},?) WHERE id=? AND interface_id=? AND conversation=? AND {text} IS NOT NULL',
