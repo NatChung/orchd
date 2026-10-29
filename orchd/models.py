@@ -3,6 +3,7 @@
     [models.terra]                 # override or add one alias; unset fields keep the built-in default
     id = "gpt-6.1-terra"
     vendor = "codex"               # codex | claude (decides the CLI, the quota bucket and the review pairing)
+    quota = "codex"                # codex | claude: which quota bucket the alias draws on (default: its vendor)
     tier = 1                       # 1 default/cheap (auto picks here), 2 escalation, 3 further escalation
 
 Changing a worker's model is a config edit; a new process picks it up (a running MCP server keeps the catalog it read
@@ -12,11 +13,11 @@ import re
 from collections.abc import Mapping
 
 DEFAULTS = {
-    "terra": dict(id="gpt-6.1-terra", vendor="codex", tier=1),
-    "sonnet": dict(id="claude-sonnet-5-5", vendor="claude", tier=1),
-    "sol": dict(id="gpt-6.1-sol", vendor="codex", tier=2),
-    "fable": dict(id="claude-fable-5-1", vendor="claude", tier=3),
-    "astra": dict(id="gpt-6-astra", vendor="codex", tier=3),
+    "terra": dict(id="gpt-6.1-terra", vendor="codex", quota="codex", tier=1),
+    "sonnet": dict(id="claude-sonnet-5-5", vendor="claude", quota="claude", tier=1),
+    "sol": dict(id="gpt-6.1-sol", vendor="codex", quota="codex", tier=2),
+    "fable": dict(id="claude-fable-5-1", vendor="claude", quota="claude", tier=3),
+    "astra": dict(id="gpt-6-astra", vendor="codex", quota="codex", tier=3),
 }
 VENDORS = ("codex", "claude")
 RESERVED = ("auto", "escalate")
@@ -37,16 +38,22 @@ def _build(data, file):
         if not _ALIAS.match(alias) or alias in RESERVED:
             raise ValueError(f"{file}: [models.{alias}] is not a valid alias (lowercase letters, digits, - _; "
                              f"not {', '.join(RESERVED)})")
-        unknown = set(entry) - {"id", "vendor", "tier"}
+        unknown = set(entry) - {"id", "vendor", "quota", "tier"}
         if unknown:
-            raise ValueError(f"{file}: [models.{alias}] unknown key {sorted(unknown)[0]!r}; use id, vendor, tier")
-        out.setdefault(alias, {}).update(entry)
+            raise ValueError(f"{file}: [models.{alias}] unknown key {sorted(unknown)[0]!r}; use id, vendor, quota, tier")
+        merged = out.setdefault(alias, {})
+        if "vendor" in entry and "quota" not in entry and alias in DEFAULTS:
+            merged.pop("quota", None)  # a vendor override without a quota follows the new vendor
+        merged.update(entry)
     for alias, entry in out.items():
         where = f"{file}: [models.{alias}]"
         if not isinstance(entry.get("id"), str) or not entry["id"].strip():
             raise ValueError(f"{where} needs a non-empty string id")
         if entry.get("vendor") not in VENDORS:
             raise ValueError(f"{where} vendor must be one of {', '.join(VENDORS)}")
+        entry.setdefault("quota", entry["vendor"])
+        if entry["quota"] not in VENDORS:
+            raise ValueError(f"{where} quota must be one of {', '.join(VENDORS)}")
         tier = entry.get("tier")
         if not isinstance(tier, int) or isinstance(tier, bool) or not 1 <= tier <= 9:
             raise ValueError(f"{where} tier must be an integer 1-9")
@@ -59,7 +66,7 @@ def _build(data, file):
 
 
 def catalog(env=None):
-    """{alias: {id, vendor, tier}} in defaults-then-config order. Re-read when the file changes."""
+    """{alias: {id, vendor, quota, tier}} in defaults-then-config order. Re-read when the file changes."""
     from . import config
     file = config.path(env)
     try:
@@ -104,6 +111,11 @@ def vendor_of(model, env=None):
     if alias:
         return catalog(env)[alias]["vendor"]
     return "codex" if isinstance(model, str) and model.startswith("gpt-") else "claude"
+
+
+def quota_provider(alias, env=None):
+    """The stored quota key (sol = Codex bucket, sonnet = Claude bucket) an alias draws on, from its quota field."""
+    return QUOTA_PROVIDER[catalog(env)[alias]["quota"]]
 
 
 def default_alias(vendor, env=None):

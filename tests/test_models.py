@@ -30,6 +30,35 @@ class ModelCatalog(unittest.TestCase):
         self.assertEqual(config.worker_backend("sol"), "app-server")
         self.assertEqual(config.worker_backend("sonnet"), "exec")
 
+    def test_quota_defaults_to_vendor_and_is_validated(self):
+        self.assertEqual({a: e["quota"] for a, e in models.catalog().items()},
+                         dict(terra="codex", sonnet="claude", sol="codex", fable="claude", astra="codex"))
+        self.write('[models.mini]\nid = "gpt-7-mini"\nvendor = "codex"\nquota = "claude"\ntier = 1\n')
+        self.assertEqual(models.catalog()["mini"]["quota"], "claude")
+        self.assertEqual(models.quota_provider("mini"), "sonnet")
+        self.write('[models.mini]\nid = "gpt-7-mini"\nvendor = "codex"\nquota = "sol"\ntier = 1\n')
+        with self.assertRaisesRegex(ValueError, "quota must be one of"):
+            models.catalog()
+
+    def test_quota_mapping_drives_auto_selection(self):
+        self.write('[models.terra]\nquota = "claude"\n')
+        snap = {"sol": dict(state="known", windows=[dict(used_percent=10, state="known")]),
+                "sonnet": dict(state="known", windows=[dict(used_percent=90, state="known")])}
+        # terra now draws on the Claude bucket (90% used), sonnet too; the Codex bucket has no tier-1 alias.
+        self.assertEqual(quota.shadow(snap, now=1)["selected_alias"], "terra")
+        self.assertEqual(models.quota_provider("terra"), "sonnet")
+
+    def test_review_pairing_ignores_the_tier_1_auto_filter(self):
+        snap = {"sol": dict(state="known", windows=[dict(used_percent=10, state="known")]),
+                "sonnet": dict(state="known", windows=[dict(used_percent=10, state="known")])}
+        for author, reviewer in (("gpt-6.1-sol", "sonnet"), ("claude-fable-5-1", "astra"), ("gpt-6-astra", "fable")):
+            got = quota.shadow(snap, task_type="review", author_model=author, applied=True, now=1)
+            self.assertEqual(got["selected_alias"], reviewer, author)
+        self.write('[models.terra]\ntier = 2\n')  # no tier-1 codex alias left; fable still pairs with astra/terra
+        got = quota.shadow(snap, task_type="review", author_model="claude-fable-5-1", applied=True, now=1)
+        self.assertEqual(got["selected_alias"], models.pair("claude-fable-5-1"))
+        self.assertIsNotNone(got["selected_alias"])
+
     def test_config_changes_the_model_id_without_code(self):
         self.write('[models.terra]\nid = "gpt-6.2-terra"\n[models.mini]\nid = "gpt-7-mini"\nvendor = "codex"\ntier = 1\n')
         self.assertEqual(WORKER_MODELS["terra"], "gpt-6.2-terra")

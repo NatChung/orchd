@@ -578,11 +578,14 @@ def shadow(snapshot, *, backend='exec', task_type=None, author_model=None, now=N
     the tier-1 aliases of the model catalog (one per vendor); a review takes the author's cross-vendor pair."""
     from . import models
     now = time.time() if now is None else now
-    tier1 = {models.QUOTA_PROVIDER[v]: models.default_alias(v) for v in models.VENDORS}
-    tier1 = {p: a for p, a in tier1.items() if a}
+    cat = models.catalog()
+    tier1 = {}
+    for alias, entry in cat.items():
+        if entry['tier'] == 1:
+            tier1.setdefault(models.quota_provider(alias), alias)
     allowed = [p for p in ('sol', 'sonnet') if p in tier1]
     if backend == 'app-server':
-        allowed = [p for p in allowed if p == 'sol']
+        allowed = [p for p in allowed if cat[tier1[p]]['vendor'] == 'codex']
     review = task_type == 'review' or author_model is not None
     alias_of = dict(tier1)
     codex, claude = tier1.get('sol', 'sol'), tier1.get('sonnet', 'sonnet')
@@ -593,10 +596,11 @@ def shadow(snapshot, *, backend='exec', task_type=None, author_model=None, now=N
         known = models.alias_for(author_model) or author_model.startswith(('gpt-', 'claude-'))
         paired = models.pair(author_model) if known else None
         if paired:
-            provider = models.QUOTA_PROVIDER[models.catalog()[paired]['vendor']]
+            # The configured pairing decides the reviewer, whatever its tier; the tier-1 filter is for auto only.
+            provider = models.quota_provider(paired)
             alias_of = {provider: paired}
-            allowed = [p for p in allowed if p == provider]
-            if backend == 'app-server' and provider != 'sol':
+            allowed = [provider]
+            if backend == 'app-server' and cat[paired]['vendor'] != 'codex':
                 allowed = []
         else:
             allowed = []
