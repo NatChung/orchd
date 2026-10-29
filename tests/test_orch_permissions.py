@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,20 @@ from orchd.runtime import Runtime, ORCH_TOOLS
 
 
 class OrchPermissionsTest(unittest.TestCase):
+    def test_mcp_server_runs_under_the_interpreter_that_has_orchd_dependencies(self):
+        # bin/orchd's shebang is the system python3, which may lack psutil; the MCP child must not rely on it.
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp).resolve() / "orch home"
+            home.mkdir()
+            rt = Runtime()
+            with mock.patch.object(rt, "orch_socket_path", return_value=str(Path(tmp) / "o.sock")), \
+                    mock.patch.object(rt, "start_claude", return_value=("job", "session")) as start, \
+                    mock.patch("orchd.paths.orchd_executable", return_value="/x/bin/orchd"):
+                rt.start_orch("o38", "opus", home)
+            args = start.call_args.args[3]
+            server = json.loads(Path(args[args.index("--mcp-config") + 1]).read_text())["mcpServers"]["orchd"]
+            self.assertEqual((server["command"], server["args"]), (sys.executable, ["/x/bin/orchd", "mcp"]))
+
     def test_only_groups_are_writable_and_only_this_homes_temp_tree_is_added(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp).resolve() / "orch home"
