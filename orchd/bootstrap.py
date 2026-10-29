@@ -1,8 +1,8 @@
-"""`orchd init`: create the Orch home and the Desktop interface under ~/orch, trust them, optionally migrate.
+"""`orchd init`: create Orch, interface and computer-use session homes under ~/orch.
 
 Folders and files come from orchd/templates. A file that already exists and differs (Operator edited it, or an older
-template) is kept and reported, never overwritten. Codex trust is appended to ~/.codex/config.toml after a timestamped
-backup; Claude trust is only checked, never written: several Claude processes rewrite ~/.claude.json and would
+template) is kept and reported, except computer-use AGENTS.md uses managed-block updates.
+Codex trust is appended to ~/.codex/config.toml after a timestamped backup; Claude trust is only checked, never written: several Claude processes rewrite ~/.claude.json and would
 clobber an outside edit (docs/decisions.md), so Operator accepts it once in `claude`.
 """
 import os
@@ -61,7 +61,8 @@ def planned_files(home, env, orchd_bin=None):
                   EXTRA_READ="".join(f"{_toml_string(p)} = \"read\"\n" for p in reads),
                   DISABLED_APPS="".join(f"\n[apps.{_toml_string(a)}]\nenabled = false\n" for a in apps))
     files = {}
-    for base, target in (("home", orch), ("interface", interface)):
+    for base, target in (("home", orch), ("interface", interface),
+                         ("gpt-computer-use-worker", paths.computer_use_home(home, env))):
         for source in sorted((TEMPLATES / base).rglob("*")):
             if source.is_file():
                 relative = source.relative_to(TEMPLATES)
@@ -168,9 +169,20 @@ def init(rt, home=None, env=None, trust=True, source=None, orchd_bin=None):
     env = os.environ if env is None else env
     orch, interface = paths.orch_home(home, env), paths.interface_home(home, env)
     planned = planned_files(home, env, orchd_bin)
-    files = {str(path): write_managed(path, text) for path, text in planned.items()}
+    from . import home_migrations
+    worker = paths.computer_use_home(home, env)
+    worker_rules = worker / "AGENTS.md"
+    files = {str(path): write_managed(path, text) for path, text in planned.items() if path != worker_rules}
+    existed = worker_rules.exists()
+    lines = []
+    home_migrations.update_rules({"gpt-computer-use-worker": worker}, False, lines,
+                                 home_migrations.state_dir(home, env) / "backups")
+    files[str(worker_rules)] = ("unchanged" if lines[0].startswith("unchanged:") else
+                                "updated" if existed else "created")
+    (worker / "reports").mkdir(parents=True, exist_ok=True)
     (orch / "groups").mkdir(parents=True, exist_ok=True)
-    result = dict(orch_home=str(orch), interface=str(interface), files=files)
+    result = dict(orch_home=str(orch), interface=str(interface), computer_use_worker=str(worker),
+                  computer_use_rules=lines, files=files)
     if source:
         generated = {orch / "AGENTS.md", orch / ".codex" / "config.toml"}  # never replaced by --from
         result["migrated"] = migrate(source, orch, {p: t for p, t in planned.items() if p not in generated})

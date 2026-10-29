@@ -5,7 +5,7 @@
   orchd orch stop ID                          stop a Claude Orch
   orchd orch restart [OLD_ID] [--model opus|sonnet] [--dry-run]
                                               stop, confirm death, start, adopt, and rebind Desktop
-  orchd init [--from OLD_ORCH_HOME] [--no-trust]   create ~/orch/home and ~/orch/interface, trust them in Codex
+  orchd init [--from OLD_ORCH_HOME] [--no-trust]   create Orch, interface and computer-use homes; trust Orch/interface in Codex
   orchd upgrade                               reinstall the uv-installed orchd at its source's newest commit
   orchd entry reconcile [--apply]             move open entry questions stranded on an old owner to the entry's owner (#60)
   orchd binding [--new | --to ORCH_ID | --status] [--entry NAME]

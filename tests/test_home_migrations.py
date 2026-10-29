@@ -54,7 +54,7 @@ class HomeMigrationTest(unittest.TestCase):
         self.assertIn("原檔已有的相同規則可以手動刪掉", "\n".join(lines))
         self.assertIn(str(backups[0]), "\n".join(lines))
         self.assertIn("restore:", "\n".join(lines))
-        self.assertEqual(self.applied(), [("orch-rules-v1",), ("orch-rules-v2",)])
+        self.assertEqual(self.applied(), [("computer-use-rules-v1",), ("orch-rules-v1",), ("orch-rules-v2",)])
         self.assertEqual(self.run_migrations()[0], 0)
         self.assertEqual(self.file.read_bytes(), content)
         self.assertEqual(list(self.backups("home").glob("AGENTS.md.*")), backups)
@@ -69,7 +69,7 @@ class HomeMigrationTest(unittest.TestCase):
         # A new release adds a new step; old steps stay recorded and are skipped.
         with patch.object(migrations, "STEPS", (("orch-rules-v1", migrations.update_rules), ("orch-rules-v2", migrations.update_rules))):
             self.assertEqual(self.run_migrations()[0], 0)
-        self.assertEqual(self.applied(), [("orch-rules-v1",), ("orch-rules-v2",)])
+        self.assertEqual(self.applied(), [("computer-use-rules-v1",), ("orch-rules-v1",), ("orch-rules-v2",)])
 
     def test_v2_step_refreshes_a_v1_block_with_the_intake_rule_and_keeps_outside_bytes(self):
         prefix, suffix = b"mine before\n", b"\nmine after"
@@ -85,11 +85,30 @@ class HomeMigrationTest(unittest.TestCase):
         self.assertTrue(content.startswith(prefix) and content.endswith(suffix))
         self.assertIn("polling".encode(), content)
         self.assertIn(b"orchd:managed:start v=2", content)
-        self.assertEqual(self.applied(), [("orch-rules-v1",), ("orch-rules-v2",)])
+        self.assertEqual(self.applied(), [("computer-use-rules-v1",), ("orch-rules-v1",), ("orch-rules-v2",)])
+
+    def test_computer_use_step_updates_existing_block_after_previous_release(self):
+        worker = self.home / "orch/gpt-computer-use-worker/AGENTS.md"
+        worker.parent.mkdir(parents=True)
+        old = b"before\r\n<!-- orchd:managed:start v=0 -->\nold\n<!-- orchd:managed:end -->\r\nafter"
+        worker.write_bytes(old)
+        con = migrations.connect(self.home, self.env)
+        with con:
+            folders = migrations.targets(self.home, self.env, con)
+            scope = migrations.json.dumps({r: str(f.absolute()) for r, f in folders.items()}, sort_keys=True)
+            for step in ("orch-rules-v1", "orch-rules-v2"):
+                con.execute("INSERT INTO applied VALUES(?, ?, 0)", (step, scope))
+        con.close()
+        self.assertEqual(self.run_migrations()[0], 0)
+        template = (bootstrap.TEMPLATES / "gpt-computer-use-worker/AGENTS.md").read_bytes().rstrip(b"\n")
+        self.assertEqual(worker.read_bytes(), b"before\r\n" + template + b"\r\nafter")
+        self.assertEqual(next(self.backups("gpt-computer-use-worker").iterdir()).read_bytes(), old)
+        self.assertEqual(self.run_migrations()[0], 0)
+        self.assertEqual(len(list(self.backups("gpt-computer-use-worker").iterdir())), 1)
 
     def test_missing_files_are_created_from_init_templates(self):
         self.assertEqual(self.run_migrations()[0], 0)
-        for role in ("home", "interface"):
+        for role in ("home", "interface", "gpt-computer-use-worker"):
             self.assertEqual((self.home / "orch" / role / "AGENTS.md").read_bytes(),
                              (bootstrap.TEMPLATES / role / "AGENTS.md").read_bytes())
 
@@ -167,11 +186,11 @@ class HomeMigrationTest(unittest.TestCase):
                       ORCHD_INTERFACE_HOME=str(self.home / "custom-interface"))
         bootstrap.init(None, home=self.home, env=custom, trust=False, orchd_bin="/opt/orchd")
         self.assertEqual(self.run_migrations()[0], 0)
-        self.assertFalse((self.home / "orch").exists())
+        self.assertTrue((self.home / "orch/gpt-computer-use-worker/AGENTS.md").is_file())
         overridden = dict(self.env, ORCHD_ROOT=str(self.home / "other"))
         self.assertEqual(migrations.run(home=self.home, env=overridden)[0], 0)
         self.assertTrue((self.home / "other/home/AGENTS.md").is_file())
-        self.assertEqual(len(self.applied()), 4)  # 2 steps x 2 scopes; step completion is scoped to home paths
+        self.assertEqual(len(self.applied()), 6)  # 3 steps x 2 scopes; step completion is scoped to home paths
 
     def test_cli_dry_run_and_migrations_only_need_no_uv_install(self):
         env = {**{k: v for k, v in os.environ.items() if not k.startswith("ORCHD_")}, **self.env, "ORCHD_ROOT": str(self.home / "orch")}
