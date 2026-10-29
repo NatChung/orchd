@@ -61,10 +61,10 @@ class ConfigTest(unittest.TestCase):
     # fail closed
     def test_invalid_values_raise_naming_the_source(self):
         with mock.patch.dict(os.environ, {"ORCHD_WORKER_MODEL": "opus"}):
-            with self.assertRaisesRegex(ValueError, "ORCHD_WORKER_MODEL.*opus.*sol, sonnet"):
+            with self.assertRaisesRegex(ValueError, "ORCHD_WORKER_MODEL.*opus.*terra, sonnet, sol, fable, astra"):
                 config.worker_model()
         self.write('[worker]\nmodel = "opus"\n')
-        with self.assertRaisesRegex(ValueError, r"config\.toml.*opus.*sol, sonnet"):
+        with self.assertRaisesRegex(ValueError, r"config\.toml.*opus.*terra, sonnet, sol, fable, astra"):
             config.worker_model()
         with self.assertRaisesRegex(ValueError, "flag.*opus"):
             config.worker_model("opus")
@@ -121,7 +121,7 @@ class ConfigTest(unittest.TestCase):
     def test_set_rejects_invalid_and_writes_nothing(self):
         code, _, err = self.run_cli("config", "set", "worker-model", "opus")
         self.assertEqual(code, 1)
-        self.assertIn("sol, sonnet", err)
+        self.assertIn("terra, sonnet, sol, fable, astra", err)
         self.assertFalse(self.file.exists())
         self.assertEqual(self.run_cli("config", "set", "nope", "x")[0], 1)
 

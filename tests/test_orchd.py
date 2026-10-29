@@ -267,7 +267,7 @@ class CoreTest(unittest.TestCase):
 
     def test_dispatch_refuses_removed_opus_before_creating_a_task(self):
         for model in ("opus", "claude-opus-5-5"):
-            with self.subTest(model=model), self.assertRaisesRegex(ValueError, "use one of sol, sonnet"):
+            with self.subTest(model=model), self.assertRaisesRegex(ValueError, "use one of terra, sonnet, sol, fable, astra"):
                 self.dispatch(model=model)
         self.assertEqual(store.open_tasks(self.con), [])
         self.assertEqual((self.rt.sent, self.rt.removed), ([], []))

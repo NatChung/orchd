@@ -55,8 +55,11 @@ def planned_files(home, env, orchd_bin=None):
     from . import mcp_server  # imported lazily: it pulls in the runtime
     orch, interface = paths.orch_home(home, env), paths.interface_home(home, env)
     reads, apps = personal(home, env)
+    from . import config
+    interface_model, interface_effort = config.interface_settings(env, home)
     values = dict(HOME=str(Path(home)), ORCH_HOME=str(orch), INTERFACE_HOME=str(interface),
                   ORCHD=str(orchd_bin or paths.orchd_executable(env)),
+                  INTERFACE_MODEL=_toml_string(interface_model), INTERFACE_EFFORT=_toml_string(interface_effort),
                   ENTRY_APPROVALS=_approvals("orchd_entry", [t["name"] for t in mcp_server.ENTRY_TOOLS]),
                   EXTRA_READ="".join(f"{_toml_string(p)} = \"read\"\n" for p in reads),
                   DISABLED_APPS="".join(f"\n[apps.{_toml_string(a)}]\nenabled = false\n" for a in apps))

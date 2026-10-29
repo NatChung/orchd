@@ -2,7 +2,11 @@
 
     projects_dir = "/Users/me/projects"   # top-level; env ORCHD_PROJECTS wins, see paths.projects_dir
     [worker]
-    model = "sol"        # sol | sonnet; with nothing set anywhere, sonnet
+    model = "sol"        # any alias of the model catalog (orchd.models); with nothing set anywhere, sonnet
+    [models.terra]       # optional: override/add worker models (id, vendor, tier); see orchd/models.py
+    [interface]          # optional: model/effort `orchd init` writes into the Desktop interface's .codex/config.toml
+    model = "gpt-6.1-terra"
+    effort = "low"
 
 Worker model precedence: dispatch's explicit model (flag) > ORCHD_WORKER_MODEL (env) > config file > default.
 Every layer is validated even when a higher one wins; a bad value raises ValueError naming its source.
@@ -11,7 +15,7 @@ Every write (worker.model, projects_dir; the doctor's first-run prompt uses it t
 the one line (line endings, CRLF included, are kept byte for byte, a new file is 0600 in a 0700 directory, an existing file keeps its
 mode) and refuses (writing nothing) unless the re-parsed result equals the old data apart from that key, so nothing else is rewritten.
 ORCHD_CONFIG_FILE points at an exact file; it is a test/advanced hook and outranks ORCHD_CONFIG_DIR.
-Review always uses the other vendor than the author, so it has no setting.
+Review always uses the other vendor than the author (same tier when possible), so it has no setting.
 """
 import json
 import os
@@ -119,7 +123,26 @@ def worker_model(explicit=None, env=None):
 
 def worker_backend(model):
     """Default for a new dispatch after resolving its model; stored attempts are unchanged."""
-    return "app-server" if model == "sol" else "exec"
+    from . import models
+    return "app-server" if models.vendor_of(model) == "codex" else "exec"
+
+
+FACTORY_INTERFACE = ("gpt-6.1-terra", "low")
+
+
+def interface_settings(env=None, home=None):
+    """(model, effort) for the interface's Codex config: [interface] model/effort in the file, else the factory pair."""
+    file = path(env, home)
+    section = _read(env, home)[1].get("interface", {})
+    if not isinstance(section, dict):
+        raise ValueError(f"{file}: [interface] must be a table")
+    out = []
+    for key, default in zip(("model", "effort"), FACTORY_INTERFACE):
+        value = section.get(key, default)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{file}: [interface] {key} must be a non-empty string")
+        out.append(value)
+    return tuple(out)
 
 
 def file_projects_dir(env=None, home=None):
@@ -239,10 +262,14 @@ def get_value(key, env=None):
 
 
 def show(env=None):
+    from . import models
     model, source = worker_model(env=env)
     projects, projects_source = get_value("projects-dir", env)
     return {"file": str(path(env)), "file-source": path_source(env),
             "worker-model": {"value": model, "source": source},
             "worker-backend": {"value": worker_backend(model), "source": "model-default"},
             "projects-dir": {"value": projects, "source": projects_source},
-            "review": "always the other vendor than the author (not configurable)"}
+            "models": {a: dict(e) for a, e in models.catalog(env).items()},
+            "interface": dict(zip(("model", "effort"), interface_settings(env))),
+            "review": "always the other vendor than the author, same tier when possible (terra<->sonnet, "
+                      "sol->sonnet, fable<->astra by default); not configurable"}

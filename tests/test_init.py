@@ -137,7 +137,7 @@ class InitTest(unittest.TestCase):
         self.assertEqual(home_cfg["mcp_servers"]["orchd"]["args"], ["mcp"])
         self.assertEqual(set(home_cfg["mcp_servers"]["orchd"]["tools"]), {t["name"] for t in mcp_server.TOOLS})
         iface = tomllib.loads((interface / ".codex" / "config.toml").read_text())
-        self.assertEqual(iface["model"], "gpt-6.1-sol")
+        self.assertEqual(iface["model"], "gpt-6.1-terra")
         self.assertEqual(iface["model_reasoning_effort"], "low")
         fs = iface["permissions"]["interface"]["filesystem"]
         self.assertEqual((fs[str(self.home)], fs[str(interface)]), ("deny", "read"))

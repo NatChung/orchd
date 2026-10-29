@@ -49,9 +49,11 @@ TOOLS = [
          "model": {"type": "string", "enum": [*WORKER_MODELS, "auto"],
                    "description": "Optional. Omitted = the default from orchd config (ORCHD_WORKER_MODEL, then "
                                   "config.toml; factory sonnet); see `orchd config show`. "
-                                  "auto = apply quota-shadow-v1 remaining-percent score (more remaining wins, within 5 points ties to sol), 95% margin; tie/unknown prefers sol, recent rate limits excluded. "
-                                  "Auto sol rate-limit failures retry sonnet once per task and notify inbox; explicit models only notify. "
-                                  "sonnet = Claude Sonnet 5.5; sol = GPT-6.1 Sol on Codex"},
+                                  "auto = apply quota-shadow-v1 remaining-percent score (more remaining wins, within 5 points ties to the Codex model), 95% margin; tie/unknown prefers the Codex model, recent rate limits excluded; "
+                                  "auto only picks tier 1 (terra, sonnet). "
+                                  "Auto Codex rate-limit failures retry the other vendor once per task and notify inbox; explicit models only notify. "
+                                  "Aliases come from orchd config [models.*]; defaults: terra = GPT-6.1 Terra and sonnet = Claude Sonnet 5.5 (tier 1), "
+                                  "sol = GPT-6.1 Sol (tier 2), fable = Claude Fable 5.1 and astra = GPT-6 Astra (tier 3); see `orchd config show`"},
          "goal_id": {"type": "string", "description": "Central goal id; must belong to repo"},
          "issue_ref": {"type": "string", "description": "Optional parent ref: github:owner/repo#N or jira:KEY-N; format validation only"},
          "goal_critical": {"type": "boolean", "description": "Requires goal_id; whether the task is critical to that goal"},
@@ -151,14 +153,14 @@ TOOLS = [
      "inputSchema": {"type": "object", "required": ["task_id"], "properties": {"task_id": {"type": "string"}}}},
     {"name": "retry",
      "description": "Replace a task's worker with a new one on the same worktree and branch, keeping all its local work "
-                    "(uncommitted, untracked, stash, commits). Pick sonnet or "
-                    "sol (required here; usually the other vendor than the current worker); the from -> to change and your reason are recorded. Stops only "
+                    "(uncommitted, untracked, stash, commits). Pick a model alias "
+                    "(required here) or escalate (next tier up, other vendor first: terra/sonnet -> sol -> fable); the from -> to change and your reason are recorded. Stops only "
                     "that task's worker and starts nothing if it does not stop. Refused for closed tasks or a "
                     "missing worktree. The new worker gets the task, its latest progress/report and your reason.",
      "inputSchema": {"type": "object", "required": ["task_id", "model", "reason"], "properties": {
          "task_id": {"type": "string"},
-         "model": {"type": "string", "enum": list(WORKER_MODELS),
-                   "description": "Required. sonnet = Claude Sonnet 5.5; sol = GPT-6.1 Sol on Codex. "
+         "model": {"type": "string", "enum": [*WORKER_MODELS, "escalate"],
+                   "description": "Required. A worker alias from orchd config (default terra, sonnet, sol, fable, astra) or escalate = next tier up. "
                                   "(dispatch may omit its model and use the configured default; retry may not.)"},
          "backend": {"type": "string", "enum": ["exec", "app-server"],
                      "description": "Optional; retains Codex attempt backend, Sonnet uses its existing backend"},

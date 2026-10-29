@@ -226,7 +226,7 @@ installation. A run on this branch produced:
 ```text
 a: sol full -> claude-sonnet-5-5; quota-shadow-v1 applied=true;
    reason: known capacity with 5% margin; remaining-percent score
-b: quota unknown -> gpt-6.1-sol; reason: quota unknown/stale; fallback
+b: quota unknown -> gpt-6.1-terra; reason: quota unknown/stale; fallback
 c: group b8105e07c6c9a; pids [53019, 53024]; simultaneous_alive=true;
    distinct_git_worktrees=true; grouped_tasks=2
 d: automatic rate-limit retry -> claude-sonnet-5-5; auto_retry_count=1;
