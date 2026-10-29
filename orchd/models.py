@@ -118,6 +118,23 @@ def quota_provider(alias, env=None):
     return QUOTA_PROVIDER[catalog(env)[alias]["quota"]]
 
 
+def quota_provider_for(model, env=None):
+    """Resolve stored ids through the catalog; historical ids retain their vendor's bucket."""
+    alias = alias_for(model, env)
+    return quota_provider(alias, env) if alias else QUOTA_PROVIDER[vendor_of(model, env)]
+
+
+def capacity_fallback(model, env=None):
+    """Other quota bucket, preferring the same tier, then nearest/lower tier and catalog order."""
+    cat = catalog(env)
+    alias = alias_for(model, env)
+    tier = cat[alias]["tier"] if alias else 1
+    provider = quota_provider_for(model, env)
+    others = [(abs(e["tier"] - tier), e["tier"], i, a) for i, (a, e) in enumerate(cat.items())
+              if quota_provider(a, env) != provider]
+    return min(others)[3] if others else None
+
+
 def default_alias(vendor, env=None):
     """The tier-1 alias auto uses for a vendor (first in catalog order), or None."""
     return next((a for a, e in catalog(env).items() if e["vendor"] == vendor and e["tier"] == 1), None)

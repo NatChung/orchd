@@ -36,6 +36,36 @@ class RoutingTest(unittest.TestCase):
         self.args = dict(repo='demo', title='Synthetic', instructions='Synthetic', done_when='Synthetic',
                          model='auto', backend='exec', model_reason='independent', task_type='code')
 
+    def test_configured_alias_cooldown_propagates_by_bucket(self):
+        from tests.test_models import snapshot
+        file = Path(self.tmp.name) / 'config.toml'
+        file.write_text('[models.mini]\nid = "gpt-7-mini"\nvendor = "codex"\nquota = "claude"\ntier = 3\n[models.sonnet]\nquota = "codex"\n')
+        with patch.dict(os.environ, {'ORCHD_CONFIG_FILE': str(file)}):
+            task = self.dispatch(model='mini')
+            core.rate_limit_notice(self.con, self.rt, task['id'], {'code': 'usage_limit_exceeded'}, 'one')
+            body = self.con.execute("SELECT body FROM messages WHERE kind='rate_limit'").fetchone()[0]
+            self.assertEqual(json.loads(body)['provider'], 'sonnet')
+            with patch('orchd.quota.dispatch_shadow', side_effect=lambda **kw: quota.shadow(snapshot(10, 10), **dict(kw, applied=False))):
+                self.assertEqual(routing.select(self.con)['selected_alias'], 'terra')
+                # Fable shares mini's Claude bucket, so review must wait too.
+                self.assertIsNone(routing.select(self.con, task_type='review', author_model='astra')['selected_alias'])
+
+    def test_default_codex_aliases_share_cooldown(self):
+        self.observe(10, 10)
+        task = self.dispatch(model='astra')
+        core.rate_limit_notice(self.con, self.rt, task['id'], {'code': 'usage_limit_exceeded'}, 'one')
+        self.assertEqual(routing.select(self.con)['selected_alias'], 'sonnet')
+
+    def test_auto_retry_uses_other_quota_bucket_at_same_tier(self):
+        file = Path(self.tmp.name) / 'config.toml'
+        file.write_text('[models.mini]\nid = "gpt-7-mini"\nvendor = "codex"\nquota = "codex"\ntier = 3\n[models.fable]\nquota = "codex"\n[models.astra]\nquota = "claude"\n')
+        with patch.dict(os.environ, {'ORCHD_CONFIG_FILE': str(file)}):
+            task = self.dispatch(model='mini')
+            store.update_task(self.con, task['id'], auto_model=1)
+            core.rate_limit_notice(self.con, self.rt, task['id'], {'code': 'usage_limit_exceeded'}, 'one')
+            result = core.auto_retry(self.con, self.rt, *self.rt.auto_requests[0])
+            self.assertEqual(result['model'], core.WORKER_MODELS['astra'])
+
     def test_provider_error_formats_and_contextual_fallback(self):
         # Source: openai/codex tag rust-v0.160.1:
         # codex-rs/app-server-protocol/schema/typescript/v2/{TurnError,CodexErrorInfo}.ts

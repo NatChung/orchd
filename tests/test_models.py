@@ -40,6 +40,17 @@ class ModelCatalog(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "quota must be one of"):
             models.catalog()
 
+    def test_cooldown_buckets_cover_shared_and_historical_models(self):
+        for alias in ('terra', 'sol', 'astra'):
+            self.assertEqual(models.quota_provider_for(WORKER_MODELS[alias]), 'sol')
+        for alias in ('sonnet', 'fable'):
+            self.assertEqual(models.quota_provider_for(WORKER_MODELS[alias]), 'sonnet')
+        self.assertEqual(models.quota_provider_for('gpt-retired'), 'sol')
+        self.assertEqual(models.quota_provider_for('claude-retired'), 'sonnet')
+        self.assertEqual(models.capacity_fallback('astra'), 'fable')
+        self.write('[models.sonnet]\nquota = "codex"\n[models.fable]\nquota = "codex"\n')
+        self.assertIsNone(models.capacity_fallback('terra'))
+
     def test_quota_mapping_drives_auto_selection(self):
         self.write('[models.terra]\nquota = "claude"\n')
         snap = {"sol": dict(state="known", windows=[dict(used_percent=10, state="known")]),
