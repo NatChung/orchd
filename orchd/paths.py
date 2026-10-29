@@ -1,4 +1,4 @@
-"""Where orchd's folders live. One root (default ~/orch) holds the Orch home and the Desktop interface.
+"""Where orchd's folders live. One root (default ~/orch) holds the Orch home, Desktop interface and computer-use session home.
 
 `home` and `env` are injectable so callers that check another user's machine (doctor, setup wizard) derive the
 defaults from that user's HOME, not ours. State (the SQLite DB) stays in ORCHD_HOME, outside these folders.
@@ -23,6 +23,10 @@ def orch_home(home=None, env=None):
 def interface_home(home=None, env=None):
     env = os.environ if env is None else env
     return Path(env.get("ORCHD_INTERFACE_HOME") or root(home, env) / "interface")
+
+
+def computer_use_home(home=None, env=None):
+    return root(home, env) / "gpt-computer-use-worker"
 
 
 def orch_images(home=None):

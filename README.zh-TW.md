@@ -64,7 +64,10 @@ orchd upgrade
 | Orch 根目錄 | `~/orch` | `ORCHD_ROOT` |
 | Orch home | `~/orch/home` | `ORCHD_ORCH_HOME` |
 | Desktop 入口 | `~/orch/interface` | `ORCHD_INTERFACE_HOME` |
+| Computer-use session 家目錄 | `~/orch/gpt-computer-use-worker` | 跟隨 `ORCHD_ROOT` |
 | 專案目錄 | `~/projects` | `ORCHD_PROJECTS` |
+
+安裝套件後執行 `orchd init`，也會建立 computer-use session 家目錄、managed `AGENTS.md` 與 `reports/` 證據目錄。重跑 init 會備份並更新 managed 區塊，保留區塊外的自訂內容。Desktop 派工仍在設計階段，見[backend 設計](docs/design/computer-use-worker.md)。
 
 `init.toml` 可設定 Orch home 額外讀取路徑與要停用的 apps；請依自己的工作範圍設定，範例不含實際 connector ID：
 

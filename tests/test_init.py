@@ -2,6 +2,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from orchd import home_migrations
 
 from orchd import bootstrap, mcp_server, paths
 
@@ -69,6 +70,40 @@ class InitTest(unittest.TestCase):
         self.assertEqual(cfg.read_text(), after)
         self.assertEqual(len(list(cfg.parent.glob("config.toml.orchd-init-*"))), 1)
         self.assertEqual(self.codex()["model"], "gpt-6.1-sol")
+
+    def test_computer_use_home_rules_update_preserves_user_content_and_evidence(self):
+        result = self.init(trust=False)
+        worker = self.home / "orch/gpt-computer-use-worker"
+        self.assertEqual(result["computer_use_worker"], str(worker))
+        self.assertTrue((worker / "reports").is_dir())
+        evidence = worker / "reports/step.png"
+        evidence.write_bytes(b"evidence")
+        rules = worker / "AGENTS.md"
+        prefix, suffix = b"local before\r\n", b"\r\nlocal after"
+        old = prefix + b"<!-- orchd:managed:start v=0 -->\nold\n<!-- orchd:managed:end -->" + suffix
+        rules.write_bytes(old)
+        updated = self.init(trust=False)
+        self.assertEqual(updated["files"][str(rules)], "updated")
+        template = (bootstrap.TEMPLATES / "gpt-computer-use-worker/AGENTS.md").read_bytes().rstrip(b"\n")
+        self.assertEqual(rules.read_bytes(), prefix + template + suffix)
+        backups = home_migrations.state_dir(self.home, self.env) / "backups/gpt-computer-use-worker"
+        self.assertEqual(next(backups.iterdir()).read_bytes(), old)
+        self.assertEqual(self.init(trust=False)["files"][str(rules)], "unchanged")
+        self.assertEqual(len(list(backups.iterdir())), 1)
+        self.assertEqual(evidence.read_bytes(), b"evidence")
+
+    def test_computer_use_home_adopts_existing_rules_and_follows_root(self):
+        self.env = {"ORCHD_ROOT": str(self.home / "custom")}
+        worker = self.home / "custom/gpt-computer-use-worker"
+        worker.mkdir(parents=True)
+        rules = worker / "AGENTS.md"
+        rules.write_bytes(b"my rules\r\n")
+        self.init(trust=False)
+        self.assertTrue(rules.read_bytes().startswith(b"my rules\r\n"))
+        self.assertEqual(rules.read_bytes().count(b"orchd:managed:start"), 1)
+        con = home_migrations.connect(self.home, self.env, readonly=True)
+        self.addCleanup(con.close)
+        self.assertEqual(home_migrations.targets(self.home, {}, con)["gpt-computer-use-worker"], worker)
 
     def test_edited_files_are_kept(self):
         self.init()

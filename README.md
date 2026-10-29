@@ -64,7 +64,10 @@ Use [public issues](https://github.com/NatChung/orchd/issues) for general bugs a
 | Orch root | `~/orch` | `ORCHD_ROOT` |
 | Orch home | `~/orch/home` | `ORCHD_ORCH_HOME` |
 | Desktop entry | `~/orch/interface` | `ORCHD_INTERFACE_HOME` |
+| Computer-use session home | `~/orch/gpt-computer-use-worker` | under `ORCHD_ROOT` |
 | Projects directory | parent of a checkout under HOME, else `~/projects` | `projects_dir` in `config.toml`, `ORCHD_PROJECTS` |
+
+`orchd init` also creates the computer-use session home with managed `AGENTS.md` rules and a `reports/` evidence folder. Re-running init refreshes that managed block with backups and preserves user content outside it. Installation includes running init after installing the package. Desktop dispatch is design-only; see [the proposed backend](docs/design/computer-use-worker.md).
 
 `config.toml` in the personal settings directory sets the projects directory shared by doctor and dispatch (`~/` or an absolute path); `ORCHD_PROJECTS` overrides it. The value does not depend on the current working directory, so Desktop and background dispatch use the same location:
 

@@ -53,7 +53,8 @@ def record_init(home, env):
     try:
         with con:
             for role, folder in (("home", paths.orch_home(home, env)),
-                                 ("interface", paths.interface_home(home, env))):
+                                 ("interface", paths.interface_home(home, env)),
+                                 ("gpt-computer-use-worker", paths.computer_use_home(home, env))):
                 con.execute("INSERT OR REPLACE INTO homes VALUES(?, ?)", (role, str(folder.absolute())))
     finally:
         con.close()
@@ -61,10 +62,11 @@ def record_init(home, env):
 
 def targets(home, env, con):
     saved = dict(con.execute("SELECT role, path FROM homes")) if con else {}
-    return {role: Path(env.get(key) or (str(folder) if env.get("ORCHD_ROOT") else saved.get(role, str(folder))))
+    return {role: Path((env.get(key) if key else None) or (str(folder) if env.get("ORCHD_ROOT") else saved.get(role, str(folder))))
             for role, key, folder in (
                 ("home", "ORCHD_ORCH_HOME", paths.orch_home(home, env)),
-                ("interface", "ORCHD_INTERFACE_HOME", paths.interface_home(home, env)))}
+                ("interface", "ORCHD_INTERFACE_HOME", paths.interface_home(home, env)),
+                ("gpt-computer-use-worker", None, paths.computer_use_home(home, env)))}
 
 
 def updated(original, template):
@@ -129,7 +131,8 @@ def update_rules(folders, dry_run, lines, backup_root):
 
 
 # Append ordered (stable id, idempotent callable) steps for future releases.
-STEPS = (("orch-rules-v1", update_rules), ("orch-rules-v2", update_rules))
+STEPS = (("orch-rules-v1", update_rules), ("orch-rules-v2", update_rules),
+         ("computer-use-rules-v1", update_rules))
 
 
 def run(*, home=None, env=None, dry_run=False):
