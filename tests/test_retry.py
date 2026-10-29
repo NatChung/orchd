@@ -128,7 +128,7 @@ class RetryTest(unittest.TestCase):
         t = self.dispatch()
         before = dict(store.get_task(self.con, t["id"]))
         for model in ("opus", "claude-opus-5-5"):
-            with self.subTest(model=model), self.assertRaisesRegex(ValueError, "use one of sol, sonnet"):
+            with self.subTest(model=model), self.assertRaisesRegex(ValueError, "use one of terra, sonnet, sol, fable, astra"):
                 core.retry(self.con, self.rt, t["id"], model, "switch worker")
         self.assertEqual((self.rt.stopped, self.rt.started), ([], []))
         self.assertEqual(dict(store.get_task(self.con, t["id"])), before)
@@ -224,6 +224,15 @@ class RetryTest(unittest.TestCase):
         self.rt.stop_ignored.clear()  # once it stops, the same retry goes through
         r = core.retry(self.con, self.rt, t["id"], "sonnet", "escalate")
         self.assertEqual(r["model"], WORKER_MODELS["sonnet"])
+
+    def test_escalate_moves_one_tier_up_preferring_the_other_vendor(self):
+        t = self.dispatch()  # factory default sonnet (tier 1)
+        r = core.retry(self.con, self.rt, t["id"], "escalate", "failed twice")
+        self.assertEqual(r["model"], WORKER_MODELS["sol"])
+        r = core.retry(self.con, self.rt, t["id"], "escalate", "failed again")
+        self.assertEqual(r["model"], WORKER_MODELS["fable"])  # sol is Codex, so tier 3 starts with Claude
+        with self.assertRaisesRegex(ValueError, "top tier"):
+            core.retry(self.con, self.rt, t["id"], "escalate", "nothing above")
 
     def test_unverifiable_claude_job_probe_counts_as_not_stopped(self):
         t = self.dispatch()
@@ -332,7 +341,7 @@ class RetryTest(unittest.TestCase):
     def test_mcp_retry_tool(self):
         tool = next(x for x in mcp_server.TOOLS if x["name"] == "retry")
         self.assertEqual(tool["inputSchema"]["required"], ["task_id", "model", "reason"])
-        self.assertEqual(tool["inputSchema"]["properties"]["model"]["enum"], list(WORKER_MODELS))
+        self.assertEqual(tool["inputSchema"]["properties"]["model"]["enum"], [*WORKER_MODELS, "escalate"])
         t = self.dispatch()
         out = io.StringIO()
         calls = [{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "retry", "arguments": {
@@ -343,7 +352,7 @@ class RetryTest(unittest.TestCase):
         ok, refused = [json.loads(line)["result"] for line in out.getvalue().splitlines()]
         self.assertEqual(json.loads(ok["content"][0]["text"])["model"], "gpt-6.1-sol")
         self.assertTrue(refused["isError"])
-        self.assertIn("use one of sol, sonnet", refused["content"][0]["text"])
+        self.assertIn("use one of terra, sonnet, sol, fable, astra", refused["content"][0]["text"])
 
 
 class RetryReviewRegressionTest(unittest.TestCase):

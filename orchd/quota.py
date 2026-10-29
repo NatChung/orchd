@@ -572,16 +572,38 @@ TIE_MARGIN = 5
 
 def shadow(snapshot, *, backend='exec', task_type=None, author_model=None, now=None,
            applied=False, recent_limited=()):
-    """One shared selection policy, optionally applied; never a quota reservation."""
+    """One shared selection policy, optionally applied; never a quota reservation.
+
+    Quota providers keep their stored keys: 'sol' is the Codex bucket, 'sonnet' the Claude one. Auto selects among
+    the tier-1 aliases of the model catalog (one per vendor); a review takes the author's cross-vendor pair."""
+    from . import models
     now = time.time() if now is None else now
-    allowed = ['sol'] if backend == 'app-server' else ['sol', 'sonnet']
+    cat = models.catalog()
+    tier1 = {}
+    for alias, entry in cat.items():
+        if entry['tier'] == 1:
+            tier1.setdefault(models.quota_provider(alias), alias)
+    allowed = [p for p in ('sol', 'sonnet') if p in tier1]
+    if backend == 'app-server':
+        allowed = [p for p in allowed if cat[tier1[p]]['vendor'] == 'codex']
     review = task_type == 'review' or author_model is not None
+    alias_of = dict(tier1)
+    codex, claude = tier1.get('sol', 'sol'), tier1.get('sonnet', 'sonnet')
     if review:
         if not author_model:
             return dict(selected_alias=None, reason='review author unknown; another provider required',
                         policy_version='quota-shadow-v1', applied=False, quota=snapshot)
-        other = 'sonnet' if author_model.startswith('gpt-') else 'sol' if author_model.startswith('claude-') else None
-        allowed = [p for p in allowed if p == other]
+        known = models.alias_for(author_model) or author_model.startswith(('gpt-', 'claude-'))
+        paired = models.pair(author_model) if known else None
+        if paired:
+            # The configured pairing decides the reviewer, whatever its tier; the tier-1 filter is for auto only.
+            provider = models.quota_provider(paired)
+            alias_of = {provider: paired}
+            allowed = [provider]
+            if backend == 'app-server' and cat[paired]['vendor'] != 'codex':
+                allowed = []
+        else:
+            allowed = []
     usable = []
     for provider in allowed:
         value = snapshot[provider]
@@ -592,7 +614,7 @@ def shadow(snapshot, *, backend='exec', task_type=None, author_model=None, now=N
     selected = None
     if usable:
         best = max(usable)[0]
-        # Scores within TIE_MARGIN of the best are a tie: prefer sol, then the higher score.
+        # Scores within TIE_MARGIN of the best are a tie: prefer the Codex bucket, then the higher score.
         selected = max((u for u in usable if best - u[0] <= TIE_MARGIN), key=lambda u: (u[1], u[0]))[2]
     reason = ('review requires another provider; ' if review else '')
     sol_used = max((w['used_percent'] for w in snapshot['sol']['windows']
@@ -600,7 +622,7 @@ def shadow(snapshot, *, backend='exec', task_type=None, author_model=None, now=N
     if (selected == 'sonnet' and 'sol' in allowed and 'sol' not in recent_limited and snapshot['sol']['state'] != 'known'
             and (sol_used is None or sol_used < 95)):
         selected = 'sol'
-        reason += 'sol quota unknown (expired/stale); prefer sol, not limited or full; no capacity guarantee'
+        reason += f'{codex} quota unknown (expired/stale); prefer {codex}, not limited or full; no capacity guarantee'
     elif selected:
         reason += 'known capacity with 5% margin; remaining-percent score (balances usage; provisional)'
     elif applied and allowed:
@@ -613,13 +635,13 @@ def shadow(snapshot, *, backend='exec', task_type=None, author_model=None, now=N
         selected = ('sol' if 'sol' in not_full else not_full[0]) if not_full else (
             min(candidates, key=lambda p: (used[p], p != 'sol')) if candidates else
             'sol' if 'sol' in allowed else allowed[0])
-        reason += ('quota unknown/stale; fallback (prefer sol when not exhausted), no capacity guarantee' if not_full else
-                   'allowed providers full; most remaining known percentage, tie/no evidence: sol (best-effort)')
+        reason += (f'quota unknown/stale; fallback (prefer {codex} when not exhausted), no capacity guarantee' if not_full else
+                   f'allowed providers full; most remaining known percentage, tie/no evidence: {codex} (best-effort)')
     elif review:
         reason += 'wait: required provider unavailable, unknown, or backend incompatible'
     elif any(snapshot[p]['state'] == 'unknown' for p in allowed):
         selected = 'sol'
-        reason += 'quota unknown; conservative sol preference, no capacity guarantee'
+        reason += f'quota unknown; conservative {codex} preference, no capacity guarantee'
     else:
         reason += 'wait: known windows at or above 95% used'
     if applied and recent_limited:
@@ -627,9 +649,9 @@ def shadow(snapshot, *, backend='exec', task_type=None, author_model=None, now=N
     if applied and selected == 'sonnet' and ('sol' in recent_limited or any(
             w.get('state') == 'known' and number(w.get('used_percent')) and w['used_percent'] >= 95
             for w in snapshot['sol']['windows'])):
-        reason += '; sol at >=95% or recent rate limit; selected sonnet'
-    return dict(selected_alias=selected, reason=reason, policy_version='quota-shadow-v1',
-                applied=applied, quota=snapshot)
+        reason += f'; {codex} at >=95% or recent rate limit; selected {claude}'
+    return dict(selected_alias=alias_of.get(selected) if selected else None, reason=reason,
+                policy_version='quota-shadow-v1', applied=applied, quota=snapshot)
 
 
 def dispatch_shadow(**kwargs):

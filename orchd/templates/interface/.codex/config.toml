@@ -1,7 +1,7 @@
 # Operator 的 Desktop interface：只轉交原文給綁定的 Orch。由 `orchd init` 產生。
 # 讀不到家目錄、沒有網路、不能寫檔；只掛 orchd 的入口 MCP（relay／status／foreground）。
-model = "gpt-6.1-sol"
-model_reasoning_effort = "low"
+model = $INTERFACE_MODEL
+model_reasoning_effort = $INTERFACE_EFFORT
 default_permissions = "interface"
 approval_policy = "never"
 approvals_reviewer = "user"

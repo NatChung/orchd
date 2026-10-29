@@ -36,6 +36,36 @@ class RoutingTest(unittest.TestCase):
         self.args = dict(repo='demo', title='Synthetic', instructions='Synthetic', done_when='Synthetic',
                          model='auto', backend='exec', model_reason='independent', task_type='code')
 
+    def test_configured_alias_cooldown_propagates_by_bucket(self):
+        from tests.test_models import snapshot
+        file = Path(self.tmp.name) / 'config.toml'
+        file.write_text('[models.mini]\nid = "gpt-7-mini"\nvendor = "codex"\nquota = "claude"\ntier = 3\n[models.sonnet]\nquota = "codex"\n')
+        with patch.dict(os.environ, {'ORCHD_CONFIG_FILE': str(file)}):
+            task = self.dispatch(model='mini')
+            core.rate_limit_notice(self.con, self.rt, task['id'], {'code': 'usage_limit_exceeded'}, 'one')
+            body = self.con.execute("SELECT body FROM messages WHERE kind='rate_limit'").fetchone()[0]
+            self.assertEqual(json.loads(body)['provider'], 'sonnet')
+            with patch('orchd.quota.dispatch_shadow', side_effect=lambda **kw: quota.shadow(snapshot(10, 10), **dict(kw, applied=False))):
+                self.assertEqual(routing.select(self.con)['selected_alias'], 'terra')
+                # Fable shares mini's Claude bucket, so review must wait too.
+                self.assertIsNone(routing.select(self.con, task_type='review', author_model='astra')['selected_alias'])
+
+    def test_default_codex_aliases_share_cooldown(self):
+        self.observe(10, 10)
+        task = self.dispatch(model='astra')
+        core.rate_limit_notice(self.con, self.rt, task['id'], {'code': 'usage_limit_exceeded'}, 'one')
+        self.assertEqual(routing.select(self.con)['selected_alias'], 'sonnet')
+
+    def test_auto_retry_uses_other_quota_bucket_at_same_tier(self):
+        file = Path(self.tmp.name) / 'config.toml'
+        file.write_text('[models.mini]\nid = "gpt-7-mini"\nvendor = "codex"\nquota = "codex"\ntier = 3\n[models.fable]\nquota = "codex"\n[models.astra]\nquota = "claude"\n')
+        with patch.dict(os.environ, {'ORCHD_CONFIG_FILE': str(file)}):
+            task = self.dispatch(model='mini')
+            store.update_task(self.con, task['id'], auto_model=1)
+            core.rate_limit_notice(self.con, self.rt, task['id'], {'code': 'usage_limit_exceeded'}, 'one')
+            result = core.auto_retry(self.con, self.rt, *self.rt.auto_requests[0])
+            self.assertEqual(result['model'], core.WORKER_MODELS['astra'])
+
     def test_provider_error_formats_and_contextual_fallback(self):
         # Source: openai/codex tag rust-v0.160.1:
         # codex-rs/app-server-protocol/schema/typescript/v2/{TurnError,CodexErrorInfo}.ts
@@ -91,7 +121,7 @@ class RoutingTest(unittest.TestCase):
         core.auto_flush(self.con, self.rt, task['id'], int(task['job_id']), turn_log=log)
         self.assertEqual(self.rt.auto_requests, [])
         self.assertEqual(self.con.execute("SELECT COUNT(*) FROM messages WHERE kind='rate_limit'").fetchone()[0], 0)
-        self.assertEqual(routing.select(self.con)['selected_alias'], 'sol')
+        self.assertEqual(routing.select(self.con)['selected_alias'], 'terra')
 
     def test_app_command_output_is_not_a_provider_error(self):
         task = self.dispatch()
@@ -109,7 +139,7 @@ class RoutingTest(unittest.TestCase):
                               'codexErrorInfo': 'sandboxError'}}}})
         self.assertEqual(self.rt.auto_requests, [])
         self.assertEqual(self.con.execute("SELECT COUNT(*) FROM messages WHERE kind='rate_limit'").fetchone()[0], 0)
-        self.assertEqual(routing.select(self.con)['selected_alias'], 'sol')
+        self.assertEqual(routing.select(self.con)['selected_alias'], 'terra')
 
     def observe(self, sol, sonnet=20, age=0):
         now = time.time()
@@ -141,7 +171,7 @@ class RoutingTest(unittest.TestCase):
             if age is not None:
                 self.observe(99, age=age)
             task = self.dispatch()
-            self.assertEqual(task['model'], core.WORKER_MODELS['sol'])
+            self.assertEqual(task['model'], core.WORKER_MODELS['terra'])
             self.assertIn('quota unknown/stale; fallback', task['model_reason'])
 
     def test_explicit_and_omitted_models_preserved(self):
@@ -157,11 +187,11 @@ class RoutingTest(unittest.TestCase):
         self.observe(99, 96)
         self.assertEqual(self.dispatch()['model'], core.WORKER_MODELS['sonnet'])
         self.observe(95, 100)
-        self.assertEqual(self.dispatch()['model'], core.WORKER_MODELS['sol'])
+        self.assertEqual(self.dispatch()['model'], core.WORKER_MODELS['terra'])
 
     def test_explicit_app_backend_remains_sol(self):
         self.observe(100)
-        self.assertEqual(routing.select(self.con, backend='app-server')['selected_alias'], 'sol')
+        self.assertEqual(routing.select(self.con, backend='app-server')['selected_alias'], 'terra')
 
     def test_exec_failure_notifies_once_and_retry_switches_same_worktree(self):
         task = self.dispatch()
@@ -214,7 +244,7 @@ class RoutingTest(unittest.TestCase):
         self.assertFalse(core.rate_limit_notice(self.con, self.rt, task['id'], 'network error', 'one'))
         self.assertTrue(core.rate_limit_notice(self.con, self.rt, task['id'], {'codexErrorInfo': 'rateLimitExceeded'}, 'one'))
         self.assertEqual(routing.select(self.con)['selected_alias'], 'sonnet')
-        self.assertEqual(routing.select(self.con, now=time.time()+601)['selected_alias'], 'sol')
+        self.assertEqual(routing.select(self.con, now=time.time()+601)['selected_alias'], 'terra')
 
     def test_batch_starts_multiple_workers_group_and_filters(self):
         result = mcp_server.call('dispatch_batch', {'tasks': [self.args, dict(self.args, title='Second')]},
@@ -242,7 +272,7 @@ class RoutingTest(unittest.TestCase):
         args = {k: v for k, v in self.args.items() if k != 'model'}
         with patch.dict(os.environ, {'ORCHD_WORKER_MODEL': 'sonnet'}):
             result = core.dispatch_batch(self.con, self.rt, orch_thread='orch', tasks=[args])
-        self.assertEqual(result['tasks'][0]['model'], core.WORKER_MODELS['sol'])
+        self.assertEqual(result['tasks'][0]['model'], core.WORKER_MODELS['terra'])
         self.assertIn('fallback', result['tasks'][0]['model_reason'])
 
     def test_unreadable_cache_falls_back_and_known_capacity_uses_shadow_score(self):
@@ -416,7 +446,7 @@ class RoutingTest(unittest.TestCase):
                 run.assert_not_called()
                 probe.assert_not_called()
                 popen.assert_not_called()
-                self.assertEqual(task['model'], core.WORKER_MODELS['sol'])
+                self.assertEqual(task['model'], core.WORKER_MODELS['terra'])
                 self.assertIn('fallback', task['model_reason'])
 
     def test_unknown_quota_wakes_background_refresher_without_waiting(self):

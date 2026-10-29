@@ -9,7 +9,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import app_worker, intake, orch_revive, paths, question_summary, store, verify as verification, worker_health
+from . import models, app_worker, intake, orch_revive, paths, question_summary, store, verify as verification, worker_health
 from .orch_health import owner_health
 from .runtime import (DEFAULT_ORCH_MODEL, ORCH_MODELS, WORKER_MODELS,
                       claude_job_alive, error_detail, worker_kind)
@@ -267,16 +267,17 @@ def rate_limit_notice(con, rt, task_id, error, attempt, *, job_id=None, generati
         for row in con.execute("SELECT body FROM messages WHERE task_id=? AND kind='rate_limit'", (task_id,)):
             if json.loads(row['body']).get('attempt') == attempt:
                 return False
-        store.add_message(con, task_id, 'rate_limit', json.dumps(dict(provider='sol', attempt=attempt)))
+        store.add_message(con, task_id, 'rate_limit', json.dumps(dict(provider=models.quota_provider_for(task['model']), attempt=attempt)))
         already_requested = con.execute("SELECT 1 FROM messages WHERE task_id=? AND kind='auto_retry_requested' LIMIT 1", (task_id,)).fetchone()
-        automatic = allow_auto and task['auto_model'] and task['auto_retry_count'] == 0 and not already_requested
+        automatic = allow_auto and models.capacity_fallback(task['model']) is not None and task['auto_model'] and task['auto_retry_count'] == 0 and not already_requested
         event_id = None
         if automatic:
             event_id = store.add_message(con, task_id, 'auto_retry_requested', json.dumps(dict(
                 model=task['model'], job_id=task['job_id'], session_id=task['session_id'], generation=task['generation'],
                 active_turn=task['active_turn'], last_completed_turn=task['last_completed_turn'])))
-        text = ('[rate limit] sol turn failed; automatic sonnet retry scheduled on the same worktree (one attempt per task).'
-                if automatic else '[rate limit] sol turn failed; automatic retry disabled (explicit model, startup failure, or limit already used). Inspect existing work and use retry if needed.')
+        here = models.alias_for(task['model']) or task['model']
+        text = (f'[rate limit] {here} turn failed; automatic {models.capacity_fallback(task["model"])} retry scheduled on the same worktree (one attempt per task).'
+                if automatic else f'[rate limit] {here} turn failed; automatic retry disabled (explicit model, startup failure, or limit already used). Inspect existing work and use retry if needed.')
         mid = store.add_message(con, task_id, 'progress', text)
     _wake(con, rt, task, mid, text)
     if event_id is not None:
@@ -297,14 +298,16 @@ def auto_retry(con, rt, task_id, event_id):
             if store.get_task(con, task_id)['status'] != 'starting':
                 break
             rt.sleep(.1)
-        task = retry(con, rt, task_id, 'sonnet', 'sol rate/usage limit: automatic provider switch', auto_event=event_id)
+        task = store.get_task(con, task_id)
+        here, other = models.alias_for(task['model']) or task['model'], models.capacity_fallback(task['model'])
+        task = retry(con, rt, task_id, other, f'{here} rate/usage limit: automatic provider switch', auto_event=event_id)
     except Exception as exc:
         progress(con, rt, task_id, f'[auto retry failed] {type(exc).__name__}: {exc}; existing worktree retained')
         return dict(status='failed', task_id=task_id, error=str(exc))
     if task is None:
         progress(con, rt, task_id, '[auto retry skipped] task closed, newer worker/turn activity, or automatic attempt already used')
         return dict(status='skipped', task_id=task_id, reason='closed, superseded, explicit model, or automatic attempt already used')
-    progress(con, rt, task_id, '[auto retry] sol rate/usage limit -> sonnet; continued the same worktree; automatic switch 1/1')
+    progress(con, rt, task_id, f'[auto retry] {here} rate/usage limit -> {other}; continued the same worktree; automatic switch 1/1')
     return dict(status='running', task_id=task_id, model=task['model'])
 
 
@@ -1142,6 +1145,8 @@ def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT, backend=No
     no other lifecycle step in between. The SQLite write lock is only held for the final commit."""
     if not isinstance(reason, str) or not reason.strip():
         raise ValueError("retry needs a non-empty reason")
+    if model == "escalate":  # the task's current worker failed it: next tier, other vendor first
+        model = models.escalate(store.get_task(con, task_id)["model"])
     _choice("model", model, tuple(WORKER_MODELS))
     with store.task_delivery(con, [task_id], lock_wait):
         task = store.get_task(con, task_id)

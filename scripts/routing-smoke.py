@@ -119,7 +119,7 @@ def main():
             print(json.dumps(dict(case='a: sol full', model=full['model'], applied=full['quota_shadow']['applied'], reason=full['model_reason'])))
             quota.Cache().path.unlink()
             unknown = mcp_server.call('dispatch', args, 'smoke', con, rt)
-            assert unknown['model'] == core.WORKER_MODELS['sol']
+            assert unknown['model'] == core.WORKER_MODELS['terra']
             assert 'fallback' in unknown['model_reason']
             print(json.dumps(dict(case='b: quota unknown', model=unknown['model'], reason=unknown['model_reason'])))
             batch = mcp_server.call('dispatch_batch', {'tasks': [args, dict(args, title='Second')]}, 'smoke', con, rt)

@@ -12,7 +12,7 @@ orchd binding      # 沿用已綁定且在線的 Claude Orch；沒有就開一�
 ```
 
 `orchd init` 寫入 interface 的 `.codex/config.toml`（範本在 `orchd/templates/interface/`）與給入口模型的 `AGENTS.md`：
-`gpt-6.1-sol`、推理 low、自訂權限 `interface`（家目錄 deny、只讀 interface 資料夾、無網路）、只掛 orchd 的入口 MCP，
+`gpt-6.1-terra`、推理 low、自訂權限 `interface`（家目錄 deny、只讀 interface 資料夾、無網路）、只掛 orchd 的入口 MCP，
 且 `relay`／`status` 預先核准（`approval_policy = "never"` 下沒核准的 MCP 工具會被直接擋掉）。
 已存在且內容不同的檔案不會被覆蓋。
 
@@ -27,7 +27,7 @@ orchd binding      # 沿用已綁定且在線的 Claude Orch；沒有就開一�
    用 `orchd orch stop` 停掉、或接回失敗時不會自己替換；確定要換用 `orchd binding --new`（舊 Orch 的未答問題留在舊 Orch）。
    綁到指定的 Orch 用 `orchd binding --to <orch_id>`，`orchd binding --status` 唯讀查看。
 
-入口模型用 `gpt-6.1-sol`（理由見下方「入口模型」）。未 live 驗證：Native Desktop 是否套用這份權限、
+入口模型用 `gpt-6.1-terra`、推理 low（可由 config 的 `[interface]` `model`／`effort` 覆寫，init 讀取；改自 `gpt-6.1-sol`，為降低成本；理由與未驗證處見下方「入口模型」）。未 live 驗證：Native Desktop 是否套用這份權限、
 全域 `~/.codex/config.toml` 的 MCP 與工具在 interface 是否仍出現、語音模式實際用哪個模型、
 orchd 的 MCP server 在 Native 是否也不受這份權限限制（它要寫 `ORCHD_HOME` 的資料庫、讀 `~/.codex/sessions`；CLI 實測不受限）。
 
@@ -140,6 +140,8 @@ Desktop 開語音時，聽與說的是即時語音模型，再交給 interface�
 
 加上 `AGENTS.md`「一字不改重新輸出」的 prompt 沒有改善 Luna。依官方價目，比 Luna 準的選項裡 `gpt-6.1-sol`
 最便宜（$2 / $0.10 快取 / $10 輸出，每 1M token）。入口模型每次收到 Orch 訊息都把內文完整重講一次（文字與語音都一樣；只寫「語音時才唸」時，文字模式下它會不出聲），這份只供收聽；批准以畫面上 orchd 送來的原文為準。
+**改用 Terra（2026-10-29，Operator 要求以降成本）**：上表只測過 Sol 與 Luna，`gpt-6.1-terra` 的原文轉述準確度**尚未用同一測試驗證**；部署後請先跑一次同樣的轉述測試再依賴語音。既有入口的 live 設定在 `~/orch/interface/.codex/config.toml`（init 與 upgrade 都不會覆蓋，需手動改 `model` 或依上節流程重新產生）。
+
 Operator → Orch 的原文由 orchd 從 rollout 讀，不經模型重打；Orch → Operator 用 `codex queue`，兩條都不受入口模型影響。
 
 

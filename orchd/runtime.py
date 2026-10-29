@@ -17,10 +17,12 @@ import uuid
 from pathlib import Path
 
 from . import paths
+from .models import WorkerModels
 from .processes import cleanup_processes, task_processes
 
 
-WORKER_MODELS = {"sol": "gpt-6.1-sol", "sonnet": "claude-sonnet-5-5"}
+# Worker aliases come from orchd.models (built-in defaults plus [models.*] in config.toml).
+WORKER_MODELS = WorkerModels()
 # Claude Orch choices are independent of the worker policy; its current default stays unchanged.
 ORCH_MODELS = {"sonnet": "claude-sonnet-5-5", "opus": "claude-opus-5-5"}
 # The worker default (factory sonnet) is resolved per dispatch by orchd.config: env, then config.toml.

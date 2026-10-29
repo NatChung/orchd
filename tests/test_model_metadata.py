@@ -98,7 +98,7 @@ class ModelMetadataTest(unittest.TestCase):
         tools = {t["name"]: t for t in mcp_server.TOOLS}
         for name in ("dispatch", "retry"):
             prop = tools[name]["inputSchema"]["properties"]["model"]
-            self.assertEqual(prop["enum"], ["sol", "sonnet", "auto"] if name == "dispatch" else ["sol", "sonnet"])
+            self.assertEqual(prop["enum"], [*core.WORKER_MODELS, "auto"] if name == "dispatch" else [*core.WORKER_MODELS, "escalate"])
             self.assertNotIn("opus", json.dumps(tools[name]))
             self.assertNotIn("M tier", json.dumps(tools[name]))
         self.assertNotIn("default", tools["dispatch"]["inputSchema"]["properties"]["model"])
@@ -115,7 +115,7 @@ class ModelMetadataTest(unittest.TestCase):
         for model in ("opus", "claude-opus-5-5"):
             result = dispatch(model=model)
             self.assertTrue(result["isError"])
-            self.assertIn("use one of sol, sonnet", result["content"][0]["text"])
+            self.assertIn("use one of terra, sonnet, sol, fable, astra", result["content"][0]["text"])
         self.assertEqual(store.open_tasks(self.con), [])
         for extra, full in (({}, "claude-sonnet-5-5"), ({"model": "sol"}, "gpt-6.1-sol"),
                             ({"model": "sonnet"}, "claude-sonnet-5-5")):

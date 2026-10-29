@@ -14,7 +14,7 @@ ADR-0002 讓每個 Desktop session 自成一組，也曾以「多一層身分或
   綁定與待答問題存在 SQLite，入口重開（新 thread 也一樣）接回原 Orch。
 - 原文不經模型重打：Operator → Orch 由 orchd 讀入口 thread 的 rollout；Orch → Operator 用 `codex queue`。
   這兩條都經 probe 量到逐位元組一致；Luna 重打 5 KB 會改寫成 10–13 KB（#37 handoff，`79ace31`）。
-- 入口模型用 `gpt-6.1-sol`：要讓它用語音唸給 Operator 聽，轉述測試 Sol 43/43、Luna 22/40（見 docs/entry.md）。
+- 入口模型原用 `gpt-6.1-sol`，2026-10-29 起改 `gpt-6.1-terra`（降成本；Terra 轉述準確度未驗證，見 docs/entry.md）。原選 Sol 的理由：要讓它用語音唸給 Operator 聽，轉述測試 Sol 43/43、Luna 22/40（見 docs/entry.md）。
   唸出來的版本只供收聽，批准以畫面原文為準。
 - 一次只有一題 current，其餘排隊；回答以 `reply_to` 綁題，不符就拒收，不猜。
 - 固定 Orch 離線時保留訊息、明說沒轉交，不啟動也不替換 Orch。

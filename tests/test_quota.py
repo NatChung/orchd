@@ -358,15 +358,15 @@ class QuotaTest(unittest.TestCase):
         return quota.shadow(snap, now=now, applied=True)
 
     def test_remaining_percent_balances_usage(self):
-        self.assertEqual(self._score_pick([1], [10, 14])['selected_alias'], 'sol')
-        self.assertEqual(self._score_pick([30], [90, 20])['selected_alias'], 'sol')
+        self.assertEqual(self._score_pick([1], [10, 14])['selected_alias'], 'terra')
+        self.assertEqual(self._score_pick([30], [90, 20])['selected_alias'], 'terra')
         result = self._score_pick([60], [10, 10])
         self.assertEqual(result['selected_alias'], 'sonnet')
         self.assertIn('remaining-percent score', result['reason'])
 
     def test_remaining_percent_tie_margin_prefers_sol(self):
-        self.assertEqual(self._score_pick([40], [36])['selected_alias'], 'sol')
-        self.assertEqual(self._score_pick([40], [35])['selected_alias'], 'sol')   # exactly 5 apart
+        self.assertEqual(self._score_pick([40], [36])['selected_alias'], 'terra')
+        self.assertEqual(self._score_pick([40], [35])['selected_alias'], 'terra')   # exactly 5 apart
         self.assertEqual(self._score_pick([40], [34])['selected_alias'], 'sonnet')  # 6 apart
         self.assertEqual(self._score_pick([60], [40])['selected_alias'], 'sonnet')
 
@@ -384,9 +384,9 @@ class QuotaTest(unittest.TestCase):
             self.assertEqual(snapshot['sol']['unknown_reasons'], ['expired TTL'])
             for applied in (True, False):
                 result = quota.shadow(snapshot, now=now, applied=applied)
-                self.assertEqual(result['selected_alias'], 'sol')
-                self.assertIn('prefer sol', result['reason'])
-            self.assertEqual(quota.shadow(cache.status(now=1000 + quota.MAX_AGE + 101), now=now)['selected_alias'], 'sol')
+                self.assertEqual(result['selected_alias'], 'terra')
+                self.assertIn('prefer terra', result['reason'])
+            self.assertEqual(quota.shadow(cache.status(now=1000 + quota.MAX_AGE + 101), now=now)['selected_alias'], 'terra')
 
     def test_recent_limited_unknown_sol_selects_sonnet(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -519,7 +519,7 @@ class QuotaTest(unittest.TestCase):
                 patch.object(quota, 'Cache', lambda: real(Path(tmp) / 'quota.db')):
             self._sonnet_known(quota.Cache(), 1000)
             result = quota.dispatch_shadow(applied=True, now=1001)
-            self.assertEqual(result['selected_alias'], 'sol')
+            self.assertEqual(result['selected_alias'], 'terra')
             probe.assert_not_called()
 
     def _fake_sol_probe(self, calls):
