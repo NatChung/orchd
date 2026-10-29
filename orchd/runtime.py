@@ -389,7 +389,8 @@ class Runtime:
         sock = self.orch_socket_path(orch_id)
         mcp = Path(sock).parent / "mcp.json"
         mcp.write_text(json.dumps({"mcpServers": {"orchd": {
-            "command": paths.orchd_executable(), "args": ["mcp"], "env": mcp_env(orch_id)}}}))
+            # Run under this interpreter: bin/orchd's shebang is the system python3, which may lack psutil.
+            "command": sys.executable, "args": [paths.orchd_executable(), "mcp"], "env": mcp_env(orch_id)}}}))
         try:
             agents = (orch_home / "AGENTS.md").read_text()
         except OSError:
