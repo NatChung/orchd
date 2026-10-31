@@ -29,6 +29,7 @@ from .runtime import CODEX_MEMORIES_OFF
 
 BACKEND = 'app-server'
 TERMINAL = ('completed', 'failed', 'interrupted')
+BACKGROUND_HEARTBEAT_TIMEOUT = 60  # Longer than normal bounded RPC/history batches.
 
 
 def enabled(task):
@@ -222,7 +223,8 @@ class Supervisor:
         self.deferred_limit = None
         self.reconcile_pending = False
         self.housekeeping_at = 0
-        self.written_note = None
+        self.background_heartbeat = None
+        self.background_error = None
         self.backoff = 0
 
     @property
@@ -514,13 +516,16 @@ class Supervisor:
             error = self.maintenance_error or self.rpc_health_error
             if self.rpc.error:
                 error = error or f'{type(self.rpc.error).__name__}: {self.rpc.error}'
-            if self.work_lock.locked():
-                error = error or 'supervisor busy: housekeeping/control RPC in progress'
+            background_error = self.background_error
+            if self.background_heartbeat is not None and \
+                    time.monotonic() - self.background_heartbeat > BACKGROUND_HEARTBEAT_TIMEOUT:
+                background_error = background_error or 'supervisor background heartbeat expired'
+            error = background_error or error
             state = self.rpc_state or task['turn_state']
-            return dict(worker_alive='unknown' if self.rpc.error or self.rpc_health_error else
+            return dict(worker_alive='unknown' if background_error or self.rpc.error or self.rpc_health_error else
                         'active' if state == 'active' else 'idle' if state in
                         ('idle', 'completed', 'failed', 'interrupted') else 'unknown',
-                        supervisor_error=error)
+                        supervisor_error=error, supervisor_busy=self.work_lock.locked())
         if cmd == 'flush':
             self.drain()
             return self.flush(tuple(request['guard']) if request.get('guard') else None)
@@ -563,6 +568,10 @@ class Supervisor:
             if self.deferred_flush:
                 self.flush(guard=self.deferred_flush)
                 self.deferred_flush = None
+            # Pending text is durable: delivery must not depend on another client flush
+            # or on a completion event observed by this particular supervisor.
+            if not self.reconcile_pending and store.pending_answer_count(self.con, self.task_id):
+                self.flush()
             self.handle_deferred_limit()
             # Viewer death releases human ownership; an idle FIFO can then flush.
             had=self.con.execute('SELECT 1 FROM worker_viewers WHERE task_id=? AND generation=?',
@@ -580,32 +589,38 @@ class Supervisor:
     def fail_housekeeping(self, exc):
         """Record why background work failed and delay the next attempt (0.2s doubling to 5s)."""
         error = f'{type(exc).__name__}: {exc}'
-        changed = error != self.maintenance_error
         self.maintenance_error = error
         self.backoff = min(5, self.backoff * 2 or .2)
         self.housekeeping_at = time.monotonic() + self.backoff
-        if changed:  # one write per distinct failure, not one per retry
-            try:
-                note = f'app-server supervisor: {error}'
-                # Compare-and-set: a concurrent close/delivery note always wins.
+        try:
+            note = f'app-server supervisor: {error}'
+            # Persist exact ownership in the same transaction as the note. A replacement
+            # supervisor can recover it; no prefix matching can claim a foreign note.
+            with store.immediate(self.con):
+                owned = self.con.execute(
+                    'SELECT note FROM worker_supervisor_notes WHERE task_id=? AND generation=?',
+                    (self.task_id, self.generation)).fetchone()
                 changed = self.con.execute(
-                    "UPDATE tasks SET note=? WHERE id=? AND generation=? AND backend='app-server' AND status<>'closed' AND (note IS NULL OR note='' OR note=?)",
-                    (note, self.task_id, self.generation, self.written_note)).rowcount
+                    "UPDATE tasks SET note=? WHERE id=? AND generation=? AND backend='app-server' "
+                    "AND status<>'closed' AND (note IS NULL OR note='' OR note=?) AND note IS NOT ?",
+                    (note, self.task_id, self.generation, owned['note'] if owned else None, note)).rowcount
                 if changed:
-                    self.written_note = note
-            except Exception:
-                pass  # the note is best effort; health still reports maintenance_error
+                    self.con.execute('INSERT OR REPLACE INTO worker_supervisor_notes VALUES(?,?,?)',
+                                     (self.task_id, self.generation, note))
+        except Exception:
+            pass  # the note is best effort; health still reports maintenance_error
 
     def clear_note(self):
-        """Recovery removes only the note this supervisor wrote, never a later one from delivery or rate limits."""
-        if self.written_note is None:
-            return
+        """Recovery removes only the durable exact note owned by this task attempt."""
         try:
-            self.con.execute("UPDATE tasks SET note=NULL WHERE id=? AND generation=? AND status<>'closed' AND note=?",
-                             (self.task_id, self.generation, self.written_note))
+            with store.immediate(self.con):
+                self.con.execute("UPDATE tasks SET note=NULL WHERE id=? AND generation=? AND status<>'closed' "
+                                 "AND note=(SELECT note FROM worker_supervisor_notes WHERE task_id=? AND generation=?)",
+                                 (self.task_id, self.generation, self.task_id, self.generation))
+                self.con.execute('DELETE FROM worker_supervisor_notes WHERE task_id=? AND generation=?',
+                                 (self.task_id, self.generation))
         except Exception:
             pass
-        self.written_note = None
 
     def housekeep(self, task):
         """Server liveness, reconnect, reconcile and maintenance. False means the server is gone."""
@@ -656,8 +671,8 @@ class Supervisor:
                         else:
                             reply = dict(status='queued', interrupted=False, delivered=0,
                                          pending=store.pending_answer_count(self.con, self.task_id),
-                                         reason='supervisor busy; text retained; retry flush later',
-                                         supervisor_error=self.maintenance_error or 'housekeeping/control RPC in progress')
+                                         reason='supervisor busy; text retained; will be delivered automatically',
+                                         supervisor_busy=True, supervisor_error=self.maintenance_error)
                 except Exception as exc:
                     reply={'exception':f'{type(exc).__name__}: {exc}'}
                 finally:
@@ -673,6 +688,7 @@ class Supervisor:
     def background(self, task, stop):
         try:
             while not stop.is_set() and not self.stopping:
+                self.background_heartbeat = time.monotonic()
                 if time.monotonic() >= self.housekeeping_at and self.work_lock.acquire(blocking=False):
                     try:
                         if not self.current() or not self.housekeep(task):
@@ -682,7 +698,13 @@ class Supervisor:
                     finally:
                         self.work_lock.release()
                 stop.wait(.2)
+        except BaseException as exc:
+            # Keep control alive so Operator can inspect the failure and explicitly retry.
+            # Never restart this lane blindly: an interrupted send may be uncertain.
+            self.background_error = f'supervisor background stopped: {type(exc).__name__}: {exc}'
         finally:
+            if not stop.is_set() and not self.stopping:
+                self.background_error = self.background_error or 'supervisor background stopped unexpectedly'
             if hasattr(self.connections, 'con'):
                 self.connections.con.close()
 

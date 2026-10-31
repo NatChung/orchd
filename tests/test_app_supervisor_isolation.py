@@ -60,7 +60,12 @@ class SupervisorIsolationTest(IsolationBase):
         self.assertEqual(store.get_task(self.con, self.id)['turn_state'], 'completed')
         store.add_message(self.con, self.id, store.QUEUED, 'the answer')
         result = app_worker.control(store.get_task(self.con, self.id), 'flush', timeout=10)
-        self.assertEqual(result['status'], 'delivered')
+        # Automatic maintenance may already own the delivery lane when flush arrives.
+        self.assertIn(result['status'], ('delivered', 'queued'))
+        deadline = time.monotonic() + 5
+        while store.pending_answer_count(self.con, self.id) and time.monotonic() < deadline:
+            time.sleep(.02)
+        self.assertEqual(store.pending_answer_count(self.con, self.id), 0)
         texts = [e['text'] for e in self.logged() if e['event'] == 'turn/start']
         self.assertEqual(len(texts), 2)
         self.assertIn('the answer', texts[1])
@@ -194,7 +199,12 @@ class ControlStaysResponsiveTest(AppBase):
         try:
             reply, elapsed = self.health()
             self.assertLess(elapsed, 3)
-            self.assertIn('busy', reply['supervisor_error'])
+            self.assertIsNone(reply['supervisor_error'])
+            self.assertTrue(reply['supervisor_busy'])
+            with patch.object(app_worker, 'process', return_value=Mock()):
+                row = [r for r in core.list_open(self.con, self.rt) if r['task_id'] == self.id][0]
+            self.assertIsNone(row['supervisor_error'])
+            self.assertNotIn('supervisor busy', row['note'] or '')
             started = time.monotonic()
             result = app_worker.control(store.get_task(self.con, self.id), 'flush', timeout=3)
             self.assertLess(time.monotonic() - started, 3)
@@ -203,6 +213,108 @@ class ControlStaysResponsiveTest(AppBase):
             self.assertEqual(store.pending_answer_count(self.con, self.id), 1)
         finally:
             release.set()
+
+    def test_queued_during_slow_housekeeping_delivers_without_second_flush(self):
+        self.idle()
+        self.queue('automatic answer')
+        entered = threading.Event()
+        finished = threading.Event()
+        def setup(sup):
+            def slow():
+                if not finished.is_set():
+                    entered.set()
+                    time.sleep(3)
+                    finished.set()
+            sup.collect_quota = slow
+        sup = self.serve(setup)
+        self.assertTrue(entered.wait(2))
+        result = app_worker.control(self.task, 'flush', timeout=2)
+        self.assertEqual(result['status'], 'queued')
+        self.assertTrue(finished.wait(4))
+        deadline = time.monotonic() + 8
+        while store.pending_answer_count(self.con, self.id) and time.monotonic() < deadline:
+            time.sleep(.05)
+        self.assertEqual(store.pending_answer_count(self.con, self.id), 0)
+        self.assertIn('will be delivered automatically', result['reason'])
+        time.sleep(.5)
+        starts = [p['input'][0]['text'] for m, p in sup.rpc.calls if m == 'turn/start']
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(starts[0].count('automatic answer'), 1)
+
+    def test_restart_pending_waits_for_idle_then_delivers_without_flush(self):
+        self.queue('survived restart')
+        attempted = threading.Event()
+        def setup(sup):
+            sup.collect_quota = lambda: attempted.set()
+        sup = self.serve(setup)
+        self.assertTrue(attempted.wait(2))
+        time.sleep(.3)
+        self.assertFalse([m for m, _ in sup.rpc.calls if m == 'turn/start'])
+        self.idle()
+        deadline = time.monotonic() + 3
+        while store.pending_answer_count(self.con, self.id) and time.monotonic() < deadline:
+            time.sleep(.02)
+        self.assertEqual(store.pending_answer_count(self.con, self.id), 0)
+        time.sleep(.4)
+        self.assertEqual(len([m for m, _ in sup.rpc.calls if m == 'turn/start']), 1)
+
+    def test_dead_background_thread_is_visible_over_control_socket(self):
+        died = threading.Event()
+        def setup(sup):
+            def fatal():
+                died.set()
+                raise SystemExit('fixture background death')
+            sup.collect_quota = fatal
+        self.serve(setup)
+        self.assertTrue(died.wait(2))
+        time.sleep(.1)
+        reply, _ = self.health()
+        self.assertIn('background', reply['supervisor_error'] or '')
+        self.assertIn('SystemExit', reply['supervisor_error'])
+        self.assertEqual(reply['worker_alive'], 'unknown')
+
+    def test_stale_background_heartbeat_is_visible(self):
+        sup = self.supervisor
+        sup.background_heartbeat = time.monotonic() - 120
+        reply = sup.command({'command': 'health', 'generation': self.gen})
+        self.assertIn('heartbeat', reply['supervisor_error'] or '')
+        self.assertEqual(reply['worker_alive'], 'unknown')
+
+    def test_restart_recovers_owned_note_but_preserves_close_pending(self):
+        sup = self.supervisor
+        sup.fail_housekeeping(TimeoutError('old supervisor'))
+        owned = store.get_task(self.con, self.id)['note']
+        restarted = app_worker.Supervisor(self.db, self.id, self.gen)
+        self.addCleanup(restarted.con.close)
+        restarted.rpc = FakeRPC()
+        restarted.maintain()
+        self.assertIsNone(store.get_task(self.con, self.id)['note'])
+        for note in ('close-pending: keep me', 'close-pending: ' + owned):
+            store.update_task(self.con, self.id, note=note)
+            restarted.clear_note()
+            self.assertEqual(store.get_task(self.con, self.id)['note'], note)
+
+    def test_restart_preserves_foreign_replacement_of_owned_note(self):
+        for foreign in ('close-pending: keep me', 'app-server supervisor: foreign error'):
+            with self.subTest(note=foreign):
+                store.update_task(self.con, self.id, note=None)
+                self.supervisor.fail_housekeeping(TimeoutError('owned'))
+                store.update_task(self.con, self.id, note=foreign)
+                restarted = app_worker.Supervisor(self.db, self.id, self.gen)
+                try:
+                    restarted.clear_note()
+                finally:
+                    restarted.con.close()
+                self.assertEqual(store.get_task(self.con, self.id)['note'], foreign)
+
+    def test_error_note_retries_after_foreign_note_is_removed(self):
+        sup = self.supervisor
+        store.update_task(self.con, self.id, note='close-pending: keep me')
+        sup.fail_housekeeping(TimeoutError('still failing'))
+        self.assertEqual(store.get_task(self.con, self.id)['note'], 'close-pending: keep me')
+        store.update_task(self.con, self.id, note=None)
+        sup.fail_housekeeping(TimeoutError('still failing'))
+        self.assertIn('still failing', store.get_task(self.con, self.id)['note'] or '')
 
     def test_changed_error_does_not_replace_foreign_note(self):
         sup = self.supervisor
@@ -369,7 +481,7 @@ class ControlStaysResponsiveTest(AppBase):
                 continue
             reply, elapsed = self.health()
             health_times.append(elapsed)
-            self.assertTrue(reply['supervisor_error'])
+            self.assertTrue(reply['supervisor_busy'])
             started = time.monotonic()
             result = app_worker.control(store.get_task(self.con, self.id), 'flush')
             flush_times.append(time.monotonic() - started)

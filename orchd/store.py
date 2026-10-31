@@ -97,6 +97,10 @@ CREATE TABLE IF NOT EXISTS worker_deliveries(
     thread_id TEXT NOT NULL, turn_id TEXT, message_ids TEXT NOT NULL,
     state TEXT NOT NULL, error TEXT, created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS worker_supervisor_notes(
+    task_id TEXT NOT NULL, generation TEXT NOT NULL, note TEXT NOT NULL,
+    PRIMARY KEY(task_id, generation)
+);
 CREATE TABLE IF NOT EXISTS worker_viewers(
     task_id TEXT NOT NULL, generation TEXT NOT NULL, identity TEXT NOT NULL,
     PRIMARY KEY(task_id, generation, identity)
