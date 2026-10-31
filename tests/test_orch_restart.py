@@ -63,7 +63,7 @@ class RestartTest(unittest.TestCase):
         self.assertEqual(out["binding_status"]["orch_id"], out["new_orch"])
         self.rt.stop_worker.assert_called_once_with("oldjob")
         self.assertEqual([s["step"] for s in out["steps"]],
-                         ["stop", "confirm-dead", "start", "adopt", "binding"])
+                         ["stop", "confirm-dead", "start", "wait-alive", "adopt", "binding"])
         self.assertEqual(out["first_prompt"], "盤點上次")
 
     def test_no_tasks_skips_adopt_and_model_override(self):
@@ -180,6 +180,87 @@ class RestartTest(unittest.TestCase):
         self.assertEqual(out["step"], "start")
         self.assertEqual(out["status"], "failed")
         self.assertIn("orchd orch start --model sonnet --no-attach", out["manual_recovery"])
+
+    def startup_window_runtime(self, window_calls):
+        """live_jobs() lists the new job without pid/status for the first `window_calls` calls after start."""
+        real = self.rt.live_jobs
+        state = dict(started=False, calls=0)
+        start = self.start
+
+        def started(orch_id, model, home):
+            state["started"] = True
+            return start(orch_id, model, home)
+
+        def live_jobs(timeout=None):
+            jobs = {k: dict(v) for k, v in real().items()}
+            if state["started"] and "newjob" in jobs:
+                state["calls"] += 1
+                if state["calls"] <= window_calls:
+                    jobs["newjob"] = dict(pid=None, status=None)
+            return jobs
+
+        self.rt.start_orch.side_effect = started
+        self.rt.live_jobs = live_jobs
+        return state
+
+    def test_fresh_orch_in_startup_window_is_waited_for_not_judged_dead(self):
+        tid = self.task()
+        self.startup_window_runtime(window_calls=2)
+        with patch.object(orch_restart.time, "sleep") as sleep:
+            out = self.run_restart()
+        self.assertEqual(out["status"], "done", out)
+        self.assertEqual(out["adopt"]["adopted"], [tid])
+        self.assertEqual(out["binding_status"]["orch_id"], out["new_orch"])
+        self.assertGreaterEqual(sleep.call_count, 1)
+        self.assertIn("wait-alive", [s["step"] for s in out["steps"]])
+
+    def test_orch_that_stays_retired_fails_after_bounded_wait_with_recovery_hint(self):
+        self.task()
+        state = self.startup_window_runtime(window_calls=10 ** 6)
+        clock = dict(now=0.0)
+        with patch.object(orch_restart.time, "sleep", side_effect=lambda s: clock.update(now=clock["now"] + s)), \
+                patch.object(orch_restart.time, "monotonic", side_effect=lambda: clock["now"]):
+            out = self.run_restart()
+        self.assertEqual(out["status"], "failed")
+        self.assertEqual(out["step"], "wait-alive")
+        self.assertIn("job_retired", out["error"])
+        self.assertIn(f"orchd adopt {out['new_orch']} --from old", out["manual_recovery"])
+        self.assertLessEqual(state["calls"], 31)
+        self.assertEqual(store.get_task(self.con, store.open_tasks(self.con)[0]["id"])["orch_thread"], "old")
+
+    def test_slow_probes_cannot_carry_the_wait_past_the_deadline(self):
+        """Each probe may only use the remaining budget; an alive answer that lands late is not accepted."""
+        self.task()
+        clock = dict(now=0.0)
+        budgets = []
+        self.startup_window_runtime(window_calls=2)  # alive only on the third probe
+        window = self.rt.live_jobs
+
+        def slow_probe(timeout=None):
+            if timeout is None:  # restart's own pre-start probes
+                return window()
+            budgets.append(timeout)
+            clock["now"] += min(14, timeout)  # each probe runs up to 14s or its budget
+            return window()
+
+        self.rt.live_jobs = slow_probe
+        with patch.object(orch_restart.time, "monotonic", side_effect=lambda: clock["now"]), \
+                patch.object(orch_restart.time, "sleep", side_effect=lambda s: clock.update(now=clock["now"] + s)):
+            out = self.run_restart()
+        self.assertEqual(out["status"], "failed", out)
+        self.assertEqual(out["step"], "wait-alive")
+        self.assertLessEqual(clock["now"], orch_restart.STARTUP_WAIT_SECONDS + 1e-9)
+        self.assertTrue(all(b <= orch_restart.STARTUP_WAIT_SECONDS for b in budgets))
+        self.assertEqual(budgets, [15, 15])  # capped at the probe limit; never a third probe past 30s
+
+    def test_new_job_that_is_absent_or_failed_is_not_waited_for(self):
+        self.task()
+        self.rt.start_orch.side_effect = lambda *a: ("/fake/new", "newjob", "new-session")
+        with patch.object(orch_restart.time, "sleep") as sleep:
+            out = self.run_restart()
+        self.assertEqual(out["step"], "wait-alive")
+        self.assertIn("job_absent", out["error"])
+        sleep.assert_not_called()
 
     def test_binding_failure_and_readback_failure_are_reported(self):
         with patch.object(entry, "bind", side_effect=OSError("bind failed")):
