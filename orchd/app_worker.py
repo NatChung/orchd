@@ -10,10 +10,12 @@ import os
 import queue
 import re
 import signal
+import sqlite3
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -201,7 +203,14 @@ def preload():
 class Supervisor:
     def __init__(self, database, task_id, generation):
         self.maintenance_error = None
-        self.con = store.connect(database)
+        self.database = database
+        self.connections = threading.local()
+        self.connections.con = store.connect(database)
+        self.work_lock = threading.Lock()
+        self.history_scan = None
+        self.rpc_health_error = None
+        self.rpc_state = None
+        self.health_refresh_at = 0
         self.task_id, self.generation = task_id, generation
         self.rpc = None
         self.server = None
@@ -215,6 +224,21 @@ class Supervisor:
         self.housekeeping_at = 0
         self.written_note = None
         self.backoff = 0
+
+    @property
+    def con(self):
+        # Each thread owns its SQLite connection. Schema setup happens once in __init__.
+        if not hasattr(self.connections, 'con'):
+            con = sqlite3.connect(self.database, timeout=2, isolation_level=None)
+            con.row_factory = sqlite3.Row
+            self.connections.con = con
+        return self.connections.con
+
+    @con.setter
+    def con(self, value):
+        if not hasattr(self, 'connections'):
+            self.connections = threading.local()
+        self.connections.con = value
 
     def task(self):
         return store.get_task(self.con, self.task_id)
@@ -313,14 +337,29 @@ class Supervisor:
         return live
 
     def history(self, thread_id):
-        turns, cursor = [], None
-        while True:
-            page = self.rpc.call('thread/turns/list', {'threadId':thread_id, 'cursor':cursor, 'limit':100,
-                                                      'sortDirection':'asc', 'itemsView':'full'}, timeout=5)
-            turns.extend(page['data'])
-            cursor = page.get('nextCursor')
-            if not cursor:
-                return turns
+        """Bound each batch to four pages/five seconds; keep the cursor on timeout.
+
+        Partial history must not update turn state or release uncertain deliveries.
+        The next maintenance pass continues at the first unconsumed page.
+        """
+        if self.history_scan is None or self.history_scan['thread'] != thread_id:
+            self.history_scan = dict(thread=thread_id, turns=[], cursor=None)
+        scan = self.history_scan
+        deadline = time.monotonic() + 5
+        for _ in range(4):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            page = self.rpc.call('thread/turns/list',
+                                 {'threadId':thread_id, 'cursor':scan['cursor'], 'limit':100,
+                                  'sortDirection':'asc', 'itemsView':'full'}, timeout=remaining)
+            scan['turns'].extend(page['data'])
+            scan['cursor'] = page.get('nextCursor')
+            if not scan['cursor']:
+                self.history_scan = None
+                return scan['turns']
+        self.reconcile_pending = True
+        return None
 
     def reconcile(self):
         """Resume subscription and read authoritative history after a connection gap.
@@ -329,8 +368,11 @@ class Supervisor:
         positively matching client id is sufficient to finish its durable receipt.
         """
         task = self.task()
-        self.rpc.call('thread/resume', {'threadId': task['session_id']}, timeout=5)
+        if self.history_scan is None:
+            self.rpc.call('thread/resume', {'threadId': task['session_id']}, timeout=5)
         turns = self.history(task['session_id'])
+        if turns is None:
+            return False
         for delivery in self.con.execute("SELECT * FROM worker_deliveries WHERE task_id=? AND generation=? "
                                          "AND state IN ('sending','uncertain')", (self.task_id,self.generation)).fetchall():
             for turn in turns:
@@ -353,6 +395,7 @@ class Supervisor:
             self.deferred_flush=(self.generation,task['session_id'],last['id'])
         else:
             self.update(active_turn=None, turn_state='idle')
+        return True
 
     def receipt(self, delivery_id, turn_id, ids):
         with store.immediate(self.con):
@@ -373,7 +416,8 @@ class Supervisor:
         if not self.reconcile_pending or time.monotonic() < self.reconnect_at:
             return
         self.reconnect_at = time.monotonic() + 2
-        self.reconcile()
+        if self.reconcile() is False:
+            return
         self.reconcile_pending = bool(self.con.execute(
             "SELECT 1 FROM worker_deliveries WHERE task_id=? AND generation=? "
             "AND state IN ('sending','uncertain') LIMIT 1",
@@ -465,14 +509,17 @@ class Supervisor:
             raise ValueError('superseded attempt')
         cmd = request['command']
         if cmd == 'health':
-            error = self.maintenance_error
-            try:
-                thread = self.rpc.call('thread/read', {'threadId':self.task()['session_id']}, timeout=2)['thread']
-                state = thread.get('status',{}).get('type')
-            except Exception as exc:  # a dead/stuck RPC must still leave the control socket answering
-                state = None
-                error = error or f'{type(exc).__name__}: {exc}'
-            return dict(worker_alive='active' if state=='active' else 'idle' if state=='idle' else 'unknown',
+            # Never call RPC or wait for the delivery lock on this read-only path.
+            task = self.task()
+            error = self.maintenance_error or self.rpc_health_error
+            if self.rpc.error:
+                error = error or f'{type(self.rpc.error).__name__}: {self.rpc.error}'
+            if self.work_lock.locked():
+                error = error or 'supervisor busy: housekeeping/control RPC in progress'
+            state = self.rpc_state or task['turn_state']
+            return dict(worker_alive='unknown' if self.rpc.error or self.rpc_health_error else
+                        'active' if state == 'active' else 'idle' if state in
+                        ('idle', 'completed', 'failed', 'interrupted') else 'unknown',
                         supervisor_error=error)
         if cmd == 'flush':
             self.drain()
@@ -501,6 +548,15 @@ class Supervisor:
         """Periodic work. Any failure (TimeoutError included) is recorded and backed off, never raised."""
         try:
             self.drain()
+            if time.monotonic() >= self.health_refresh_at:
+                self.health_refresh_at = time.monotonic() + 2
+                try:
+                    thread = self.rpc.call('thread/read', {'threadId':self.task()['session_id']}, timeout=2)['thread']
+                    self.rpc_state = thread.get('status', {}).get('type')
+                    self.rpc_health_error = None
+                except Exception as exc:
+                    self.rpc_health_error = f'{type(exc).__name__}: {exc}'
+                    raise
             self.collect_quota()  # Single-flight TTL also refreshes idle workers, without inference.
             self.handle_deferred_limit()
             self.reconcile_if_needed()
@@ -514,7 +570,7 @@ class Supervisor:
             if had and not self.viewers():
                 self.deferred_flush = (self.generation,self.task()['session_id'],
                                        self.task()['last_completed_turn'])
-            if not self.reconcile_pending and not self.deferred_flush:  # work still owed means the failure stands
+            if not self.reconcile_pending and not self.deferred_flush and self.rpc_health_error is None:
                 self.maintenance_error = None
                 self.backoff = 0
                 self.clear_note()
@@ -530,8 +586,13 @@ class Supervisor:
         self.housekeeping_at = time.monotonic() + self.backoff
         if changed:  # one write per distinct failure, not one per retry
             try:
-                self.written_note = f'app-server supervisor: {error}'
-                self.update(note=self.written_note)
+                note = f'app-server supervisor: {error}'
+                # Compare-and-set: a concurrent close/delivery note always wins.
+                changed = self.con.execute(
+                    "UPDATE tasks SET note=? WHERE id=? AND generation=? AND backend='app-server' AND status<>'closed' AND (note IS NULL OR note='' OR note=?)",
+                    (note, self.task_id, self.generation, self.written_note)).rowcount
+                if changed:
+                    self.written_note = note
             except Exception:
                 pass  # the note is best effort; health still reports maintenance_error
 
@@ -540,8 +601,8 @@ class Supervisor:
         if self.written_note is None:
             return
         try:
-            if self.task()['note'] == self.written_note:
-                self.update(note=None)
+            self.con.execute("UPDATE tasks SET note=NULL WHERE id=? AND generation=? AND status<>'closed' AND note=?",
+                             (self.task_id, self.generation, self.written_note))
         except Exception:
             pass
         self.written_note = None
@@ -549,15 +610,20 @@ class Supervisor:
     def housekeep(self, task):
         """Server liveness, reconnect, reconcile and maintenance. False means the server is gone."""
         if self.server.poll() is not None:
-            self.update(turn_state='dead',note='task app-server exited; pending retained')
+            self.update(turn_state='dead')
+            self.fail_housekeeping(RuntimeError('task app-server exited; pending retained'))
             return False
         if self.rpc.error:
-            self.update(turn_state='unknown',note='RPC disconnected; pending retained')
+            self.update(turn_state='unknown')
+            if self.maintenance_error is None:
+                self.fail_housekeeping(self.rpc.error)
             if time.monotonic()<self.reconnect_at:
                 return True
             self.reconnect_at=time.monotonic()+2
             self.rpc.close();self.rpc=RPC(task['endpoint'])
-            self.reconcile()
+            self.history_scan = None
+            self.health_refresh_at = 0
+            self.reconcile_pending = True
         self.maintain()
         return True
 
@@ -566,30 +632,72 @@ class Supervisor:
             peer,_=listener.accept()
         except socket.timeout:
             return
-        with peer:
-            peer.settimeout(2)
-            try:
+        # A control RPC can itself be slow. Its peer thread must not hold accept up.
+        threading.Thread(target=self.serve_peer, args=(peer,), daemon=True).start()
+
+    def serve_peer(self, peer):
+        try:
+            with peer:
+                peer.settimeout(2)
                 with peer.makefile('r') as stream:
                     request=json.loads(stream.readline(1024*1024))
+                acquired = False
                 try:
-                    reply=self.command(request)
+                    if request.get('command') == 'health':
+                        reply = self.command(request)
+                    else:
+                        acquired = self.work_lock.acquire(blocking=False)
+                        if acquired:
+                            reply = self.command(request)
+                        elif request.get('generation') != self.generation or not self.current():
+                            raise ValueError('superseded attempt')
+                        elif request.get('command') not in ('flush', 'interrupt'):
+                            raise RuntimeError('supervisor busy; retry control later')
+                        else:
+                            reply = dict(status='queued', interrupted=False, delivered=0,
+                                         pending=store.pending_answer_count(self.con, self.task_id),
+                                         reason='supervisor busy; text retained; retry flush later',
+                                         supervisor_error=self.maintenance_error or 'housekeeping/control RPC in progress')
                 except Exception as exc:
                     reply={'exception':f'{type(exc).__name__}: {exc}'}
+                finally:
+                    if acquired:
+                        self.work_lock.release()
                 peer.sendall((json.dumps(reply)+'\n').encode())
-            except (OSError, ValueError):
-                pass  # a bad or vanished client must not stop the loop
+        except (OSError, ValueError):
+            pass
+        finally:
+            if hasattr(self.connections, 'con'):
+                self.connections.con.close()
+
+    def background(self, task, stop):
+        try:
+            while not stop.is_set() and not self.stopping:
+                if time.monotonic() >= self.housekeeping_at and self.work_lock.acquire(blocking=False):
+                    try:
+                        if not self.current() or not self.housekeep(task):
+                            self.stopping = True
+                    except Exception as exc:
+                        self.fail_housekeeping(exc)
+                    finally:
+                        self.work_lock.release()
+                stop.wait(.2)
+        finally:
+            if hasattr(self.connections, 'con'):
+                self.connections.con.close()
 
     def loop(self, listener, task):
-        """Control is served first on every pass; background work runs after it and can only delay itself."""
-        while not self.stopping and self.current():
-            self.serve(listener)
-            if time.monotonic() < self.housekeeping_at:
-                continue
-            try:
-                if not self.housekeep(task):
-                    break
-            except Exception as exc:
-                self.fail_housekeeping(exc)
+        """One serialized RPC/delivery lane; accept and health never wait for it."""
+        stop = threading.Event()
+        worker = threading.Thread(target=self.background, args=(task, stop), daemon=True)
+        worker.start()
+        try:
+            while not self.stopping and self.current():
+                self.serve(listener)
+        finally:
+            stop.set()
+            worker.join(.3)
+            # run() closes RPC to wake a pending call during process shutdown.
 
     def run(self):
         preload()

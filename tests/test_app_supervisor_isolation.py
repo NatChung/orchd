@@ -1,6 +1,7 @@
 """Issue #107: the app-server supervisor and viewer must never import orchd from the worker's worktree."""
 import json
 import os
+import queue
 import socket
 import subprocess
 import sys
@@ -82,9 +83,10 @@ class SupervisorIsolationTest(IsolationBase):
 
 
 class FailureVisibilityTest(AppBase):
-    def test_answer_reports_supervisor_note_when_control_times_out(self):
-        store.update_task(self.con, self.id, note='app-server supervisor: ImportError: cannot import name X')
-        with patch.object(app_worker, 'control', side_effect=TimeoutError('timed out')):
+    def test_answer_reports_structured_supervisor_error_when_control_times_out(self):
+        store.update_task(self.con, self.id, note='close-pending: keep me')
+        with patch.object(app_worker, 'control', side_effect=TimeoutError('timed out')), \
+                patch.object(app_worker, 'health_detail', return_value=('idle', 'ImportError: cannot import name X')):
             result = core.answer(self.con, self.rt, self.id, 'hi')
         self.assertIn('ImportError: cannot import name X', result['error'])
 
@@ -128,6 +130,18 @@ LOCK_HOLDER = ("import sys,time\nfrom orchd import store\ncon=store.connect(sys.
 class ControlStaysResponsiveTest(AppBase):
     """Maintenance, reconnect and reconcile failures must never keep the control socket from answering."""
 
+    def setUp(self):
+        super().setUp()
+        self.servers = []
+
+    def tearDown(self):
+        # Stop fixture threads before AppBase removes their database directory.
+        for sup, thread in self.servers:
+            sup.stopping = True
+            thread.join(3)
+            self.assertFalse(thread.is_alive())
+        super().tearDown()
+
     def serve(self, setup):
         listener = socket.socket(socket.AF_UNIX)
         self.addCleanup(listener.close)
@@ -145,12 +159,16 @@ class ControlStaysResponsiveTest(AppBase):
             sup.server.poll.return_value = None
             setup(sup)
             ready.set()
-            sup.loop(listener, store.get_task(sup.con, self.id))
+            try:
+                sup.loop(listener, store.get_task(sup.con, self.id))
+            finally:
+                sup.con.close()
 
         thread = threading.Thread(target=run, daemon=True)
         thread.start()
         ready.wait(5)
         sup = box['sup']
+        self.servers.append((sup, thread))
         self.addCleanup(thread.join, 3)
         self.addCleanup(setattr, sup, 'stopping', True)
         return sup
@@ -159,6 +177,218 @@ class ControlStaysResponsiveTest(AppBase):
         started = time.monotonic()
         reply = app_worker.control(store.get_task(self.con, self.id), 'health', timeout=3)
         return reply, time.monotonic() - started
+
+    def test_slow_housekeeping_keeps_health_and_flush_responsive(self):
+        entered = threading.Event()
+        release = threading.Event()
+        self.addCleanup(release.set)
+        self.queue('retained once')
+        def setup(sup):
+            def slow():
+                entered.set()
+                release.wait(8)
+                raise TimeoutError('history page stalled')
+            sup.collect_quota = slow
+        self.serve(setup)
+        self.assertTrue(entered.wait(2))
+        try:
+            reply, elapsed = self.health()
+            self.assertLess(elapsed, 3)
+            self.assertIn('busy', reply['supervisor_error'])
+            started = time.monotonic()
+            result = app_worker.control(store.get_task(self.con, self.id), 'flush', timeout=3)
+            self.assertLess(time.monotonic() - started, 3)
+            self.assertEqual(result['status'], 'queued')
+            self.assertIn('busy', result['reason'])
+            self.assertEqual(store.pending_answer_count(self.con, self.id), 1)
+        finally:
+            release.set()
+
+    def test_changed_error_does_not_replace_foreign_note(self):
+        sup = self.supervisor
+        for initial in ('close-pending: keep me', None):
+            store.update_task(self.con, self.id, note=initial)
+            sup.fail_housekeeping(TimeoutError('first'))
+            if initial:
+                self.assertEqual(store.get_task(self.con, self.id)['note'], initial)
+            store.update_task(self.con, self.id, note='close-pending: replacement')
+            sup.fail_housekeeping(ImportError('second'))
+            self.assertEqual(store.get_task(self.con, self.id)['note'], 'close-pending: replacement')
+            self.assertIn('second', sup.maintenance_error)
+            sup.clear_note()
+            self.assertEqual(store.get_task(self.con, self.id)['note'], 'close-pending: replacement')
+
+    def test_history_page_budget_continues_without_losing_turns(self):
+        sup = self.supervisor
+        calls = []
+        def page(method, params, timeout=20):
+            cursor = params['cursor']
+            index = int(cursor or 0)
+            calls.append(index)
+            return {'data': [{'id': str(index), 'status': 'completed'}],
+                    'nextCursor': str(index + 1) if index < 10 else None}
+        sup.rpc.call = page
+        turns = sup.history('thread')
+        self.assertIsNone(turns)
+        self.assertLessEqual(len(calls), 4)
+        for _ in range(10):
+            turns = sup.history('thread')
+            if turns is not None:
+                break
+        self.assertEqual([t['id'] for t in turns], [str(i) for i in range(11)])
+        self.assertEqual(calls, list(range(11)))
+
+    def test_concurrent_flushes_use_one_delivery_lane(self):
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        self.idle()
+        self.queue('one message')
+        def setup(sup):
+            sup.housekeeping_at = time.monotonic() + 60
+            original = sup.rpc.call
+            def call(method, params, timeout=20):
+                if method == 'turn/start':
+                    entered.set()
+                    release.wait(5)
+                return original(method, params, timeout)
+            sup.rpc.call = call
+        sup = self.serve(setup)
+        replies = []
+        client = threading.Thread(target=lambda: replies.append(
+            app_worker.control(self.task, 'flush')), daemon=True)
+        client.start()
+        try:
+            self.assertTrue(entered.wait(2))
+            busy = core.answer(self.con, self.rt, self.id, 'next message')
+            self.assertEqual(busy['status'], 'queued')
+            self.assertEqual(busy['pending'], 2)
+            reply, elapsed = self.health()
+            self.assertLess(elapsed, 3)
+        finally:
+            release.set()
+            client.join(3)
+        self.assertFalse(client.is_alive())
+        self.assertEqual(replies[0]['delivered'], 1)
+        self.assertEqual(store.pending_answer_count(self.con, self.id), 1)
+        self.assertEqual(len([m for m, _ in sup.rpc.calls if m == 'turn/start']), 1)
+        self.idle()
+        result = app_worker.control(self.task, 'flush')
+        self.assertEqual(result['delivered'], 1)
+        self.assertEqual(store.pending_answer_count(self.con, self.id), 0)
+        starts = [p['input'][0]['text'] for m, p in sup.rpc.calls if m == 'turn/start']
+        self.assertEqual(sum(t.count('one message') for t in starts), 1)
+        self.assertEqual(sum(t.count('next message') for t in starts), 1)
+
+    def test_history_time_budget_retries_only_unconsumed_page(self):
+        sup = self.supervisor
+        clock = [0.0]
+        seen = []
+        def page(method, params, timeout=20):
+            index = int(params['cursor'] or 0)
+            seen.append((index, timeout))
+            clock[0] += min(4.8, timeout)
+            if timeout < 4.8:
+                raise TimeoutError('page budget')
+            return {'data': [{'id': str(index)}], 'nextCursor': str(index + 1) if index < 2 else None}
+        sup.rpc.call = page
+        with patch.object(app_worker.time, 'monotonic', side_effect=lambda: clock[0]):
+            with self.assertRaises(TimeoutError):
+                sup.history('thread')
+            self.assertAlmostEqual(clock[0], 5)
+            self.assertAlmostEqual(seen[1][1], .2)
+            with self.assertRaises(TimeoutError):
+                sup.history('thread')
+            turns = sup.history('thread')
+        self.assertEqual([t['id'] for t in turns], ['0', '1', '2'])
+        self.assertEqual([i for i, _ in seen], [0, 1, 1, 2, 2])
+
+    def test_partial_history_does_not_release_uncertain_delivery_or_flush(self):
+        sup = self.supervisor
+        mid = self.queue('uncertain answer')
+        self.con.execute('INSERT INTO worker_deliveries VALUES(?,?,?,?,?,?,?,?,?)',
+                         ('client', self.id, self.gen, 'thread', None, json.dumps([mid]),
+                          'uncertain', 'gap', time.time()))
+        def page(method, params, timeout=20):
+            if method == 'thread/resume':
+                return {}
+            index = int(params['cursor'] or 0)
+            return {'data': [{'id': str(index), 'status': 'completed',
+                              'items': [{'clientId': 'client'}] if index == 0 else []}],
+                    'nextCursor': str(index + 1) if index < 5 else None}
+        sup.rpc.call = page
+        self.assertFalse(sup.reconcile())
+        self.assertEqual(store.pending_answer_count(self.con, self.id), 1)
+        self.assertIsNone(sup.deferred_flush)
+        self.assertTrue(sup.reconcile())
+        self.assertEqual(store.pending_answer_count(self.con, self.id), 0)
+        self.assertEqual(store.get_task(self.con, self.id)['last_completed_turn'], '5')
+        self.assertEqual(self.con.execute("SELECT count(*) FROM messages WHERE kind='answer'").fetchone()[0], 1)
+
+    def test_29_second_rpc_sequence_keeps_control_responsive_and_delivers_once(self):
+        """Original workload: resume 4.8s, four pages 4.8s, final page times out at 5s.
+
+        The fixture honors reduced per-batch deadlines; timed-out cursors retry next pass.
+        All control requests use the real Unix socket and default flush deadline.
+        """
+        slow_calls = queue.Queue()
+        finished = threading.Event()
+        starts = []
+        timed_out_last = [False]
+        self.queue('slow history answer')
+        def setup(sup):
+            sup.reconcile_pending = True
+            sup.collect_quota = lambda: None
+            original = sup.rpc.call
+            def call(method, params, timeout=20):
+                if method not in ('thread/resume', 'thread/turns/list'):
+                    if method == 'turn/start':
+                        starts.append(params['input'][0]['text'])
+                        finished.set()
+                    return original(method, params, timeout)
+                index = int(params.get('cursor') or 0)
+                delay = 5 if method == 'thread/turns/list' and index == 4 else 4.8
+                if index == 4 and timed_out_last[0]:
+                    return {'data': [{'id': 'last', 'status': 'completed'}], 'nextCursor': None}
+                slow_calls.put(method)
+                time.sleep(min(delay, timeout))
+                if timeout < delay or (method == 'thread/turns/list' and index == 4):
+                    if index == 4 and timeout > 4.9:
+                        timed_out_last[0] = True
+                    raise TimeoutError('history page stalled')
+                if method == 'thread/resume':
+                    return {}
+                return {'data': [{'id': str(index), 'status': 'completed'}], 'nextCursor': str(index + 1)}
+            sup.rpc.call = call
+        sup = self.serve(setup)
+        health_times, flush_times = [], []
+        deadline = time.monotonic() + 50
+        while not finished.is_set() and time.monotonic() < deadline:
+            try:
+                slow_calls.get(timeout=.2)
+            except queue.Empty:
+                continue
+            reply, elapsed = self.health()
+            health_times.append(elapsed)
+            self.assertTrue(reply['supervisor_error'])
+            started = time.monotonic()
+            result = app_worker.control(store.get_task(self.con, self.id), 'flush')
+            flush_times.append(time.monotonic() - started)
+            self.assertEqual(result['status'], 'queued')
+            self.assertIn('retained', result['reason'])
+            self.assertEqual(store.pending_answer_count(self.con, self.id), 1)
+        self.assertTrue(finished.wait(2))
+        # Wait for the receipt, not merely the turn/start bytes.
+        deadline = time.monotonic() + 2
+        while store.pending_answer_count(self.con, self.id) and time.monotonic() < deadline:
+            time.sleep(.02)
+        self.assertEqual(store.pending_answer_count(self.con, self.id), 0)
+        app_worker.control(store.get_task(self.con, self.id), 'flush')
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(starts[0].count('slow history answer'), 1)
+        self.assertLess(max(health_times), 3)
+        self.assertLess(max(flush_times), 25)
+        print(f'29s workload: health max={max(health_times):.6f}s; flush max={max(flush_times):.6f}s; '
+              f'probes={len(health_times)}; delivered={len(starts)}', flush=True)
 
     def test_consecutive_timeouts_answer_health_without_busy_loop(self):
         sup = self.serve(lambda s: setattr(s, 'collect_quota', Mock(side_effect=TimeoutError('delivery busy'))))
@@ -214,6 +444,19 @@ class ControlStaysResponsiveTest(AppBase):
         reply, _ = self.health()
         self.assertEqual(reply['worker_alive'], 'unknown')
         self.assertIn('rpc stuck', reply['supervisor_error'])
+
+    def test_cached_rpc_error_is_not_cleared_before_successful_refresh(self):
+        sup = self.supervisor
+        sup.rpc.fail = TimeoutError('still down')
+        sup.maintain()
+        sup.maintain()  # cached health refresh is not due yet
+        self.assertIn('still down', sup.maintenance_error)
+        self.assertIn('still down', store.get_task(self.con, self.id)['note'])
+        sup.rpc.fail = None
+        sup.health_refresh_at = 0
+        sup.maintain()
+        self.assertIsNone(sup.maintenance_error)
+        self.assertIsNone(store.get_task(self.con, self.id)['note'])
 
     def test_supervisor_error_reaches_health_detail_and_list_open(self):
         task = store.get_task(self.con, self.id)
