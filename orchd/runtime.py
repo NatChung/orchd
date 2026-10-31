@@ -79,12 +79,23 @@ CLAUDE_DEAD_STATES = ("failed",)  # the only dead state observed so far (a reape
 
 
 def claude_job_alive(jobs, job_id):
-    """Liveness of a Claude job from one `live_jobs()` snapshot: None when the query failed or there is no job,
-    False when the daemon no longer lists it or lists it as dead."""
+    """Read-only liveness from the public `agents --json` snapshot.
+
+    CLI 2.1.314 exposes pid/status without the recorded procStart or the result
+    of its birth probe. Even a readable psutil create_time would only identify
+    today's PID, not tie it to this job. State is an outcome, not identity.
+    Until a verified session/birth is available, listed process evidence is
+    unknown. Only an absent job or a failed job with no process evidence is dead.
+    """
     if jobs is None or not job_id:
         return None
     job = jobs.get(job_id)
-    return job is not None and (job or {}).get("state") not in CLAUDE_DEAD_STATES
+    if job is None:
+        return False
+    if (job.get("state") in CLAUDE_DEAD_STATES
+            and job.get("pid") is None and job.get("status") is None):
+        return False
+    return None
 
 
 def launch_env():
