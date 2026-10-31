@@ -9,7 +9,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import models, app_worker, intake, orch_revive, paths, question_summary, store, verify as verification, worker_health
+from . import limits, models, app_worker, intake, orch_revive, paths, question_summary, store, verify as verification, worker_health
 from .orch_health import owner_health
 from .runtime import (DEFAULT_ORCH_MODEL, ORCH_MODELS, WORKER_MODELS,
                       claude_job_alive, error_detail, worker_kind)
@@ -407,7 +407,8 @@ def inbox(con, orch_thread, group_id=None):
     store.mark_read(con, [r["id"] for r in rows])
     return [dict(task_id=r["task_id"], repo=r["repo"], title=r["title"], kind=r["kind"],
                  body=r["body"], evidence=r["evidence"], task_status=r["status"],
-                 model=task_model(r), model_reason=r['model_reason'], group_id=r['group_id'], pending=pending[r["task_id"]],
+                 model=task_model(r), model_reason=limits.cap_text(r['model_reason']), group_id=r['group_id'],
+                 pending=pending[r["task_id"]],
                  verification=checked[r["task_id"]]) for r in rows]
 
 
@@ -858,6 +859,19 @@ def followup(con, rt, task_id, message):
     return result
 
 
+def retry_summary(con, task_id):
+    """retry_count and the latest retry's target model and reason; the full history stays in the retry events."""
+    rows = con.execute("SELECT body FROM messages WHERE task_id=? AND kind='retry' ORDER BY id", (task_id,)).fetchall()
+    last = None
+    if rows:
+        try:
+            body = json.loads(rows[-1]["body"])
+            last = dict(model=body.get("to_model"), reason=limits.cap_text(body.get("reason")))
+        except (ValueError, AttributeError):
+            last = None
+    return dict(retry_count=len(rows), last_retry=last)
+
+
 def list_open(con, rt):
     from . import task_question_answers
     try:
@@ -874,7 +888,8 @@ def list_open(con, rt):
         else:
             alive = claude_job_alive(jobs, t["job_id"])
         out.append(dict(task_id=t["id"], repo=t["repo"], title=t["title"], status=t["status"],
-                        model=task_model(t), model_reason=t['model_reason'], group_id=t['group_id'],
+                        model=task_model(t), model_reason=limits.cap_text(t['model_reason']), group_id=t['group_id'],
+                        **retry_summary(con, t['id']),
                         auto_model=bool(t['auto_model']), auto_retry_count=t['auto_retry_count'],
                         worker_alive=alive, goal_id=t["goal_id"], goal_critical=t["goal_critical"],
                         worktree=t["worktree"], branch=t["branch"],
@@ -1196,7 +1211,6 @@ def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT, backend=No
             try:
                 store.update_task(con, task_id, status="running", note=None)
                 current = app_worker.start(con, rt, task, prompt, to_model, pending, brief=app_brief())
-                store.update_task(con, task_id, model_reason=f"{task['model_reason'] or ''}; retry: {model}: {reason}")
                 store.add_message(con, task_id, "retry", json.dumps(dict(**fields,
                     from_model=from_model, new_job_id=current["job_id"], new_session_id=current["session_id"],
                     answers_delivered=len(pending), generation=current["generation"])))
@@ -1232,8 +1246,7 @@ def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT, backend=No
                     raise _Superseded("the task was closed or its worker changed while retrying")
                 store.update_task(con, task_id, backend="exec", generation=None, endpoint=None,
                                   control_endpoint=None, supervisor_identity=None, server_identity=None,
-                                  active_turn=None, turn_state=None, last_completed_turn=None,
-                                  model_reason=f"{task['model_reason'] or ''}; retry: {model}: {reason}")
+                                  active_turn=None, turn_state=None, last_completed_turn=None)
                 store.mark_read(con, [row["id"] for row in pending])  # the same receipt an answer flush writes
                 for row in pending:
                     store.add_message(con, task_id, "answer", row["body"], evidence=row["evidence"],

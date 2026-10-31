@@ -193,7 +193,7 @@ class OrchHealthTest(unittest.TestCase):
         self.con.execute("UPDATE messages SET wake_error='RuntimeError: SECRET',read_at=1 WHERE id=?", (old,))
         before = list(self.con.iterdump())
         # MCP list_open spans groups but must not make other groups' messages public.
-        rows = mcp_server.call("list_open", {}, "owner-C", self.con, self.rt)
+        rows = mcp_server.call("list_open", {}, "owner-C", self.con, self.rt)["tasks"]
         by_task = {r["task_id"]: r["notification_delivery"] for r in rows}
         self.assertEqual(by_task[a["id"]]["unread_count"], 3)
         self.assertEqual(by_task[a["id"]]["unread_wake_failed_count"], 1)

@@ -162,6 +162,9 @@ unchanged. An observed sol rate-limit failure excludes sol for **10 minutes**.
 Unknown/stale/unreadable quota does not block ordinary tasks: prefer sol absent
 known exhaustion/recent failure, or sonnet when sol is full. Every applied choice
 appends its reason to `model_reason`, returned by dispatch, list_open and inbox.
+`model_reason` keeps only the first dispatch reason; retries no longer append to it. `list_open` shows
+`retry_count` and `last_retry` (target model and reason); the full history is in the task's `retry` events.
+Output text is capped at 500 characters with a `…[truncated N chars]` marker; the stored value is unchanged.
 If both providers are full, choose the non-cooldown provider with the lowest
 maximum known used percentage. Ties or no such evidence fall back to sol.
 This is best-effort, not a quota reservation or a guarantee of equivalent tokens.

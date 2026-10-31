@@ -610,7 +610,7 @@ class McpTest(unittest.TestCase):
                           "intake_pending", "intake_show", "intake_decide", "intake_resolve", "intake_decisions",
                           "intake_backlog", "intake_take_unassigned", "interface_requests", "interface_reply", "interface_dismiss"})
         self.assertNotIn("isError", replies[2]["result"])
-        (row,) = json.loads(replies[3]["result"]["content"][0]["text"])
+        (row,) = json.loads(replies[3]["result"]["content"][0]["text"])["tasks"]
         self.assertEqual(row["orch_thread"], "thread-X")
         dispatched = json.loads(replies[2]["result"]["content"][0]["text"])
         self.assertEqual((dispatched["orch_id"], dispatched["model"], dispatched["other_open_on_repo"]),
@@ -624,7 +624,7 @@ class McpTest(unittest.TestCase):
             "arguments": {"repo": "demo", "title": "T", "instructions": "i", "done_when": "d",
                               "model_reason": "r", "task_type": "code"}}},
             {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "list_open", "arguments": {}}})
-        (row,) = json.loads(replies[1]["result"]["content"][0]["text"])
+        (row,) = json.loads(replies[1]["result"]["content"][0]["text"])["tasks"]
         self.assertEqual(row["orch_thread"], "oabc1234")
 
     def test_codex_thread_is_registered_lazily_as_codex(self):

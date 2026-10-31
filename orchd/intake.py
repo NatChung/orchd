@@ -14,7 +14,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import store
+from . import limits, store
 
 VERSION = 1
 PROVIDERS = ("email", "slack", "line")
@@ -188,7 +188,8 @@ def _event(con, receipt_id):
     return row
 
 
-def pending(con, owner=None, limit=100, *, after_id=None, high_water_id=None, cursor=None):
+def pending(con, owner=None, limit=100, *, after_id=None, high_water_id=None, cursor=None,
+            max_bytes=limits.MAX_PAGE_BYTES):
     """Read a live queue in id order, bounded by a traversal's fixed high-water id.
 
     Carry next_cursor to keep the boundary and owner. Queue membership is evaluated on each page;
@@ -219,8 +220,8 @@ def pending(con, owner=None, limit=100, *, after_id=None, high_water_id=None, cu
     rows = con.execute("SELECT * FROM intake_events WHERE state='received' AND " + clause +
                        " AND id>? AND id<=? ORDER BY id LIMIT ?",
                        (*params, after_id, high_water_id, limit + 1)).fetchall()
-    has_more = len(rows) > limit
-    events = [_event_view(r) for r in rows[:limit]]
+    events = limits.fit_bytes([_event_view(r) for r in rows[:limit]], max_bytes)  # a page is bounded in bytes too
+    has_more = len(rows) > len(events)
     last_id = events[-1]["id"] if events else after_id
     return dict(owner=owner, events=events, has_more=has_more, high_water_id=high_water_id,
                 next_cursor=f"p1:{last_id}:{high_water_id}:{scope}" if has_more else None)
