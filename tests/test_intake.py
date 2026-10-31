@@ -389,14 +389,14 @@ class PaginationTests(IntakeBase):
 
     def test_legacy_default_order_limit_and_json_fields_unchanged(self):
         self.seed(105)
-        page = intake.pending(self.con)
+        page = intake.pending(self.con, max_bytes=10**9)  # order, limit and fields; the byte cut is tested elsewhere
         self.assertEqual(page["owner"], None)
         self.assertEqual([e["id"] for e in page["events"]], list(range(1, 101)))
         old_fields = {"receipt_id", "version", "provider", "account", "company", "event_id", "source_ref",
                       "thread_ref", "source_time", "received_at", "producer", "summary", "owner_orch",
                       "state", "acked_at", "acked_by", "classification", "level", "todo_id", "issue_ref", "project"}
         self.assertTrue(old_fields <= page["events"][0].keys())
-        self.assertEqual(page["events"], intake.pending(self.con, None, 100)["events"])
+        self.assertEqual(page["events"], intake.pending(self.con, None, 100, max_bytes=10**9)["events"])
 
 
 class DraftTests(IntakeBase):

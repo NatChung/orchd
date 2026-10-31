@@ -92,6 +92,9 @@ high-water id and owner scope. The final page has `has_more=false`, `next_cursor
 polling traversal without a cursor; do not repeatedly read only the first page. This visits old unresolved
 items and later received items without letting newly submitted events extend a traversal forever.
 
+A page is also bounded in bytes (the MCP reply stays within 60,000 bytes; an event too large alone has its long text fields shortened with a marker, so every page holds at least one event), so it can
+return fewer than `--limit` events with `has_more=true`. Keep following `next_cursor` until `has_more` is false.
+
 Manual equivalent: `--after-id N --high-water-id H`; both are nonnegative integers, N ≤ H. Without H,
 a call captures the current max event id. Carry H on every subsequent page to preserve the boundary;
 `--after-id` alone does not preserve a prior boundary. Cursor cannot be mixed with either manual flag.

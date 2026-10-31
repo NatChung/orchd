@@ -483,7 +483,7 @@ def get_task(con, task_id):
 
 def open_tasks(con):
     marks = ",".join("?" * len(OPEN))
-    return con.execute(f"SELECT * FROM tasks WHERE status IN ({marks}) ORDER BY created_at", OPEN).fetchall()
+    return con.execute(f"SELECT * FROM tasks WHERE status IN ({marks}) ORDER BY created_at,id", OPEN).fetchall()
 
 
 def get_orch(con, orch_id):
