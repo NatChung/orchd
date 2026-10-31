@@ -360,7 +360,7 @@ class Runtime:
 
     def start_worker(self, worktree, sock, brief, model):
         from . import store
-        command = shlex.join(['env', 'ORCHD_HOME=' + str(store.home()), paths.orchd_executable(),
+        command = shlex.join(['env', 'ORCHD_HOME=' + str(store.home()), *paths.orchd_command(),
                               'quota', '--probe', 'sonnet', '--binary', self.claude]) + ' >/dev/null 2>&1'
         hooks = {event: [{'hooks': [{'type': 'command', 'command': command, 'timeout': 25}]}]
                  for event in ('SessionStart', 'UserPromptSubmit', 'Stop', 'StopFailure')}
@@ -567,10 +567,11 @@ class Runtime:
         name = Path(log).parent.name
         if not name.startswith("orchd-"):
             return cmd
-        script = ('task=$1; orchd=$2; log=$3; shift 3; '
-                  '"$@"; "$orchd" quota --codex-log "$log" >/dev/null 2>&1; '
-                  '"$orchd" flush "$task" --after-pid $$ --turn-log "$log"')
-        return ["/bin/sh", "-c", script, "orchd-turn", name[len("orchd-"):], paths.orchd_executable(), str(log), *cmd]
+        orchd = shlex.join(paths.orchd_command())  # interpreter + script: bare `python3` on PATH may lack psutil
+        script = (f'task=$1; log=$2; shift 2; '
+                  f'"$@"; {orchd} quota --codex-log "$log" >/dev/null 2>&1; '
+                  f'{orchd} flush "$task" --after-pid $$ --turn-log "$log"')
+        return ["/bin/sh", "-c", script, "orchd-turn", name[len("orchd-"):], str(log), *cmd]
 
     def start_codex_worker(self, worktree, log, prompt, model):
         pid = self.spawn(self.codex_turn([self.codex, "exec", *CODEX_FLAGS, "-m", model, "-C", worktree, prompt], log),
