@@ -15,6 +15,21 @@ TERM_GRACE = 2.0
 KILL_GRACE = 2.0
 
 
+def environ_of(proc, attempts=4):
+    """A process mid-exec briefly refuses its environment, and one that exits mid-read makes psutil's C code raise
+    SystemError ("returned a result with an exception set"). Retry; a failure that persists is NoSuchProcess when
+    the process is gone and AccessDenied (unknown, blocks) when it is still there."""
+    for attempt in range(attempts):
+        try:
+            return proc.environ()
+        except (psutil.AccessDenied, SystemError):
+            if attempt < attempts - 1:
+                time.sleep(.05)
+    if not proc.is_running():
+        raise psutil.NoSuchProcess(proc.pid)
+    raise psutil.AccessDenied(proc.pid)
+
+
 def _descendants(proc, mark, found):
     """Do not cross into another task, even if a worker dispatched that task."""
     try:
@@ -23,7 +38,7 @@ def _descendants(proc, mark, found):
         return
     for child in children:
         try:
-            owner = child.environ().get("ORCHD_WORKTREE")
+            owner = environ_of(child).get("ORCHD_WORKTREE")
             if owner and owner != mark:
                 continue
             child.create_time()
@@ -45,7 +60,7 @@ def task_processes(worktree, captured=()):
         try:
             if proc.pid == os.getpid() or proc.uids().real != os.getuid():
                 continue
-            if proc.environ().get("ORCHD_WORKTREE") != mark:
+            if environ_of(proc).get("ORCHD_WORKTREE") != mark:
                 continue
             # Force identity acquisition now, before a PID can disappear/reappear.
             proc.create_time()
@@ -53,16 +68,14 @@ def task_processes(worktree, captured=()):
             _descendants(proc, mark, found)
         except (psutil.NoSuchProcess, psutil.ZombieProcess):
             continue
+        except SystemError:  # psutil's C code lost a race with the process exiting
+            if not proc.is_running():
+                continue
+            raise RuntimeError(f"cannot inspect process {proc.pid}; worktree kept") from None
         except psutil.AccessDenied:
-            if proc.pid in found:
-                raise RuntimeError(f"cannot inspect descendants of task process {proc.pid}; worktree kept") from None
-            # Protected unrelated sessions cannot be inspected. A task-local
-            # process whose ownership is unreadable blocks close, never gets killed.
-            try:
-                if Path(proc.cwd()).resolve().is_relative_to(Path(mark)):
-                    raise RuntimeError(f"cannot inspect task-local process {proc.pid}; worktree kept")
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
+            # The mark is the only proof of ownership. A process of ours whose mark cannot be read is unknown,
+            # not unrelated: it blocks close (worktree kept) and is never signalled.
+            raise RuntimeError(f"cannot inspect process {proc.pid}; worktree kept") from None
     return found
 
 

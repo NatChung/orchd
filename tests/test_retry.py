@@ -1,11 +1,13 @@
 import io
 import json
+import os
 import sqlite3
 import subprocess
 import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from orchd import core, mcp_server, store
@@ -640,6 +642,9 @@ class RealCodexStopTest(unittest.TestCase):
         self.wt = root / "wt-task"
         self.wt.mkdir()
         self.procs = []
+        home = patch.dict(os.environ, {"ORCHD_HOME": str(root / "home")})  # where spawn records a turn's identity
+        home.start()
+        self.addCleanup(home.stop)
         self.con = store.connect(root / "t.db")
         test = self
 
@@ -654,7 +659,7 @@ class RealCodexStopTest(unittest.TestCase):
                 return None
 
             def start_codex_worker(self, worktree, log, prompt, model):  # a new turn: its args name the worktree
-                test.new = test.start("-C", worktree)
+                test.new = test.start("-C", worktree, record=True)
                 return str(test.new.pid), "thread-new"
         self.rt = Rt()
 
@@ -665,10 +670,13 @@ class RealCodexStopTest(unittest.TestCase):
                 proc.wait()
         self.tmp.cleanup()
 
-    def start(self, *args):
+    def start(self, *args, record=False):
+        """record=True: a turn orchd started (Runtime.spawn writes its identity); False: whatever else holds a pid."""
         proc = subprocess.Popen([str(self.codex), "300", *args], start_new_session=True)
         self.procs.append(proc)
         time.sleep(0.1)
+        if record:
+            Runtime()._record_identity(proc.pid)
         return proc
 
     def task(self, pid):
@@ -688,7 +696,7 @@ class RealCodexStopTest(unittest.TestCase):
     def test_own_codex_turn_is_stopped_and_confirmed_before_the_new_one(self):
         for args in (("exec", "-C", None), ("exec", "resume", "thread-old")):  # first turn, resumed turn
             with self.subTest(args=args[1]):
-                own = self.start(*[a or str(self.wt) for a in args])
+                own = self.start(*[a or str(self.wt) for a in args], record=True)
                 self.con.execute("DELETE FROM tasks")
                 self.task(own.pid)
                 r = core.retry(self.con, self.rt, "t1", "sol", "fresh context")

@@ -826,6 +826,17 @@ def main(argv=None):
         print(json.dumps(result, ensure_ascii=False, indent=1))
         return 1 if result["status"] == "failed" else 0
 
+    if args.cmd == "stuck-close":  # a listing: opens the database read-only, never creates or migrates it
+        try:
+            con = store.connect_readonly()
+        except store.DatabaseUnavailable as error:
+            print(f"stuck-close: {error}", file=sys.stderr)
+            return 1
+        try:
+            print(json.dumps(core.stuck_closes(con), ensure_ascii=False, indent=1))
+        finally:
+            con.close()
+        return 0
     con, rt = store.connect(args.database if args.cmd == '_auto-retry' else None), Runtime()
     if args.cmd in ("watch", "summary"):
         from orchd import watch
@@ -919,8 +930,6 @@ def main(argv=None):
         return 0 if result["passed"] else 1
     elif args.cmd == "list":
         print(json.dumps(core.list_open(con, rt), ensure_ascii=False, indent=1))
-    elif args.cmd == "stuck-close":
-        print(json.dumps(core.stuck_closes(con), ensure_ascii=False, indent=1))
     elif args.cmd == "adopt":
         try:
             print(json.dumps(core.adopt(con, rt, args.new_orch, args.task_ids, args.from_orch, args.force),

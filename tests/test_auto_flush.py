@@ -252,6 +252,9 @@ class WrapperCleanupTest(unittest.TestCase):
         rt.codex = str(codex)
         env = {"ORCHD_EXECUTABLE": str(orchd), "ORCHD_HOME": str(tmp / "home"), "READY": str(ready),
                "TRACE": str(trace)}
+        patcher = patch.dict(os.environ, {"ORCHD_HOME": env["ORCHD_HOME"]})  # the spawn record is found at stop time
+        patcher.start()
+        self.addCleanup(patcher.stop)
         with patch.dict(os.environ, env):
             pid = rt.resume_codex_worker(str(worktree), str(log), "th-wrap", "hello", "gpt-6.1-sol")
         for _ in range(200):

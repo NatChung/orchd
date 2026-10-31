@@ -16,9 +16,11 @@ import time
 import uuid
 from pathlib import Path
 
+import psutil
+
 from . import paths
 from .models import WorkerModels
-from .processes import cleanup_processes, task_processes
+from .processes import environ_of, cleanup_processes, task_processes
 
 
 # Worker aliases come from orchd.models (built-in defaults plus [models.*] in config.toml).
@@ -67,6 +69,10 @@ def worker_kind(model):
     """A worker runs on the CLI of its model's vendor: GPT models on codex, the rest on claude."""
     return "codex" if model and model.startswith("gpt-") else "claude"
 
+
+# Ignored directories that are rebuilt from tracked files; anything else ignored (.env, local config, build output,
+# data) may be the only copy and keeps the worktree. Exactly these names, matched as a path component.
+REBUILDABLE_IGNORED = (".venv", "node_modules", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache")
 
 CLAUDE_DEAD_STATES = ("failed",)  # the only dead state observed so far (a reaped worker); "blocked" is alive, waiting
 
@@ -169,8 +175,30 @@ class Runtime:
     def spawn(self, cmd, cwd, log):
         """Start a detached process that outlives us, stdout+stderr appended to `log`; return its pid."""
         with open(log, "a") as out:
-            return subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
-                                    env=worker_env(cwd), start_new_session=True).pid
+            pid = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
+                                   env=worker_env(cwd), start_new_session=True).pid
+        self._record_identity(pid)
+        return pid
+
+    def _identity_file(self, pid):
+        from . import store
+        return store.home() / "codex-pids" / f"{int(pid)}.json"
+
+    def _record_identity(self, pid):
+        """Remember (pid, birth, pgid) of a turn we started, so a later stop can tell it from a reused pid. Best
+        effort: without a record the stop falls back to the environment mark and refuses what it cannot prove."""
+        try:
+            proc = psutil.Process(int(pid))
+            record = json.dumps(dict(pid=proc.pid, birth=proc.create_time(), pgid=os.getpgid(proc.pid)))
+            path = self._identity_file(pid)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(record)
+            cutoff = time.time() - 14 * 86400
+            for old in path.parent.glob("*.json"):
+                if old != path and old.stat().st_mtime < cutoff:
+                    old.unlink()
+        except Exception:
+            pass
 
     def pid_alive(self, pid):
         try:  # a finished child of this long-lived process stays a zombie, and kill(0) finds it, until reaped
@@ -180,8 +208,12 @@ class Runtime:
             pass
         try:
             os.kill(int(pid), 0)
-        except (OSError, ValueError):
+        except ValueError:
             return False
+        except ProcessLookupError:  # ESRCH is the only proof of absence
+            return False
+        except OSError:  # EPERM or anything else: the process exists or cannot be told apart, so it blocks
+            return True
         return True
 
     def start_auto_retry(self, database, task_id, event_id):
@@ -234,6 +266,24 @@ class Runtime:
         return self.run(["git", "-c", "status.showUntrackedFiles=all", "-C", path, "status", "--porcelain",
                          "--untracked-files=all", "--ignore-submodules=none"]).stdout.strip()
 
+    def ignored_loss(self, path):
+        """Why ignored files stop a removal, else None. `git worktree remove` deletes ignored files without a word
+        and they are in no commit, so each one is the only copy unless it sits under a REBUILDABLE_IGNORED
+        directory. Git lists an ignored directory as one entry (`out/`); the first few entries are named in the reason."""
+        out = self.run(["git", "-c", "status.showUntrackedFiles=normal", "-C", path, "status", "--porcelain", "-z",
+                        "--ignored=matching", "--untracked-files=normal", "--ignore-submodules=none"]).stdout
+        kept = []
+        for entry in out.split("\0"):
+            if not entry.startswith("!! "):
+                continue
+            name = entry[3:]
+            if not any(part in REBUILDABLE_IGNORED for part in name.rstrip("/").split("/")):
+                kept.append(name)
+        if not kept:
+            return None
+        shown = ", ".join(kept[:5]) + (f" (+{len(kept) - 5} more)" if len(kept) > 5 else "")
+        return f"ignored files present, not in git and not rebuildable: {shown}"
+
     def submodule_paths(self, worktree):
         """Absolute paths of every initialized submodule, nested ones included."""
         out = self.run(["git", "-C", worktree, "submodule", "foreach", "--recursive", "--quiet",
@@ -266,6 +316,9 @@ class Runtime:
         """What in one submodule would be lost on removal, else None. Raises when git cannot be asked."""
         if self.dirty(path):
             return f"uncommitted changes in submodule {name}"
+        ignored = self.ignored_loss(path)
+        if ignored:
+            return f"{ignored} in submodule {name}"
         if self.run(["git", "-C", path, "stash", "list"]).stdout.strip():
             return f"stash in submodule {name}"
         unpushed = self.run(["git", "-C", path, "rev-list", "--count", "HEAD", "--branches", "--tags",
@@ -274,20 +327,25 @@ class Runtime:
             return f"commits not pushed in submodule {name}"
         return None
 
-    def worktree_state(self, worktree, base):
-        """Return (removable, reason). Removable only when nothing local would be lost."""
-        if not self.exists(worktree):
-            return True, "worktree already gone"
+    def local_loss(self, worktree):
+        """Why removing this worktree would delete something that exists nowhere else, else None: uncommitted
+        changes, ignored files, submodule state. Needs no base, so every removal path can run it."""
         try:
             dirty = self.dirty(worktree)
         except subprocess.CalledProcessError as e:
             if not self.exists(os.path.join(worktree, ".gitmodules")):
                 raise
             # git cannot read a submodule it lists (damaged git dir): doubt means keep, not stuck
-            return False, f"cannot verify submodule state: {error_detail(e)}"
+            return f"cannot verify submodule state: {error_detail(e)}"
         if dirty:
-            return False, "uncommitted changes"
-        loss = self.submodule_loss(worktree)
+            return "uncommitted changes"
+        return self.ignored_loss(worktree) or self.submodule_loss(worktree)
+
+    def worktree_state(self, worktree, base):
+        """Return (removable, reason). Removable only when nothing local would be lost."""
+        if not self.exists(worktree):
+            return True, "worktree already gone"
+        loss = self.local_loss(worktree)
         if loss:
             return False, loss
         head = self.run(["git", "-C", worktree, "rev-parse", "HEAD"]).stdout.strip()
@@ -317,6 +375,10 @@ class Runtime:
             if base is not None:
                 removable, reason = self.worktree_state(worktree, base)
                 if not removable:
+                    return reason
+            else:  # no base to compare commits with, but unsaved files are checked on every path
+                reason = self.local_loss(worktree)
+                if reason:
                     return reason
             self.run(["git", "-c", "status.showUntrackedFiles=all", "-C", str(repo_path), "worktree", "remove",
                       worktree])
@@ -539,29 +601,80 @@ class Runtime:
             self.sleep(0.5)
         raise RuntimeError(f"claude worker {job} not confirmed stopped ({state}); claude stop: {stop_note}")
 
-    def _stop_codex_confirmed(self, pid, marks, wait):
-        """A Codex turn's pid may be long gone and reused, so only a process that is codex *and* runs this task's
-        worktree or thread is ours; anything else means our worker already exited."""
-        def ours():
-            if not self.pid_alive(pid):
-                return False
-            try:
-                ps = self.run(["ps", "-ww", "-p", str(pid), "-o", "args="], timeout=10, check=False)
-            except (OSError, subprocess.SubprocessError) as e:
-                raise RuntimeError(f"codex worker {pid} not confirmed stopped: {error_detail(e)}") from None
-            if ps.returncode not in (0, 1):
-                raise RuntimeError(f"codex worker {pid} not confirmed stopped: ps exit {ps.returncode}: "
-                                   f"{redact(_text(ps.stderr))}")
-            args = ps.stdout
-            return "codex" in args and any(m in args for m in marks)
-        if not ours():
-            return None
+    def _read_identity(self, pid):
         try:
-            os.killpg(int(pid), 15)
-        except ProcessLookupError:
+            record = json.loads(self._identity_file(pid).read_text())
+            return record if isinstance(record, dict) and record.get("pid") == int(pid) else None
+        except (OSError, ValueError, TypeError):
             return None
-        except (OSError, ValueError) as e:
-            raise RuntimeError(f"codex worker {pid} not confirmed stopped: kill failed: {e}") from None
+
+    def _codex_targets(self, pid, marks):
+        """[the turn's process] when it is provably this task's, [] when the pid is gone or is not ours (a reused
+        pid). Descendants are not signalled here: the marked-process cleanup that follows every stop handles them,
+        skipping any that carry another task's mark.
+        Raises RuntimeError when ownership cannot be established; callers keep the task open then.
+
+        Ownership never comes from a command line. A turn orchd started has a record (pid, birth, pgid) written at
+        spawn: a pid whose birth differs was reused. Without a record (an older turn) the process must carry this
+        task's ORCHD_WORKTREE mark and lead its own group. Nothing is signalled through killpg, so a member of the
+        group that is not provably ours is never touched."""
+        def unknown(why):
+            return RuntimeError(f"codex worker {pid} not confirmed stopped: {why}")
+        try:
+            proc = psutil.Process(int(pid))
+            if proc.status() == psutil.STATUS_ZOMBIE:
+                return []
+            birth, pgid = proc.create_time(), os.getpgid(proc.pid)
+        except (psutil.NoSuchProcess, ProcessLookupError, ValueError):
+            return []
+        except (psutil.AccessDenied, OSError) as e:
+            raise unknown(f"cannot inspect it ({type(e).__name__})") from None
+        mark = str(Path(marks[0]).resolve()) if marks and marks[0] else None
+        record = self._read_identity(pid)
+        try:
+            if record:
+                if abs(float(record.get("birth", 0)) - birth) > 0.01:
+                    return []  # same pid, different process
+                if pgid != proc.pid or record.get("pgid") != pgid:
+                    raise unknown("not an owned process-group leader; stop refused")
+            else:
+                try:
+                    env = environ_of(proc)
+                except psutil.AccessDenied:
+                    env = None
+                if not env:  # unreadable, or empty as macOS shows a protected binary's (the turn's sh wrapper)
+                    # Only dismissed when its command line shows it is no Codex turn at all; otherwise it might be
+                    # ours and we cannot tell.
+                    if not any(os.path.basename(a) == "codex" or a == "orchd-turn" for a in proc.cmdline()):
+                        return []
+                    raise unknown("no spawn record and its environment is unreadable") from None
+                owner = env.get("ORCHD_WORKTREE")
+                if not mark or owner != mark or pgid != proc.pid:
+                    return []
+            return [proc]
+        except psutil.NoSuchProcess:
+            return []
+        except psutil.AccessDenied as e:
+            raise unknown(f"cannot inspect it ({type(e).__name__})") from None
+
+    def _signal_codex(self, targets, pid):
+        for proc in targets:  # the leader first: a shell wrapper must not outlive its codex and run its flush
+            try:
+                proc.terminate()
+            except psutil.NoSuchProcess:
+                pass
+            except (psutil.AccessDenied, OSError) as e:
+                raise RuntimeError(f"codex worker {pid} not confirmed stopped: kill failed: {e}") from None
+
+    def _stop_codex_confirmed(self, pid, marks, wait):
+        """Stop one Codex turn if (and only if) it is verifiably this task's, and confirm it is gone. A pid that is
+        gone, or now belongs to something else, means our worker already exited."""
+        def ours():
+            return self._codex_targets(pid, marks) if self.pid_alive(pid) else []
+        targets = ours()
+        if not targets:
+            return None
+        self._signal_codex(targets, pid)
         for _ in range(max(1, int(wait / 0.2))):
             self.sleep(0.2)
             if not ours():
@@ -608,7 +721,7 @@ class Runtime:
                 break
             self.sleep(0.2)
         try:
-            self.stop_codex(pid)
+            self.stop_codex(pid, (worktree,))
         finally:
             cleanup_processes(worktree, task_processes(worktree))
         raise RuntimeError("codex exec started no thread: " + Path(log).read_text(errors="replace")[-500:]
@@ -619,14 +732,12 @@ class Runtime:
         cmd = [self.codex, "exec", "resume", *CODEX_FLAGS, "-m", model, thread, text]
         return str(self.spawn(self.codex_turn(cmd, log), worktree, log))
 
-    def stop_codex(self, pid):
-        """An idle worker's pid is long gone and may be reused, so kill only a process that is still codex."""
-        comm = self.run(["ps", "-ww", "-p", str(pid), "-o", "args="], check=False).stdout  # a turn is a shell around codex
-        if "codex" not in comm:
-            return
+    def stop_codex(self, pid, marks=()):
+        """Best-effort stop of a turn we just started. An idle worker's pid is long gone and may be reused, so only a
+        verified process of this task is signalled (see _codex_targets)."""
         try:
-            os.killpg(int(pid), 15)
-        except (OSError, ValueError):
+            self._signal_codex(self._codex_targets(pid, marks), pid)
+        except RuntimeError:
             pass
 
     def codex_usage(self, thread):

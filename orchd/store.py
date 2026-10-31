@@ -378,6 +378,38 @@ def connect(path=None):
     return con
 
 
+class DatabaseUnavailable(Exception):
+    """connect_readonly found no usable database; the message says what to do."""
+
+
+def connect_readonly(path=None):
+    """Open the database for reading only: never creates a file, a directory, a table or a column, and takes no
+    write lock. A missing or older-than-this-orchd database raises DatabaseUnavailable instead of being created or
+    migrated; run any other orchd command to migrate it."""
+    path = Path(path or home() / "orchd.db")
+    if not path.is_file():
+        raise DatabaseUnavailable(f"no database at {path}; nothing was created")
+    # With no -wal file nothing is waiting to be read from it, and a plain read-only open of a WAL database would
+    # create -shm/-wal beside it; immutable skips that. With a -wal present (a writer is live) both files already
+    # exist, so a read-only open creates nothing and sees the committed rows.
+    wal = path.with_name(path.name + "-wal")
+    uri = f"{path.resolve().as_uri()}?mode=ro" if wal.exists() else f"{path.resolve().as_uri()}?immutable=1"
+    try:
+        con = sqlite3.connect(uri, uri=True, timeout=30)
+        con.row_factory = sqlite3.Row
+        have = {r["name"] for r in con.execute("PRAGMA table_info(tasks)")}
+    except sqlite3.Error as error:
+        raise DatabaseUnavailable(f"cannot read {path} read-only: {error}") from None
+    missing = [name for name in ("id", "status", "note", "worktree", *(c.split()[0] for c in TASK_COLUMNS))
+               if name not in have]
+    if not have or missing:
+        con.close()
+        raise DatabaseUnavailable(f"database {path} is older than this orchd (tasks columns missing: "
+                                  f"{', '.join(missing) or 'whole table'}); it was not changed. Run any other "
+                                  "orchd command (for example `orchd list`) to migrate it, then retry.")
+    return con
+
+
 @contextmanager
 def task_delivery(con, task_ids, timeout=65):
     """Cross-process task locks for ownership changes and transport, never a SQLite write lock.
