@@ -259,22 +259,33 @@ def claude_usage(cache, text, now=None):
                           r'([A-Z][a-z]{2}) (\d{1,2}) at (\d{1,2})(?::(\d{2}))?(am|pm) '
                           r'\(([^)]+)\)', text)
         if not match:
-            raise ValueError('CLI /usage missing subscription windows or unsupported display format')
-        month, day, hour, minute, period, zone = match.groups()[1:]
-        tz = ZoneInfo(zone)
-        local = datetime.datetime.fromtimestamp(now, tz)
-        month_number = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'].index(month) + 1
-        hour = int(hour)
-        if not 1 <= hour <= 12:
-            raise ValueError('CLI /usage invalid reset hour')
-        candidates = [datetime.datetime(year, month_number, int(day), hour % 12 + (12 if period == 'pm' else 0),
-                                       int(minute or 0), tzinfo=tz).timestamp()
-                      for year in (local.year, local.year + 1)]
-        resets = [stamp for stamp in candidates if 0 < stamp - now <= duration]
-        if len(resets) != 1:
-            raise ValueError('CLI /usage reset is past or outside subscription window')
-        windows.append(dict(name=name, used_percent=float(match[1]), reset_at=resets[0],
+            reason = ('invalid' if label + ':' in text else 'missing') + f' {label} window'
+            windows.append(dict(name=name, observation_reason=reason))
+            continue
+        try:
+            month, day, hour, minute, period, zone = match.groups()[1:]
+            tz = ZoneInfo(zone)
+            local = datetime.datetime.fromtimestamp(now, tz)
+            month_number = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'].index(month) + 1
+            hour = int(hour)
+            if not 1 <= hour <= 12:
+                raise ValueError('CLI /usage invalid reset hour')
+            candidates = [datetime.datetime(year, month_number, int(day), hour % 12 + (12 if period == 'pm' else 0),
+                                           int(minute or 0), tzinfo=tz).timestamp()
+                          for year in (local.year, local.year + 1)]
+            resets = [stamp for stamp in candidates if 0 < stamp - now <= duration]
+            if len(resets) != 1:
+                raise ValueError('CLI /usage reset is past or outside subscription window')
+            used = float(match[1])
+            if not 0 <= used <= 100:
+                raise ValueError('invalid percentage')
+        except (ValueError, KeyError, OverflowError):
+            windows.append(dict(name=name, observation_reason=f'invalid {label} window'))
+            continue
+        windows.append(dict(name=name, used_percent=used, reset_at=resets[0],
                             window_seconds=duration, reset_precision_seconds=60))
+    if not any('used_percent' in window for window in windows):
+        raise ValueError('CLI /usage missing subscription windows or unsupported display format')
     cache.put('sonnet', 'subscription', windows, 'claude.cli.usage', now)
 
 
@@ -608,7 +619,16 @@ def shadow(snapshot, *, backend='exec', task_type=None, author_model=None, now=N
     for provider in allowed:
         value = snapshot[provider]
         windows = value['windows']
-        if provider not in recent_limited and value['state'] == 'known' and windows and all(w['used_percent'] < 95 for w in windows):
+        # Only CLI partial displays get this exception. Status remains unknown;
+        # absent capacity is never fabricated, and stale receipts cannot qualify.
+        partial_cli = (not review and provider == 'sonnet' and windows and all(
+            w.get('source') == 'claude.cli.usage' and (w.get('state') == 'known' or
+            (w.get('observation_reason') and w.get('reason') == w['observation_reason']))
+            for w in windows))
+        known_windows = [w for w in windows if w.get('state') == 'known']
+        if (provider not in recent_limited and (value['state'] == 'known' or partial_cli)
+                and known_windows and all(w['used_percent'] < 95 for w in known_windows)):
+            windows = known_windows
             # Most constrained window's remaining percentage (below the 95% cap).
             usable.append((min(95 - w['used_percent'] for w in windows), provider == 'sol', provider))
     selected = None
@@ -650,6 +670,11 @@ def shadow(snapshot, *, backend='exec', task_type=None, author_model=None, now=N
             w.get('state') == 'known' and number(w.get('used_percent')) and w['used_percent'] >= 95
             for w in snapshot['sol']['windows'])):
         reason += f'; {codex} at >=95% or recent rate limit; selected {claude}'
+    for provider in allowed:
+        unknown = sorted({w['observation_reason'] for w in snapshot[provider]['windows']
+                          if w.get('source') == 'claude.cli.usage' and w.get('observation_reason')})
+        if unknown:
+            reason += f'; {provider} quota incomplete: ' + ', '.join(unknown)
     return dict(selected_alias=alias_of.get(selected) if selected else None, reason=reason,
                 policy_version='quota-shadow-v1', applied=applied, quota=snapshot)
 
