@@ -131,7 +131,8 @@ def current_question(con, entry):
 
 def queued_questions(con, entry):
     return con.execute("SELECT * FROM entry_messages WHERE entry_id=? AND orch_id=? AND kind='question' "
-                       "AND question_state='queued' ORDER BY COALESCE(queue_order,id),id",
+                       f"AND question_state='queued' AND NOT (delivery='held' AND attempts>={MAX_SEND_ATTEMPTS}) "
+                       "ORDER BY COALESCE(queue_order,id),id",
                        (entry["id"], entry["orch_id"])).fetchall()
 
 
@@ -336,7 +337,7 @@ def question_transition(con, rt, entry_id, question_id, expected_version, expect
                      question_id))
         _history(con, row, state, actor, reason)
         if state == "queued":
-            con.execute("UPDATE entry_messages SET queue_order=?,delivery='held',revisit_at=NULL WHERE id=?",
+            con.execute("UPDATE entry_messages SET queue_order=?,delivery='held',attempts=0,revisit_at=NULL WHERE id=?",
                         (_queue_tail(con), question_id))
         _promote(con, bound, actor, f"after {state} question {question_id}")
     deliver_outbound(con, rt, entry_id)
@@ -363,6 +364,8 @@ def cancel_task_questions(con, task_id):
 
 def _save_reply(con, bound, question, text, actor, **fields):
     """Shared Desktop/dashboard completion and FIFO promotion; caller owns the transaction."""
+    if question["question_state"] != "current" or question["delivery"] != "delivered":
+        raise ValueError(f"question {question['id']} has not been delivered or is no longer current; nothing was relayed")
     con.execute("UPDATE entry_messages SET question_state='answered' WHERE id=?", (question["id"],))
     _history(con, question, "answered", actor, "reply_to")
     message_id = _insert(con, bound, "in", "reply", text, reply_to=question["id"],
@@ -431,8 +434,11 @@ def _send(con, rows, recipient, transport):
         except Exception as error:
             try:
                 held = row["direction"] == "out" and row["attempts"] + 1 >= MAX_SEND_ATTEMPTS
-                con.execute("UPDATE entry_messages SET delivery=?, delivery_error=? WHERE id=?",
-                            ("held" if held else "failed", f"{type(error).__name__}: {error}"[:500], row["id"]))
+                with store.immediate(con):
+                    con.execute("UPDATE entry_messages SET delivery=?, delivery_error=? WHERE id=?",
+                                ("held" if held else "failed", f"{type(error).__name__}: {error}"[:500], row["id"]))
+                    if held and row["question_state"] == "current":
+                        _park_failed_question(con, row)
                 result[row["id"]] = "held" if held else "failed"
             except Exception:
                 result[row["id"]] = "uncertain"
@@ -447,6 +453,13 @@ def _send(con, rows, recipient, transport):
             break
         result[row["id"]] = "delivered"
     return result
+
+
+def _park_failed_question(con, row):
+    """Release current without retrying a capped question; caller owns the transaction."""
+    con.execute("UPDATE entry_messages SET question_state='queued' WHERE id=?", (row["id"],))
+    _history(con, row, "queued", "orchd", "delivery held after repeated send failures; explicit resend required")
+    _promote(con, get_entry(con, row["entry_id"]), "orchd", "held question no longer blocks queue")
 
 
 def _lock(con, entry_id):
@@ -493,6 +506,11 @@ def deliver_outbound(con, rt, entry_id):
     """Queue the Orch's messages and the current question into the entry's Desktop thread, oldest first."""
     with _lock(con, entry_id):
         entry = get_entry(con, entry_id)
+        # Recover held/current rows written by earlier versions, including after a restart.
+        with store.immediate(con):
+            current = current_question(con, entry)
+            if current is not None and current["delivery"] == "held" and current["attempts"] >= MAX_SEND_ATTEMPTS:
+                _park_failed_question(con, current)
         if not entry["thread_id"]:
             return {}  # no Desktop thread has called yet; status() will hand them over
         rows = con.execute("SELECT * FROM entry_messages WHERE entry_id=? AND direction='out' "
@@ -718,7 +736,7 @@ def status(con, rt, entry_id, thread):
         undelivered = con.execute("SELECT * FROM entry_messages WHERE entry_id=? AND direction='out' "
                                   "AND (question_state IS NULL OR question_state NOT IN ('snoozed','cancelled','superseded')) "
                                   "AND (delivery IN ('pending','failed','sending') "
-                                  "OR (delivery='held' AND (question_state IS NULL OR question_state='current'))) "
+                                  f"OR (delivery='held' AND (question_state IS NULL OR question_state='current' OR attempts>={MAX_SEND_ATTEMPTS}))) "
                                   "ORDER BY id", (entry_id,)).fetchall()
         # held stays listed until resend_to_nat succeeds: handing it over here would hide the unsent message
         handed = [r["id"] for r in undelivered if r["delivery"] in ("pending", "failed")]
@@ -812,9 +830,10 @@ def _deliver_result(con, rt, entry, message_id):
 DELIVERY_NOTES = {
     "pending": "not sent yet: waiting for the Desktop thread or behind an earlier message; retried automatically",
     "failed": "a send was tried and errored; it is retried automatically, and `resend_to_nat` retries it now",
-    "held": f"a send failed {MAX_SEND_ATTEMPTS} times, so it is no longer retried and later messages go ahead; "
-            "fix the cause and call `resend_to_nat` (it will arrive after those later messages). A queued "
-            "question is not this: it was never sent and goes out when it becomes current",
+    "held": f"a send failed {MAX_SEND_ATTEMPTS} times, so it is no longer retried and later messages and questions go ahead; "
+            "fix the cause and call `resend_to_nat`. Held questions leave current; resend resets attempts and "
+            "joins the existing question queue tail. A queued question without failed attempts was never "
+            "sent and goes out when it becomes current",
     "sending": "uncertain: it may have reached the Desktop queue but the receipt was not saved; not resent automatically",
 }
 DELIVERY_NOTES["uncertain"] = DELIVERY_NOTES["sending"]
@@ -843,19 +862,33 @@ def send_to_nat(con, rt, orch_id, text, *, issue_ref=None):
 
 
 def resend_to_nat(con, rt, orch_id, message_id):
-    """Orch tool: retry one of this Orch's failed or held messages to Operator right now."""
+    """Retry a failed message; a capped question rejoins the existing question queue tail."""
     entry = _entry_of(con, orch_id)
     row = _row(con, message_id) if isinstance(message_id, int) else None
     if row is None or row["entry_id"] != entry["id"] or row["orch_id"] != orch_id or row["direction"] != "out":
         raise ValueError(f"message {message_id} is not a message of this Orch")
-    with store.immediate(con):
+    with _lock(con, entry["id"]), store.immediate(con):
         row = _row(con, message_id)
         if row["delivery"] not in ("failed", "held"):
             raise ValueError(f"message {message_id} is {_state(row)}; only failed or held messages can be resent")
-        if row["question_state"] not in (None, "current") or row["wire_text"] is None:
-            raise ValueError(f"message {message_id} is a {row['question_state'] or 'unsent'} question that was never "
-                             "sent (held only while it waits); it goes out when it becomes current")
-        con.execute("UPDATE entry_messages SET delivery='pending', attempts=0 WHERE id=?", (message_id,))
+        state = row["question_state"]
+        if state == "snoozed":
+            raise ValueError(f"message {message_id} is snoozed; explicitly unsnooze it before it can be sent")
+        if state in ("cancelled", "superseded", "answered"):
+            raise ValueError(f"message {message_id} is {state}; it will not be sent automatically and cannot be resent")
+        parked = state in ("queued", "current") and row["delivery"] == "held" and row["attempts"] >= MAX_SEND_ATTEMPTS
+        if (state not in (None, "current") and not parked) or row["wire_text"] is None:
+            raise ValueError(f"message {message_id} is a queued question that was never sent "
+                             "(held only while it waits); it goes out when it becomes current")
+        if parked:
+            if state == "current":  # A held/current row persisted by the previous release.
+                _park_failed_question(con, row)
+                row = _row(con, message_id)
+            con.execute("UPDATE entry_messages SET attempts=0,queue_order=? WHERE id=?", (_queue_tail(con), message_id))
+            _history(con, row, "queued", f"orch:{orch_id}", "explicit resend at queue tail")
+            _promote(con, entry, f"orch:{orch_id}", "explicit resend")
+        else:
+            con.execute("UPDATE entry_messages SET delivery='pending', attempts=0 WHERE id=?", (message_id,))
     return dict(_deliver_result(con, rt, entry, message_id), **_questions(con, entry))
 
 

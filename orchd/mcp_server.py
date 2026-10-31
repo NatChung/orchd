@@ -219,15 +219,16 @@ TOOLS += [
                     "pending|delivered|failed|held|uncertain: delivered = it reached the Desktop queue, not that Operator "
                     "read or approved it; pending = not sent yet (no Desktop thread yet, or waiting behind an earlier "
                     "message), retried automatically; failed = a send was tried and errored, retried on the entry's "
-                    "next call; held = a send failed 3 times, no longer retried and no longer blocks later messages, use "
+                    "next call; held = a send failed 3 times, no longer retried and no longer blocks later messages or questions, use "
                     "resend_to_nat (listed in entry_status from_orch until resent); uncertain = it may have arrived but the receipt was not saved, never resent "
                     f"automatically. Text over {entry.MAX_SEND_BYTES} UTF-8 bytes (a policy cap, same for ask_nat) is rejected with an error and "
                     "nothing is stored: split it into numbered messages (1/3, 2/3, ...).",
      "inputSchema": {"type": "object", "required": ["text"], "properties": {"text": {"type": "string"}}}},
     {"name": "resend_to_nat",
      "description": "Retry one of your own send_to_nat/ask_nat messages whose send failed (delivery failed, or held after 3 "
-                    "failed sends), right now. It arrives after the messages that went out while it was held. A queued "
-                    "ask_nat question also shows delivery held but was never sent: resend refuses it, it goes out when "
+                    "failed sends). Plain messages retry now; held questions leave current and resend joins the existing "
+                    "question queue tail, waiting for earlier questions to be answered. A queued "
+                    "ask_nat question without failed attempts also shows delivery held but was never sent: resend refuses it, it goes out when "
                     "it becomes current.",
      "inputSchema": {"type": "object", "required": ["message_id"], "properties": {"message_id": {"type": "integer"}}}},
     {"name": "ask_nat",
