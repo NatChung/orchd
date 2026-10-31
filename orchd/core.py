@@ -82,7 +82,7 @@ Ask format (required for every worker question):
 def worker_cli():
     """Workers are spawned by the Claude daemon and do not inherit our env, so carry a non-default home."""
     home = os.environ.get("ORCHD_HOME")
-    orchd = shlex.quote(paths.orchd_executable())
+    orchd = shlex.join(paths.orchd_command())
     return f"ORCHD_HOME={shlex.quote(home)} {orchd}" if home else orchd
 
 
