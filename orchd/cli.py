@@ -137,9 +137,11 @@ def build_parser():
     reconcile = entry_actions.add_parser("reconcile", help="move open questions stranded on a previous owner to the "
                                                        "entry's owner (dry run unless --apply; backs up the DB first)")
     reconcile.add_argument("--apply", action="store_true")
-    for action in ("send", "ask", "tag"):
+    for action in ("send", "ask", "tag", "resend"):
         command = entry_actions.add_parser(action)
-        if action == "tag":
+        if action == "resend":
+            command.add_argument("message_id", type=int)
+        elif action == "tag":
             command.add_argument("message_id", type=int)
             tag_ref = command.add_mutually_exclusive_group(required=True)
             tag_ref.add_argument("--issue-ref")
@@ -489,7 +491,7 @@ HOME_POLICY = {
     ("binding",): "write",  # --status -> warn
     ("entry", "thread"): "warn", ("entry", "reconcile"): "write",  # no --apply -> warn
     ("intake", "reconcile"): "write",  # no --apply -> warn
-    ("entry", "tag"): "write", ("entry", "send"): "write", ("entry", "ask"): "write",
+    ("entry", "tag"): "write", ("entry", "send"): "write", ("entry", "resend"): "write", ("entry", "ask"): "write",
     ("entry-question", "show"): "warn", ("entry-question", "snooze"): "write", ("entry-question", "un-snooze"): "write",
     ("entry-question", "cancel"): "write", ("entry-question", "supersede"): "write", ("entry-question", "answer"): "write",
     ("task-question", "answer"): "write", ("task-question", "dismiss"): "write",
@@ -599,6 +601,8 @@ def main(argv=None):
                 con = store.connect()
                 if args.entry_action == "tag":
                     result = entry.entry_tag(con, orch_id, args.message_id, args.issue_ref)
+                elif args.entry_action == "resend":
+                    result = entry.resend_to_nat(con, Runtime(), orch_id, args.message_id)
                 elif args.entry_action == "send":
                     result = entry.send_to_nat(con, Runtime(), orch_id, args.text, issue_ref=args.issue_ref)
                 else:

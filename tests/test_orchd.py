@@ -66,6 +66,8 @@ class FakeRuntime:
     def wake_orch(self, codex_bin, thread, text):
         if self.wake_fails:
             raise OSError("queue down")
+        if not isinstance(text, str):  # the real queue takes the text as one argv string
+            raise TypeError(f"wake_orch text must be str, got {type(text).__name__}")
         self.woken.append((codex_bin, thread, text))
 
     def live_jobs(self):
@@ -605,7 +607,7 @@ class McpTest(unittest.TestCase):
         self.assertEqual([r["id"] for r in replies], [0, 1, 2, 3])
         self.assertEqual({t["name"] for t in replies[1]["result"]["tools"]},
                          {"dispatch", "dispatch_batch", "inbox", "list_open", "list_orchs", "answer", "close", "view_worker", "lock_verify", "retry", "followup", "interrupt",
-                  "entry_inbox", "send_to_nat", "ask_nat", "entry_tag", "entry_question_show", "entry_question_snooze",
+                  "entry_inbox", "send_to_nat", "resend_to_nat", "ask_nat", "entry_tag", "entry_question_show", "entry_question_snooze",
                   "entry_question_cancel", "goal_list", "goal_set", "task_link", "task_unlink", "quota_status",
                           "intake_pending", "intake_show", "intake_decide", "intake_resolve", "intake_decisions",
                           "intake_backlog", "intake_take_unassigned", "interface_requests", "interface_reply", "interface_dismiss"})

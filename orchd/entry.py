@@ -23,6 +23,12 @@ from .orch_health import owner_health
 
 DEFAULT_ENTRY = "desktop"
 RETRYABLE = ("pending", "failed")
+# Policy cap on one Orch->Operator message (send_to_nat text, ask_nat body), not a transport limit: `codex queue`
+# takes the text as an argv string and only fails (E2BIG) near the OS argv+environment limit, far above this.
+# A message whose send still fails MAX_SEND_ATTEMPTS times in a row is "held" (no longer retried, no longer
+# blocks later ones) until resend_to_nat. A queued question is also "held" but was never sent; see _resendable.
+MAX_SEND_BYTES = 64000
+MAX_SEND_ATTEMPTS = 3
 
 
 class SourceNotReady(Exception):
@@ -414,7 +420,8 @@ def submit_answer(con, rt, entry_id, question_id, expected_version, expected_sta
 
 
 def _send(con, rows, recipient, transport):
-    """Send rows in order; stop at the first failure so later rows never overtake it."""
+    """Send rows in order; a failure stops this batch (a failed row is retried first next time), but a row that
+    failed MAX_SEND_ATTEMPTS times is held and no longer blocks later rows, which may then arrive before it."""
     result = {}
     for row in rows:
         con.execute("UPDATE entry_messages SET delivery='sending', attempts=attempts+1, recipient=?, "
@@ -423,9 +430,10 @@ def _send(con, rows, recipient, transport):
             transport(row)
         except Exception as error:
             try:
-                con.execute("UPDATE entry_messages SET delivery='failed', delivery_error=? WHERE id=?",
-                            (f"{type(error).__name__}: {error}"[:500], row["id"]))
-                result[row["id"]] = "failed"
+                held = row["direction"] == "out" and row["attempts"] + 1 >= MAX_SEND_ATTEMPTS
+                con.execute("UPDATE entry_messages SET delivery=?, delivery_error=? WHERE id=?",
+                            ("held" if held else "failed", f"{type(error).__name__}: {error}"[:500], row["id"]))
+                result[row["id"]] = "held" if held else "failed"
             except Exception:
                 result[row["id"]] = "uncertain"
             break
@@ -709,9 +717,11 @@ def status(con, rt, entry_id, thread):
     with store.immediate(con):
         undelivered = con.execute("SELECT * FROM entry_messages WHERE entry_id=? AND direction='out' "
                                   "AND (question_state IS NULL OR question_state NOT IN ('snoozed','cancelled','superseded')) "
-                                  "AND delivery IN ('pending','failed','sending') ORDER BY id",
-                                  (entry_id,)).fetchall()
-        handed = [r["id"] for r in undelivered if r["delivery"] != "sending"]
+                                  "AND (delivery IN ('pending','failed','sending') "
+                                  "OR (delivery='held' AND (question_state IS NULL OR question_state='current'))) "
+                                  "ORDER BY id", (entry_id,)).fetchall()
+        # held stays listed until resend_to_nat succeeds: handing it over here would hide the unsent message
+        handed = [r["id"] for r in undelivered if r["delivery"] in ("pending", "failed")]
         con.executemany("UPDATE entry_messages SET delivery='delivered', delivered_at=?, recipient=? WHERE id=?",
                         [(time.time(), f"status:{thread}", i) for i in handed])
     current = current_question(con, entry)
@@ -730,7 +740,9 @@ def status(con, rt, entry_id, thread):
                 not_yet_delivered_to_orch=[_public(r) for r in inbound],
                 historical_undelivered=dict(count=sum(r["count"] for r in historical),
                                             owners=[dict(r) for r in historical]),
-                from_orch=[dict(_public(r, body=True), wire_text=r["wire_text"]) for r in undelivered])
+                from_orch=[dict(_public(r, body=True), wire_text=r["wire_text"],
+                                **({"note": DELIVERY_NOTES["held"]} if r["delivery"] == "held" else {}))
+                           for r in undelivered])
 
 
 # -- Orch side --------------------------------------------------------------------------------------------
@@ -792,13 +804,34 @@ def _deliver_result(con, rt, entry, message_id):
     result = _public(row)
     if row["delivery"] == "pending" and not get_entry(con, entry["id"])["thread_id"]:
         result["note"] = "no Desktop entry thread has called yet; Operator sees it when the entry calls status"
+    elif row["delivery"] in DELIVERY_NOTES:
+        result["note"] = DELIVERY_NOTES[row["delivery"]]
     return result
+
+
+DELIVERY_NOTES = {
+    "pending": "not sent yet: waiting for the Desktop thread or behind an earlier message; retried automatically",
+    "failed": "a send was tried and errored; it is retried automatically, and `resend_to_nat` retries it now",
+    "held": f"a send failed {MAX_SEND_ATTEMPTS} times, so it is no longer retried and later messages go ahead; "
+            "fix the cause and call `resend_to_nat` (it will arrive after those later messages). A queued "
+            "question is not this: it was never sent and goes out when it becomes current",
+    "sending": "uncertain: it may have reached the Desktop queue but the receipt was not saved; not resent automatically",
+}
+DELIVERY_NOTES["uncertain"] = DELIVERY_NOTES["sending"]
+
+
+def _check_size(what, text):
+    size = len(text.encode())
+    if size > MAX_SEND_BYTES:
+        raise ValueError(f"{what} is {size} bytes; at most {MAX_SEND_BYTES} bytes (UTF-8) are allowed in one "
+                         "message. Nothing was stored; shorten it or send it as several numbered messages (1/3, 2/3, ...)")
 
 
 def send_to_nat(con, rt, orch_id, text, *, issue_ref=None):
     """Orch tool: a plain message to Operator, queued into the entry's Desktop thread byte for byte."""
     if not isinstance(text, str) or not text.strip():
         raise ValueError("send_to_nat needs non-empty text")
+    _check_size("send_to_nat text", text)
     if issue_ref is not None:
         issue_links.validate_ref(issue_ref)
     entry = _entry_of(con, orch_id)
@@ -806,6 +839,23 @@ def send_to_nat(con, rt, orch_id, text, *, issue_ref=None):
         message_id = _insert(con, entry, "out", "message", text, issue_ref=issue_ref)
         con.execute("UPDATE entry_messages SET wire_text=? WHERE id=?", (message_wire(message_id, orch_id, text),
                                                                           message_id))
+    return dict(_deliver_result(con, rt, entry, message_id), **_questions(con, entry))
+
+
+def resend_to_nat(con, rt, orch_id, message_id):
+    """Orch tool: retry one of this Orch's failed or held messages to Operator right now."""
+    entry = _entry_of(con, orch_id)
+    row = _row(con, message_id) if isinstance(message_id, int) else None
+    if row is None or row["entry_id"] != entry["id"] or row["orch_id"] != orch_id or row["direction"] != "out":
+        raise ValueError(f"message {message_id} is not a message of this Orch")
+    with store.immediate(con):
+        row = _row(con, message_id)
+        if row["delivery"] not in ("failed", "held"):
+            raise ValueError(f"message {message_id} is {_state(row)}; only failed or held messages can be resent")
+        if row["question_state"] not in (None, "current") or row["wire_text"] is None:
+            raise ValueError(f"message {message_id} is a {row['question_state'] or 'unsent'} question that was never "
+                             "sent (held only while it waits); it goes out when it becomes current")
+        con.execute("UPDATE entry_messages SET delivery='pending', attempts=0 WHERE id=?", (message_id,))
     return dict(_deliver_result(con, rt, entry, message_id), **_questions(con, entry))
 
 
@@ -838,6 +888,7 @@ def ask_nat(con, rt, orch_id, text=None, task_id=None, quote_worker_question=Fal
     if not parts:
         raise ValueError("ask_nat needs text, or quote_worker_question with task_id")
     body = "\n\n".join(parts)
+    _check_size("ask_nat text", body)
     if supersedes is None and any(value is not None for value in (expected_version, expected_state, reason)):
         raise ValueError("expected version/state and reason require supersedes")
     if supersedes is not None and (not isinstance(reason, str) or not reason.strip()):
