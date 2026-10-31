@@ -37,8 +37,8 @@ computer_use = false
 enabled = false
 
 [mcp_servers.orchd_entry]
-command = "$ORCHD"
-args = ["mcp", "--role", "entry"]
+command = $ORCHD_COMMAND
+args = [${ORCHD_LEAD}"mcp", "--role", "entry"]
 startup_timeout_sec = 30
 tool_timeout_sec = 120
 
