@@ -90,8 +90,26 @@ TOOLS = [
                     "stored full model id in `model` (\"unknown\" for tasks dispatched before models were stored). "
                     "pending is the task's count of undelivered queued answers and followups, even if closed; "
                     "it reveals no queued body and does not consume or flush the queue. "
-                    "Includes model_reason and group_id; optional group_id leaves other batches unread. Call it when an [orchd] message arrives.",
-     "inputSchema": {"type": "object", "properties": {"group_id": {"type": "string"}}}},
+                    "Includes model_reason and group_id; optional group_id leaves other batches unread. Call it when an [orchd] message arrives. "
+                    "Returns at most `limit` messages (default 20) and at most about 60 KB serialized, whichever is smaller: worker questions first, "
+                    "then open-task messages, then old messages of closed tasks. Only the returned ones are marked read, and only after the page was "
+                    "written and flushed by orchd (at-least-once: if building or writing the reply fails, they stay unread and come back on the next call; "
+                    "a reply lost after the flush is not detected). Concurrent calls can return duplicates: "
+                    "deduplicate by message_id before taking action or retrying; this is not exactly-once. The rest "
+                    "stay unread. Every row carries `remaining` (still unread) split into `remaining_priority` (questions and open-task messages) and "
+                    "`remaining_closed`: call again until remaining is 0. Closed-task messages are read last, so they can wait while questions and "
+                    "open-task messages keep arriving; watch remaining_closed. "
+                    "body and evidence over 2000 chars, title over 200 and model_reason over 500 are cut with a \"truncated, N chars\" marker; "
+                    "Other metadata strings (including verification.command) are capped at 256 chars; "
+                    "an oversized first row uses 128-char previews. field=metadata reads full metadata as JSON. "
+                    "message_id (+ field body|evidence|title|model_reason|metadata, offset, length up to 20000) reads that text in slices without changing read state: "
+                    "it returns text, total and next_offset (null at the end). Only for messages of your own tasks that inbox can show.",
+     "inputSchema": {"type": "object", "properties": {"group_id": {"type": "string"},
+                                                       "limit": {"type": "integer", "minimum": 1},
+                                                       "message_id": {"type": "integer"},
+                                                       "field": {"type": "string", "enum": ["body", "evidence", "title", "model_reason", "metadata"]},
+                                                       "offset": {"type": "integer", "minimum": 0},
+                                                       "length": {"type": "integer", "minimum": 1}}}},
     {"name": "list_open",
      "description": "List every task that is not closed, across all Orch sessions, with worker liveness. "
                     "worker_alive true only means the worker's PID/job exists, not that it is working; "
@@ -480,7 +498,7 @@ def intake_call(name, args, thread, con, rt=None):
     raise ValueError(f"unknown tool {name}")
 
 
-def call(name, args, thread, con, rt):
+def call(name, args, thread, con, rt, sent=None, *, reply_id=None):
     from . import interface
     if name == "interface_requests":
         if set(args) - {"after_id", "limit"}:
@@ -531,7 +549,15 @@ def call(name, args, thread, con, rt):
     if name == "inbox":
         if not thread:
             raise ValueError("inbox needs the caller's thread id")
-        return core.inbox(con, thread, args.get('group_id'))
+        if args.get('message_id') is not None:
+            return core.inbox_message(con, thread, args['message_id'], args.get('field', 'body'),
+                                      args.get('offset', 0), args.get('length', core.INBOX_READ_LENGTH), reply_id=reply_id)
+        rows, ids = core.inbox_page(con, thread, args.get('group_id'), args.get('limit'), reply_id=reply_id)
+        if sent is None:  # direct caller, no reply to wait for
+            store.mark_read(con, ids)
+        else:
+            sent.append(ids)  # handle/serve mark them once the reply was serialized / written
+        return rows
     if name == "list_orchs":
         return inventory.list_orchs(con, rt, observe=True)
     if name == "list_open":
@@ -652,7 +678,7 @@ TOOLS.extend([
 ])
 
 
-def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY):
+def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY, sent=None):
     method, mid = msg.get("method"), msg.get("id")
     if mid is None:
         return None
@@ -666,6 +692,7 @@ def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY):
         result = {"tools": ENTRY_TOOLS if role == "entry" else TOOLS}
     elif method == "tools/call":
         meta = params.get("_meta") or {}
+        marks = sent if sent is not None else []
         try:
             if role == "entry":  # never an Orch: no ORCHD_ORCH_ID, no registration
                 print(f"orchd entry meta keys: {sorted(meta)}", file=sys.stderr)
@@ -676,8 +703,12 @@ def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY):
                     thread = meta.get("threadId") or (meta.get("x-codex-turn-metadata") or {}).get("thread_id")
                     if thread and params.get("name") not in ("list_orchs", "quota_status"):
                         store.register_orch(con, thread, "codex")
-                data = call(params.get("name"), params.get("arguments") or {}, thread, con, rt)
-            result = {"content": [{"type": "text", "text": limits.tool_text(data)}]}
+                data = call(params.get("name"), params.get("arguments") or {}, thread, con, rt, marks, reply_id=mid)
+            result = core.inbox_result(data)
+            core.inbox_wire({"jsonrpc": "2.0", "id": mid, "result": result})
+            if sent is None:  # no transport to wait for: serialized fine, so mark now
+                for ids in marks:
+                    store.mark_read(con, ids)
             if (role != "entry" and params.get("name") in ("list_orchs", "quota_status")) or (role == "entry" and params.get("name") == "foreground"):
                 result["structuredContent"] = data
         except Exception as error:
@@ -702,10 +733,14 @@ def serve(stdin=sys.stdin, stdout=sys.stdout, con=None, rt=None, role="orch", en
         for line in stdin:
             if not line.strip():
                 continue
-            reply = handle(json.loads(line), con, rt, role, entry_id)
+            sent = []  # inbox read marks: committed only after the reply was written and flushed
+            reply = handle(json.loads(line), con, rt, role, entry_id, sent)
             if reply is not None:
-                stdout.write(json.dumps(reply, ensure_ascii=False) + "\n")
+                stdout.write(core.inbox_wire(reply))
                 stdout.flush()
+            if not (reply or {}).get("result", {}).get("isError"):
+                for ids in sent:
+                    store.mark_read(con, ids)
     finally:
         if role != "entry":
             quota.stop_background()  # No orphaned probe subprocess outlives the server.

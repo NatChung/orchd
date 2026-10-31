@@ -347,6 +347,7 @@ def build_parser():
     adopt.add_argument("--from", dest="from_orch", help="move all open tasks of this Orch (or limit TASK_IDs to it)")
     adopt.add_argument("--force", action="store_true", help="also move from an alive or unknown owner, and tell it")
     sub.add_parser("close").add_argument("task_id")
+    sub.add_parser("stuck-close", help="read-only: tasks stuck at 'close pending' with the last error and next step")
     cfg = sub.add_parser("config", help="personal settings in ~/.config/orchd/config.toml (worker-model, projects-dir)")
     cfg_actions = cfg.add_subparsers(dest="config_action", required=True)
     cfg_actions.add_parser("show", help="every setting with its source: flag, env, file or default")
@@ -499,7 +500,7 @@ HOME_POLICY = {
     ("task", "link"): "write", ("task", "unlink"): "write",
     ("ack",): "write", ("report",): "write", ("progress",): "write", ("flush",): "write",
     ("watch",): "warn", ("summary",): "warn", ("_auto-retry",): "write", ("ask",): "write", ("verify",): "write", ("close",): "write", ("adopt",): "write",
-    ("list",): "warn", ("stats",): "warn", ("snapshot",): "warn", ("board",): "warn",
+    ("list",): "warn", ("stuck-close",): "warn", ("stats",): "warn", ("snapshot",): "warn", ("board",): "warn",
     ("goal", "add"): "write", ("goal", "set"): "write",
     ("goal", "show"): "warn", ("goal", "list"): "warn", ("goal", "export"): "warn",
 }
@@ -825,6 +826,17 @@ def main(argv=None):
         print(json.dumps(result, ensure_ascii=False, indent=1))
         return 1 if result["status"] == "failed" else 0
 
+    if args.cmd == "stuck-close":  # a listing: opens the database read-only, never creates or migrates it
+        try:
+            con = store.connect_readonly()
+        except store.DatabaseUnavailable as error:
+            print(f"stuck-close: {error}", file=sys.stderr)
+            return 1
+        try:
+            print(json.dumps(core.stuck_closes(con), ensure_ascii=False, indent=1))
+        finally:
+            con.close()
+        return 0
     con, rt = store.connect(args.database if args.cmd == '_auto-retry' else None), Runtime()
     if args.cmd in ("watch", "summary"):
         from orchd import watch

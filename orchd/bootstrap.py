@@ -57,8 +57,10 @@ def planned_files(home, env, orchd_bin=None):
     reads, apps = personal(home, env)
     from . import config
     interface_model, interface_effort = config.interface_settings(env, home)
+    command, lead = paths.mcp_launch(str(orchd_bin or paths.orchd_executable(env)))
     values = dict(HOME=str(Path(home)), ORCH_HOME=str(orch), INTERFACE_HOME=str(interface),
-                  ORCHD=str(orchd_bin or paths.orchd_executable(env)),
+                  ORCHD_COMMAND=_toml_string(command),
+                  ORCHD_LEAD="".join(_toml_string(a) + ", " for a in lead),
                   INTERFACE_MODEL=_toml_string(interface_model), INTERFACE_EFFORT=_toml_string(interface_effort),
                   ENTRY_APPROVALS=_approvals("orchd_entry", [t["name"] for t in mcp_server.ENTRY_TOOLS]),
                   EXTRA_READ="".join(f"{_toml_string(p)} = \"read\"\n" for p in reads),

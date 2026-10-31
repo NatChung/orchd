@@ -6,6 +6,7 @@ defaults from that user's HOME, not ours. State (the SQLite DB) stays in ORCHD_H
 import os
 import re
 import shutil
+import shlex
 import sys
 from pathlib import Path
 
@@ -96,3 +97,106 @@ def orchd_executable(env=None):
     if found:
         return found
     raise RuntimeError("cannot find the orchd command; install it (uv tool install ...) or set ORCHD_EXECUTABLE")
+
+
+_NATIVE_MAGIC = (b"\x7fELF", b"MZ", b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe",
+                 b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca")
+
+
+def _head(executable):
+    try:
+        with open(executable, "rb") as f:
+            return f.read(200)
+    except OSError:
+        return None
+
+
+def is_python_script(executable):
+    """True when `executable` has to be run by a Python interpreter: a Python shebang script, or a shebang-less
+    `.py` file. A native binary, a script with any other shebang (a shell wrapper) and a file we cannot read or
+    classify (missing, unreadable, shebang-less without `.py`) are launched directly: the path is what the
+    operator asked for, and guessing "Python" is what broke `/bin/echo` as an override."""
+    head = _head(executable)
+    if head is None or head.startswith(_NATIVE_MAGIC):
+        return False
+    if head.startswith(b"#!"):
+        return is_python_interpreter(shebang_interpreter(executable) or "")
+    return str(executable).endswith(".py")
+
+
+def is_python_interpreter(command):
+    """Match the interpreter name, never directory names or script arguments."""
+    return re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?(?:[dt])?(?:\.exe)?", Path(command).name) is not None
+
+
+def shebang_interpreter(executable):
+    """Interpreter path or env's command token (including env -S), or None."""
+    head = _head(executable)
+    if not head or not head.startswith(b"#!"):
+        return None
+    words = head.split(b"\n", 1)[0][2:].decode("utf-8", "replace").split(None, 1)
+    if not words:
+        return None
+    if Path(words[0]).name != "env":
+        return words[0]
+    try:
+        tokens = shlex.split(words[1]) if len(words) > 1 else []
+    except ValueError:
+        return None
+    while tokens:
+        token = tokens.pop(0)
+        if token in ("-S", "--split-string", "-i", "--ignore-environment", "--"):
+            continue
+        if token in ("-u", "--unset"):
+            if tokens:
+                tokens.pop(0)
+            continue
+        if token.startswith("-") or "=" in token:
+            continue
+        return token
+    return None
+
+
+def same_python_interpreter(left, right):
+    """Compare executable targets while keeping distinct venvs distinct.
+
+    Venv Python symlinks often point at the same base binary but load different packages.
+    """
+    def identity(command):
+        path = Path(os.path.abspath(command))
+        venv = path.parent.parent
+        if (venv / "pyvenv.cfg").is_file():
+            return (str(venv.resolve()), os.path.realpath(path))
+        return (None, os.path.realpath(path))
+    return identity(left) == identity(right)
+
+
+def mcp_launch(executable):
+    """(command, leading args) to start `<executable> mcp ...`.
+
+    bin/orchd's shebang is the system python3, which may lack psutil, so a Python entry point is run under this
+    interpreter. Anything else (a native binary, an ORCHD_EXECUTABLE shell wrapper, an unknown file) is launched
+    directly.
+    """
+    if is_python_script(executable):
+        return sys.executable, [executable]
+    return executable, []
+
+
+def orchd_command(env=None):
+    """argv prefix that runs orchd under this interpreter when the script's shebang would pick another one.
+
+    bin/orchd starts with `#!/usr/bin/env python3`, which finds whatever python3 is first on PATH; that may lack
+    psutil. Hooks, quota, flush and worker commands run it from a bare environment, so name the interpreter.
+    An install's entry point or a non-Python override has its own shebang and is launched directly.
+    """
+    exe = orchd_executable(env)
+    try:
+        with open(exe, "rb") as f:
+            first = f.readline(256).decode("utf-8", "replace").strip()
+    except OSError:
+        return [exe]
+    words = first[2:].split() if first.startswith("#!") else []
+    if len(words) == 2 and words[0] == "/usr/bin/env" and words[1].startswith("python"):
+        return [sys.executable, exe]
+    return [exe]

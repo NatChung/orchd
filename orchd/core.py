@@ -82,7 +82,7 @@ Ask format (required for every worker question):
 def worker_cli():
     """Workers are spawned by the Claude daemon and do not inherit our env, so carry a non-default home."""
     home = os.environ.get("ORCHD_HOME")
-    orchd = shlex.quote(paths.orchd_executable())
+    orchd = shlex.join(paths.orchd_command())
     return f"ORCHD_HOME={shlex.quote(home)} {orchd}" if home else orchd
 
 
@@ -389,27 +389,164 @@ def ask(con, rt, task_id, question):
     return _wake(con, rt, task, mid, f"question: {_short(question_summary.wake_note(question))}")
 
 
-def inbox(con, orch_thread, group_id=None):
+INBOX_DEFAULT_LIMIT = 20
+INBOX_PAGE_BUDGET = 60_000  # UTF-8 bytes of the final MCP envelope, including its newline
+INBOX_CAPS = dict(body=2000, evidence=2000, title=200, model_reason=limits.TEXT_CAP)  # per-field previews inside a page
+INBOX_FIELDS = (*INBOX_CAPS, "metadata")
+INBOX_READ_LENGTH = 20_000  # default and maximum characters per inbox_message slice
+INBOX_TIERS = ("question", "open", "closed")
+
+
+def _inbox_tier(r):
+    # Worker questions first (even of closed tasks), then open-task messages, then old closed-task messages.
+    return 0 if r["kind"] == "question" else 1 if r["status"] != "closed" else 2
+
+
+def _inbox_preview(text, field, cap=None):
+    cap = INBOX_CAPS[field] if cap is None else cap
+    if isinstance(text, str) and len(text) > cap:
+        return text[:cap] + f"\n[truncated, {len(text)} chars; full text: inbox(message_id=..., field=\"{field}\")]"
+    return text
+
+
+def inbox_result(data):
+    """The text result shared by page sizing and the MCP transport."""
+    return {"content": [{"type": "text", "text": limits.tool_text(data)}]}
+
+
+def inbox_wire(reply):
+    return json.dumps(reply, ensure_ascii=False) + "\n"
+
+
+def _inbox_size(rows, reply_id=None):
+    return len(inbox_wire({"jsonrpc": "2.0", "id": reply_id, "result": inbox_result(rows)}).encode("utf-8"))
+
+
+def _inbox_metadata_preview(value, cap=256):
+    # Metadata has a fixed schema; cap every string, including verification.command and identifiers.
+    if isinstance(value, str) and len(value) > cap:
+        return value[:cap] + " [truncated; full text: field=metadata]"
+    if isinstance(value, dict):
+        return {k: _inbox_metadata_preview(v, cap) for k, v in value.items()}
+    return value
+
+
+def _inbox_verification(con, task):
+    try:
+        return verification.status(con, task["id"]) if verification.has_any(con, task) else dict(state="none")
+    except Exception as error:
+        return dict(state="error", error=type(error).__name__)
+
+
+def inbox_message(con, orch_thread, message_id, field="body", offset=0, length=INBOX_READ_LENGTH, *, reply_id=None):
+    """One slice of one field of an inbox message of this Orch's tasks, for text a page only previews. Only
+    ORCH_KINDS rows of tasks this Orch owns: the same rows `inbox` can show. Read-only; read state unchanged.
+    Returns text, total (chars) and next_offset (None at the end): call again with next_offset to read on."""
+    if field not in INBOX_FIELDS:
+        raise ValueError(f"field must be one of {', '.join(INBOX_FIELDS)}")
+    for name, value in (("offset", offset), ("length", length)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < (0 if name == "offset" else 1):
+            raise ValueError(f"{name} must be a {'non-negative' if name == 'offset' else 'positive'} integer")
+    length = min(length, INBOX_READ_LENGTH)
+    marks = ",".join("?" * len(store.ORCH_KINDS))
+    row = con.execute("SELECT m.id, m.task_id, m.kind, m.body, m.evidence, t.title, t.model_reason FROM messages m "
+                      f"JOIN tasks t ON t.id=m.task_id WHERE m.id=? AND t.orch_thread=? AND m.kind IN ({marks})",
+                      (message_id, orch_thread, *store.ORCH_KINDS)).fetchone()
+    if row is None:
+        raise ValueError(f"no message {message_id} for this Orch")
+    if field == "metadata":
+        task = store.get_task(con, row["task_id"])
+        text = json.dumps(dict(task_id=task["id"], repo=task["repo"], task_status=task["status"],
+                               model=task_model(task), group_id=task["group_id"],
+                               verification=_inbox_verification(con, task)), ensure_ascii=False)
+    else:
+        text = row[field] or ""
+    def slice_result(size):
+        end = offset + size
+        return dict(message_id=row["id"], task_id=row["task_id"], kind=row["kind"], field=field, offset=offset,
+                    text=text[offset:end], total=len(text), next_offset=end if end < len(text) else None)
+
+    result = slice_result(length)
+    if _inbox_size(result, reply_id) <= INBOX_PAGE_BUDGET:
+        return result
+    # Search character boundaries, measuring both JSON encodings and the final envelope each time.
+    low, high, result = 1, len(result["text"]) - 1, None
+    while low <= high:
+        size = (low + high) // 2
+        candidate = slice_result(size)
+        if _inbox_size(candidate, reply_id) <= INBOX_PAGE_BUDGET:
+            result, low = candidate, size + 1
+        else:
+            high = size - 1
+    if result is None:
+        raise ValueError("inbox envelope cannot fit one character within the wire budget")
+    return result
+
+
+def inbox_page(con, orch_thread, group_id=None, limit=INBOX_DEFAULT_LIMIT, *, reply_id=None):
+    """Build one page without touching read state: (rows, ids to mark read once the page was delivered).
+    Rows are taken in priority order (questions, open-task messages, closed-task messages; oldest first inside a
+    tier) until `limit` or INBOX_PAGE_BUDGET serialized bytes, then shown oldest first. Fields are previews
+    (INBOX_CAPS); the rest of a message is read with inbox_message. Everything not in the page stays unread."""
+    limit = INBOX_DEFAULT_LIMIT if limit is None else limit
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError("limit must be a positive integer")
     rows = store.unread_for_thread(con, orch_thread)
     if group_id is not None:
         rows = [r for r in rows if r['group_id'] == group_id]
-    checked = {}
-    pending = {}
-    for r in rows:  # only tasks with a lock or a verifies link shell out to git; before mark_read, never losing rows
-        if r["task_id"] not in checked:
-            pending[r["task_id"]] = store.pending_answer_count(con, r["task_id"])
-            try:
-                task = store.get_task(con, r["task_id"])
-                checked[r["task_id"]] = (verification.status(con, task["id"]) if verification.has_any(con, task)
-                                         else dict(state="none"))
-            except Exception as error:
-                checked[r["task_id"]] = dict(state="error", error=type(error).__name__)
-    store.mark_read(con, [r["id"] for r in rows])
-    return [dict(task_id=r["task_id"], repo=r["repo"], title=r["title"], kind=r["kind"],
-                 body=r["body"], evidence=r["evidence"], task_status=r["status"],
-                 model=task_model(r), model_reason=limits.cap_text(r['model_reason']), group_id=r['group_id'],
-                 pending=pending[r["task_id"]],
-                 verification=checked[r["task_id"]]) for r in rows]
+    ordered = sorted(rows, key=lambda r: (_inbox_tier(r), r["id"]))
+    info = {}
+
+    def build(r):
+        if r["task_id"] not in info:  # only tasks with a lock or a verifies link shell out to git
+            task = store.get_task(con, r["task_id"])
+            state = _inbox_verification(con, task)
+            info[r["task_id"]] = (store.pending_answer_count(con, r["task_id"]), state)
+        pending, state = info[r["task_id"]]
+        return dict(**_inbox_metadata_preview(dict(task_id=r["task_id"], repo=r["repo"], kind=r["kind"],
+                    task_status=r["status"], model=task_model(r), group_id=r["group_id"], verification=state)),
+                    title=_inbox_preview(r["title"], "title"),
+                    body=_inbox_preview(r["body"], "body"), evidence=_inbox_preview(r["evidence"], "evidence"),
+                    model_reason=_inbox_preview(r['model_reason'], "model_reason"),
+                    pending=pending, message_id=r["id"])
+
+    def with_counts(page):
+        left = ordered[len(page):]
+        counts = {name: sum(1 for r in left if _inbox_tier(r) == i) for i, name in enumerate(INBOX_TIERS)}
+        return sorted([dict(row, remaining=len(left), remaining_priority=counts["question"] + counts["open"],
+                            remaining_closed=counts["closed"]) for row in page], key=lambda row: row["message_id"])
+
+    chosen, built = [], []
+    for r in ordered:
+        if len(chosen) >= limit:
+            break
+        row = build(r)
+        candidate = with_counts(built + [row])
+        if _inbox_size(candidate, reply_id) > INBOX_PAGE_BUDGET:
+            if chosen:
+                break
+            # Even the first row must fit. Shorten all strings to guarantee bounded progress
+            # for escape-heavy previews; message_id still provides access to every full field.
+            row = _inbox_metadata_preview(row, cap=128)
+            row.update({field: _inbox_preview(r[field], field, cap=128) for field in INBOX_CAPS})
+            candidate = with_counts([row])
+            if _inbox_size(candidate, reply_id) > INBOX_PAGE_BUDGET:
+                raise ValueError("inbox response envelope exceeds page budget")
+        chosen.append(r)
+        built.append(row)
+    built = with_counts(built)
+    return built, [r["id"] for r in chosen]
+
+
+def inbox(con, orch_thread, group_id=None, limit=INBOX_DEFAULT_LIMIT):
+    """One page (see inbox_page), marked read only after it was fully assembled; at-least-once for a caller that
+    delivers the page itself: use inbox_page and store.mark_read after the send (the MCP server does).
+    Every row carries `remaining` (still unread here) split into `remaining_priority` (questions and open-task
+    messages) and `remaining_closed`. Closed-task messages are read last, so while questions and open-task
+    messages keep arriving they can wait; call until remaining is 0, or watch remaining_closed."""
+    rows, ids = inbox_page(con, orch_thread, group_id, limit)
+    store.mark_read(con, ids)
+    return rows
 
 
 class _ResumeFailed(Exception):
@@ -957,6 +1094,20 @@ def close(con, rt, task_id, outcome=None, rating=None, lock_wait=CLOSE_LOCK_WAIT
             raise
         raise RuntimeError(f"close of {task_id} waited {lock_wait:g}s for the task's delivery lock (another close, "
                            "retry or adopt holds it); nothing changed, run close again") from None
+
+
+def stuck_closes(con):
+    """Read-only: open tasks whose last close attempt failed ("close pending"), with the error and what to do next."""
+    out = []
+    for t in store.open_tasks(con):
+        note = t["note"] or ""
+        if not note.startswith("close pending"):
+            continue
+        out.append(dict(task_id=t["id"], status=t["status"], worktree=t["worktree"], last_error=note,
+                        next_step=f"run `orchd close {t['id']}` again; if the same error repeats, follow "
+                                  "docs/runbooks/stuck-close.md (inspect the worktree, save or push what you need, "
+                                  "then close again)"))
+    return out
 
 
 def _close_locked(con, rt, task_id, outcome, rating):

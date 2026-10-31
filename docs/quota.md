@@ -207,7 +207,8 @@ Launches happen in input order; workers continue concurrently without waiting fo
 another worker's completion. Each item independently reads the cache and defaults
 to auto. Results contain an index and success/error per item plus a shared
 `group_id`. Use `list_open(group_id=...)` and `inbox(group_id=...)` to inspect a
-group; filtered inbox leaves other groups unread. Successful items survive later
+group; filtered inbox leaves other groups unread. `inbox` returns at most `limit`
+messages (default 20) and every row carries `remaining`; see docs/inbox.md. Successful items survive later
 failures: retry only failed items after inspecting group status. Excess items are
 rejected before launch and must be submitted by the Orch in later batches.
 There is no persistent queue, global worker limit, or quota-derived concurrency

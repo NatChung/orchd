@@ -5,6 +5,7 @@ import shlex
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from orchd import core, mcp_server, paths, store
@@ -68,7 +69,7 @@ class FakeRuntime:
             raise OSError("queue down")
         self.woken.append((codex_bin, thread, text))
 
-    def live_jobs(self):
+    def live_jobs(self, timeout=None):
         return self.jobs
 
     def stop_worker(self, job):
@@ -141,7 +142,7 @@ class CoreTest(unittest.TestCase):
         finally:
             os.environ.pop("ORCHD_HOME")
         self.assertIn("ORCHD_HOME='/tmp/iso home' ", self.rt.brief)
-        self.assertIn(f"ORCHD_HOME='/tmp/iso home' {shlex.quote(paths.orchd_executable())} ack {t['id']}", self.rt.sent[0][2])
+        self.assertIn(f"ORCHD_HOME='/tmp/iso home' {shlex.join(paths.orchd_command())} ack {t['id']}", self.rt.sent[0][2])
 
     def test_dispatch_without_thread_is_refused(self):
         with self.assertRaises(ValueError):
@@ -438,18 +439,15 @@ class CodexWorkerTest(unittest.TestCase):
         self.assertEqual(seen["cmd"][-2:], ["th-1", "answer"])
         self.assertEqual(seen["cwd"], "/wt")
 
-    def test_stop_kills_only_a_live_codex_process(self):
+    def test_stop_signals_only_what_ownership_verification_returns(self):
         rt = Runtime()
-        rt.run = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "/usr/bin/python3\n", "")
-        killed = []
-        orig, os.killpg = os.killpg, lambda pid, sig: killed.append(pid)
-        try:
-            rt.stop_codex("4242")  # a reused pid now running something else
-            rt.run = lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, "/home/example/.local/bin/codex\n", "")
+        proc = mock.Mock()
+        with mock.patch.object(rt, "_codex_targets", return_value=[]):  # a reused pid: not ours
             rt.stop_codex("4242")
-        finally:
-            os.killpg = orig
-        self.assertEqual(killed, [4242])
+        proc.terminate.assert_not_called()
+        with mock.patch.object(rt, "_codex_targets", return_value=[proc]):
+            rt.stop_codex("4242")
+        proc.terminate.assert_called_once_with()
 
     def test_start_parses_thread_id_from_exec_json(self):
         log = Path(self.tmp.name) / "codex.jsonl"
