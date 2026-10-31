@@ -153,10 +153,10 @@ def start(con, rt, task, prompt, model, pending=(), brief=None):
                       turn_state='starting', last_completed_turn=None, session_id=None, socket=None,
                       model=model, job_id=None)
     env = worker_env(task['worktree'])
-    # Use the package that launched this attempt, including an isolated checkout install.
+    # Use the launching package; -P excludes the worktree while honoring PYTHONPATH.
     env['PYTHONPATH'] = str(Path(__file__).resolve().parents[1]) + os.pathsep + env.get('PYTHONPATH','')
     with open(directory/'supervisor.log', 'a') as out:
-        child = subprocess.Popen([sys.executable, '-m', 'orchd.app_worker', 'supervise', database,
+        child = subprocess.Popen([sys.executable, '-P', '-m', 'orchd.app_worker', 'supervise', database,
                                   task['id'], generation], cwd=task['worktree'], env=env,
                                  stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True)
     store.update_task(con, task['id'], supervisor_identity=identity(child.pid), job_id=str(child.pid))
@@ -171,7 +171,11 @@ def start(con, rt, task, prompt, model, pending=(), brief=None):
             if child.poll() is not None:
                 break
             time.sleep(.05)
-        raise RuntimeError('app-server startup failed: '+(directory/'supervisor.log').read_text()[-1200:])
+        reason = (directory/'supervisor.log').read_text()[-1200:].strip()
+        if not reason:
+            reason = (f'supervisor exited with code {child.returncode}' if child.poll() is not None
+                      else 'supervisor did not become ready within 35 seconds')
+        raise RuntimeError('app-server startup failed: '+reason)
     except Exception:
         # The supervisor publishes server identity before any RPC/start. Preserve rows/pending on failure.
         stop(con, store.get_task(con, task['id']))
@@ -180,6 +184,12 @@ def start(con, rt, task, prompt, model, pending=(), brief=None):
 
 def app_server_command(task):
     return [task['codex_bin'],*CODEX_MEMORIES_OFF,'app-server','--listen','unix://'+task['endpoint']]
+
+
+def preload():
+    """Freeze lazy supervisor dependencies before a worker can edit the package on disk."""
+    from . import config, core, models, paths, quota, routing  # noqa: F401
+    from .runtime import Runtime  # noqa: F401
 
 
 class Supervisor:
@@ -472,6 +482,10 @@ class Supervisor:
         raise ValueError('unknown control command')
 
     def run(self):
+        try:
+            preload()
+        except Exception as exc:
+            raise RuntimeError(f'app-server supervisor preload failed: {type(exc).__name__}: {exc}') from exc
         task = self.task()
         validate(task)
         directory=Path(task['endpoint']).parent
