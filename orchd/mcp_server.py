@@ -147,12 +147,20 @@ TOOLS = [
                     "\"[auto-flush failed]\" and the answers stay queued. You can still call answer with flush=true "
                     "(or a new text) to send them yourself. If you get queued while the task is in status question, the "
                     "worker already asked and is only finishing its exit: the auto flush follows within seconds (or "
-                    "retry flush=true). failed: the turn could not start; the answers "
+                    "retry flush=true). For Codex, failed: the turn could not start; the answers "
 "stay queued, retry with "
                     "flush=true instead of resending the text. failed with uncertain=true: a turn did start but its "
                     "receipt could not be written, so it was stopped (or the error says MAY STILL BE RUNNING). The "
                     "answers already reached that worker but still read as pending, so a later flush sends them "
-                    "again: check its log or wait for its report first. flush=true with no text also just shows pending.",
+                    "again: check its log or wait for its report first. flush=true with no text also just shows pending. "
+                    "If a Claude worker's socket cannot be reached, orchd checks the daemon's job list: a missing or dead job raises "
+                    "\"the Claude worker has ended\" (text kept as a queued answer; retry starts a new worker that "
+                    "receives it); an alive or unknown worker raises \"cannot reach the Claude worker right now\" "
+                    "(text kept as a queued answer; answer flush=true later; if independently confirmed ended, retry "
+                    "starts a new worker with the queued text). A Claude connect failure queues text; a failure during "
+                    "writing returns failed with uncertain=true and does not queue new text: the worker may have received "
+                    "it, so check worker status or read its log before deciding whether to resend. An error after the "
+                    "complete frame was written counts as delivered, with no automatic queue or resend.",
      "inputSchema": {"type": "object", "required": ["task_id"], "properties": {
          "task_id": {"type": "string"}, "text": {"type": "string", "description": "The answer; omit only with flush"},
          "flush": {"type": "boolean", "description": "Send queued answers to an idle Codex worker"},
@@ -168,7 +176,11 @@ TOOLS = [
                     "delivered|failed, pending) plus interrupted (true when a running turn was stopped) and note. If "
                     "the turn cannot be confirmed stopped nothing is resumed and the text stays queued. A Claude "
                     "worker needs no interrupt (its socket takes messages mid-turn): the text is sent like answer, "
-                    "nothing is stopped, and the note says so.",
+                    "nothing is stopped. A connect failure raises \"interrupt was not delivered\"; if the worker "
+                    "has ended, retry and give the instruction again. A write failure returns failed with uncertain=true: "
+                    "the worker may have received it, so check worker status or read its log before deciding whether to "
+                    "resend. Neither failure queues the correction. An error after the complete frame was written "
+                    "counts as delivered.",
      "inputSchema": {"type": "object", "required": ["task_id", "text"], "properties": {
          "task_id": {"type": "string"}, "text": {"type": "string", "description": "The correction, in full"}}}},
     {"name": "close",
@@ -206,7 +218,13 @@ TOOLS = [
                     "with delivered and pending counts, and errors if it could not be sent (nothing is lost if "
                     "queued). A delivered result with record_error was sent; only orchd's bookkeeping failed, so do "
                     "not resend it. If the task lock stays busy (close, retry or adopt running) it raises and nothing "
-                    "is accepted: call again later. The worker's earlier report and events are kept; it acks, may send progress, and ends "
+                    "is accepted: call again later. If a Claude worker cannot be reached it raises: \"the Claude worker has ended\" "
+                    "only when the daemon no longer lists it or lists it as dead (instruction kept as a queued answer; run retry), otherwise "
+                    "\"cannot reach the Claude worker right now\" (instruction kept; answer flush=true later; if independently confirmed ended, retry with the queued text). "
+                    "A write failure returns failed with uncertain=true, queues no new text and records an uncertain "
+                    "followup event: the worker may have received it; check worker status or read its log before deciding "
+                    "whether to resend. An error after the whole frame was written counts as delivered. "
+                    "The worker's earlier report and events are kept; it acks, may send progress, and ends "
                     "with a new report, which wakes you as usual.",
      "inputSchema": {"type": "object", "required": ["task_id", "message"], "properties": {
          "task_id": {"type": "string"},
