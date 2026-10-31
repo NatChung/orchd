@@ -89,8 +89,13 @@ TOOLS = [
                     "stored full model id in `model` (\"unknown\" for tasks dispatched before models were stored). "
                     "pending is the task's count of undelivered queued answers and followups, even if closed; "
                     "it reveals no queued body and does not consume or flush the queue. "
-                    "Includes model_reason and group_id; optional group_id leaves other batches unread. Call it when an [orchd] message arrives.",
-     "inputSchema": {"type": "object", "properties": {"group_id": {"type": "string"}}}},
+                    "Includes model_reason and group_id; optional group_id leaves other batches unread. Call it when an [orchd] message arrives. "
+                    "Returns at most `limit` messages (default 20; worker questions first, then open-task messages, then old messages of closed tasks); "
+                    "only the returned ones are marked read, the rest stay unread and every row carries `remaining` (still unread): call again until it is 0. "
+                    "Bodies over 2000 chars are cut with a \"truncated, N chars\" marker; message_id returns that one full message without changing read state.",
+     "inputSchema": {"type": "object", "properties": {"group_id": {"type": "string"},
+                                                       "limit": {"type": "integer", "minimum": 1},
+                                                       "message_id": {"type": "integer"}}}},
     {"name": "list_open",
      "description": "List every task that is not closed, across all Orch sessions, with worker liveness. "
                     "model is the task's stored full model id (\"unknown\" if none was stored). "
@@ -467,7 +472,9 @@ def call(name, args, thread, con, rt):
     if name == "inbox":
         if not thread:
             raise ValueError("inbox needs the caller's thread id")
-        return core.inbox(con, thread, args.get('group_id'))
+        if args.get('message_id') is not None:
+            return core.inbox_message(con, thread, args['message_id'])
+        return core.inbox(con, thread, args.get('group_id'), args.get('limit'))
     if name == "list_orchs":
         return inventory.list_orchs(con, rt, observe=True)
     if name == "list_open":

@@ -389,10 +389,42 @@ def ask(con, rt, task_id, question):
     return _wake(con, rt, task, mid, f"question: {_short(question_summary.wake_note(question))}")
 
 
-def inbox(con, orch_thread, group_id=None):
+INBOX_DEFAULT_LIMIT = 20  # with INBOX_BODY_CAP keeps one default call far below the MCP tool output limit
+INBOX_BODY_CAP = 2000
+
+
+def _inbox_rank(r):
+    # Worker questions first (even of closed tasks), then open-task messages, then old closed-task messages.
+    return (0 if r["kind"] == "question" else 1 if r["status"] != "closed" else 2, r["id"])
+
+
+def _inbox_body(body):
+    if body is not None and len(body) > INBOX_BODY_CAP:
+        return body[:INBOX_BODY_CAP] + f"\n[truncated, {len(body)} chars; full text: inbox(message_id=...)]"
+    return body
+
+
+def inbox_message(con, orch_thread, message_id):
+    """Full body of one message of this Orch's tasks. Read-only: does not change the read state."""
+    row = con.execute("SELECT m.id, m.task_id, m.kind, m.body, m.evidence FROM messages m JOIN tasks t ON t.id=m.task_id "
+                      "WHERE m.id=? AND t.orch_thread=?", (message_id, orch_thread)).fetchone()
+    if row is None:
+        raise ValueError(f"no message {message_id} for this Orch")
+    return dict(message_id=row["id"], task_id=row["task_id"], kind=row["kind"], body=row["body"], evidence=row["evidence"])
+
+
+def inbox(con, orch_thread, group_id=None, limit=INBOX_DEFAULT_LIMIT):
+    """At most `limit` unread messages: questions, then open-task messages, then closed-task ones are chosen first,
+    and the page is returned oldest first like before. Only returned rows are marked
+    read; the rest stay unread and every returned row carries `remaining` (how many are still unread here)."""
+    limit = INBOX_DEFAULT_LIMIT if limit is None else limit
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError("limit must be a positive integer")
     rows = store.unread_for_thread(con, orch_thread)
     if group_id is not None:
         rows = [r for r in rows if r['group_id'] == group_id]
+    remaining = max(len(rows) - limit, 0)
+    rows = sorted(sorted(rows, key=_inbox_rank)[:limit], key=lambda r: r["id"])  # pick by priority, show in order
     checked = {}
     pending = {}
     for r in rows:  # only tasks with a lock or a verifies link shell out to git; before mark_read, never losing rows
@@ -406,9 +438,9 @@ def inbox(con, orch_thread, group_id=None):
                 checked[r["task_id"]] = dict(state="error", error=type(error).__name__)
     store.mark_read(con, [r["id"] for r in rows])
     return [dict(task_id=r["task_id"], repo=r["repo"], title=r["title"], kind=r["kind"],
-                 body=r["body"], evidence=r["evidence"], task_status=r["status"],
+                 body=_inbox_body(r["body"]), evidence=r["evidence"], task_status=r["status"],
                  model=task_model(r), model_reason=r['model_reason'], group_id=r['group_id'], pending=pending[r["task_id"]],
-                 verification=checked[r["task_id"]]) for r in rows]
+                 verification=checked[r["task_id"]], message_id=r["id"], remaining=remaining) for r in rows]
 
 
 class _ResumeFailed(Exception):
