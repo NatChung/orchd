@@ -1,13 +1,15 @@
 import contextlib
 import io
+import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from orchd import cli, core, entry, interface, orch_restart, store
+from orchd import cli, core, entry, intake, interface, mcp_server, orch_restart, store
 from orchd.runtime import ORCH_MODELS
+from tests.test_intake import PRODUCERS, fixture
 from tests.test_orchd import FakeRuntime
 
 
@@ -227,6 +229,106 @@ class RestartTest(unittest.TestCase):
         self.assertIn(f"orchd adopt {out['new_orch']} --from old", out["manual_recovery"])
         self.assertLessEqual(state["calls"], 31)
         self.assertEqual(store.get_task(self.con, store.open_tasks(self.con)[0]["id"])["orch_thread"], "old")
+
+    def manual_recovery(self, *, tasks=True, receipts=True, desktop="old"):
+        """Run the documented CLI sequence on a private DB; no real runtime or service."""
+        tid = self.task() if tasks else None
+        rid = intake.submit(self.con, dict(fixture("event_email.json"), owner_orch="old"),
+                            producer="email-adapter", producers=PRODUCERS)["receipt_id"] if receipts else None
+        registration = interface.register(self.con, name="adapter", orch_id="old")
+        auth = {k: registration[k] for k in ("name", "token")}
+        request = interface.submit(self.con, self.rt, **auth, conversation="route",
+                                   request_key="pending", text="body")["request_id"]
+        disabled = interface.register(self.con, name="disabled", orch_id="old")
+        interface.deregister(self.con, name=disabled["name"], token=disabled["token"])
+
+        def command(*args, expected=0):
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(cli.main(list(args)), expected, output.getvalue())
+            return json.loads(output.getvalue())
+
+        self.startup_window_runtime(window_calls=10 ** 6)
+        clock = dict(now=0.0)
+        # Isolate DB, home migration files and Operator identity from the worker environment.
+        with patch.dict(os.environ, ORCHD_HOME=self.tmp.name, ORCHD_ROOT=self.tmp.name,
+                        ORCHD_ORCH_HOME=str(Path(self.tmp.name) / "home"),
+                        ORCHD_INTERFACE_HOME=str(Path(self.tmp.name) / "interface"),
+                        ORCHD_ORCH_ID="", ORCHD_WORKTREE=""), \
+                patch.object(cli, "Runtime", return_value=self.rt):
+            with patch.object(orch_restart.time, "sleep", side_effect=lambda s: clock.update(now=clock["now"] + s)), \
+                    patch.object(orch_restart.time, "monotonic", side_effect=lambda: clock["now"]):
+                failed = command("orch", "restart", expected=1)
+            self.assertEqual(failed["step"], "wait-alive")
+            new = failed["new_orch"]
+            self.assertIsNotNone(store.get_orch(self.con, "old")["stopped_at"])
+            self.assertEqual(entry.get_entry(self.con, "desktop")["orch_id"], "old")
+            self.assertEqual({r[0] for r in self.con.execute("SELECT orch_id FROM interface_requests")}, {"old"})
+            # NEW finishes publishing its runtime state after the timeout.
+            self.rt.live_jobs = lambda timeout=None: self.rt.jobs
+            inventory = command("orch", "list", "--all", "--json")
+            self.assertEqual(next(o for o in inventory["orchs"] if o["orch_id"] == new)["health"], "alive")
+            original = command("binding", "--status")
+            self.assertEqual({r["orch_id"] for r in command("interface", "list")}, {"old"})
+            open_tasks = command("list")
+            backlog = command("intake", "backlog", "--owner", "old")
+            if any(t["orch_thread"] == "old" for t in open_tasks) or any(
+                    q["owner"] == "old" and q["waiting"] for q in backlog["queues"]):
+                adopted = command("adopt", new, "--from", "old")
+                self.assertTrue(adopted["committed"])
+                self.assertEqual(adopted["notification_errors"], {})
+            else:
+                self.assertFalse(tasks or receipts)  # empty ownership must skip adopt
+
+            before = list(self.con.iterdump())
+            preview = command("interface", "rebind", "--from", "old", "--to", new, "--dry-run")
+            self.assertEqual((preview["status"], preview["unanswered"]), ("dry-run", 1))
+            self.assertEqual(list(self.con.iterdump()), before)
+            sent_before = len(self.rt.sent)
+            moved = command("interface", "rebind", "--from", "old", "--to", new)
+            self.assertTrue(moved["committed"])
+            self.assertEqual(moved["interfaces_migrated"], 2)
+            self.assertEqual(moved["interface_wakes"], {str(request): None})
+            self.assertNotIn("wake_error", moved)
+            self.assertEqual(len(self.rt.sent), sent_before + 1)
+            self.assertEqual(self.rt.sent[-1][:2], ("/fake/new", "new-session"))
+
+            if desktop != "old":
+                # Another Operator changed Desktop during recovery; preserve that choice.
+                store.register_orch(self.con, desktop, "claude", socket="/fake/other", job_id="otherjob")
+                self.rt.jobs["otherjob"] = dict(pid=4244, status="idle")
+                command("binding", "--to", desktop)
+            current = command("binding", "--status")
+            if original["orch_id"] == "old" and current["orch_id"] == "old":
+                self.assertEqual(command("binding", "--to", new)["notice"], "sent")
+            self.assertEqual(command("binding", "--status")["orch_id"], new if desktop == "old" else desktop)
+            self.assertEqual({r["orch_id"] for r in command("interface", "list")}, {new})
+            self.assertEqual({t["orch_thread"] for t in command("list")}, {new} if tasks else set())
+            recovered = command("intake", "backlog", "--owner", new)
+            self.assertEqual([(q["owner"], q["waiting"]) for q in recovered["queues"]],
+                             [(new, 1)] if receipts else [])
+            pending = mcp_server.call("interface_requests", {}, new, self.con, self.rt)
+            self.assertEqual([r["id"] for r in pending], [request])
+            row = self.con.execute("SELECT * FROM interface_requests WHERE id=?", (request,)).fetchone()
+            self.assertEqual(row["orch_id"], new)
+            self.assertIsNotNone(row["wake_at"])
+            self.assertIsNone(row["wake_error"])
+            if tid:
+                self.assertEqual(store.get_task(self.con, tid)["orch_thread"], new)
+            if rid:
+                owner = self.con.execute("SELECT owner_orch FROM intake_events WHERE receipt_id=?", (rid,)).fetchone()[0]
+                self.assertEqual(owner, new)
+
+    def test_documented_manual_recovery_moves_tasks_desktop_interfaces_and_pending_requests(self):
+        self.manual_recovery()
+
+    def test_documented_manual_recovery_adopts_receipts_without_tasks(self):
+        self.manual_recovery(tasks=False)
+
+    def test_documented_manual_recovery_skips_empty_adopt(self):
+        self.manual_recovery(tasks=False, receipts=False)
+
+    def test_documented_manual_recovery_preserves_changed_desktop_binding(self):
+        self.manual_recovery(desktop="other")
 
     def test_slow_probes_cannot_carry_the_wait_past_the_deadline(self):
         """Each probe may only use the remaining budget; an alive answer that lands late is not accepted."""

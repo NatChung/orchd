@@ -28,8 +28,26 @@ status: proposed
 
 wait-alive 逾時時，替換後的 Orch 可能只是還沒發布 pid/status，**仍然在跑**，舊 Orch 已停、任務與綁定還沒搬。
 這時再跑一次 `orchd orch restart` 會停掉舊 Orch 的紀錄（已死）並再啟動第三個 Orch，造成兩個替換 Orch 並存；本決定**不實作**冪等重跑。
-手動恢復：`orchd orch list --all` 確認新 Orch 的狀態；若已 `alive`，`orchd adopt NEW_ID --from OLD_ID` 後 `orchd binding --to NEW_ID`、`orchd binding --status`；
-若確定沒有在跑，才 `orchd orch stop NEW_ID` 再重新 restart。
+手動恢復（在可信任的本機 Operator shell 執行；以下 OLD_ID／NEW_ID 使用失敗結果中的 ID）：
+
+1. `orchd orch list --all` 確認 NEW_ID 已 `alive`，OLD_ID 已停止。狀態不明就先停在這裡；若確定 NEW_ID 沒有在跑，才 `orchd orch stop NEW_ID` 再重新 restart。
+2. 先 `orchd binding --status` 記錄 Desktop 綁定，並確認 restart 前是否指向 OLD_ID。`orchd interface list` 檢查所有註冊（含 disabled）與 pending 數量。
+   沒有 interface 就跳過 rebind；有註冊時必須**全部**屬於 OLD_ID，才可執行下列兩步。若混有其他 owner，停止並人工釐清，不要強制搬走別人的註冊。
+3. `orchd list`、`orchd intake backlog --owner OLD_ID` 檢查開放任務與 received receipts；有任一項才執行 `orchd adopt NEW_ID --from OLD_ID`，兩者都沒有就跳過。
+   檢查 adopt 的 `committed` 與通知錯誤；已提交但通知失敗時先讀回 ownership，不要當作未搬移而盲目重跑。
+4. 有 interface 且符合第 2 步時，先預覽，再提交：
+
+   ```sh
+   orchd interface rebind --from OLD_ID --to NEW_ID --dry-run
+   orchd interface rebind --from OLD_ID --to NEW_ID
+   ```
+
+   dry-run 必須成功且 owner／數量符合預期才提交；提交時會再次檢查全部註冊的來源 owner。這一步搬移 interface 註冊與 pending requests，保留 token、reply route 與 ack 狀態，並喚醒 NEW_ID。
+   檢查 `committed: true`、`interface_wakes` 各值為 null、沒有 `wake_error`。通知失敗不代表 ownership 回滾；先讀回並排除通知問題，讓 daemon 的持久化重試補送，不要反向搬移。
+5. 再 `orchd binding --status`：只有 Desktop **原本就指向 OLD_ID，且期間沒被其他操作更改**時，才 `orchd binding --to NEW_ID`。
+   恢復期間協調其他 Operator 不要更改 binding；CLI 沒有 compare-and-swap，單次讀回不能防止同時寫入。原本未綁 OLD_ID 或已被更改就保留現況。
+6. `orchd list`、`orchd intake backlog --owner NEW_ID`、`orchd interface list`、`orchd binding --status` 讀回，確認任務／received receipts／interfaces 與預期 Desktop 都屬於 NEW_ID。
+   在 NEW_ID 的 Orch 用 `interface_requests` 讀回 pending request ID（超過一頁要分頁），確認收到 interface wake。`binding` 本身不會移轉 interfaces／pending requests，不能取代第 4 步。
 
 ## 不在這張票
 
