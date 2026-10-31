@@ -23,6 +23,10 @@ from .orch_health import owner_health
 
 DEFAULT_ENTRY = "desktop"
 RETRYABLE = ("pending", "failed")
+# send_to_nat text is capped so one message can never be too big for `codex queue`; a message that still fails this
+# many times in a row is "held" (no longer retried, no longer blocks later ones) until resend_to_nat.
+MAX_SEND_BYTES = 8000
+MAX_SEND_ATTEMPTS = 3
 
 
 class SourceNotReady(Exception):
@@ -423,9 +427,10 @@ def _send(con, rows, recipient, transport):
             transport(row)
         except Exception as error:
             try:
-                con.execute("UPDATE entry_messages SET delivery='failed', delivery_error=? WHERE id=?",
-                            (f"{type(error).__name__}: {error}"[:500], row["id"]))
-                result[row["id"]] = "failed"
+                held = row["direction"] == "out" and row["attempts"] + 1 >= MAX_SEND_ATTEMPTS
+                con.execute("UPDATE entry_messages SET delivery=?, delivery_error=? WHERE id=?",
+                            ("held" if held else "failed", f"{type(error).__name__}: {error}"[:500], row["id"]))
+                result[row["id"]] = "held" if held else "failed"
             except Exception:
                 result[row["id"]] = "uncertain"
             break
@@ -792,13 +797,29 @@ def _deliver_result(con, rt, entry, message_id):
     result = _public(row)
     if row["delivery"] == "pending" and not get_entry(con, entry["id"])["thread_id"]:
         result["note"] = "no Desktop entry thread has called yet; Operator sees it when the entry calls status"
+    elif row["delivery"] in DELIVERY_NOTES:
+        result["note"] = DELIVERY_NOTES[row["delivery"]]
     return result
+
+
+DELIVERY_NOTES = {
+    "pending": "not sent yet: waiting for the Desktop thread or behind an earlier message; retried automatically",
+    "failed": "a send was tried and errored; it is retried automatically, and `resend_to_nat` retries it now",
+    "held": f"failed {MAX_SEND_ATTEMPTS} times, so it is no longer retried and later messages go ahead; "
+            "fix the cause and call `resend_to_nat` (it will arrive after those later messages)",
+    "sending": "uncertain: it may have reached the Desktop queue but the receipt was not saved; not resent automatically",
+}
+DELIVERY_NOTES["uncertain"] = DELIVERY_NOTES["sending"]
 
 
 def send_to_nat(con, rt, orch_id, text, *, issue_ref=None):
     """Orch tool: a plain message to Operator, queued into the entry's Desktop thread byte for byte."""
     if not isinstance(text, str) or not text.strip():
         raise ValueError("send_to_nat needs non-empty text")
+    size = len(text.encode())
+    if size > MAX_SEND_BYTES:
+        raise ValueError(f"send_to_nat text is {size} bytes; at most {MAX_SEND_BYTES} bytes (UTF-8) fit one Desktop "
+                         "message. Nothing was stored; shorten it or send it as several numbered messages (1/3, 2/3, ...)")
     if issue_ref is not None:
         issue_links.validate_ref(issue_ref)
     entry = _entry_of(con, orch_id)
@@ -806,6 +827,20 @@ def send_to_nat(con, rt, orch_id, text, *, issue_ref=None):
         message_id = _insert(con, entry, "out", "message", text, issue_ref=issue_ref)
         con.execute("UPDATE entry_messages SET wire_text=? WHERE id=?", (message_wire(message_id, orch_id, text),
                                                                           message_id))
+    return dict(_deliver_result(con, rt, entry, message_id), **_questions(con, entry))
+
+
+def resend_to_nat(con, rt, orch_id, message_id):
+    """Orch tool: retry one of this Orch's failed or held messages to Operator right now."""
+    entry = _entry_of(con, orch_id)
+    row = _row(con, message_id) if isinstance(message_id, int) else None
+    if row is None or row["entry_id"] != entry["id"] or row["orch_id"] != orch_id or row["direction"] != "out":
+        raise ValueError(f"message {message_id} is not a message of this Orch")
+    with store.immediate(con):
+        row = _row(con, message_id)
+        if row["delivery"] not in ("failed", "held"):
+            raise ValueError(f"message {message_id} is {_state(row)}; only failed or held messages can be resent")
+        con.execute("UPDATE entry_messages SET delivery='pending', attempts=0 WHERE id=?", (message_id,))
     return dict(_deliver_result(con, rt, entry, message_id), **_questions(con, entry))
 
 

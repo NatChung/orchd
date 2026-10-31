@@ -216,9 +216,18 @@ TOOLS += [
      "inputSchema": {"type": "object", "properties": {}}},
     {"name": "send_to_nat",
      "description": "Send a message to Operator's Desktop entry thread; it is queued there byte for byte. Returns delivery "
-                    "pending|delivered|failed|uncertain: delivered means it reached the Desktop queue, not that Operator "
-                    "read or approved it. failed rows are retried on the entry's next call; uncertain ones are not.",
+                    "pending|delivered|failed|held|uncertain: delivered = it reached the Desktop queue, not that Operator "
+                    "read or approved it; pending = not sent yet (no Desktop thread yet, or waiting behind an earlier "
+                    "message), retried automatically; failed = a send was tried and errored, retried on the entry's "
+                    "next call; held = failed 3 times, no longer retried and no longer blocks later messages, use "
+                    "resend_to_nat; uncertain = it may have arrived but the receipt was not saved, never resent "
+                    f"automatically. Text over {entry.MAX_SEND_BYTES} UTF-8 bytes is rejected with an error and "
+                    "nothing is stored: split it into numbered messages (1/3, 2/3, ...).",
      "inputSchema": {"type": "object", "required": ["text"], "properties": {"text": {"type": "string"}}}},
+    {"name": "resend_to_nat",
+     "description": "Retry one of your own send_to_nat/ask_nat messages whose delivery is failed or held, right now. "
+                    "A held message arrives after the messages that went out while it was held.",
+     "inputSchema": {"type": "object", "required": ["message_id"], "properties": {"message_id": {"type": "integer"}}}},
     {"name": "ask_nat",
      "description": "Ask Operator one question through the Desktop entry. Only one question is open at a time: if one is "
                     "already open this one is queued (state queued) and sent after Operator answers the earlier ones, in "
@@ -484,6 +493,8 @@ def call(name, args, thread, con, rt):
         return entry.inbox(con, thread, rt)
     if name == "send_to_nat":
         return entry.send_to_nat(con, rt, thread, args.get("text"), issue_ref=args.get("issue_ref"))
+    if name == "resend_to_nat":
+        return entry.resend_to_nat(con, rt, thread, args["message_id"])
     if name == "ask_nat":
         return entry.ask_nat(con, rt, thread, args.get("text"), args.get("task_id"),
                              bool(args.get("quote_worker_question")), supersedes=args.get("supersedes"),

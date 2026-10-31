@@ -38,9 +38,22 @@ orchd 的 MCP server 在 Native 是否也不受這份權限限制（它要寫 `O
 | 入口 | `relay(reply_to?)` | 轉交 Operator 這一則訊息；原文由 orchd 從 rollout 讀，沒有 text 參數 |
 | 入口 | `status()` | 綁定、Orch 健康、目前問題全文、排隊數、未送達項目；重開時先呼叫 |
 | Orch | `entry_inbox` | 讀 Operator 原文，附 sha256、`reply_to`、`task_id` |
-| Orch | `send_to_nat(text)` | 一般訊息 |
+| Orch | `send_to_nat(text)` | 一般訊息；UTF-8 超過 8000 bytes 直接報錯、不存，請分成編號訊息（1/3、2/3） |
+| Orch | `resend_to_nat(message_id)` | 立刻重送自己 `failed`／`held` 的訊息（CLI：`orchd entry resend MESSAGE_ID`） |
 | Orch | `ask_nat(text?, task_id?, quote_worker_question?)` | 一次一題，其餘排隊；可原樣引用 worker 的問題（對外預覽） |
 | Orch | `answer(task_id, entry_reply_id=N)` | 把 Operator 的回覆原文轉給 worker；task 不符就拒絕 |
+
+## 送達狀態（Orch → Operator）
+
+| 狀態 | 意思 | 之後 |
+| --- | --- | --- |
+| `pending` | 還沒送：Desktop thread 還沒出現，或排在較早的訊息後面 | 自動重試 |
+| `failed` | 送過一次但 `codex queue` 報錯 | 自動重試（入口下次呼叫時）；也可 `resend_to_nat` |
+| `held` | 連續失敗 3 次（例如內容永遠送不過）：不再自動重試，**也不再擋後面的訊息** | 排除原因後 `resend_to_nat`；會排在這段期間送出的訊息之後 |
+| `uncertain` | 可能已進 Desktop queue 但沒存到回執 | 不會自動重送，`resend_to_nat` 也不收（只收 failed／held）；請 Operator 確認有沒有收到，沒收到就用 `send_to_nat` 重寫一則 |
+| `delivered` | 已進 Desktop queue（不代表 Operator 看過或批准） | — |
+
+`send_to_nat` 內文上限 8000 UTF-8 bytes（`entry.MAX_SEND_BYTES`）；超過在存入前就報錯。此上限只針對 `send_to_nat`。
 
 ## 圖片附件
 
