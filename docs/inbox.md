@@ -5,7 +5,7 @@
 ## A page
 
 - A page holds at most `limit` unread messages (default 20) and at most 60,000 bytes once serialized
-  (`INBOX_PAGE_BUDGET`, measured as UTF-8 of the JSON the MCP server sends, every field included).
+  (`INBOX_PAGE_BUDGET`, measured as UTF-8 of the final JSON-RPC envelope the MCP server sends, including escaped text, counters and newline).
   Whichever is hit first ends the page. The rest stay unread.
 - Which messages make the page: worker `question`s first (even of closed tasks), then messages of open tasks,
   then old messages of closed tasks (`task_status` is `closed`); oldest first inside each group.
@@ -23,13 +23,21 @@
   and the same messages come back on the next `inbox` call. A reply that was written and flushed but then lost
   on the client side is outside this guarantee: orchd cannot see it and the messages count as read.
 
+- Concurrent calls, including calls on separate database connections, can select the same messages.
+  Before taking action or retrying, deduplicate by `message_id`; delivery is not exactly-once.
+  Marking a delivered page affects only its selected IDs: late arrivals and unselected rows stay unread.
+
 ## Previews and full text
 
 - `body` and `evidence` over 2000 chars, `title` over 200 and `model_reason` over 500 are cut and end with
-  `[truncated, N chars; ...]`.
+  `[truncated, N chars; ...]`. Other metadata strings, including `verification.command`, are capped at
+  256 chars. If the first row still exceeds the wire budget, all its string previews shrink to 128 chars
+  with a truncation marker, so even escape-heavy rows make bounded progress.
 - `inbox(message_id=ID, field=..., offset=..., length=...)` returns `text`, `total` and `next_offset`
-  (null at the end) for one field (`body`, `evidence`, `title`, `model_reason`); `length` is at most 20000, so a
+  (null at the end) for one field (`body`, `evidence`, `title`, `model_reason`, or `metadata`); `length` is at most 20000, so a
   message of any size can be read in slices. Read-only, read state unchanged.
+- `field="metadata"` returns full metadata as JSON, including verification state and command; it uses the
+  same authorization and read-only slicing rules. Core calls apply the same envelope budget with a null reply ID.
 - It only serves the kinds `inbox` itself shows (ack, progress, report, question, adopt, task_question_answer,
   question_dismissed) of tasks owned by the calling Orch. Queued answers, dispatch and other event rows are refused.
 - `group_id` works as before and leaves other groups unread. Calls without `limit` still work.

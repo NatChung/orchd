@@ -93,17 +93,20 @@ TOOLS = [
                     "Returns at most `limit` messages (default 20) and at most about 60 KB serialized, whichever is smaller: worker questions first, "
                     "then open-task messages, then old messages of closed tasks. Only the returned ones are marked read, and only after the page was "
                     "written and flushed by orchd (at-least-once: if building or writing the reply fails, they stay unread and come back on the next call; "
-                    "a reply lost after the flush is not detected); the rest "
+                    "a reply lost after the flush is not detected). Concurrent calls can return duplicates: "
+                    "deduplicate by message_id before taking action or retrying; this is not exactly-once. The rest "
                     "stay unread. Every row carries `remaining` (still unread) split into `remaining_priority` (questions and open-task messages) and "
                     "`remaining_closed`: call again until remaining is 0. Closed-task messages are read last, so they can wait while questions and "
                     "open-task messages keep arriving; watch remaining_closed. "
                     "body and evidence over 2000 chars, title over 200 and model_reason over 500 are cut with a \"truncated, N chars\" marker; "
-                    "message_id (+ field body|evidence|title|model_reason, offset, length up to 20000) reads that text in slices without changing read state: "
+                    "Other metadata strings (including verification.command) are capped at 256 chars; "
+                    "an oversized first row uses 128-char previews. field=metadata reads full metadata as JSON. "
+                    "message_id (+ field body|evidence|title|model_reason|metadata, offset, length up to 20000) reads that text in slices without changing read state: "
                     "it returns text, total and next_offset (null at the end). Only for messages of your own tasks that inbox can show.",
      "inputSchema": {"type": "object", "properties": {"group_id": {"type": "string"},
                                                        "limit": {"type": "integer", "minimum": 1},
                                                        "message_id": {"type": "integer"},
-                                                       "field": {"type": "string", "enum": ["body", "evidence", "title", "model_reason"]},
+                                                       "field": {"type": "string", "enum": ["body", "evidence", "title", "model_reason", "metadata"]},
                                                        "offset": {"type": "integer", "minimum": 0},
                                                        "length": {"type": "integer", "minimum": 1}}}},
     {"name": "list_open",
@@ -431,7 +434,7 @@ def intake_call(name, args, thread, con, rt=None):
     raise ValueError(f"unknown tool {name}")
 
 
-def call(name, args, thread, con, rt, sent=None):
+def call(name, args, thread, con, rt, sent=None, *, reply_id=None):
     from . import interface
     if name == "interface_requests":
         if set(args) - {"after_id", "limit"}:
@@ -485,7 +488,7 @@ def call(name, args, thread, con, rt, sent=None):
         if args.get('message_id') is not None:
             return core.inbox_message(con, thread, args['message_id'], args.get('field', 'body'),
                                       args.get('offset', 0), args.get('length', core.INBOX_READ_LENGTH))
-        rows, ids = core.inbox_page(con, thread, args.get('group_id'), args.get('limit'))
+        rows, ids = core.inbox_page(con, thread, args.get('group_id'), args.get('limit'), reply_id=reply_id)
         if sent is None:  # direct caller, no reply to wait for
             store.mark_read(con, ids)
         else:
@@ -630,8 +633,9 @@ def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY, sent=None):
                     thread = meta.get("threadId") or (meta.get("x-codex-turn-metadata") or {}).get("thread_id")
                     if thread and params.get("name") not in ("list_orchs", "quota_status"):
                         store.register_orch(con, thread, "codex")
-                data = call(params.get("name"), params.get("arguments") or {}, thread, con, rt, marks)
-            result = {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False, indent=1)}]}
+                data = call(params.get("name"), params.get("arguments") or {}, thread, con, rt, marks, reply_id=mid)
+            result = core.inbox_result(data)
+            core.inbox_wire({"jsonrpc": "2.0", "id": mid, "result": result})
             if sent is None:  # no transport to wait for: serialized fine, so mark now
                 for ids in marks:
                     store.mark_read(con, ids)
@@ -662,7 +666,7 @@ def serve(stdin=sys.stdin, stdout=sys.stdout, con=None, rt=None, role="orch", en
             sent = []  # inbox read marks: committed only after the reply was written and flushed
             reply = handle(json.loads(line), con, rt, role, entry_id, sent)
             if reply is not None:
-                stdout.write(json.dumps(reply, ensure_ascii=False) + "\n")
+                stdout.write(core.inbox_wire(reply))
                 stdout.flush()
             if not (reply or {}).get("result", {}).get("isError"):
                 for ids in sent:

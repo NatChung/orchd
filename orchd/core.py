@@ -390,9 +390,9 @@ def ask(con, rt, task_id, question):
 
 
 INBOX_DEFAULT_LIMIT = 20
-INBOX_PAGE_BUDGET = 60_000  # UTF-8 bytes of the serialized page (json.dumps indent=1, as the MCP server sends it)
+INBOX_PAGE_BUDGET = 60_000  # UTF-8 bytes of the final MCP envelope, including its newline
 INBOX_CAPS = dict(body=2000, evidence=2000, title=200, model_reason=500)  # per-field previews inside a page
-INBOX_FIELDS = tuple(INBOX_CAPS)
+INBOX_FIELDS = (*INBOX_CAPS, "metadata")
 INBOX_READ_LENGTH = 20_000  # default and maximum characters per inbox_message slice
 INBOX_TIERS = ("question", "open", "closed")
 
@@ -402,15 +402,40 @@ def _inbox_tier(r):
     return 0 if r["kind"] == "question" else 1 if r["status"] != "closed" else 2
 
 
-def _inbox_preview(text, field):
-    cap = INBOX_CAPS[field]
+def _inbox_preview(text, field, cap=None):
+    cap = INBOX_CAPS[field] if cap is None else cap
     if isinstance(text, str) and len(text) > cap:
         return text[:cap] + f"\n[truncated, {len(text)} chars; full text: inbox(message_id=..., field=\"{field}\")]"
     return text
 
 
-def _inbox_size(rows):
-    return len(json.dumps(rows, ensure_ascii=False, indent=1).encode("utf-8"))
+def inbox_result(data):
+    """The text result shared by page sizing and the MCP transport."""
+    return {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False, indent=1)}]}
+
+
+def inbox_wire(reply):
+    return json.dumps(reply, ensure_ascii=False) + "\n"
+
+
+def _inbox_size(rows, reply_id=None):
+    return len(inbox_wire({"jsonrpc": "2.0", "id": reply_id, "result": inbox_result(rows)}).encode("utf-8"))
+
+
+def _inbox_metadata_preview(value, cap=256):
+    # Metadata has a fixed schema; cap every string, including verification.command and identifiers.
+    if isinstance(value, str) and len(value) > cap:
+        return value[:cap] + " [truncated; full text: field=metadata]"
+    if isinstance(value, dict):
+        return {k: _inbox_metadata_preview(v, cap) for k, v in value.items()}
+    return value
+
+
+def _inbox_verification(con, task):
+    try:
+        return verification.status(con, task["id"]) if verification.has_any(con, task) else dict(state="none")
+    except Exception as error:
+        return dict(state="error", error=type(error).__name__)
 
 
 def inbox_message(con, orch_thread, message_id, field="body", offset=0, length=INBOX_READ_LENGTH):
@@ -429,13 +454,19 @@ def inbox_message(con, orch_thread, message_id, field="body", offset=0, length=I
                       (message_id, orch_thread, *store.ORCH_KINDS)).fetchone()
     if row is None:
         raise ValueError(f"no message {message_id} for this Orch")
-    text = row[field] or ""
+    if field == "metadata":
+        task = store.get_task(con, row["task_id"])
+        text = json.dumps(dict(task_id=task["id"], repo=task["repo"], task_status=task["status"],
+                               model=task_model(task), group_id=task["group_id"],
+                               verification=_inbox_verification(con, task)), ensure_ascii=False)
+    else:
+        text = row[field] or ""
     end = offset + length
     return dict(message_id=row["id"], task_id=row["task_id"], kind=row["kind"], field=field, offset=offset,
                 text=text[offset:end], total=len(text), next_offset=end if end < len(text) else None)
 
 
-def inbox_page(con, orch_thread, group_id=None, limit=INBOX_DEFAULT_LIMIT):
+def inbox_page(con, orch_thread, group_id=None, limit=INBOX_DEFAULT_LIMIT, *, reply_id=None):
     """Build one page without touching read state: (rows, ids to mark read once the page was delivered).
     Rows are taken in priority order (questions, open-task messages, closed-task messages; oldest first inside a
     tier) until `limit` or INBOX_PAGE_BUDGET serialized bytes, then shown oldest first. Fields are previews
@@ -451,35 +482,42 @@ def inbox_page(con, orch_thread, group_id=None, limit=INBOX_DEFAULT_LIMIT):
 
     def build(r):
         if r["task_id"] not in info:  # only tasks with a lock or a verifies link shell out to git
-            try:
-                task = store.get_task(con, r["task_id"])
-                state = (verification.status(con, task["id"]) if verification.has_any(con, task) else dict(state="none"))
-            except Exception as error:
-                state = dict(state="error", error=type(error).__name__)
+            task = store.get_task(con, r["task_id"])
+            state = _inbox_verification(con, task)
             info[r["task_id"]] = (store.pending_answer_count(con, r["task_id"]), state)
         pending, state = info[r["task_id"]]
-        return dict(task_id=r["task_id"], repo=r["repo"], title=_inbox_preview(r["title"], "title"), kind=r["kind"],
+        return dict(**_inbox_metadata_preview(dict(task_id=r["task_id"], repo=r["repo"], kind=r["kind"],
+                    task_status=r["status"], model=task_model(r), group_id=r["group_id"], verification=state)),
+                    title=_inbox_preview(r["title"], "title"),
                     body=_inbox_preview(r["body"], "body"), evidence=_inbox_preview(r["evidence"], "evidence"),
-                    task_status=r["status"], model=task_model(r),
-                    model_reason=_inbox_preview(r['model_reason'], "model_reason"), group_id=r['group_id'],
-                    pending=pending, verification=state, message_id=r["id"])
+                    model_reason=_inbox_preview(r['model_reason'], "model_reason"),
+                    pending=pending, message_id=r["id"])
+
+    def with_counts(page):
+        left = ordered[len(page):]
+        counts = {name: sum(1 for r in left if _inbox_tier(r) == i) for i, name in enumerate(INBOX_TIERS)}
+        return sorted([dict(row, remaining=len(left), remaining_priority=counts["question"] + counts["open"],
+                            remaining_closed=counts["closed"]) for row in page], key=lambda row: row["message_id"])
 
     chosen, built = [], []
     for r in ordered:
         if len(chosen) >= limit:
             break
         row = build(r)
-        # +400 reserves room for the remaining_* counters added to every row afterwards
-        if chosen and _inbox_size(built + [row]) + 400 * (len(built) + 1) > INBOX_PAGE_BUDGET:
-            break
+        candidate = with_counts(built + [row])
+        if _inbox_size(candidate, reply_id) > INBOX_PAGE_BUDGET:
+            if chosen:
+                break
+            # Even the first row must fit. Shorten all strings to guarantee bounded progress
+            # for escape-heavy previews; message_id still provides access to every full field.
+            row = _inbox_metadata_preview(row, cap=128)
+            row.update({field: _inbox_preview(r[field], field, cap=128) for field in INBOX_CAPS})
+            candidate = with_counts([row])
+            if _inbox_size(candidate, reply_id) > INBOX_PAGE_BUDGET:
+                raise ValueError("inbox response envelope exceeds page budget")
         chosen.append(r)
         built.append(row)
-    left = ordered[len(chosen):]
-    counts = {name: sum(1 for r in left if _inbox_tier(r) == i) for i, name in enumerate(INBOX_TIERS)}
-    for row in built:
-        row.update(remaining=len(left), remaining_priority=counts["question"] + counts["open"],
-                   remaining_closed=counts["closed"])
-    built.sort(key=lambda row: row["message_id"])
+    built = with_counts(built)
     return built, [r["id"] for r in chosen]
 
 

@@ -123,6 +123,148 @@ class InboxLimitTest(unittest.TestCase):
         ids = [store.add_message(self.con, t["id"], kind, "y" * size, "e" * 20_000) for _ in range(n)]
         return t, ids
 
+    def wire_size(self, reply):
+        return len((json.dumps(reply, ensure_ascii=False) + "\n").encode("utf-8"))
+
+    def test_70k_verification_command_and_metadata_are_bounded_and_recoverable(self):
+        t = self.dispatch()
+        core.inbox(self.con, "thread-A")
+        command = "x" * 70_000
+        # A real verify_lock stores its command in evidence; no git or live service needed.
+        store.add_message(self.con, t["id"], "verify_lock", "lock",
+                          json.dumps(dict(sha="a" * 40, command=command)))
+        mid = store.add_message(self.con, t["id"], "report", "done")
+        with mock.patch.object(core.verification, "_current_sha", return_value="a" * 40):
+            reply = self.mcp("inbox")
+            self.assertLessEqual(self.wire_size(reply), core.INBOX_PAGE_BUDGET)
+            rows = self.mcp_rows(reply)
+            self.assertEqual([r["message_id"] for r in rows], [mid])
+            self.assertIn("truncated", rows[0]["verification"]["command"])
+            text, offset = "", 0
+            while offset is not None:
+                part = core.inbox_message(self.con, "thread-A", mid, "metadata", offset)
+                text += part["text"]
+                offset = part["next_offset"]
+            self.assertEqual(json.loads(text)["verification"]["command"], command)
+        self.assertEqual(self.unread(), 0)
+
+    def test_quotes_and_controls_fit_final_wire_and_core_budget(self):
+        t = self.dispatch()
+        core.inbox(self.con, "thread-A")
+        for _ in range(6):
+            store.add_message(self.con, t["id"], "report", '"' * 2000, '"' * 2000)
+        rows, ids = core.inbox_page(self.con, "thread-A")
+        envelope = {"jsonrpc": "2.0", "id": None, "result": {
+            "content": [{"type": "text", "text": json.dumps(rows, ensure_ascii=False, indent=1)}]}}
+        self.assertLessEqual(self.wire_size(envelope), core.INBOX_PAGE_BUDGET)
+        reply = self.mcp("inbox")
+        self.assertLessEqual(self.wire_size(reply), core.INBOX_PAGE_BUDGET)
+        self.assertEqual(self.unread(), 6 - len(self.mcp_rows(reply)))
+        core.inbox(self.con, "thread-A", limit=100)
+        mid = store.add_message(self.con, t["id"], "question", "\x00" * 2000, "\x01" * 2000)
+        reply = self.mcp("inbox")
+        self.assertLessEqual(self.wire_size(reply), core.INBOX_PAGE_BUDGET)
+        self.assertEqual(self.mcp_rows(reply)[0]["message_id"], mid)
+        self.assertEqual(self.unread(), 0)
+
+    def test_two_connections_duplicate_selection_late_arrival_and_unselected_stay_unread(self):
+        t = self.dispatch()
+        core.inbox(self.con, "thread-A")
+        first = store.add_message(self.con, t["id"], "progress", "first")
+        second = store.add_message(self.con, t["id"], "progress", "second")
+        other = store.connect(Path(self.tmp.name) / "t.db")
+        try:
+            a, aids = core.inbox_page(self.con, "thread-A", limit=1)
+            b, bids = core.inbox_page(other, "thread-A", limit=1)
+            self.assertEqual(aids, [first])
+            self.assertEqual(bids, aids)  # at-least-once, consumer deduplicates message_id
+            late = store.add_message(other, t["id"], "question", "late")
+            store.mark_read(self.con, aids)
+            store.mark_read(other, bids)
+            self.assertEqual({r["id"] for r in store.unread_for_thread(other, "thread-A")}, {second, late})
+            self.assertEqual(core.inbox_page(other, "thread-A", limit=1)[1], [late])
+        finally:
+            other.close()
+        tool = next(x for x in mcp_server.TOOLS if x["name"] == "inbox")
+        self.assertIn("deduplicate by message_id", tool["description"])
+        doc = (Path(__file__).parents[1] / "docs/inbox.md").read_text()
+        self.assertIn("deduplicate by `message_id`", doc)
+
+    def test_all_metadata_strings_are_bounded_and_full_values_remain_accessible(self):
+        t = self.dispatch()
+        core.inbox(self.con, "thread-A")
+        value = "\x00" * 70_000
+        store.update_task(self.con, t["id"], repo=value, model=value, group_id=value)
+        mid = store.add_message(self.con, t["id"], "report", "done")
+        reply = self.mcp("inbox")
+        self.assertLessEqual(self.wire_size(reply), core.INBOX_PAGE_BUDGET)
+        row = self.mcp_rows(reply)[0]
+        for key in ("repo", "model", "group_id"):
+            self.assertLess(len(row[key]), 320)
+        part = core.inbox_message(self.con, "thread-A", mid, "metadata", length=200)
+        self.assertGreater(part["total"], len(value) * 3)
+        self.assertEqual(part["next_offset"], 200)
+        with self.assertRaises(ValueError):
+            core.inbox_message(self.con, "thread-B", mid, "metadata")
+        self.assertEqual(self.unread(), 0)
+
+    def test_actual_escaped_request_id_is_included_in_wire_budget(self):
+        self.big_messages(20)
+        msg = {"jsonrpc": "2.0", "id": '"\n' * 3000, "method": "tools/call",
+               "params": {"name": "inbox", "arguments": {}}}
+        with mock.patch.dict("os.environ", {"ORCHD_ORCH_ID": "thread-A"}):
+            reply = mcp_server.handle(msg, self.con, self.rt)
+        self.assertLessEqual(self.wire_size(reply), core.INBOX_PAGE_BUDGET)
+        self.assertTrue(self.mcp_rows(reply))
+
+    def test_oversized_first_row_shrinks_and_advances_with_exact_counters(self):
+        t = self.dispatch()
+        core.inbox(self.con, "thread-A")
+        body = "\x00" * 2000
+        first = store.add_message(self.con, t["id"], "report", body, body)
+        second = store.add_message(self.con, t["id"], "progress", "next")
+        msg = {"jsonrpc": "2.0", "id": '"' * 16000, "method": "tools/call",
+               "params": {"name": "inbox", "arguments": {"limit": 1}}}
+        with mock.patch.dict("os.environ", {"ORCHD_ORCH_ID": "thread-A"}):
+            reply = mcp_server.handle(msg, self.con, self.rt)
+        self.assertLessEqual(self.wire_size(reply), core.INBOX_PAGE_BUDGET)
+        rows = self.mcp_rows(reply)
+        self.assertEqual([r["message_id"] for r in rows], [first])
+        self.assertIn("truncated, 2000 chars", rows[0]["body"])
+        self.assertEqual(rows[0]["remaining"], 1)
+        self.assertEqual(rows[0]["remaining_priority"], 1)
+        self.assertEqual(rows[0]["remaining_closed"], 0)
+        self.assertEqual([r["id"] for r in store.unread_for_thread(self.con, "thread-A")], [second])
+        self.assertEqual(core.inbox_message(self.con, "thread-A", first)["text"], body)
+
+    def test_final_envelope_serialization_failure_does_not_mark_read(self):
+        t = self.dispatch()
+        store.add_message(self.con, t["id"], "progress", "p")
+        before = self.unread()
+        with mock.patch.object(core, "_inbox_size", return_value=1), \
+                mock.patch.object(core, "inbox_wire", side_effect=TypeError("outer serialization")):
+            reply = self.mcp("inbox")
+        self.assertTrue(reply["result"]["isError"])
+        self.assertEqual(self.unread(), before)
+
+    def test_flush_failure_does_not_mark_read(self):
+        t = self.dispatch()
+        store.add_message(self.con, t["id"], "progress", "p")
+        before = self.unread()
+
+        class BrokenFlush(io.StringIO):
+            def flush(self):
+                raise BrokenPipeError("flush failed")
+
+        request = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                              "params": {"name": "inbox", "arguments": {}}}) + "\n"
+        with mock.patch.dict("os.environ", {"ORCHD_ORCH_ID": "thread-A"}), \
+                mock.patch.object(mcp_server.quota, "start_background"), \
+                mock.patch.object(mcp_server.quota, "stop_background"):
+            with self.assertRaises(BrokenPipeError):
+                mcp_server.serve(io.StringIO(request), BrokenFlush(), self.con, self.rt)
+        self.assertEqual(self.unread(), before)
+
     def test_schema_documents_limit_budget_and_slices(self):
         tool = [x for x in mcp_server.TOOLS if x["name"] == "inbox"][0]
         props = tool["inputSchema"]["properties"]
@@ -136,6 +278,7 @@ class InboxLimitTest(unittest.TestCase):
         total = self.unread()
         reply = self.mcp("inbox")
         text = reply["result"]["content"][0]["text"]
+        self.assertLessEqual(self.wire_size(reply), core.INBOX_PAGE_BUDGET)
         self.assertLessEqual(len(text.encode("utf-8")), core.INBOX_PAGE_BUDGET)
         rows = json.loads(text)
         self.assertGreater(len(rows), 0)
@@ -179,7 +322,7 @@ class InboxLimitTest(unittest.TestCase):
         for _ in range(15):
             store.add_message(self.con, t["id"], "report", "字" * 5000, "證" * 5000)
         reply = self.mcp("inbox")
-        self.assertLessEqual(len(reply["result"]["content"][0]["text"].encode("utf-8")), core.INBOX_PAGE_BUDGET)
+        self.assertLessEqual(self.wire_size(reply), core.INBOX_PAGE_BUDGET)
 
     def test_assembly_failure_does_not_mark_anything_read(self):
         t = self.dispatch()
