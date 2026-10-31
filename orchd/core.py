@@ -699,12 +699,19 @@ def interrupt(con, rt, task_id, text):
     if task["status"] == "closed":
         raise ValueError(f"task {task_id} is closed")
     if app_worker.enabled(task):
-        _queue_answer(con, task_id, "[interrupt] Codex cancelled your running turn. Check git status and "
-                      f"any detached jobs before continuing; run ack, then follow this correction.\n\n{text}", None)
+        queued_id = store.add_message(con, task_id, store.QUEUED,
+                                      "[interrupt] Codex cancelled your running turn. Check git status and "
+                                      f"any detached jobs before continuing; run ack, then follow this correction.\n\n{text}")
         try:
-            return app_worker.control(store.get_task(con, task_id), "interrupt",
-                                      expected_generation=task["generation"], expected_thread=task["session_id"],
-                                      expected_turn=task["active_turn"])
+            reply = app_worker.control(store.get_task(con, task_id), "interrupt",
+                                       expected_generation=task["generation"], expected_thread=task["session_id"],
+                                       expected_turn=task["active_turn"])
+            if reply.get("not_sent"):
+                # The supervisor never touched the turn (still busy after the bounded wait). A failed interrupt is
+                # not queued: the supervisor would send it automatically later, after the moment has passed.
+                con.execute("DELETE FROM messages WHERE id=? AND read_at IS NULL", (queued_id,))
+                reply["pending"] = store.pending_answer_count(con, task_id)
+            return reply
         except Exception as exc:
             return dict(status="failed", interrupted=False, delivered=0,
                         pending=store.pending_answer_count(con, task_id), error=str(exc))

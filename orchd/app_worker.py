@@ -5,6 +5,7 @@ id/generation, never arbitrary commands or endpoints. Ambiguous sends are held f
 history reconciliation or an explicit retry, never automatically resent.
 """
 import argparse
+import datetime
 import json
 import os
 import queue
@@ -201,6 +202,14 @@ def preload():
     from .runtime import Runtime  # noqa: F401
 
 
+# An interrupt is urgent: wait for the delivery lane this long, then fail loudly (never queue).
+# Kept under control()'s 25 s socket timeout together with the 15 s confirmation window.
+INTERRUPT_LOCK_WAIT = 10
+# Automatic delivery pause after a rate-limit refusal without a usable reset time.
+LIMIT_BACKOFF_BASE = 30
+LIMIT_BACKOFF_MAX = 300
+
+
 class Supervisor:
     def __init__(self, database, task_id, generation):
         self.maintenance_error = None
@@ -226,6 +235,9 @@ class Supervisor:
         self.background_heartbeat = None
         self.background_error = None
         self.backoff = 0
+        self.limit_until = 0  # monotonic; automatic delivery is paused until then after a rate-limit refusal
+        self.limit_wall = None
+        self.limit_failures = 0
         self.rejected = None  # pending ids the server explicitly refused; in memory, so a restart retries once
 
     @property
@@ -439,13 +451,15 @@ class Supervisor:
                        'approvalPolicy':'never', 'sandboxPolicy': {'type':'dangerFullAccess'}})
             self.receipt(delivery_id, result['turn']['id'], ids)
             self.rejected = None
+            self.limit_until = 0
+            self.limit_failures = 0
             return dict(status='delivered',delivered=len(ids),pending=store.pending_answer_count(self.con,self.task_id))
         except RPCError as exc:  # definitive server rejection: bytes did not start a turn
             self.con.execute("UPDATE worker_deliveries SET state='rejected',error=? WHERE id=?",(str(exc),delivery_id))
             from .routing import limited
             if limited(exc.error):
-                self.update(note=f"app-server delivery rejected; pending retained: {exc}")
                 self.deferred_limit = (exc.error, self.generation + ':' + delivery_id)
+                self.pause_for_limit(exc.error)
             else:
                 # Not transient: retrying only piles up journal rows. Hold automatic delivery until a new
                 # answer, answer(flush=true) or retry; the text stays pending.
@@ -460,6 +474,21 @@ class Supervisor:
             self.reconcile_pending = True
             return dict(status='failed',uncertain=True,delivered=0,
                         pending=store.pending_answer_count(self.con,self.task_id),error=str(exc))
+
+    def pause_for_limit(self, error):
+        """Hold automatic delivery after a rate-limit refusal: until the reset time the error carries, else a
+        capped exponential backoff. The text stays pending; nothing is journaled while paused."""
+        self.limit_failures += 1
+        delay = min(LIMIT_BACKOFF_MAX, LIMIT_BACKOFF_BASE * 2 ** (self.limit_failures - 1))
+        reset = error.get('resetsAt') or error.get('resets_at') if isinstance(error, dict) else None
+        if isinstance(reset, (int, float)) and not isinstance(reset, bool) and reset > time.time():
+            delay = reset - time.time()
+        self.limit_until = time.monotonic() + delay
+        self.limit_wall = time.time() + delay
+        when = datetime.datetime.fromtimestamp(self.limit_wall, datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        self.maintenance_error = (f'rate limit: turn/start refused; automatic delivery paused, text retained; '
+                                  f'next attempt {when} (answer flush=true tries once now)')
+        self.set_owned_note(f'app-server supervisor: {self.maintenance_error}')
 
     def flush(self, guard=None, ignore_viewer=False):
         with store.task_delivery(self.con,[self.task_id],timeout=.1):
@@ -539,6 +568,7 @@ class Supervisor:
             self.drain()
             if not request.get('guard'):
                 self.rejected = None  # an explicit flush always sends once and reports the result
+                self.limit_until = 0
             return self.flush(tuple(request['guard']) if request.get('guard') else None)
         if cmd == 'interrupt':
             task=self.task()
@@ -593,7 +623,7 @@ class Supervisor:
                 self.deferred_flush = (self.generation,self.task()['session_id'],
                                        self.task()['last_completed_turn'])
             if not self.reconcile_pending and not self.deferred_flush and self.rpc_health_error is None \
-                    and self.rejected is None:
+                    and self.rejected is None and time.monotonic() >= self.limit_until:
                 self.maintenance_error = None
                 self.backoff = 0
                 self.clear_note()
@@ -601,7 +631,10 @@ class Supervisor:
             self.fail_housekeeping(exc)
 
     def auto_paused(self):
-        """True while the pending answers are exactly the ones the server refused; any change resumes."""
+        """True while a rate-limit pause runs, or while the pending answers are exactly the ones the server
+        refused (any change to those resumes)."""
+        if time.monotonic() < self.limit_until:
+            return True
         if self.rejected is not None and frozenset(r['id'] for r in store.pending_answers(
                 self.con, self.task_id)) != self.rejected:
             self.rejected = None
@@ -684,16 +717,24 @@ class Supervisor:
                     if request.get('command') == 'health':
                         reply = self.command(request)
                     else:
-                        acquired = self.work_lock.acquire(blocking=False)
+                        interrupt = request.get('command') == 'interrupt'
+                        # Urgent: wait for the lane (bounded) instead of reporting a busy that nobody retries.
+                        acquired = self.work_lock.acquire(timeout=INTERRUPT_LOCK_WAIT) if interrupt \
+                            else self.work_lock.acquire(blocking=False)
                         if acquired:
                             reply = self.command(request)
                         elif request.get('generation') != self.generation or not self.current():
                             raise ValueError('superseded attempt')
-                        elif request.get('command') not in ('flush', 'interrupt'):
+                        elif interrupt:
+                            reply = dict(status='failed', interrupted=False, delivered=0, not_sent=True,
+                                         pending=store.pending_answer_count(self.con, self.task_id),
+                                         error='interrupt not delivered: supervisor busy; retry', supervisor_busy=True)
+                        elif request.get('command') != 'flush':
                             raise RuntimeError('supervisor busy; retry control later')
                         else:
                             if request.get('command') == 'flush' and not request.get('guard'):
                                 self.rejected = None  # explicit flush lifts the pause; the next tick sends once
+                                self.limit_until = 0
                             reply = dict(status='queued', interrupted=False, delivered=0,
                                          pending=store.pending_answer_count(self.con, self.task_id),
                                          reason='supervisor busy; text retained; will be delivered automatically',

@@ -17,6 +17,7 @@ from tests.app_support import AppBase, FakeRPC
 
 REPO = Path(__file__).resolve().parents[1]
 FAKE = Path(__file__).parent / 'fixtures' / 'fake_app_server.py'
+LIMIT = {'codexErrorInfo': 'usageLimitExceeded', 'message': "You've hit your usage limit"}
 SHADOW = "raise RuntimeError('SHADOWED-ORCHD-LOADED')\n"
 
 
@@ -684,6 +685,131 @@ class ControlStaysResponsiveTest(AppBase):
         self.assertEqual(row['supervisor_error'], 'TimeoutError: busy')
         self.assertIn('TimeoutError: busy', row['note'])
         self.assertEqual(row['worker_health'], 'alive')
+
+    def isolate_limit_side_effects(self):
+        """Supervisors build a real Runtime for rate-limit notices: no helper process, no Orch wake-up."""
+        helper = patch('orchd.runtime.Runtime.start_auto_retry', return_value=1)
+        notify = patch('orchd.core._notify_orch')
+        started = helper.start()
+        notify.start()
+        self.addCleanup(helper.stop)
+        self.addCleanup(notify.stop)
+        return started
+
+    def interrupting_rpc(self, sup):
+        base = sup.rpc.call
+        def call(method, params, timeout=20):
+            if method == 'turn/interrupt':
+                sup.rpc.calls.append((method, params))
+                sup.rpc.events.put({'method': 'turn/completed', 'params': {
+                    'threadId': 'thread', 'turn': {'id': 'turn', 'status': 'interrupted', 'error': None}}})
+                return {}
+            return base(method, params, timeout)
+        sup.rpc.call = call
+
+    def calls(self, sup, method):
+        return len([m for m, _ in sup.rpc.calls if m == method])
+
+    def interrupt_request(self, task, timeout=25):
+        return app_worker.control(task, 'interrupt', timeout=timeout, expected_generation=self.gen,
+                                  expected_thread='thread', expected_turn='turn')
+
+    def test_busy_interrupt_runs_once_the_lock_is_released(self):
+        self.queue('[interrupt] correction')
+        sup = self.serve(lambda s: self.interrupting_rpc(s))
+        self.assertTrue(sup.work_lock.acquire(timeout=3))
+        box = {}
+        task = store.get_task(self.con, self.id)
+        thread = threading.Thread(target=lambda: box.update(reply=self.interrupt_request(task)))
+        thread.start()
+        time.sleep(.7)
+        self.assertEqual(self.calls(sup, 'turn/interrupt'), 0)
+        sup.work_lock.release()
+        thread.join(10)
+        self.assertEqual(self.calls(sup, 'turn/interrupt'), 1)
+        self.assertEqual(self.calls(sup, 'turn/start'), 1)
+        self.assertTrue(box['reply']['interrupted'])
+        self.assertEqual(store.pending_answer_count(self.con, self.id), 0)
+
+    def test_busy_interrupt_times_out_with_failure_and_leaves_nothing_pending(self):
+        sup = self.serve(lambda s: self.interrupting_rpc(s))
+        with patch.object(app_worker, 'INTERRUPT_LOCK_WAIT', .5):
+            self.assertTrue(sup.work_lock.acquire(timeout=3))
+            self.addCleanup(lambda: sup.work_lock.locked() and sup.work_lock.release())
+            result = core.interrupt(self.con, self.rt, self.id, 'stop that')
+        self.assertEqual(result['status'], 'failed')
+        self.assertFalse(result['interrupted'])
+        self.assertIn('supervisor busy', result['error'])
+        self.assertEqual(result['pending'], 0)
+        self.assertEqual(store.pending_answer_count(self.con, self.id), 0)
+        sup.work_lock.release()
+        time.sleep(1)
+        self.assertEqual(self.calls(sup, 'turn/interrupt'), 0)
+        self.assertEqual(self.calls(sup, 'turn/start'), 0)
+
+    def test_rate_limited_turn_start_pauses_auto_flush(self):
+        self.isolate_limit_side_effects()
+        self.idle()
+        self.queue('explicit model text')
+        reasons = [LIMIT]
+        sup = self.serve(lambda s: self.reject_turns(s, reasons))
+        deadline = time.monotonic() + 3
+        while not self.starts(sup) and time.monotonic() < deadline:
+            time.sleep(.02)
+        time.sleep(1.5)  # ~7 maintenance ticks
+        self.assertEqual(self.starts(sup), 1)
+        self.assertEqual(self.deliveries(), 1)
+        kinds = [r[0] for r in self.con.execute('SELECT kind FROM messages WHERE task_id=?', (self.id,))]
+        self.assertEqual(kinds.count('rate_limit'), 1)
+        self.assertEqual(kinds.count('progress'), 1)
+        self.assertEqual(store.pending_answer_count(self.con, self.id), 1)
+        reply, _ = self.health()
+        self.assertIn('rate limit', reply['supervisor_error'].lower())
+        self.assertIn('next attempt', reply['supervisor_error'])
+        self.queue('another answer')  # a new answer does not lift a limit pause
+        time.sleep(.8)
+        self.assertEqual(self.starts(sup), 1)
+        reasons.clear()  # explicit flush may try once immediately
+        result = app_worker.control(store.get_task(self.con, self.id), 'flush', timeout=10)
+        self.assertIn(result['status'], ('delivered', 'queued'))
+        deadline = time.monotonic() + 3
+        while self.starts(sup) < 2 and time.monotonic() < deadline:
+            time.sleep(.02)
+        self.assertEqual(self.starts(sup), 2)
+
+    def test_rate_limit_waits_until_reset_time_when_given(self):
+        self.isolate_limit_side_effects()
+        self.idle()
+        self.queue('text')
+        reset = time.time() + 3600
+        sup = self.serve(lambda s: self.reject_turns(s, [dict(LIMIT, resetsAt=int(reset))]))
+        deadline = time.monotonic() + 3
+        while not self.starts(sup) and time.monotonic() < deadline:
+            time.sleep(.02)
+        time.sleep(.6)
+        self.assertGreater(sup.limit_until - time.monotonic(), 3000)
+        self.assertEqual(self.starts(sup), 1)
+
+    def test_rate_limit_backoff_is_capped_without_reset_time(self):
+        sup = self.supervisor
+        for _ in range(12):
+            sup.pause_for_limit({'codexErrorInfo': 'usageLimitExceeded'})
+        self.assertLessEqual(sup.limit_until - time.monotonic(), app_worker.LIMIT_BACKOFF_MAX + 1)
+        self.assertGreater(sup.limit_until - time.monotonic(), app_worker.LIMIT_BACKOFF_MAX - 5)
+
+    def test_auto_task_provider_retry_path_still_owns_the_limit(self):
+        started = self.isolate_limit_side_effects()
+        store.update_task(self.con, self.id, auto_model=1)
+        self.idle()
+        self.queue('text')
+        sup = self.serve(lambda s: self.reject_turns(s, [LIMIT]))
+        time.sleep(1.5)
+        from orchd.core import auto_retry_pending
+        task = store.get_task(self.con, self.id)
+        self.assertTrue(auto_retry_pending(self.con, task))  # one automatic fallback requested, as before
+        started.assert_called_once()
+        self.assertEqual(self.starts(sup), 1)
+        self.assertEqual(store.pending_answer_count(self.con, self.id), 1)
 
 
 class RealLockHolderTest(IsolationBase):
