@@ -153,10 +153,12 @@ def start(con, rt, task, prompt, model, pending=(), brief=None):
                       turn_state='starting', last_completed_turn=None, session_id=None, socket=None,
                       model=model, job_id=None)
     env = worker_env(task['worktree'])
-    # Use the package that launched this attempt, including an isolated checkout install.
+    # Use the package that launched this attempt, including an isolated checkout install. PYTHONPATH is
+    # honored with -P; only the implicit cwd entry is dropped.
     env['PYTHONPATH'] = str(Path(__file__).resolve().parents[1]) + os.pathsep + env.get('PYTHONPATH','')
     with open(directory/'supervisor.log', 'a') as out:
-        child = subprocess.Popen([sys.executable, '-m', 'orchd.app_worker', 'supervise', database,
+        # -P: never put the worktree (cwd) on sys.path; it may hold its own, different orchd/.
+        child = subprocess.Popen([sys.executable, '-P', '-m', 'orchd.app_worker', 'supervise', database,
                                   task['id'], generation], cwd=task['worktree'], env=env,
                                  stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True)
     store.update_task(con, task['id'], supervisor_identity=identity(child.pid), job_id=str(child.pid))
@@ -182,8 +184,14 @@ def app_server_command(task):
     return [task['codex_bin'],*CODEX_MEMORIES_OFF,'app-server','--listen','unix://'+task['endpoint']]
 
 
+def preload():
+    """Import everything the supervisor loads lazily, so the worker editing orchd on disk cannot skew it later."""
+    from . import core, quota, routing  # noqa: F401
+
+
 class Supervisor:
     def __init__(self, database, task_id, generation):
+        self.maintenance_error = None
         self.con = store.connect(database)
         self.task_id, self.generation = task_id, generation
         self.rpc = None
@@ -447,7 +455,8 @@ class Supervisor:
         if cmd == 'health':
             thread = self.rpc.call('thread/read', {'threadId':self.task()['session_id']})['thread']
             state = thread.get('status',{}).get('type')
-            return dict(worker_alive='active' if state=='active' else 'idle' if state=='idle' else 'unknown')
+            return dict(worker_alive='active' if state=='active' else 'idle' if state=='idle' else 'unknown',
+                        supervisor_error=self.maintenance_error)
         if cmd == 'flush':
             self.drain()
             return self.flush(tuple(request['guard']) if request.get('guard') else None)
@@ -471,7 +480,32 @@ class Supervisor:
             return dict(status='registered')
         raise ValueError('unknown control command')
 
+    def maintain(self):
+        """Periodic work. A failure is recorded, never allowed to stop the loop from serving control requests."""
+        try:
+            self.drain()
+            self.collect_quota()  # Single-flight TTL also refreshes idle workers, without inference.
+            self.handle_deferred_limit()
+            self.reconcile_if_needed()
+            if self.deferred_flush:
+                self.flush(guard=self.deferred_flush)
+                self.deferred_flush = None
+            self.handle_deferred_limit()
+            # Viewer death releases human ownership; an idle FIFO can then flush.
+            had=self.con.execute('SELECT 1 FROM worker_viewers WHERE task_id=? AND generation=?',
+                                 (self.task_id,self.generation)).fetchone()
+            if had and not self.viewers():
+                self.deferred_flush = (self.generation,self.task()['session_id'],
+                                       self.task()['last_completed_turn'])
+            self.maintenance_error = None
+        except TimeoutError:
+            raise
+        except Exception as exc:
+            self.maintenance_error = f'{type(exc).__name__}: {exc}'
+            self.update(note=f'app-server supervisor: {self.maintenance_error}')
+
     def run(self):
+        preload()
         task = self.task()
         validate(task)
         directory=Path(task['endpoint']).parent
@@ -517,20 +551,7 @@ class Supervisor:
                             self.reconnect_at=time.monotonic()+2
                             self.rpc.close();self.rpc=RPC(task['endpoint'])
                             self.reconcile()
-                        self.drain()
-                        self.collect_quota()  # Single-flight TTL also refreshes idle workers, without inference.
-                        self.handle_deferred_limit()
-                        self.reconcile_if_needed()
-                        if self.deferred_flush:
-                            self.flush(guard=self.deferred_flush)
-                            self.deferred_flush = None
-                        self.handle_deferred_limit()
-                        # Viewer death releases human ownership; an idle FIFO can then flush.
-                        had=self.con.execute('SELECT 1 FROM worker_viewers WHERE task_id=? AND generation=?',
-                                             (self.task_id,self.generation)).fetchone()
-                        if had and not self.viewers():
-                            self.deferred_flush = (self.generation,self.task()['session_id'],
-                                                   self.task()['last_completed_turn'])
+                        self.maintain()
                         try:
                             peer,_=listener.accept()
                         except socket.timeout:

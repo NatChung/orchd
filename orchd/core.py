@@ -511,8 +511,12 @@ def _answer(con, rt, task_id, text=None, flush=False, accept=None, finished_pid=
         try:
             return app_worker.control(store.get_task(con, task_id), "flush")
         except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            note = store.get_task(con, task_id)["note"]
+            if note and "supervisor" in note:  # a bare timeout hides why the supervisor is not answering
+                error += f" (supervisor note: {note})"
             return dict(status="failed", delivered=0, pending=store.pending_answer_count(con, task_id),
-                        error=f"{type(exc).__name__}: {exc}")
+                        error=error)
     if worker_kind(task["model"]) != "codex":
         try:
             with store.task_delivery(con, [task_id]):
