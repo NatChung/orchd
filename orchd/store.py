@@ -383,22 +383,26 @@ class DatabaseUnavailable(Exception):
 
 
 def connect_readonly(path=None):
-    """Open the database for reading only: never creates a file, a directory, a table or a column, and takes no
-    write lock. A missing or older-than-this-orchd database raises DatabaseUnavailable instead of being created or
-    migrated; run any other orchd command to migrate it."""
+    """Return a read-only in-memory snapshot; never create or change files beside the source or take its write
+    lock. A missing or older-than-this-orchd database raises DatabaseUnavailable instead of being created or
+    migrated; run any other orchd command to migrate it. The private temporary DB/WAL copy is removed before return."""
     path = Path(path or home() / "orchd.db")
     if not path.is_file():
         raise DatabaseUnavailable(f"no database at {path}; nothing was created")
-    # With no -wal file nothing is waiting to be read from it, and a plain read-only open of a WAL database would
-    # create -shm/-wal beside it; immutable skips that. With a -wal present (a writer is live) both files already
-    # exist, so a read-only open creates nothing and sees the committed rows.
-    wal = path.with_name(path.name + "-wal")
-    uri = f"{path.resolve().as_uri()}?mode=ro" if wal.exists() else f"{path.resolve().as_uri()}?immutable=1"
+    # Never let SQLite open the source: mode=ro can create or rewrite SHM, and immutable ignores committed WAL.
+    # Reuse the stable DB+WAL copy used by stats, then detach an in-memory connection from its temporary files.
+    from .stats import open_snapshot, SnapshotError
+    con = None
     try:
-        con = sqlite3.connect(uri, uri=True, timeout=30)
+        with open_snapshot(path) as snapshot:
+            con = sqlite3.connect(":memory:")
+            snapshot.con.backup(con)
         con.row_factory = sqlite3.Row
+        con.execute("PRAGMA query_only=ON")
         have = {r["name"] for r in con.execute("PRAGMA table_info(tasks)")}
-    except sqlite3.Error as error:
+    except (sqlite3.Error, OSError, SnapshotError) as error:
+        if con is not None:
+            con.close()
         raise DatabaseUnavailable(f"cannot read {path} read-only: {error}") from None
     missing = [name for name in ("id", "status", "note", "worktree", *(c.split()[0] for c in TASK_COLUMNS))
                if name not in have]

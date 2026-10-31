@@ -1,6 +1,7 @@
 """PR #101 review fixes for issue #96: close never deletes ignored files, an unreadable pid blocks instead of
 counting as gone, a Codex stop signals only verified processes, `stuck-close` touches no file, and the runbook's
 manual cleanup is a full checklist. Real git, real processes and temp dirs; fake data only."""
+import hashlib
 import json
 import os
 import signal
@@ -115,6 +116,31 @@ class IgnoredFilesTest(WorktreeCase):
         self.assertFalse(removable)
         self.assertIn("keep.env", reason)
         self.assertNotIn(".venv", reason)
+
+    def test_rebuildable_names_as_regular_files_or_symlinks_are_kept(self):
+        from orchd.runtime import REBUILDABLE_IGNORED
+        # Ignore the name regardless of type, unlike the fixture's directory-only patterns.
+        exclude = Path(git("rev-parse", "--git-path", "info/exclude", cwd=Path(self.wt)).strip())
+        if not exclude.is_absolute():
+            exclude = Path(self.wt) / exclude
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("\n".join(REBUILDABLE_IGNORED) + "\n")
+        for name in REBUILDABLE_IGNORED:
+            for kind in ("file", "symlink"):
+                with self.subTest(name=name, kind=kind):
+                    path = Path(self.wt, name)
+                    if kind == "file":
+                        path.write_text("unique data")
+                    else:
+                        path.symlink_to(self.repo, target_is_directory=True)
+                    try:
+                        removable, reason = self.rt.worktree_state(self.wt, self.base)
+                        self.assertFalse(removable, reason)
+                        self.assertIn(name, reason)
+                        self.assertIn(name, self.rt.remove_worktree(self.repo, self.wt, self.base))
+                        self.assertTrue(path.is_symlink() or path.is_file())
+                    finally:
+                        path.unlink()
 
     def test_safe_list_is_explicit(self):
         from orchd import runtime
@@ -322,6 +348,76 @@ class CodexStopTest(unittest.TestCase):
         self.assertFalse(self.rt.pid_alive(pid))
 
 
+class CodexIdentityOwnershipTest(unittest.TestCase):
+    def test_another_tasks_record_overwriting_a_reused_pid_cannot_authorize_close(self):
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, ORCHD_HOME=home):
+            rt = Runtime()
+            proc = mock.Mock(spec=psutil.Process, pid=4242)
+            proc.status.return_value = psutil.STATUS_RUNNING
+            proc.create_time.return_value = 100
+            proc.environ.return_value = {"ORCHD_WORKTREE": "/wt/A"}
+            with mock.patch("orchd.runtime.psutil.Process", return_value=proc), \
+                    mock.patch("orchd.runtime.os.getpgid", return_value=4242), \
+                    mock.patch.object(rt, "pid_alive", return_value=True):
+                rt._record_identity(4242)
+                proc.create_time.return_value = 200
+                proc.environ.return_value = {"ORCHD_WORKTREE": "/wt/B"}
+                rt._record_identity(4242)
+                rt.stop_codex(4242, ("/wt/A",))
+                proc.terminate.assert_not_called()
+                proc.kill.assert_not_called()
+                self.assertEqual(rt._codex_targets(4242, ("/wt/B",)), [proc])
+
+    def test_identity_expiry_keeps_live_unknown_and_non_pid_files(self):
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, ORCHD_HOME=home):
+            rt = Runtime()
+            directory = Path(home, "codex-pids")
+            directory.mkdir()
+            names = ("10.json", "11.json", "12.json", "notes.json", "١٣.json")
+            for name in names:
+                pid = int(name[:-5]) if name[:-5].isdecimal() else 99
+                path = directory / name
+                path.write_text(json.dumps(dict(pid=pid, birth=100, pgid=pid, worktree="/wt/A")))
+                os.utime(path, (1, 1))
+            (directory / "14.json").mkdir()
+            (directory / "15.json").symlink_to(directory / "notes.json")
+            current = mock.Mock(spec=psutil.Process, pid=4242)
+            current.create_time.return_value = 200
+            live = mock.Mock(spec=psutil.Process, pid=10)
+            live.create_time.return_value = 100
+            def process(pid):
+                if pid == 4242:
+                    return current
+                if pid == 10:
+                    return live
+                if pid == 11:
+                    raise psutil.AccessDenied(pid)
+                raise psutil.NoSuchProcess(pid)
+            with mock.patch("orchd.runtime.psutil.Process", side_effect=process), \
+                    mock.patch("orchd.runtime.os.getpgid", return_value=4242):
+                rt._record_identity(4242, worktree="/wt/B")
+            self.assertFalse((directory / "12.json").exists())
+            for name in ("10.json", "11.json", "notes.json", "١٣.json", "14.json", "15.json", "4242.json"):
+                self.assertTrue((directory / name).exists(), name)
+
+    def test_legacy_unowned_record_requires_a_matching_environment(self):
+        with tempfile.TemporaryDirectory() as home, mock.patch.dict(os.environ, ORCHD_HOME=home):
+            rt = Runtime()
+            path = rt._identity_file(4242)
+            path.parent.mkdir()
+            path.write_text(json.dumps(dict(pid=4242, birth=100, pgid=4242)))
+            proc = mock.Mock(spec=psutil.Process, pid=4242)
+            proc.status.return_value = psutil.STATUS_RUNNING
+            proc.create_time.return_value = 100
+            proc.environ.return_value = {"ORCHD_WORKTREE": "/wt/B"}
+            with mock.patch("orchd.runtime.psutil.Process", return_value=proc), \
+                    mock.patch("orchd.runtime.os.getpgid", return_value=4242):
+                rt.stop_codex(4242, ("/wt/A",))
+                proc.terminate.assert_not_called()
+                proc.environ.return_value = {"ORCHD_WORKTREE": "/wt/A"}
+                self.assertEqual(rt._codex_targets(4242, ("/wt/A",)), [proc])
+
+
 class StuckCloseReadOnlyTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -365,6 +461,37 @@ class StuckCloseReadOnlyTest(unittest.TestCase):
             self.assertEqual([r[1] for r in check.execute("PRAGMA table_info(tasks)")], ["id", "status"])
             self.assertEqual(check.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall(), [("tasks",)])
         check.close()
+
+    def test_listing_preserves_database_wal_and_shm_hashes(self):
+        self.home.mkdir()
+        db = self.home / "orchd.db"
+        con = store.connect(db)
+        self.addCleanup(con.close)
+        con.execute("PRAGMA wal_autocheckpoint=0")
+        con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        store.create_task(con, id="abcd1234", repo="demo", repo_path="/r", title="T", instructions="i", done_when="d",
+                          orch_thread="th", codex_bin="c", model="claude-sonnet-5-5", worktree="/wt", status="done")
+        store.update_task(con, "abcd1234", note="close pending, worker not confirmed stopped")
+        # Keep a writer alive, and copy its committed DB/WAL into isolated fixtures. Never unlink a live SHM.
+        for state in ("wal_without_shm", "wal_with_shm", "no_wal"):
+            with self.subTest(state=state):
+                directory = Path(self.tmp.name) / state
+                directory.mkdir()
+                if state == "no_wal":
+                    con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                for suffix in (("",) if state == "no_wal" else ("", "-wal", "-shm")):
+                    if state == "wal_without_shm" and suffix == "-shm":
+                        continue
+                    (directory / ("orchd.db" + suffix)).write_bytes(Path(str(db) + suffix).read_bytes())
+                def hashes():
+                    return {p.name: (p.stat().st_mtime_ns, hashlib.sha256(p.read_bytes()).hexdigest())
+                            for p in directory.iterdir()}
+                before = hashes()
+                with mock.patch.dict(self.env, ORCHD_HOME=str(directory)):
+                    done = self.run_cli()
+                self.assertEqual(done.returncode, 0, done.stderr)
+                self.assertEqual([row["task_id"] for row in json.loads(done.stdout)], ["abcd1234"])
+                self.assertEqual(hashes(), before)
 
     def test_current_database_lists_pending_closes_with_no_file_changes(self):
         self.home.mkdir()

@@ -10,6 +10,7 @@ import re
 import shutil
 import shlex
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -177,25 +178,39 @@ class Runtime:
         with open(log, "a") as out:
             pid = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
                                    env=worker_env(cwd), start_new_session=True).pid
-        self._record_identity(pid)
+        self._record_identity(pid, worktree=cwd)
         return pid
 
     def _identity_file(self, pid):
         from . import store
         return store.home() / "codex-pids" / f"{int(pid)}.json"
 
-    def _record_identity(self, pid):
-        """Remember (pid, birth, pgid) of a turn we started, so a later stop can tell it from a reused pid. Best
-        effort: without a record the stop falls back to the environment mark and refuses what it cannot prove."""
+    def _record_identity(self, pid, worktree=None):
+        """Remember a turn's pid, birth, pgid and originating worktree. A global PID slot may be overwritten by
+        another task, so a stop must validate the owner as well as birth. Best effort: missing or legacy ownership
+        falls back to the environment mark and refuses what it cannot prove."""
         try:
             proc = psutil.Process(int(pid))
-            record = json.dumps(dict(pid=proc.pid, birth=proc.create_time(), pgid=os.getpgid(proc.pid)))
+            if worktree is None:
+                worktree = (environ_of(proc) or {}).get("ORCHD_WORKTREE")
+            record = json.dumps(dict(pid=proc.pid, birth=proc.create_time(), pgid=os.getpgid(proc.pid),
+                                     worktree=str(Path(worktree).resolve()) if worktree else None))
             path = self._identity_file(pid)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(record)
             cutoff = time.time() - 14 * 86400
             for old in path.parent.glob("*.json"):
-                if old != path and old.stat().st_mtime < cutoff:
+                if (old != path and re.fullmatch(r"[0-9]+\.json", old.name)
+                        and stat.S_ISREG(old.lstat().st_mode) and old.stat().st_mtime < cutoff):
+                    try:
+                        saved = self._read_identity(int(old.stem))
+                        live = psutil.Process(int(old.stem))
+                        if not saved or abs(float(saved.get("birth", 0)) - live.create_time()) <= 0.01:
+                            continue
+                    except (psutil.NoSuchProcess, ProcessLookupError):
+                        pass
+                    except (psutil.AccessDenied, OSError, ValueError, TypeError):
+                        continue  # unknown is not proof that an identity expired
                     old.unlink()
         except Exception:
             pass
@@ -277,7 +292,20 @@ class Runtime:
             if not entry.startswith("!! "):
                 continue
             name = entry[3:]
-            if not any(part in REBUILDABLE_IGNORED for part in name.rstrip("/").split("/")):
+            rebuildable = False
+            current = Path(path)
+            for part in name.rstrip("/").split("/"):
+                current = current / part
+                try:
+                    mode = current.lstat().st_mode
+                except OSError:
+                    break  # cannot prove this path is disposable
+                if stat.S_ISLNK(mode):
+                    break
+                if part in REBUILDABLE_IGNORED and stat.S_ISDIR(mode):
+                    rebuildable = True
+                    break
+            if not rebuildable:
                 kept.append(name)
         if not kept:
             return None
@@ -614,9 +642,9 @@ class Runtime:
         skipping any that carry another task's mark.
         Raises RuntimeError when ownership cannot be established; callers keep the task open then.
 
-        Ownership never comes from a command line. A turn orchd started has a record (pid, birth, pgid) written at
-        spawn: a pid whose birth differs was reused. Without a record (an older turn) the process must carry this
-        task's ORCHD_WORKTREE mark and lead its own group. Nothing is signalled through killpg, so a member of the
+        Ownership never comes from a command line. A turn orchd started has a record (pid, birth, pgid, worktree)
+        written at spawn: a pid whose birth differs was reused; a foreign worktree cannot authorize this stop.
+        Without ownership in the record (an older turn) the process must carry this task's ORCHD_WORKTREE mark and lead its own group. Nothing is signalled through killpg, so a member of the
         group that is not provably ours is never touched."""
         def unknown(why):
             return RuntimeError(f"codex worker {pid} not confirmed stopped: {why}")
@@ -635,9 +663,13 @@ class Runtime:
             if record:
                 if abs(float(record.get("birth", 0)) - birth) > 0.01:
                     return []  # same pid, different process
-                if pgid != proc.pid or record.get("pgid") != pgid:
+                owner = record.get("worktree")
+                if owner and (not mark or owner != mark):
+                    return []  # a later task overwrote this pid's record; never borrow its identity
+                if owner and (pgid != proc.pid or record.get("pgid") != pgid):
                     raise unknown("not an owned process-group leader; stop refused")
-            else:
+            if not record or not record.get("worktree"):
+                # Legacy records prove birth, but not task ownership. Require the task's environment mark too.
                 try:
                     env = environ_of(proc)
                 except psutil.AccessDenied:

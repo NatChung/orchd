@@ -676,7 +676,7 @@ class RealCodexStopTest(unittest.TestCase):
         self.procs.append(proc)
         time.sleep(0.1)
         if record:
-            Runtime()._record_identity(proc.pid)
+            Runtime()._record_identity(proc.pid, worktree=self.wt)
         return proc
 
     def task(self, pid):
