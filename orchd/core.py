@@ -12,7 +12,7 @@ from pathlib import Path
 from . import models, app_worker, intake, orch_revive, paths, question_summary, store, verify as verification, worker_health
 from .orch_health import owner_health
 from .runtime import (DEFAULT_ORCH_MODEL, ORCH_MODELS, WORKER_MODELS,
-                      claude_job_alive, error_detail, worker_kind)
+                      UDSWriteUncertain, claude_job_alive, error_detail, worker_kind)
 
 
 
@@ -431,7 +431,8 @@ def _deliver_to_claude(con, rt, task, text, keep_sent=False, entry_reply_id=None
     all in one message; the receipt (read_at + one `answer` row each) is written only after the send succeeded.
     A receipt that fails after a successful send raises, unless `keep_sent` (followup): then the result stays
     `delivered` and carries `record_error` naming the queued rows that went out but still read as pending.
-    A failed send keeps `text` queued unless `interrupt`, which is never queued (see interrupt). Only a job the
+    A connect failure keeps `text` queued unless `interrupt`, which is never queued. A write failure
+    returns uncertain without queuing new text. Only a job the
     Claude daemon no longer lists, or lists as dead, is called ended; unknown liveness is treated as alive."""
     task_id = task["id"]
     pending = store.pending_answers(con, task_id)
@@ -443,7 +444,13 @@ def _deliver_to_claude(con, rt, task, text, keep_sent=False, entry_reply_id=None
                          + (f"; {len(pending)} queued answer(s) stay pending" if pending else ""))
     try:
         rt.send_uds(task["socket"], task["session_id"], "\n\n".join(f"[orchd answer {task_id}]\n{b}" for b in bodies))
-    except OSError as gone:  # no socket, refused, reset, timed out: the send did not happen, so say nothing was delivered
+    except UDSWriteUncertain as error:
+        return dict(status="failed", delivered=0, pending=len(pending), uncertain=True,
+                    error=f"task {task_id}: the Claude worker may have received the message "
+                          f"({error}); no new text was queued. Check the worker status or read its log before "
+                          "deciding whether to resend. Earlier queued answers may also have reached it; "
+                          "confirm before flushing them again.")
+    except OSError as gone:  # Runtime only propagates ordinary OSError before any frame data is written
         ended = claude_job_alive(_live_jobs(rt), task["job_id"]) is False  # the daemon's job list, never the socket alone
         if interrupt:  # a correction is only valid for this worker: never keep it for a replacement
             raise ValueError(f"task {task_id}: interrupt was not delivered ({type(gone).__name__}: {gone}) and was not "
@@ -462,7 +469,8 @@ def _deliver_to_claude(con, rt, task, text, keep_sent=False, entry_reply_id=None
                              "receives the queued answers.") from gone
         raise ValueError(f"task {task_id}: cannot reach the Claude worker right now ({type(gone).__name__}: {gone}); it "
                          f"is not confirmed ended, so nothing was delivered. {what}{kept}; send it later with "
-                         "answer(flush=true), do not retry.") from gone
+                         "answer(flush=true); if you have independently confirmed the worker ended, run retry "
+                         "on this task and the queued text will reach the new worker.") from gone
     try:
         with store.immediate(con):
             store.mark_read(con, [row["id"] for row in pending])
@@ -723,8 +731,8 @@ def interrupt(con, rt, task_id, text):
     leftover processes), then resume the thread with `text` plus any answers already queued, as one new turn.
     The text is queued first, so a failed stop or resume loses nothing and `answer(flush=true)` retries it. A Codex
     worker that is between turns just gets the same resume. Claude: its socket takes a message mid-turn, so this
-    is a plain send and nothing is stopped; if the send fails the correction is NOT queued (it would reach a
-    replacement worker after retry) and the error says interrupt was not delivered. Returns the answer's receipt plus `interrupted` (a running turn was
+    is a plain send and nothing is stopped. A connect failure says interrupt was not delivered; a write failure
+    returns failed with uncertain=true. Neither queues the correction for a replacement worker. Returns the answer's receipt plus `interrupted` (a running turn was
     stopped) and `note`."""
     if not isinstance(text, str) or not text.strip():
         raise ValueError("interrupt needs a non-empty text")
@@ -742,8 +750,9 @@ def interrupt(con, rt, task_id, text):
             return dict(status="failed", interrupted=False, delivered=0,
                         pending=store.pending_answer_count(con, task_id), error=str(exc))
     if worker_kind(task["model"]) != "codex":
-        return dict(_answer(con, rt, task_id, text, interrupt=True), interrupted=False,
-                    note="Claude worker: sent over its socket, nothing was stopped")
+        result = _answer(con, rt, task_id, text, interrupt=True)
+        return dict(result, interrupted=False,
+                    note="Claude worker: socket delivery attempted, nothing was stopped")
     if not task["session_id"] or not task["worktree"]:
         raise ValueError(f"task {task_id} has no codex thread")
     queued = f"{INTERRUPT_HEAD}\n\n{text}"
@@ -885,6 +894,8 @@ def followup(con, rt, task_id, message):
             pass
         raise
     event.update(result)
+    if result.get("uncertain") and worker_kind(task["model"]) == "claude":
+        event["status"] = "uncertain"
     try:
         if record() != 1:
             raise LookupError("the committed followup event row was not found")

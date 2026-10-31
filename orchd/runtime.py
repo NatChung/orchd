@@ -140,6 +140,10 @@ def _bin(name, env_var):
     return str(fallback)
 
 
+class UDSWriteUncertain(OSError):
+    """A frame write failed; the peer may have received some or all of it."""
+
+
 class Runtime:
     def __init__(self):
         self.claude = _bin("claude", "ORCHD_CLAUDE")
@@ -157,8 +161,15 @@ class Runtime:
         with socket.socket(socket.AF_UNIX) as peer:
             peer.settimeout(5)
             peer.connect(path)
-            peer.sendall((json.dumps(frame, ensure_ascii=False) + "\n").encode())
-            peer.shutdown(socket.SHUT_WR)
+            data = (json.dumps(frame, ensure_ascii=False) + "\n").encode()
+            try:
+                peer.sendall(data)
+            except OSError as error:
+                raise UDSWriteUncertain(f"{type(error).__name__}: {error}") from error
+            try:
+                peer.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass  # The complete frame was written; shutdown cannot undo that send.
 
     def sleep(self, seconds):
         time.sleep(seconds)

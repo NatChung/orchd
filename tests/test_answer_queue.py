@@ -1,8 +1,10 @@
 """Issue #12: answers to a Codex worker that is mid-turn are queued, then flushed into its next turn."""
+import errno
 import json
 import shutil
 import socket
 import sqlite3
+import sys
 import tempfile
 import threading
 import unittest
@@ -283,7 +285,7 @@ class AnswerQueueTest(unittest.TestCase):
             raise error
         self.rt.send_uds = down
 
-    def test_live_claude_worker_unreachable_keeps_text_without_retry_advice(self):
+    def test_live_claude_worker_unreachable_keeps_text_with_conditional_retry_advice(self):
         t = self.dispatch(model="sonnet")
         real, sent = self.rt.send_uds, []
         for error in (ConnectionRefusedError("refused"), FileNotFoundError(2, "gone"), ConnectionResetError("reset"),
@@ -295,7 +297,7 @@ class AnswerQueueTest(unittest.TestCase):
             message = str(caught.exception)
             self.assertNotIn("has ended", message)
             self.assertIn("answer(flush=true)", message)
-            self.assertIn("do not retry", message)
+            self.assertIn("if you have independently confirmed", message)
         self.assertEqual(len(store.pending_answers(self.con, t["id"])), 4)
         self.rt.send_uds = real
         before = len(self.rt.sent)
@@ -334,6 +336,7 @@ class AnswerQueueTest(unittest.TestCase):
             core.answer(self.con, self.rt, t["id"], "urgent")
         self.assertNotIn("has ended", str(caught.exception))
         self.assertEqual([r["body"] for r in store.pending_answers(self.con, t["id"])], ["urgent"])
+        self.assertIn("if you have independently confirmed", str(caught.exception))
         server.listen(1)
         got = []
 
@@ -378,9 +381,122 @@ class AnswerQueueTest(unittest.TestCase):
         (event,) = [json.loads(r["body"]) for r in self.con.execute(
             "SELECT body FROM messages WHERE task_id=? AND kind='followup'", (t["id"],))]
         self.assertEqual(event["status"], "failed")
-        self.assertIn("do not retry", event["error"])
+        self.assertIn("if you have independently confirmed", event["error"])
         (queued,) = store.pending_answers(self.con, t["id"])
         self.assertIn("do more", queued["body"])
+
+    def socket_delivery(self, operation, phase):
+        """Use an isolated real Unix peer; synchronize close before the real shutdown."""
+        t = self.dispatch(model="sonnet")
+        folder = tempfile.mkdtemp(dir="/tmp")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = f"{folder}/w.sock"
+        real_socket = socket.socket
+        server = real_socket(socket.AF_UNIX)
+        self.addCleanup(server.close)
+        server.bind(path)
+        server.listen(1)
+        server.settimeout(5)
+        store.update_task(self.con, t["id"], socket=path)
+        got, errors, shutdown_errors = [], [], []
+        closed = threading.Event()
+
+        def receive():
+            try:
+                peer, _ = server.accept()
+                with peer:
+                    peer.settimeout(5)
+                    data = b""
+                    while not data.endswith(b"\n"):
+                        chunk = peer.recv(65536)
+                        if not chunk:
+                            break
+                        data += chunk
+                    got.append(data)
+            except Exception as error:
+                errors.append(error)
+            finally:
+                closed.set()
+
+        class Client(real_socket):
+            def sendall(client, data):
+                if phase == "write":
+                    super().sendall(data[:len(data)//2])
+                    raise BrokenPipeError("partial frame")
+                super().sendall(data)
+
+            def shutdown(client, how):
+                if not closed.wait(5):
+                    raise AssertionError("peer did not close")
+                # On macOS this is the actual OSError(57) regression.
+                try:
+                    return super().shutdown(how)
+                except OSError as error:
+                    shutdown_errors.append(error.errno)
+                    raise
+
+        thread = threading.Thread(target=receive)
+        thread.start()
+        self.rt.send_uds = lambda p, sid, text: runtime.Runtime.send_uds(None, p, sid, text)
+        try:
+            with patch.object(runtime.socket, "socket", Client):
+                result = getattr(core, operation)(self.con, self.rt, t["id"], "only once")
+        finally:
+            thread.join(6)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(got), 1)
+        self.assertEqual(store.pending_answers(self.con, t["id"]), [])
+        if phase == "write":
+            self.assertTrue(got[0])
+            self.assertFalse(got[0].endswith(b"\n"))
+            self.assertEqual(result["status"], "failed")
+            self.assertTrue(result["uncertain"])
+            self.assertIn("may have received", result["error"])
+            self.assertIn("log", result["error"])
+            self.assertNotIn("not delivered", result["error"])
+            self.assertEqual(self.answers(t["id"]), [])
+        else:
+            if sys.platform == "darwin" or shutdown_errors:
+                self.assertEqual(shutdown_errors, [errno.ENOTCONN])
+            self.assertEqual(len(self.answers(t["id"])), 1)
+            self.assertEqual(result, dict(status="delivered", delivered=1, pending=0))
+            self.assertEqual(json.loads(got[0])["message"]["content"].count("only once"), 1)
+            self.assertEqual(core.answer(self.con, self.rt, t["id"], flush=True)["delivered"], 0)
+        if operation == "followup":
+            event = json.loads(self.con.execute(
+                "SELECT body FROM messages WHERE task_id=? AND kind='followup'", (t["id"],)).fetchone()[0])
+            self.assertEqual(event["status"], "uncertain" if phase == "write" else "delivered")
+
+    def test_real_socket_shutdown_after_frame_answer_once(self):
+        self.socket_delivery("answer", "shutdown")
+
+    def test_real_socket_shutdown_after_frame_followup_once(self):
+        self.socket_delivery("followup", "shutdown")
+
+    def test_real_socket_partial_write_answer_uncertain(self):
+        self.socket_delivery("answer", "write")
+
+    def test_real_socket_partial_write_followup_uncertain(self):
+        self.socket_delivery("followup", "write")
+
+    def test_real_socket_partial_write_interrupt_uncertain(self):
+        self.socket_delivery("interrupt", "write")
+
+    def test_unreachable_probe_failure_or_stale_jobs_gives_conditional_retry(self):
+        t = self.dispatch(model="sonnet")
+        for probe in (lambda: (_ for _ in ()).throw(OSError("probe failed")),
+                      lambda: {"job1": {"state": "idle"}}):
+            with self.subTest(probe=probe):
+                self.rt.live_jobs = probe
+                self.refuse(ConnectionRefusedError("refused"))
+                with self.assertRaises(ValueError) as caught:
+                    core.answer(self.con, self.rt, t["id"], "keep")
+                message = str(caught.exception)
+                self.assertIn("answer(flush=true)", message)
+                self.assertIn("if you have independently confirmed", message)
+                self.assertIn("retry", message)
+                self.assertNotIn("do not retry", message)
 
     def test_text_or_flush_is_required(self):
         t = self.dispatch()
