@@ -1,6 +1,6 @@
 # Interrupted workers and their worktrees
 
-What to do when `list_open` shows `worker_health: "orphan"`: the task is `running` or `acked`, its worker is
+What to do when `list_open` shows `worker_health: "orphan"`: the task is `running`, `acked` or `question`, its worker is
 confirmed dead (the Claude daemon lists the job as `failed` or no longer lists it; a Codex turn exited), and it never
 sent `report`. See issue #17.
 
@@ -14,8 +14,19 @@ worktree. Every step below is manual, and the Orch decides what follows.
 | `alive` | The worker process or job is running. | None. |
 | `unknown` | Liveness could not be confirmed: `claude agents` failed, or a Codex thread is between turns (`worker_alive: null`). | Not a death. Do not guess from timestamps; check again later. |
 | `finished` | The task is `done`/`blocked` or the worker sent a report. A gone worker is a normal exit. | Read the report as usual. |
-| `orphan` | `running`/`acked`, worker confirmed dead, no report. | Follow this runbook. |
-| `null` | Status outside this check (`starting`, `failed`, `question`). | — |
+| `orphan` | `running`/`acked`/`question`, worker confirmed dead, no report. | Follow this runbook. |
+| `null` | Status outside this check (`starting`, `failed`). | — |
+
+## Silence is not death: `worker_alive`, `last_report_at`, `stale`
+
+`worker_alive: true` only means the worker's PID or job exists. It does not mean the worker is doing anything.
+`list_open` therefore also returns `last_report_at` (time of the latest worker `ack`/`progress`/`question`/`report`,
+`null` if none) and `stale`: true when a `running`/`acked`/`question` task has had no such message for
+`stale_after_hours` (default 24; set `ORCHD_STALE_HOURS`, or pass `stale_hours` to the MCP tool). `stale` is a label
+only: orchd never marks a stale task dead, fails it, retries it or closes it. Check the worktree (section 1) first.
+
+`list_open` still returns every open task as a plain list. Pass `attention_only: true` to hide healthy, non-stale
+`starting`/`running`/`acked` tasks, and `with_counts: true` to get `{total, shown, tasks}` instead of a bare list.
 
 An orphan label says the worker is gone, not why. A daemon restart, a reap, or a crash all look the same here.
 

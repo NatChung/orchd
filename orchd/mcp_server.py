@@ -93,6 +93,13 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {"group_id": {"type": "string"}}}},
     {"name": "list_open",
      "description": "List every task that is not closed, across all Orch sessions, with worker liveness. "
+                    "worker_alive true only means the worker's PID/job exists, not that it is working; "
+                    "last_report_at is the latest worker ack/progress/question/report time, and stale (label only, never "
+                    "an automatic death verdict or close) means a running/acked/question task has been silent for "
+                    "stale_after_hours (default 24, env ORCHD_STALE_HOURS or the stale_hours argument). "
+                    "Default output is unchanged (all open tasks, a plain list); attention_only=true hides healthy "
+                    "non-stale running/acked/starting tasks; with_counts=true wraps the result as "
+                    "{total, shown, tasks}. "
                     "model is the task's stored full model id (\"unknown\" if none was stored). "
                     "pending counts undelivered queued answers and followups without revealing their bodies, "
                     "consuming them or flushing; it remains nonzero until delivery is recorded, including "
@@ -104,7 +111,8 @@ TOOLS = [
                     "when unverified (including Desktop/exec Codex owners). notification_delivery shows unread counts "
                     "and safe wake-failure metadata without consuming inbox or revealing message content. "
                     "Includes model_reason, group_id, auto_model and auto_retry_count; optional group_id filters a batch. This does not adopt tasks or change their owner.",
-     "inputSchema": {"type": "object", "properties": {"group_id": {"type": "string"}}}},
+     "inputSchema": {"type": "object", "properties": {"group_id": {"type": "string"}, "attention_only": {"type": "boolean"},
+                                                       "with_counts": {"type": "boolean"}, "stale_hours": {"type": "number"}}}},
     {"name": "answer",
      "description": "Send an answer to a worker's question. For outward sends, pass Operator's decision verbatim. "
                     "Returns status delivered|queued|failed with delivered and pending counts. A Codex worker gets "
@@ -471,7 +479,12 @@ def call(name, args, thread, con, rt):
     if name == "list_orchs":
         return inventory.list_orchs(con, rt, observe=True)
     if name == "list_open":
-        return [t for t in core.list_open(con, rt) if args.get('group_id') is None or t['group_id'] == args['group_id']]
+        rows = core.list_open(con, rt, stale_hours=args.get('stale_hours'), attention_only=bool(args.get('attention_only')))
+        shown = [t for t in rows if args.get('group_id') is None or t['group_id'] == args['group_id']]
+        if not args.get('with_counts'):
+            return shown
+        total = len(core.list_open(con, rt, stale_hours=args.get('stale_hours')))
+        return dict(total=total, shown=len(shown), tasks=shown)
     if name == "answer":
         text = args.get("text")
         if args.get("entry_reply_id") is not None and not thread:

@@ -41,8 +41,23 @@ class AssessTest(unittest.TestCase):
         self.assertEqual(got, dict(worker_health="unknown", recovery_hint=None))
 
     def test_statuses_outside_the_check_get_no_label(self):
-        for status in ("starting", "failed", "question"):
+        for status in ("starting", "failed"):
             self.assertIsNone(worker_health.assess(status, False, False)["worker_health"])
+
+    def test_question_with_dead_worker_is_orphan_and_unknown_stays_unknown(self):
+        got = worker_health.assess("question", False, False, task_id="t1", worktree="/wt/t1", branch="b", base="abc")
+        self.assertEqual(got["worker_health"], "orphan")
+        self.assertIn("rework_of=t1", got["recovery_hint"])
+        self.assertEqual(worker_health.assess("question", None, False)["worker_health"], "unknown")  # Codex between turns
+        self.assertEqual(worker_health.assess("question", True, False)["worker_health"], "alive")
+
+    def test_stale_is_a_label_for_watched_statuses_only(self):
+        hour = 3600
+        self.assertTrue(worker_health.is_stale("running", 100.0, 100.0 + 25 * hour, 24))
+        self.assertFalse(worker_health.is_stale("running", 100.0, 100.0 + 23 * hour, 24))
+        self.assertTrue(worker_health.is_stale("question", 100.0, 100.0 + 25 * hour, 24))
+        self.assertFalse(worker_health.is_stale("done", 100.0, 100.0 + 99 * hour, 24))
+        self.assertFalse(worker_health.is_stale("running", None, 100.0, 24))
 
 
 class ListOpenHealthTest(unittest.TestCase):
@@ -169,3 +184,92 @@ class AppWorkerHealthTest(AppBase):
         self.assertEqual(result["backend"],"app-server")
         self.assertEqual(result["worker_alive"],"idle")
         self.assertFalse(result["uncertain_delivery"])
+
+
+class StaleAndLastReportTest(ListOpenHealthTest):
+    """last_report_at / stale / attention_only on list_open. Time is passed in, never slept."""
+
+    def set_times(self, task_id, when):
+        self.con.execute("UPDATE messages SET created_at=? WHERE task_id=?", (when, task_id))
+        self.con.execute("UPDATE tasks SET created_at=? WHERE id=?", (when, task_id))
+        self.con.commit()
+
+    def listing(self, now, **kw):
+        return {r["task_id"]: r for r in core.list_open(self.con, self.rt, now=now, **kw)}
+
+    def test_last_report_at_is_latest_worker_message_and_stale_appears_and_disappears(self):
+        t = self.dispatch()
+        core.ack(self.con, t["id"])
+        core.progress(self.con, self.rt, t["id"], "halfway")
+        self.set_times(t["id"], 1000.0)
+        self.rt.jobs = {"job1": {"state": "working"}}  # worker_alive true, but silent
+        row = self.listing(1000.0 + 3600)[t["id"]]
+        self.assertEqual((row["last_report_at"], row["stale"], row["worker_alive"]), (1000.0, False, True))
+        row = self.listing(1000.0 + 25 * 3600)[t["id"]]
+        self.assertEqual((row["stale"], row["worker_health"], row["status"]), (True, "alive", "acked"))
+        self.assertEqual(row["stale_after_hours"], 24)
+        store.add_message(self.con, t["id"], "progress", "still going")
+        self.con.execute("UPDATE messages SET created_at=? WHERE task_id=? AND body='still going'", (1000.0 + 24 * 3600, t["id"]))
+        self.con.commit()
+        row = self.listing(1000.0 + 25 * 3600)[t["id"]]
+        self.assertEqual((row["last_report_at"], row["stale"]), (1000.0 + 24 * 3600, False))
+
+    def test_stale_threshold_is_configurable_and_listing_never_changes_the_task(self):
+        t = self.dispatch()
+        core.ack(self.con, t["id"])
+        self.set_times(t["id"], 1000.0)
+        before = self.snapshot()
+        self.assertFalse(self.listing(1000.0 + 5 * 3600)[t["id"]]["stale"])
+        self.assertTrue(self.listing(1000.0 + 5 * 3600, stale_hours=4)[t["id"]]["stale"])
+        with mock.patch.dict(os.environ, {"ORCHD_STALE_HOURS": "2"}):
+            self.assertTrue(self.listing(1000.0 + 5 * 3600)[t["id"]]["stale"])
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(store.get_task(self.con, t["id"])["status"], "acked")
+
+    def test_task_with_no_worker_message_uses_creation_time_and_has_null_last_report(self):
+        t = self.dispatch()
+        self.con.execute("UPDATE tasks SET created_at=? WHERE id=?", (1000.0, t["id"]))
+        self.con.execute("DELETE FROM messages WHERE task_id=? AND kind NOT IN ('ack','progress','question','report')", (t["id"],))
+        self.con.commit()
+        row = self.listing(1000.0 + 30 * 3600)[t["id"]]
+        self.assertIsNone(row["last_report_at"])
+        self.assertEqual(row["stale"], row["status"] in worker_health.WATCHED + ("question",))
+
+    def test_question_with_dead_worker_is_orphan_in_list_open(self):
+        t = self.dispatch()
+        core.ask(self.con, self.rt, t["id"], "which one?")
+        self.rt.jobs = {}
+        row = self.listing(None)[t["id"]]
+        self.assertEqual((row["status"], row["worker_alive"], row["worker_health"]), ("question", False, "orphan"))
+        self.assertIn(f"rework_of={t['id']}", row["recovery_hint"])
+        self.assertEqual(store.get_task(self.con, t["id"])["status"], "question")
+
+    def test_default_lists_everything_and_attention_only_hides_healthy_running_tasks(self):
+        healthy = self.dispatch()
+        core.ack(self.con, healthy["id"])
+        quiet = self.dispatch()
+        core.ack(self.con, quiet["id"])
+        asking = self.dispatch()
+        core.ask(self.con, self.rt, asking["id"], "which one?")
+        self.rt.jobs = {"job1": {"state": "working"}}
+        self.set_times(quiet["id"], 1000.0)
+        now = 1000.0 + 48 * 3600
+        self.con.execute("UPDATE messages SET created_at=? WHERE task_id IN (?, ?)", (now, healthy["id"], asking["id"]))
+        self.con.commit()
+        self.assertEqual(set(self.listing(now)), {healthy["id"], quiet["id"], asking["id"]})  # default unchanged
+        self.assertEqual(set(self.listing(now, attention_only=True)), {quiet["id"], asking["id"]})
+
+    def test_mcp_default_shape_is_unchanged_and_counts_are_opt_in(self):
+        from orchd import mcp_server
+        t = self.dispatch()
+        core.ack(self.con, t["id"])
+        self.rt.jobs = {"job1": {"state": "working"}}
+        plain = mcp_server.call("list_open", {}, "thread-A", self.con, self.rt)
+        self.assertIsInstance(plain, list)
+        self.assertEqual(len(plain), 1)
+        self.assertIn("last_report_at", plain[0])
+        shown = mcp_server.call("list_open", {"attention_only": True, "with_counts": True}, "thread-A", self.con, self.rt)
+        self.assertEqual((shown["total"], shown["shown"], shown["tasks"]), (1, 0, []))
+        tool = next(x for x in mcp_server.TOOLS if x["name"] == "list_open")
+        self.assertIn("PID", tool["description"])
+        self.assertIn("attention_only", tool["inputSchema"]["properties"])
