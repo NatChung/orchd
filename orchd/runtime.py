@@ -313,8 +313,8 @@ class Runtime:
         directory.mkdir(mode=0o700, exist_ok=True)
         return str(directory / "w.sock")
 
-    def agents(self):
-        out = self.run([self.claude, "agents", "--json"], timeout=15).stdout
+    def agents(self, timeout=15):
+        out = self.run([self.claude, "agents", "--json"], timeout=timeout).stdout
         data = json.loads(out)
         if not isinstance(data, list):
             raise RuntimeError("unsupported claude agents JSON format")
@@ -547,9 +547,9 @@ class Runtime:
                 return None
         raise RuntimeError(f"codex worker {pid} still running {wait:g}s after SIGTERM; not confirmed stopped")
 
-    def live_jobs(self):
+    def live_jobs(self, timeout=15):
         try:
-            return {a["id"]: a for a in self.agents() if isinstance(a.get("id"), str) and a["id"]}
+            return {a["id"]: a for a in self.agents(timeout) if isinstance(a.get("id"), str) and a["id"]}
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
             return None
 
