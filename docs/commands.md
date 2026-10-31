@@ -207,6 +207,7 @@ Quote text containing spaces. Report evidence defaults to an empty string; suppl
 | `orchd flush TASK_ID [--after-pid PID]` | Turn-shell integration: deliver queued answers after Codex exits. | `orchd flush TASK_ID --after-pid PID` |
 | `orchd stats [--since TIME] [--json]` | Read source-backed task/token counts and cost estimates by Orch/task type. | `orchd stats --json` |
 | `orchd close TASK_ID` | Stop a task worker and clean its worktree only when safe. | `orchd close TASK_ID` |
+| `orchd stuck-close` | Read-only: tasks stuck at `close pending`, with the last error and next step. See `docs/runbooks/stuck-close.md`. | `orchd stuck-close` |
 
 `mcp` defaults to role orch and entry desktop; entry names apply to entry role. Flush is shell integration, not a normal manual reporting step. `stats --since` accepts local HH:MM today or ISO-8601 with Z/offset; default is all time and cost is estimated. Close stops a worker and may delete its worktree; follow task authorization.
 
@@ -219,7 +220,23 @@ orchd orch restart --dry-run
 orchd orch restart
 ```
 
-Restart already stops the old Orch, confirms death using fresh runtime/socket probes, starts the replacement, adopts open tasks and rebinds Desktop when it was bound to the old Orch. You do not need a separate `binding` command. It leaves the daemon and task workers running. The model defaults to the old Orch's model; use `orchd orch restart OLD_ID --model sonnet` to select explicitly. Without OLD_ID, a missing/stale Desktop binding prints candidates and stops for selection.
+Restart already stops the old Orch, confirms death using fresh runtime/socket probes, starts the replacement, adopts open tasks and rebinds Desktop when it was bound to the old Orch. After starting, it waits at most 30 seconds in total (probe time included; each probe is limited to the remaining budget) for the new Orch's job to publish a pid/status (`wait-alive` step, ADR-0004); a job that stays retired fails there with the manual recovery hint. It leaves the daemon and task workers running. The model defaults to the old Orch's model; use `orchd orch restart OLD_ID --model sonnet` to select explicitly. Without OLD_ID, a missing/stale Desktop binding prints candidates and stops for selection.
+
+Restart is not idempotent: after a `wait-alive` timeout the replacement may still be running. Use the OLD_ID and NEW_ID from the failed result and recover in this order from a trusted local Operator shell:
+
+1. Run `orchd orch list --all`. Continue only once NEW_ID is alive and OLD_ID is stopped. If uncertain, stop here; only if NEW_ID is confirmed not running, `orchd orch stop NEW_ID` and restart.
+2. Record `orchd binding --status` and whether Desktop was bound to OLD_ID before restart. Inspect `orchd interface list`, including disabled registrations and pending counts. Skip interface rebind if there are no registrations. Otherwise **all registered interfaces must belong to OLD_ID**; mixed owners require manual investigation, not a forced migration.
+3. Inspect `orchd list` and `orchd intake backlog --owner OLD_ID`. Run `orchd adopt NEW_ID --from OLD_ID` only if OLD_ID has open tasks or received receipts; skip it if both are empty. Check `committed` and notification errors. If adoption committed but notification failed, read ownership back before retrying.
+4. If step 2 permits interface migration, preview it before committing:
+
+   ```sh
+   orchd interface rebind --from OLD_ID --to NEW_ID --dry-run
+   orchd interface rebind --from OLD_ID --to NEW_ID
+   ```
+
+   Proceed only if dry-run succeeds and its owners/counts match the inspection. The commit rechecks the all-interfaces source-owner condition. It moves registrations and pending requests, preserves tokens, reply routes and acknowledgement state, and wakes NEW_ID. Check `committed: true`, null values in `interface_wakes`, and no `wake_error`. A wake failure does not roll back ownership: read it back, fix notification delivery and let the daemon's durable retries deliver the wake; do not reverse the migration.
+5. Recheck `orchd binding --status`. Run `orchd binding --to NEW_ID` only if Desktop originally pointed to OLD_ID and has not been changed concurrently. Coordinate with other Operators to prevent binding edits during recovery: the CLI has no compare-and-swap, so a read alone cannot prevent a concurrent write. Leave an unrelated or changed binding alone.
+6. Read back `orchd list`, `orchd intake backlog --owner NEW_ID`, `orchd interface list` and `orchd binding --status`. Confirm tasks, received receipts, interfaces and the expected Desktop binding belong to NEW_ID. In NEW_ID's Orch, use `interface_requests` to verify the pending request IDs (paginate as needed) and confirm the interface wake arrived. `binding` alone does not move interfaces or pending requests.
 
 After success, use the printed new Orch ID and first prompt `盤點上次` (take stock of previous work). If any step fails or is uncertain, follow the printed recovery commands and inspect task ownership before retrying: adopt can be committed even if notifications fail. An explicitly selected Orch that was not Desktop-bound leaves Desktop binding alone; use `orchd orch attach NEW_ID` to talk to it.
 
