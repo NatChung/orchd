@@ -68,7 +68,7 @@ class FakeRuntime:
             raise OSError("queue down")
         self.woken.append((codex_bin, thread, text))
 
-    def live_jobs(self):
+    def live_jobs(self, timeout=None):
         return self.jobs
 
     def stop_worker(self, job):

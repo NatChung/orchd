@@ -191,7 +191,7 @@ class RestartTest(unittest.TestCase):
             state["started"] = True
             return start(orch_id, model, home)
 
-        def live_jobs():
+        def live_jobs(timeout=None):
             jobs = {k: dict(v) for k, v in real().items()}
             if state["started"] and "newjob" in jobs:
                 state["calls"] += 1
@@ -217,15 +217,41 @@ class RestartTest(unittest.TestCase):
     def test_orch_that_stays_retired_fails_after_bounded_wait_with_recovery_hint(self):
         self.task()
         state = self.startup_window_runtime(window_calls=10 ** 6)
-        with patch.object(orch_restart.time, "sleep"), \
-                patch.object(orch_restart.time, "monotonic", side_effect=[0, 0, 1, 2, 3, 10 ** 6, 10 ** 6]):
+        clock = dict(now=0.0)
+        with patch.object(orch_restart.time, "sleep", side_effect=lambda s: clock.update(now=clock["now"] + s)), \
+                patch.object(orch_restart.time, "monotonic", side_effect=lambda: clock["now"]):
             out = self.run_restart()
         self.assertEqual(out["status"], "failed")
         self.assertEqual(out["step"], "wait-alive")
         self.assertIn("job_retired", out["error"])
         self.assertIn(f"orchd adopt {out['new_orch']} --from old", out["manual_recovery"])
-        self.assertLess(state["calls"], 20)
+        self.assertLessEqual(state["calls"], 31)
         self.assertEqual(store.get_task(self.con, store.open_tasks(self.con)[0]["id"])["orch_thread"], "old")
+
+    def test_slow_probes_cannot_carry_the_wait_past_the_deadline(self):
+        """Each probe may only use the remaining budget; an alive answer that lands late is not accepted."""
+        self.task()
+        clock = dict(now=0.0)
+        budgets = []
+        self.startup_window_runtime(window_calls=2)  # alive only on the third probe
+        window = self.rt.live_jobs
+
+        def slow_probe(timeout=None):
+            if timeout is None:  # restart's own pre-start probes
+                return window()
+            budgets.append(timeout)
+            clock["now"] += min(14, timeout)  # each probe runs up to 14s or its budget
+            return window()
+
+        self.rt.live_jobs = slow_probe
+        with patch.object(orch_restart.time, "monotonic", side_effect=lambda: clock["now"]), \
+                patch.object(orch_restart.time, "sleep", side_effect=lambda s: clock.update(now=clock["now"] + s)):
+            out = self.run_restart()
+        self.assertEqual(out["status"], "failed", out)
+        self.assertEqual(out["step"], "wait-alive")
+        self.assertLessEqual(clock["now"], orch_restart.STARTUP_WAIT_SECONDS + 1e-9)
+        self.assertTrue(all(b <= orch_restart.STARTUP_WAIT_SECONDS for b in budgets))
+        self.assertEqual(budgets, [15, 15])  # capped at the probe limit; never a third probe past 30s
 
     def test_new_job_that_is_absent_or_failed_is_not_waited_for(self):
         self.task()

@@ -8,6 +8,8 @@ from .runtime import ORCH_MODELS
 # Startup window (ADR-0004): how long a freshly started Orch may stay without pid/status before restart gives up.
 STARTUP_WAIT_SECONDS = 30.0
 STARTUP_POLL_SECONDS = 1.0
+# Per-probe cap; each probe is further limited to the budget left before the deadline.
+PROBE_TIMEOUT_SECONDS = 15
 # Reasons that can still be a job that has not published a pid/status yet. Anything else is real death.
 STARTUP_REASONS = ("job_retired", "job_unverified")
 
@@ -17,20 +19,28 @@ def wait_alive(con, rt, orch_id, timeout=None, poll=None):
     timeout = STARTUP_WAIT_SECONDS if timeout is None else timeout
     poll = STARTUP_POLL_SECONDS if poll is None else poll
     deadline = time.monotonic() + timeout
+    health = None
     while True:
+        # The probe gets only the remaining budget, so a slow query cannot carry the wait past the deadline.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError(f"orch {orch_id} is {health['state']} ({health['reason']}) after waiting {timeout:g}s "
+                             "for its job to publish a pid/status")
         try:
-            jobs = rt.live_jobs()
+            jobs = rt.live_jobs(timeout=min(remaining, PROBE_TIMEOUT_SECONDS))
         except Exception:
             jobs = None
         health = owner_health(store.get_orch(con, orch_id), jobs)
-        if health["state"] == "alive":
+        # A probe that finished after the deadline is too late to count, alive or not.
+        expired = time.monotonic() >= deadline
+        if health["state"] == "alive" and not expired:
             return health
-        if health["reason"] not in STARTUP_REASONS and health["reason"] != "runtime_unavailable":
+        if not expired and health["reason"] not in STARTUP_REASONS and health["reason"] != "runtime_unavailable":
             raise ValueError(f"orch {orch_id} is {health['state']} ({health['reason']})")
-        if time.monotonic() >= deadline:
+        if expired:
             raise ValueError(f"orch {orch_id} is {health['state']} ({health['reason']}) after waiting {timeout:g}s "
                              "for its job to publish a pid/status")
-        time.sleep(poll)
+        time.sleep(min(poll, max(deadline - time.monotonic(), 0)))
 
 
 def restart(con, rt, old_id=None, model=None, dry_run=False):
