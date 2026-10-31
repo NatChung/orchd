@@ -26,7 +26,7 @@ worktree. Every step below is manual, and the Orch decides what follows.
 only: orchd never marks a stale task dead, fails it, retries it or closes it. Check the worktree (section 1) first.
 
 `list_open` still returns every open task as a plain list. Pass `attention_only: true` to hide healthy, non-stale
-`starting`/`running`/`acked` tasks, and `with_counts: true` to get `{total, shown, tasks}` instead of a bare list.
+`starting`/`running`/`acked` tasks (tasks whose health is `unknown` stay listed), and `with_counts: true` to get `{total, shown, tasks}` instead of a bare list.
 
 An orphan label says the worker is gone, not why. A daemon restart, a reap, or a crash all look the same here.
 

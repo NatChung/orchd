@@ -72,12 +72,23 @@ CLAUDE_DEAD_STATES = ("failed",)  # the only dead state observed so far (a reape
 
 
 def claude_job_alive(jobs, job_id):
-    """Liveness of a Claude job from one `live_jobs()` snapshot: None when the query failed or there is no job,
-    False when the daemon no longer lists it or lists it as dead."""
+    """Liveness of a Claude job from one `live_jobs()` snapshot: None when the query failed, there is no job, or a
+    failed job carries only partial process evidence; False when the daemon no longer lists it or lists it as dead.
+    A failed job with a pid and a live status is still a running process (a task outcome is not process death)."""
+    from .orch_health import LIVE_STATUSES
     if jobs is None or not job_id:
         return None
     job = jobs.get(job_id)
-    return job is not None and (job or {}).get("state") not in CLAUDE_DEAD_STATES
+    if job is None:
+        return False
+    if (job or {}).get("state") not in CLAUDE_DEAD_STATES:
+        return True
+    pid, status = job.get("pid"), job.get("status")
+    if isinstance(pid, int) and not isinstance(pid, bool) and pid > 0 and status in LIVE_STATUSES:
+        return True
+    if pid is None and status is None:
+        return False
+    return None
 
 
 def launch_env():

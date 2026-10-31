@@ -862,7 +862,8 @@ def list_open(con, rt, *, now=None, stale_hours=None, attention_only=False):
     """Every open task. `worker_alive` only means the process/job exists, not that it is working; `last_report_at`
     (latest worker ack/progress/question/report) and `stale` (no such message for stale_hours, default 24 or
     ORCHD_STALE_HOURS) show silence. Both are labels: nothing here changes a task. attention_only drops healthy,
-    non-stale running/acked/starting tasks."""
+    non-stale running/acked/starting tasks;
+    health-unknown ones stay listed."""
     from . import task_question_answers
     try:
         jobs = rt.live_jobs()
@@ -900,7 +901,7 @@ def list_open(con, rt, *, now=None, stale_hours=None, attention_only=False):
                         last_report_at=heard, stale=stale, stale_after_hours=hours,
                         **health))
     if attention_only:
-        out = [r for r in out if r["stale"] or r["worker_health"] == "orphan" or r["uncertain_delivery"]
+        out = [r for r in out if r["stale"] or r["worker_health"] in ("orphan", "unknown") or r["uncertain_delivery"]
                or r["status"] not in ("starting", "running", "acked")]
     return out
 

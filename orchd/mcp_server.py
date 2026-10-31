@@ -98,7 +98,7 @@ TOOLS = [
                     "an automatic death verdict or close) means a running/acked/question task has been silent for "
                     "stale_after_hours (default 24, env ORCHD_STALE_HOURS or the stale_hours argument). "
                     "Default output is unchanged (all open tasks, a plain list); attention_only=true hides healthy "
-                    "non-stale running/acked/starting tasks; with_counts=true wraps the result as "
+                    "non-stale running/acked/starting tasks (health-unknown ones stay); with_counts=true wraps the result as "
                     "{total, shown, tasks}. "
                     "model is the task's stored full model id (\"unknown\" if none was stored). "
                     "pending counts undelivered queued answers and followups without revealing their bodies, "

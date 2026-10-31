@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 from unittest import mock
 
 from orchd import core, store, worker_health
@@ -15,6 +16,8 @@ class ClaudeJobAliveTest(unittest.TestCase):
         self.assertTrue(claude_job_alive({"j": {}}, "j"))
         self.assertFalse(claude_job_alive({"j": {"state": "failed", "reapedMidWorkAt": "2026-10-01T11:04:36Z"}}, "j"))
         self.assertFalse(claude_job_alive({}, "j"))
+        self.assertTrue(claude_job_alive({"j": {"state": "failed", "pid": 4242, "status": "busy"}}, "j"))
+        self.assertIsNone(claude_job_alive({"j": {"state": "failed", "pid": 4242}}, "j"))
 
     def test_failed_query_or_missing_job_id_is_unknown(self):
         self.assertIsNone(claude_job_alive(None, "j"))
@@ -258,6 +261,40 @@ class StaleAndLastReportTest(ListOpenHealthTest):
         self.con.commit()
         self.assertEqual(set(self.listing(now)), {healthy["id"], quiet["id"], asking["id"]})  # default unchanged
         self.assertEqual(set(self.listing(now, attention_only=True)), {quiet["id"], asking["id"]})
+
+    def test_question_with_failed_job_but_live_process_evidence_is_not_orphan(self):
+        t = self.dispatch()
+        core.ask(self.con, self.rt, t["id"], "which one?")
+        self.rt.jobs = {"job1": {"state": "failed", "pid": 4242, "status": "idle"}}
+        row = self.listing(None)[t["id"]]
+        self.assertEqual((row["worker_alive"], row["worker_health"], row["recovery_hint"]), (True, "alive", None))
+
+    def test_question_with_failed_job_and_partial_evidence_is_unknown(self):
+        t = self.dispatch()
+        core.ask(self.con, self.rt, t["id"], "which one?")
+        for extra in ({"pid": 4242}, {"status": "idle"}, {"pid": "4242", "status": "idle"}, {"pid": 4242, "status": "newstatus"}):
+            with self.subTest(extra=extra):
+                self.rt.jobs = {"job1": {"state": "failed", **extra}}
+                row = self.listing(None)[t["id"]]
+                self.assertEqual((row["worker_alive"], row["worker_health"]), (None, "unknown"))
+
+    def test_attention_only_keeps_health_unknown_running_tasks(self):
+        t = self.dispatch()
+        core.ack(self.con, t["id"])
+        self.rt.jobs = None  # status probe failed
+        self.assertEqual(self.listing(None)[t["id"]]["worker_health"], "unknown")
+        self.assertEqual(set(self.listing(None, attention_only=True)), {t["id"]})
+        self.rt.jobs = {"job1": {"state": "working"}}  # confirmed healthy: hidden again
+        self.assertEqual(self.listing(None, attention_only=True), {})
+
+    def test_attention_only_keeps_app_server_probe_failure(self):
+        from orchd import app_worker
+        t = self.dispatch()
+        core.ack(self.con, t["id"])
+        with patch("orchd.app_worker.enabled", return_value=True), patch("orchd.app_worker.health", return_value="unknown"):
+            self.assertEqual(set(self.listing(None, attention_only=True)), {t["id"]})
+        with patch("orchd.app_worker.enabled", return_value=True), patch("orchd.app_worker.health", return_value="idle"):
+            self.assertEqual(self.listing(None, attention_only=True), {})
 
     def test_mcp_default_shape_is_unchanged_and_counts_are_opt_in(self):
         from orchd import mcp_server
