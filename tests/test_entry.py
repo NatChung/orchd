@@ -363,6 +363,208 @@ class EntryTest(unittest.TestCase):
         self.assertEqual([w[1] for w in self.rt.woken], ["desk-1", "desk-1"])
         self.assertEqual([w[2].split("\n\n", 1)[1] for w in self.rt.woken], ["x", "y"])
 
+    def test_over_limit_text_is_rejected_early_and_later_messages_still_deliver(self):
+        self.relay_thread_seen()
+        too_long = "x" * (entry.MAX_SEND_BYTES + 1)
+        with self.assertRaisesRegex(ValueError, f"at most {entry.MAX_SEND_BYTES} bytes"):
+            entry.send_to_nat(self.con, self.rt, self.orch, too_long)
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM entry_messages WHERE direction='out'").fetchone()[0], 0)
+        # the limit counts UTF-8 bytes, not characters
+        with self.assertRaisesRegex(ValueError, "bytes"):
+            entry.send_to_nat(self.con, self.rt, self.orch, "中" * (entry.MAX_SEND_BYTES // 3 + 1))
+        self.assertEqual(entry.send_to_nat(self.con, self.rt, self.orch, "x" * entry.MAX_SEND_BYTES)["delivery"],
+                         "delivered")
+        self.assertEqual(entry.send_to_nat(self.con, self.rt, self.orch, "after")["delivery"], "delivered")
+
+    def test_message_that_keeps_failing_is_held_and_does_not_block_later_ones(self):
+        self.relay_thread_seen()
+        self.rt.wake_fails = True
+        first = entry.send_to_nat(self.con, self.rt, self.orch, "poison")
+        self.assertEqual(first["delivery"], "failed")
+        for _ in range(entry.MAX_SEND_ATTEMPTS - 1):
+            entry.deliver_outbound(self.con, self.rt, "desktop")
+        self.assertEqual(entry._state(entry._row(self.con, first["message_id"])), "held")
+        self.rt.wake_fails = False
+        later = entry.send_to_nat(self.con, self.rt, self.orch, "later")
+        self.assertEqual(later["delivery"], "delivered")
+        self.assertEqual(entry._state(entry._row(self.con, first["message_id"])), "held")  # not retried on its own
+
+    def test_failed_or_held_message_can_be_resent_explicitly(self):
+        self.relay_thread_seen()
+        self.rt.wake_fails = True
+        sent = entry.send_to_nat(self.con, self.rt, self.orch, "again")
+        self.rt.wake_fails = False
+        resent = entry.resend_to_nat(self.con, self.rt, self.orch, sent["message_id"])
+        self.assertEqual(resent["delivery"], "delivered")
+        self.assertEqual(self.rt.woken[-1][2].split("\n\n", 1)[1], "again")
+        with self.assertRaisesRegex(ValueError, "only failed or held"):
+            entry.resend_to_nat(self.con, self.rt, self.orch, sent["message_id"])
+        with self.assertRaisesRegex(ValueError, "not a message of this Orch"):
+            entry.resend_to_nat(self.con, self.rt, self.orch, 99999)
+
+    def test_resend_works_on_a_held_message(self):
+        self.relay_thread_seen()
+        self.rt.wake_fails = True
+        sent = entry.send_to_nat(self.con, self.rt, self.orch, "held one")
+        for _ in range(entry.MAX_SEND_ATTEMPTS - 1):
+            entry.deliver_outbound(self.con, self.rt, "desktop")
+        self.rt.wake_fails = False
+        self.assertEqual(entry.resend_to_nat(self.con, self.rt, self.orch, sent["message_id"])["delivery"],
+                         "delivered")
+
+    def test_resend_refuses_a_queued_question_that_was_never_sent(self):
+        self.relay_thread_seen()
+        first = entry.ask_nat(self.con, self.rt, self.orch, "first")
+        second = entry.ask_nat(self.con, self.rt, self.orch, "second")
+        self.assertEqual(second["state"], "queued")
+        before = len(self.rt.woken)
+        with self.assertRaisesRegex(ValueError, "queued"):
+            entry.resend_to_nat(self.con, self.rt, self.orch, second["question_id"])
+        self.assertEqual(len(self.rt.woken), before)
+        row = entry._row(self.con, second["question_id"])
+        self.assertEqual((row["delivery"], row["question_state"]), ("held", "queued"))
+        self.assertEqual(entry._row(self.con, first["question_id"])["delivery"], "delivered")
+
+    def failed_question_pair(self):
+        self.relay_thread_seen()
+        self.rt.wake_fails = True
+        q1 = entry.ask_nat(self.con, self.rt, self.orch, "Q1")["question_id"]
+        q2 = entry.ask_nat(self.con, self.rt, self.orch, "Q2")["question_id"]
+        entry.deliver_outbound(self.con, self.rt, "desktop")
+        self.assertEqual(entry._row(self.con, q1)["attempts"], 3)
+        self.rt.wake_fails = False
+        return q1, q2
+
+    def reopen_entry_db(self):
+        self.con.close()
+        self.con = store.connect(Path(self.tmp.name) / "t.db")
+
+    def test_held_question_releases_next_after_reopen_and_cannot_take_its_reply(self):
+        q1, q2 = self.failed_question_pair()
+        self.reopen_entry_db()
+        for _ in range(5):
+            entry.deliver_outbound(self.con, self.rt, "desktop")
+        self.assertEqual(entry._row(self.con, q2)["delivery"], "delivered")
+        self.assertEqual(entry._row(self.con, q1)["delivery"], "held")
+        self.rt.nat_says("desk-1", "answer Q2")
+        with self.assertRaises(ValueError):
+            self.relay(reply_to=q1)
+        reply = self.relay(reply_to=q2)
+        self.assertEqual(entry._row(self.con, reply["message_id"])["reply_to"], q2)
+        self.assertEqual(len(self.rt.woken), 1)
+        listed = entry.status(self.con, self.rt, "desktop", "desk-1")["from_orch"]
+        self.assertIn(q1, [r["message_id"] for r in listed])
+
+    def test_held_question_resend_joins_tail_and_binds_only_its_own_reply(self):
+        q1, q2 = self.failed_question_pair()
+        q3 = entry.ask_nat(self.con, self.rt, self.orch, "Q3")["question_id"]
+        resent = entry.resend_to_nat(self.con, self.rt, self.orch, q1)
+        self.assertEqual(resent["delivery"], "held")
+        self.assertEqual(entry.current_question(self.con, entry.get_entry(self.con, "desktop"))["id"], q2)
+        self.reopen_entry_db()
+        for q in (q2, q3, q1):
+            self.assertEqual(entry.current_question(self.con, entry.get_entry(self.con, "desktop"))["id"], q)
+            self.assertEqual(entry._row(self.con, q)["delivery"], "delivered")
+            self.assertEqual(self.con.execute("SELECT COUNT(*) FROM entry_messages WHERE question_state='current'").fetchone()[0], 1)
+            self.rt.nat_says("desk-1", f"answer {q}", item=f"reply-{q}")
+            reply = self.relay(reply_to=q)
+            self.assertEqual(entry._row(self.con, reply["message_id"])["reply_to"], q)
+            self.reopen_entry_db()
+            entry.deliver_outbound(self.con, self.rt, "desktop")
+        self.assertEqual([w[2].split("\n\n", 1)[1] for w in self.rt.woken], ["Q2", "Q3", "Q1"])
+
+    def test_held_question_cannot_take_reply_before_next_delivery(self):
+        q1, _ = self.failed_question_pair()
+        self.rt.nat_says("desk-1", "answer for the question I saw")
+        with self.assertRaises(ValueError):
+            self.relay(reply_to=q1)
+        with self.assertRaises(ValueError):
+            entry.submit_answer(self.con, self.rt, "desktop", q1, 1, "current", "answer", "held-key", orch_id=self.orch)
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM entry_messages WHERE kind='reply'").fetchone()[0], 0)
+
+    def test_held_question_resend_after_queue_drains_sends_once_after_reopen(self):
+        q1, q2 = self.failed_question_pair()
+        entry.deliver_outbound(self.con, self.rt, "desktop")
+        self.rt.nat_says("desk-1", "Q2 answer")
+        self.relay(reply_to=q2)
+        self.reopen_entry_db()
+        self.assertEqual(entry.resend_to_nat(self.con, self.rt, self.orch, q1)["delivery"], "delivered")
+        self.reopen_entry_db()
+        entry.deliver_outbound(self.con, self.rt, "desktop")
+        self.assertEqual([w[2].split("\n\n", 1)[1] for w in self.rt.woken], ["Q2", "Q1"])
+
+    def test_legacy_held_current_recovers_after_reopen_without_duplicate_send(self):
+        q1, q2 = self.failed_question_pair()
+        # Persist the exact state left by the previous release.
+        self.con.execute("UPDATE entry_messages SET question_state='queued',delivery='held',wire_text=NULL WHERE id=?", (q2,))
+        self.con.execute("UPDATE entry_messages SET question_state='current' WHERE id=?", (q1,))
+        self.reopen_entry_db()
+        for _ in range(5):
+            entry.deliver_outbound(self.con, self.rt, "desktop")
+        self.assertEqual(entry._row(self.con, q2)["delivery"], "delivered")
+        self.assertEqual(entry._row(self.con, q1)["attempts"], 3)
+        self.assertEqual(len(self.rt.woken), 1)
+
+    def test_legacy_held_current_resend_also_joins_queue_tail(self):
+        q1, q2 = self.failed_question_pair()
+        self.con.execute("UPDATE entry_messages SET question_state='queued',delivery='held',wire_text=NULL WHERE id=?", (q2,))
+        self.con.execute("UPDATE entry_messages SET question_state='current' WHERE id=?", (q1,))
+        self.reopen_entry_db()
+        result = entry.resend_to_nat(self.con, self.rt, self.orch, q1)
+        self.assertEqual(result["delivery"], "held")
+        self.assertEqual(entry._row(self.con, q2)["delivery"], "delivered")
+        self.assertEqual([w[2].split("\n\n", 1)[1] for w in self.rt.woken], ["Q2"])
+
+    def test_snoozed_held_question_can_be_explicitly_unsnoozed(self):
+        q1, q2 = self.failed_question_pair()
+        entry.question_transition(self.con, self.rt, "desktop", q1, 1, "queued", "snoozed",
+                                  actor="operator", revisit_at=0)
+        entry.question_transition(self.con, self.rt, "desktop", q1, 1, "snoozed", "queued", actor="operator")
+        self.rt.nat_says("desk-1", "Q2 answer")
+        self.relay(reply_to=q2)
+        self.assertEqual(entry._row(self.con, q1)["delivery"], "delivered")
+        self.assertEqual(entry._row(self.con, q1)["question_state"], "current")
+
+    def test_unsent_current_question_cannot_be_answered_by_either_interface(self):
+        q = entry.ask_nat(self.con, self.rt, self.orch, "Q1")["question_id"]
+        self.rt.nat_says("desk-1", "answer")
+        with self.assertRaisesRegex(ValueError, "not been delivered"):
+            self.relay(reply_to=q)
+        with self.assertRaisesRegex(ValueError, "not been delivered"):
+            entry.submit_answer(self.con, self.rt, "desktop", q, 1, "current", "answer", "key", orch_id=self.orch)
+
+    def test_resend_rejections_explain_snoozed_and_cancelled(self):
+        for state, hint in (("snoozed", "unsnooze"), ("cancelled", "will not be sent automatically")):
+            with self.subTest(state=state):
+                q = entry.ask_nat(self.con, self.rt, self.orch, state)["question_id"]
+                self.con.execute("UPDATE entry_messages SET question_state=?,delivery='held' WHERE id=?", (state, q))
+                with self.assertRaisesRegex(ValueError, hint):
+                    entry.resend_to_nat(self.con, self.rt, self.orch, q)
+
+    def test_held_message_stays_visible_in_status_with_resend_hint(self):
+        self.relay_thread_seen()
+        self.rt.wake_fails = True
+        sent = entry.send_to_nat(self.con, self.rt, self.orch, "poison")
+        for _ in range(entry.MAX_SEND_ATTEMPTS - 1):
+            entry.deliver_outbound(self.con, self.rt, "desktop")
+        self.rt.wake_fails = False
+        self.assertEqual(entry._state(entry._row(self.con, sent["message_id"])), "held")
+        listed = entry.status(self.con, self.rt, "desktop", "desk-1")["from_orch"]
+        self.assertEqual([m["message_id"] for m in listed], [sent["message_id"]])
+        self.assertEqual(listed[0]["delivery"], "held")
+        self.assertIn("resend_to_nat", listed[0]["note"])
+        self.assertEqual(entry._state(entry._row(self.con, sent["message_id"])), "held")  # status must not mark it delivered
+        self.assertEqual(entry.resend_to_nat(self.con, self.rt, self.orch, sent["message_id"])["delivery"], "delivered")
+        self.assertEqual(entry.status(self.con, self.rt, "desktop", "desk-1")["from_orch"], [])
+
+    def test_ask_nat_over_limit_is_rejected_and_not_stored(self):
+        self.relay_thread_seen()
+        with self.assertRaisesRegex(ValueError, "at most 64000 bytes"):
+            entry.ask_nat(self.con, self.rt, self.orch, "x" * (entry.MAX_SEND_BYTES + 1))
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM entry_messages WHERE direction='out'").fetchone()[0], 0)
+        self.assertEqual(entry.MAX_SEND_BYTES, 64000)
+        self.assertIn("question_id", entry.ask_nat(self.con, self.rt, self.orch, "x" * 1000))
+
     # -- binding and permissions -----------------------------------------------------------------------
 
     def test_bind_refuses_codex_stopped_dead_and_silent_rebind(self):
@@ -395,7 +597,7 @@ class EntryTest(unittest.TestCase):
         init = mcp_server.handle({"id": 1, "method": "initialize", "params": {}}, self.con, self.rt, role="entry")
         self.assertIn("never retype", init["result"]["instructions"])
         before = self.con.execute("SELECT COUNT(*) FROM orchs").fetchone()[0]
-        for name in ("dispatch", "answer", "close", "retry", "followup", "inbox", "send_to_nat", "ask_nat",
+        for name in ("dispatch", "answer", "close", "retry", "followup", "inbox", "send_to_nat", "resend_to_nat", "ask_nat",
                      "entry_inbox", "list_open", "view_worker"):
             result = self.entry_call(name, {"task_id": "x"})
             self.assertTrue(result["isError"], name)
