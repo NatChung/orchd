@@ -29,7 +29,7 @@ class HookRuntime(Runtime):
     jobs = {}  # what `claude agents` lists; tests never reach the real claude CLI
     stop_result = None  # what `claude stop` returns or raises; None means it succeeds
 
-    def agents(self):
+    def agents(self, timeout=15):
         if isinstance(self.jobs, Exception):
             raise self.jobs
         return [dict(job, id=job_id) for job_id, job in self.jobs.items()]
