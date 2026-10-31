@@ -11,6 +11,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from orchd import core, store
 from orchd.runtime import Runtime, error_detail, redact
@@ -554,30 +555,32 @@ class CloseRetryTest(unittest.TestCase):
         self.assertNotIn("tok", error_detail(subprocess.TimeoutExpired(cmd, 5)))
 
     def test_codex_worker_is_stopped_only_when_it_is_this_tasks_process_and_confirmed_gone(self):
-        rt, killed, ps = Runtime(), [], {"out": "", "rc": 0}
+        """Ownership is decided by Runtime._codex_targets (real processes in tests/test_close_hardening.py); here
+        its verdicts drive the confirm loop."""
+        rt, state = Runtime(), {"targets": [], "error": None}
         rt.sleep = lambda s: None
-        rt.run = lambda cmd, **kw: subprocess.CompletedProcess(cmd, ps["rc"], ps["out"], "")
-        alive = {"4242": True}
-        rt.pid_alive = lambda pid: alive[pid]
-        orig, os.killpg = os.killpg, lambda pid, sig: killed.append(pid)
-        self.addCleanup(setattr, os, "killpg", orig)
-        ps["out"] = "/usr/bin/python3 other.py\n"  # pid reused by something else: ours is gone, kill nothing
-        rt.stop_task_worker("codex", "4242", ("/wt/demo-t1", "thread-1"))
-        ps["out"] = "/Users/x/.local/bin/codex exec resume --json thread-9 hi\n"  # another task's codex
-        rt.stop_task_worker("codex", "4242", ("/wt/demo-t1", "thread-1"))
-        self.assertEqual(killed, [])
-        ps["out"] = "/Users/x/.local/bin/codex exec resume --json thread-1 hi\n"
-        with self.assertRaisesRegex(RuntimeError, "still running"):  # SIGTERM sent but it does not exit
-            rt.stop_task_worker("codex", "4242", ("/wt/demo-t1", "thread-1"))
-        self.assertEqual(killed, [4242])
-        rt.pid_alive = lambda pid: not killed  # exits after SIGTERM
-        killed.clear()
-        rt.stop_task_worker("codex", "4242", ("/wt/demo-t1", "thread-1"))
-        self.assertEqual(killed, [4242])
         rt.pid_alive = lambda pid: True
-        ps["rc"], ps["out"] = 2, ""  # ps itself broke: unknown, so not stopped
-        with self.assertRaisesRegex(RuntimeError, "not confirmed"):
-            rt.stop_task_worker("codex", "4242", ("/wt/demo-t1", "thread-1"))
+        proc = mock.Mock()
+
+        def targets(pid, marks):
+            if state["error"]:
+                raise state["error"]
+            return state["targets"]
+        rt._codex_targets = targets
+        marks = ("/wt/demo-t1", "thread-1")
+        rt.stop_task_worker("codex", "4242", marks)  # pid reused or gone: nothing is ours, nothing is signalled
+        proc.terminate.assert_not_called()
+        state["targets"] = [proc]
+        with self.assertRaisesRegex(RuntimeError, "still running"):  # SIGTERM sent but it does not exit
+            rt.stop_task_worker("codex", "4242", marks)
+        proc.terminate.assert_called_once_with()
+        proc.reset_mock()
+        proc.terminate.side_effect = lambda: state.update(targets=[])  # exits after SIGTERM
+        rt.stop_task_worker("codex", "4242", marks)
+        proc.terminate.assert_called_once_with()
+        state["error"] = RuntimeError("codex worker 4242 not confirmed stopped: cannot inspect it")
+        with self.assertRaisesRegex(RuntimeError, "not confirmed"):  # ownership unknown: blocks, signals nothing
+            rt.stop_task_worker("codex", "4242", marks)
 
     def test_close_of_codex_task_stops_it_through_the_confirming_path(self):
         self.con.execute("UPDATE tasks SET model='gpt-6.1-sol', session_id='thread-1' WHERE id='t1'")

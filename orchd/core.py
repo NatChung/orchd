@@ -931,6 +931,20 @@ def close(con, rt, task_id, outcome=None, rating=None, lock_wait=CLOSE_LOCK_WAIT
                            "retry or adopt holds it); nothing changed, run close again") from None
 
 
+def stuck_closes(con):
+    """Read-only: open tasks whose last close attempt failed ("close pending"), with the error and what to do next."""
+    out = []
+    for t in store.open_tasks(con):
+        note = t["note"] or ""
+        if not note.startswith("close pending"):
+            continue
+        out.append(dict(task_id=t["id"], status=t["status"], worktree=t["worktree"], last_error=note,
+                        next_step=f"run `orchd close {t['id']}` again; if the same error repeats, follow "
+                                  "docs/runbooks/stuck-close.md (inspect the worktree, save or push what you need, "
+                                  "then close again)"))
+    return out
+
+
 def _close_locked(con, rt, task_id, outcome, rating):
     """close's work under the task's delivery lock. The lock is not re-entrant: nothing here may take it again
     (no _wake, no adopt)."""

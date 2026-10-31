@@ -207,6 +207,7 @@ Quote text containing spaces. Report evidence defaults to an empty string; suppl
 | `orchd flush TASK_ID [--after-pid PID]` | Turn-shell integration: deliver queued answers after Codex exits. | `orchd flush TASK_ID --after-pid PID` |
 | `orchd stats [--since TIME] [--json]` | Read source-backed task/token counts and cost estimates by Orch/task type. | `orchd stats --json` |
 | `orchd close TASK_ID` | Stop a task worker and clean its worktree only when safe. | `orchd close TASK_ID` |
+| `orchd stuck-close` | Read-only: tasks stuck at `close pending`, with the last error and next step. See `docs/runbooks/stuck-close.md`. | `orchd stuck-close` |
 
 `mcp` defaults to role orch and entry desktop; entry names apply to entry role. Flush is shell integration, not a normal manual reporting step. `stats --since` accepts local HH:MM today or ISO-8601 with Z/offset; default is all time and cost is estimated. Close stops a worker and may delete its worktree; follow task authorization.
 
