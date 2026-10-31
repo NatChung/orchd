@@ -385,6 +385,19 @@ class RetryReviewRegressionTest(unittest.TestCase):
     def live_workers(self):
         return sorted(self.rt.codex_live | {j for j in self.rt.jobs})
 
+    def test_answer_kept_after_ended_claude_worker_reaches_the_retried_worker(self):
+        t = self.dispatch("sonnet")
+
+        def gone(*args):
+            raise FileNotFoundError(2, "No such file or directory", "/x/worker-abc12345.sock")
+        real, self.rt.send_uds = self.rt.send_uds, gone
+        with self.assertRaisesRegex(ValueError, "worker has ended.*retry"):
+            core.answer(self.con, self.rt, t["id"], "yes please")
+        self.rt.send_uds = real
+        core.retry(self.con, self.rt, t["id"], "sonnet", "worker ended")
+        self.assertIn("yes please", self.rt.sent[-1][2])
+        self.assertEqual(store.pending_answers(self.con, t["id"]), [])
+
     # 1. queued answers survive a cross-vendor retry: FIFO in the new prompt, one receipt each, nothing duplicated
     def test_queued_codex_answers_go_fifo_to_new_claude_worker_with_receipts(self):
         t = self.dispatch("sol")  # its turn is still running, so answers queue
