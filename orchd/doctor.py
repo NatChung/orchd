@@ -381,7 +381,7 @@ class Doctor:
     def check_mcp_launch(self):
         """`orchd init` keeps config.toml files that differ from its version, so installs made before #89 still start
         the MCP through bin/orchd's shebang (system python3, maybe without psutil). What counts is the program the
-        config really starts: a wrapper, a native binary or a Python interpreter running orchd is fine."""
+        config really starts: wrappers and native binaries launch directly; Python must match this interpreter."""
         stale, fixes = [], []
         for folder in (self.orch_home, paths.interface_home(self.home, self.env)):
             cfg = folder / ".codex" / "config.toml"
@@ -395,17 +395,27 @@ class Doctor:
                 command, args = spec.get("command"), spec.get("args")
                 if not isinstance(command, str) or not isinstance(args, list) or "mcp" not in args:
                     continue
-                if not paths.is_python_script(command):
-                    continue  # interpreter binary, native binary, shell wrapper: not the bin/orchd shebang
-                shebang = paths.shebang_interpreter(command)
-                if shebang not in (None, "env") and os.path.realpath(shebang) == os.path.realpath(sys.executable):
-                    continue  # the shebang already names orchd's own interpreter
+                resolved = self.which(command) if not os.path.dirname(command) else command
+                resolved = resolved or command
+                if paths.is_python_script(resolved):
+                    interpreter = paths.shebang_interpreter(resolved)
+                    interpreter = (self.which(interpreter) if interpreter and not os.path.dirname(interpreter)
+                                   else interpreter)
+                    launch_args = [resolved] + [str(a) for a in args]
+                elif paths.is_python_interpreter(resolved):
+                    interpreter = resolved
+                    launch_args = [str(a) for a in args]
+                else:
+                    continue  # native binary, shell wrapper or unclassifiable command: launch directly
+                if interpreter and paths.same_python_interpreter(interpreter, sys.executable):
+                    continue
                 stale.append(f"{name} in {cfg}")
-                fixes.append(f"in {cfg}, only inside [mcp_servers.{name}], set command = {json.dumps(sys.executable)} "
-                             f"and args = {json.dumps([command] + [str(a) for a in args])}")
+                fixes.append(f"in {cfg}, only inside [mcp_servers.{name}], set command = "
+                             f"{json.dumps(sys.executable, ensure_ascii=False)} and args = "
+                             f"{json.dumps(launch_args, ensure_ascii=False)}")
         if stale:
             self.add("Codex MCP launch", OPTIONAL, WARN,
-                     "starts bin/orchd directly (system python3 may lack psutil): " + "; ".join(stale),
+                     "does not use the orchd interpreter (other Python may lack psutil): " + "; ".join(stale),
                      "Edit only that one table and leave every other setting as it is (`orchd init` keeps edited "
                      "files, so it will not rewrite it): " + "; ".join(fixes) + ".")
         else:

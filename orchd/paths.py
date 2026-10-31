@@ -6,6 +6,7 @@ defaults from that user's HOME, not ours. State (the SQLite DB) stays in ORCHD_H
 import os
 import re
 import shutil
+import shlex
 import sys
 from pathlib import Path
 
@@ -111,7 +112,7 @@ def _head(executable):
 
 
 def is_python_script(executable):
-    """True when `executable` has to be run by a Python interpreter: a `#!...python...` script, or a shebang-less
+    """True when `executable` has to be run by a Python interpreter: a Python shebang script, or a shebang-less
     `.py` file. A native binary, a script with any other shebang (a shell wrapper) and a file we cannot read or
     classify (missing, unreadable, shebang-less without `.py`) are launched directly: the path is what the
     operator asked for, and guessing "Python" is what broke `/bin/echo` as an override."""
@@ -119,19 +120,55 @@ def is_python_script(executable):
     if head is None or head.startswith(_NATIVE_MAGIC):
         return False
     if head.startswith(b"#!"):
-        return b"python" in head.split(b"\n", 1)[0]
+        return is_python_interpreter(shebang_interpreter(executable) or "")
     return str(executable).endswith(".py")
 
 
+def is_python_interpreter(command):
+    """Match the interpreter name, never directory names or script arguments."""
+    return re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?(?:[dt])?(?:\.exe)?", Path(command).name) is not None
+
+
 def shebang_interpreter(executable):
-    """The interpreter path in a `#!` line, "env" for `#!/usr/bin/env ...`, or None."""
+    """Interpreter path or env's command token (including env -S), or None."""
     head = _head(executable)
     if not head or not head.startswith(b"#!"):
         return None
-    words = head.split(b"\n", 1)[0][2:].decode("utf-8", "replace").split()
+    words = head.split(b"\n", 1)[0][2:].decode("utf-8", "replace").split(None, 1)
     if not words:
         return None
-    return "env" if Path(words[0]).name == "env" else words[0]
+    if Path(words[0]).name != "env":
+        return words[0]
+    try:
+        tokens = shlex.split(words[1]) if len(words) > 1 else []
+    except ValueError:
+        return None
+    while tokens:
+        token = tokens.pop(0)
+        if token in ("-S", "--split-string", "-i", "--ignore-environment", "--"):
+            continue
+        if token in ("-u", "--unset"):
+            if tokens:
+                tokens.pop(0)
+            continue
+        if token.startswith("-") or "=" in token:
+            continue
+        return token
+    return None
+
+
+def same_python_interpreter(left, right):
+    """Compare executable targets while keeping distinct venvs distinct.
+
+    Venv Python symlinks often point at the same base binary but load different packages.
+    """
+    def identity(command):
+        path = Path(os.path.abspath(command))
+        venv = path.parent.parent
+        if (venv / "pyvenv.cfg").is_file():
+            return (str(venv.resolve()), os.path.realpath(path))
+        return (None, os.path.realpath(path))
+    return identity(left) == identity(right)
 
 
 def mcp_launch(executable):

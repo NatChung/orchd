@@ -1,4 +1,5 @@
 """Issue #50: `orchd init` creates ~/orch/home and ~/orch/interface, trusts them in Codex, migrates an old home."""
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -234,6 +235,29 @@ class InitTest(unittest.TestCase):
         files = bootstrap.planned_files(self.home, {"ORCHD_EXECUTABLE": str(script)})
         spec = tomllib.loads(files[self.home / "orch" / "home" / ".codex" / "config.toml"])["mcp_servers"]["orchd"]
         self.assertEqual((spec["command"], spec["args"]), (str(script), ["mcp"]))
+
+    def test_shell_interpreter_directory_named_python_tools_is_not_python(self):
+        folder = self.home / "python-tools"
+        folder.mkdir()
+        shell = folder / "sh"
+        shell.symlink_to("/bin/sh")
+        wrapper = folder / "wrapper"
+        wrapper.write_text(f"#!{shell}\nexit 0\n")
+        wrapper.chmod(0o755)
+        self.assertEqual(subprocess.run([str(wrapper)], capture_output=True).returncode, 0)
+        command, args = paths.mcp_launch(str(wrapper))
+        self.assertEqual(subprocess.run([command, *args], capture_output=True).returncode, 0)
+
+    def test_shebang_uses_interpreter_basename_and_env_command_token(self):
+        script = self.home / "script"
+        for shebang, expected in (("/usr/bin/env python3", True),
+                                  ("/usr/bin/env -S python3 -u", True),
+                                  ("/usr/bin/env sh python-helper", False),
+                                  ("/usr/bin/env -S sh python-helper", False),
+                                  ("/bin/sh # python", False)):
+            with self.subTest(shebang=shebang):
+                script.write_text("#!" + shebang + "\n")
+                self.assertEqual(paths.is_python_script(script), expected)
 
     def test_native_orchd_override_is_launched_directly(self):
         # /bin/echo has no shebang; running it under python is a SyntaxError (rc 1).
