@@ -691,7 +691,7 @@ class Runtime:
         return found
 
     def open_app_viewer(self, database, task):
-        # -P keeps the worktree's own orchd/ (if any) off sys.path; Ghostty does not inherit PYTHONPATH.
+        # Ghostty does not inherit PYTHONPATH; -P excludes the worktree package.
         package_root = str(Path(__file__).resolve().parents[1])
         self.run(["open", "-na", "Ghostty.app", "--args", f"--working-directory={task['worktree']}", "-e",
                   "/usr/bin/env", f"PYTHONPATH={package_root}", sys.executable, "-P", "-m", "orchd.app_worker",

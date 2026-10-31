@@ -115,21 +115,12 @@ TOOLS = [
                     "\"[auto-flush failed]\" and the answers stay queued. You can still call answer with flush=true "
                     "(or a new text) to send them yourself. If you get queued while the task is in status question, the "
                     "worker already asked and is only finishing its exit: the auto flush follows within seconds (or "
-                    "retry flush=true). An app-server worker may return queued with "
-                    "reason \"supervisor busy\": the text is stored and its supervisor sends it automatically soon. "
-                    "failed: the turn could not start; the answers "
+                    "retry flush=true). failed: the turn could not start; the answers "
 "stay queued, retry with "
-                    "flush=true instead of resending the text. If an app-server rejects turn/start outright (for example "
-                    "invalid model) its automatic delivery pauses instead of retrying: the cause is in supervisor_error "
-                    "and the task note, the text stays pending, and a new answer, flush=true or retry sends again. A "
-                    "rate-limit rejection is different: automatic delivery waits until the reset time (else a backoff "
-                    "of up to about 5 minutes), a new answer does not end the wait, supervisor_error says when the next "
-                    "attempt is, and flush=true tries once immediately. failed with uncertain=true: a turn did start "
-                    "but its receipt could not be written. For an app-server worker the supervisor never resends it "
-                    "automatically and the answers still read as pending: check its log or wait for its report before "
-                    "flush=true. For a Claude worker it was stopped (or the error says MAY STILL BE RUNNING) and a later "
-                    "flush sends the answers again: you judge from its log whether that duplicates. flush=true with no "
-                    "text also just shows pending.",
+                    "flush=true instead of resending the text. failed with uncertain=true: a turn did start but its "
+                    "receipt could not be written, so it was stopped (or the error says MAY STILL BE RUNNING). The "
+                    "answers already reached that worker but still read as pending, so a later flush sends them "
+                    "again: check its log or wait for its report first. flush=true with no text also just shows pending.",
      "inputSchema": {"type": "object", "required": ["task_id"], "properties": {
          "task_id": {"type": "string"}, "text": {"type": "string", "description": "The answer; omit only with flush"},
          "flush": {"type": "boolean", "description": "Send queued answers to an idle Codex worker"},
@@ -143,9 +134,7 @@ TOOLS = [
                     "a new turn on the same thread with your text (plus any queued answers). Use answer instead for "
                     "anything that can wait for the turn to end. Returns the answer receipt (status "
                     "delivered|failed, pending) plus interrupted (true when a running turn was stopped) and note. If "
-                    "the turn cannot be confirmed stopped nothing is resumed and the text stays queued. For an app-server "
-                    "worker whose supervisor is busy, interrupt waits up to 10 seconds, then fails with \"interrupt not "
-                    "delivered: supervisor busy; retry\" and nothing is queued: call it again. A Claude "
+                    "the turn cannot be confirmed stopped nothing is resumed and the text stays queued. A Claude "
                     "worker needs no interrupt (its socket takes messages mid-turn): the text is sent like answer, "
                     "nothing is stopped, and the note says so.",
      "inputSchema": {"type": "object", "required": ["task_id", "text"], "properties": {

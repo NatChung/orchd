@@ -5,18 +5,15 @@ id/generation, never arbitrary commands or endpoints. Ambiguous sends are held f
 history reconciliation or an explicit retry, never automatically resent.
 """
 import argparse
-import datetime
 import json
 import os
 import queue
 import re
 import signal
-import sqlite3
 import socket
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import uuid
 from pathlib import Path
@@ -30,7 +27,6 @@ from .runtime import CODEX_MEMORIES_OFF
 
 BACKEND = 'app-server'
 TERMINAL = ('completed', 'failed', 'interrupted')
-BACKGROUND_HEARTBEAT_TIMEOUT = 60  # Longer than normal bounded RPC/history batches.
 
 
 def enabled(task):
@@ -112,22 +108,16 @@ def control(task, command, timeout=25, **fields):
         return result
 
 
-def health_detail(task):
-    """(worker_alive, supervisor_error). The error is why a live supervisor is degraded; None when it is not."""
+def health(task):
     try:
         sup, server = process(task['supervisor_identity']), process(task['server_identity'])
         if sup is None and server is None:
-            return 'dead', None
+            return 'dead'
         if sup is None or server is None:
-            return 'unknown', None
-        reply = control(task, 'health', timeout=3)
-        return reply['worker_alive'], reply.get('supervisor_error')
-    except Exception as exc:
-        return 'unknown', f'control: {type(exc).__name__}: {exc}'
-
-
-def health(task):
-    return health_detail(task)[0]
+            return 'unknown'
+        return control(task, 'health', timeout=3)['worker_alive']
+    except Exception:
+        return 'unknown'
 
 
 def stop(con, task):
@@ -163,11 +153,9 @@ def start(con, rt, task, prompt, model, pending=(), brief=None):
                       turn_state='starting', last_completed_turn=None, session_id=None, socket=None,
                       model=model, job_id=None)
     env = worker_env(task['worktree'])
-    # Use the package that launched this attempt, including an isolated checkout install. PYTHONPATH is
-    # honored with -P; only the implicit cwd entry is dropped.
+    # Use the launching package; -P excludes the worktree while honoring PYTHONPATH.
     env['PYTHONPATH'] = str(Path(__file__).resolve().parents[1]) + os.pathsep + env.get('PYTHONPATH','')
     with open(directory/'supervisor.log', 'a') as out:
-        # -P: never put the worktree (cwd) on sys.path; it may hold its own, different orchd/.
         child = subprocess.Popen([sys.executable, '-P', '-m', 'orchd.app_worker', 'supervise', database,
                                   task['id'], generation], cwd=task['worktree'], env=env,
                                  stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True)
@@ -183,7 +171,11 @@ def start(con, rt, task, prompt, model, pending=(), brief=None):
             if child.poll() is not None:
                 break
             time.sleep(.05)
-        raise RuntimeError('app-server startup failed: '+(directory/'supervisor.log').read_text()[-1200:])
+        reason = (directory/'supervisor.log').read_text()[-1200:].strip()
+        if not reason:
+            reason = (f'supervisor exited with code {child.returncode}' if child.poll() is not None
+                      else 'supervisor did not become ready within 35 seconds')
+        raise RuntimeError('app-server startup failed: '+reason)
     except Exception:
         # The supervisor publishes server identity before any RPC/start. Preserve rows/pending on failure.
         stop(con, store.get_task(con, task['id']))
@@ -195,32 +187,14 @@ def app_server_command(task):
 
 
 def preload():
-    """Import everything the supervisor loads lazily, so the worker editing orchd on disk cannot skew it later."""
-    # config, models and paths are reached through Runtime() and core.auto_retry_pending; the isolation test walks
-    # those paths and fails if anything else is still imported late.
+    """Freeze lazy supervisor dependencies before a worker can edit the package on disk."""
     from . import config, core, models, paths, quota, routing  # noqa: F401
     from .runtime import Runtime  # noqa: F401
 
 
-# An interrupt is urgent: wait for the delivery lane this long, then fail loudly (never queue).
-# Kept under control()'s 25 s socket timeout together with the 15 s confirmation window.
-INTERRUPT_LOCK_WAIT = 10
-# Automatic delivery pause after a rate-limit refusal without a usable reset time.
-LIMIT_BACKOFF_BASE = 30
-LIMIT_BACKOFF_MAX = 300
-
-
 class Supervisor:
     def __init__(self, database, task_id, generation):
-        self.maintenance_error = None
-        self.database = database
-        self.connections = threading.local()
-        self.connections.con = store.connect(database)
-        self.work_lock = threading.Lock()
-        self.history_scan = None
-        self.rpc_health_error = None
-        self.rpc_state = None
-        self.health_refresh_at = 0
+        self.con = store.connect(database)
         self.task_id, self.generation = task_id, generation
         self.rpc = None
         self.server = None
@@ -231,29 +205,6 @@ class Supervisor:
         self.deferred_flush = None
         self.deferred_limit = None
         self.reconcile_pending = False
-        self.housekeeping_at = 0
-        self.background_heartbeat = None
-        self.background_error = None
-        self.backoff = 0
-        self.limit_until = 0  # monotonic; automatic delivery is paused until then after a rate-limit refusal
-        self.limit_wall = None
-        self.limit_failures = 0
-        self.rejected = None  # pending ids the server explicitly refused; in memory, so a restart retries once
-
-    @property
-    def con(self):
-        # Each thread owns its SQLite connection. Schema setup happens once in __init__.
-        if not hasattr(self.connections, 'con'):
-            con = sqlite3.connect(self.database, timeout=2, isolation_level=None)
-            con.row_factory = sqlite3.Row
-            self.connections.con = con
-        return self.connections.con
-
-    @con.setter
-    def con(self, value):
-        if not hasattr(self, 'connections'):
-            self.connections = threading.local()
-        self.connections.con = value
 
     def task(self):
         return store.get_task(self.con, self.task_id)
@@ -352,29 +303,14 @@ class Supervisor:
         return live
 
     def history(self, thread_id):
-        """Bound each batch to four pages/five seconds; keep the cursor on timeout.
-
-        Partial history must not update turn state or release uncertain deliveries.
-        The next maintenance pass continues at the first unconsumed page.
-        """
-        if self.history_scan is None or self.history_scan['thread'] != thread_id:
-            self.history_scan = dict(thread=thread_id, turns=[], cursor=None)
-        scan = self.history_scan
-        deadline = time.monotonic() + 5
-        for _ in range(4):
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            page = self.rpc.call('thread/turns/list',
-                                 {'threadId':thread_id, 'cursor':scan['cursor'], 'limit':100,
-                                  'sortDirection':'asc', 'itemsView':'full'}, timeout=remaining)
-            scan['turns'].extend(page['data'])
-            scan['cursor'] = page.get('nextCursor')
-            if not scan['cursor']:
-                self.history_scan = None
-                return scan['turns']
-        self.reconcile_pending = True
-        return None
+        turns, cursor = [], None
+        while True:
+            page = self.rpc.call('thread/turns/list', {'threadId':thread_id, 'cursor':cursor, 'limit':100,
+                                                      'sortDirection':'asc', 'itemsView':'full'})
+            turns.extend(page['data'])
+            cursor = page.get('nextCursor')
+            if not cursor:
+                return turns
 
     def reconcile(self):
         """Resume subscription and read authoritative history after a connection gap.
@@ -383,11 +319,8 @@ class Supervisor:
         positively matching client id is sufficient to finish its durable receipt.
         """
         task = self.task()
-        if self.history_scan is None:
-            self.rpc.call('thread/resume', {'threadId': task['session_id']}, timeout=5)
+        self.rpc.call('thread/resume', {'threadId': task['session_id']})
         turns = self.history(task['session_id'])
-        if turns is None:
-            return False
         for delivery in self.con.execute("SELECT * FROM worker_deliveries WHERE task_id=? AND generation=? "
                                          "AND state IN ('sending','uncertain')", (self.task_id,self.generation)).fetchall():
             for turn in turns:
@@ -410,7 +343,6 @@ class Supervisor:
             self.deferred_flush=(self.generation,task['session_id'],last['id'])
         else:
             self.update(active_turn=None, turn_state='idle')
-        return True
 
     def receipt(self, delivery_id, turn_id, ids):
         with store.immediate(self.con):
@@ -431,8 +363,7 @@ class Supervisor:
         if not self.reconcile_pending or time.monotonic() < self.reconnect_at:
             return
         self.reconnect_at = time.monotonic() + 2
-        if self.reconcile() is False:
-            return
+        self.reconcile()
         self.reconcile_pending = bool(self.con.execute(
             "SELECT 1 FROM worker_deliveries WHERE task_id=? AND generation=? "
             "AND state IN ('sending','uncertain') LIMIT 1",
@@ -450,23 +381,13 @@ class Supervisor:
                        'clientUserMessageId': delivery_id, 'model': task['model'],
                        'approvalPolicy':'never', 'sandboxPolicy': {'type':'dangerFullAccess'}})
             self.receipt(delivery_id, result['turn']['id'], ids)
-            self.rejected = None
-            self.limit_until = 0
-            self.limit_failures = 0
             return dict(status='delivered',delivered=len(ids),pending=store.pending_answer_count(self.con,self.task_id))
         except RPCError as exc:  # definitive server rejection: bytes did not start a turn
             self.con.execute("UPDATE worker_deliveries SET state='rejected',error=? WHERE id=?",(str(exc),delivery_id))
+            self.update(note=f"app-server delivery rejected; pending retained: {exc}")
             from .routing import limited
             if limited(exc.error):
                 self.deferred_limit = (exc.error, self.generation + ':' + delivery_id)
-                self.pause_for_limit(exc.error)
-            else:
-                # Not transient: retrying only piles up journal rows. Hold automatic delivery until a new
-                # answer, answer(flush=true) or retry; the text stays pending.
-                self.rejected = frozenset(ids)
-                self.maintenance_error = (f'turn/start rejected: {exc}; automatic delivery paused, text retained. '
-                                          'Fix the cause, then answer(flush=true) or retry')
-                self.set_owned_note(f'app-server supervisor: {self.maintenance_error}')
             return dict(status='failed',delivered=0,pending=store.pending_answer_count(self.con,self.task_id),error=str(exc))
         except Exception as exc:
             self.con.execute("UPDATE worker_deliveries SET state='uncertain',error=? WHERE id=?",(str(exc),delivery_id))
@@ -474,21 +395,6 @@ class Supervisor:
             self.reconcile_pending = True
             return dict(status='failed',uncertain=True,delivered=0,
                         pending=store.pending_answer_count(self.con,self.task_id),error=str(exc))
-
-    def pause_for_limit(self, error):
-        """Hold automatic delivery after a rate-limit refusal: until the reset time the error carries, else a
-        capped exponential backoff. The text stays pending; nothing is journaled while paused."""
-        self.limit_failures += 1
-        delay = min(LIMIT_BACKOFF_MAX, LIMIT_BACKOFF_BASE * 2 ** (self.limit_failures - 1))
-        reset = error.get('resetsAt') or error.get('resets_at') if isinstance(error, dict) else None
-        if isinstance(reset, (int, float)) and not isinstance(reset, bool) and reset > time.time():
-            delay = reset - time.time()
-        self.limit_until = time.monotonic() + delay
-        self.limit_wall = time.time() + delay
-        when = datetime.datetime.fromtimestamp(self.limit_wall, datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-        self.maintenance_error = (f'rate limit: turn/start refused; automatic delivery paused, text retained; '
-                                  f'next attempt {when} (answer flush=true tries once now)')
-        self.set_owned_note(f'app-server supervisor: {self.maintenance_error}')
 
     def flush(self, guard=None, ignore_viewer=False):
         with store.task_delivery(self.con,[self.task_id],timeout=.1):
@@ -549,26 +455,11 @@ class Supervisor:
             raise ValueError('superseded attempt')
         cmd = request['command']
         if cmd == 'health':
-            # Never call RPC or wait for the delivery lock on this read-only path.
-            task = self.task()
-            error = self.maintenance_error or self.rpc_health_error
-            if self.rpc.error:
-                error = error or f'{type(self.rpc.error).__name__}: {self.rpc.error}'
-            background_error = self.background_error
-            if self.background_heartbeat is not None and \
-                    time.monotonic() - self.background_heartbeat > BACKGROUND_HEARTBEAT_TIMEOUT:
-                background_error = background_error or 'supervisor background heartbeat expired'
-            error = background_error or error
-            state = self.rpc_state or task['turn_state']
-            return dict(worker_alive='unknown' if background_error or self.rpc.error or self.rpc_health_error else
-                        'active' if state == 'active' else 'idle' if state in
-                        ('idle', 'completed', 'failed', 'interrupted') else 'unknown',
-                        supervisor_error=error, supervisor_busy=self.work_lock.locked())
+            thread = self.rpc.call('thread/read', {'threadId':self.task()['session_id']})['thread']
+            state = thread.get('status',{}).get('type')
+            return dict(worker_alive='active' if state=='active' else 'idle' if state=='idle' else 'unknown')
         if cmd == 'flush':
             self.drain()
-            if not request.get('guard'):
-                self.rejected = None  # an explicit flush always sends once and reports the result
-                self.limit_until = 0
             return self.flush(tuple(request['guard']) if request.get('guard') else None)
         if cmd == 'interrupt':
             task=self.task()
@@ -590,205 +481,11 @@ class Supervisor:
             return dict(status='registered')
         raise ValueError('unknown control command')
 
-    def maintain(self):
-        """Periodic work. Any failure (TimeoutError included) is recorded and backed off, never raised."""
-        try:
-            self.drain()
-            if time.monotonic() >= self.health_refresh_at:
-                self.health_refresh_at = time.monotonic() + 2
-                try:
-                    thread = self.rpc.call('thread/read', {'threadId':self.task()['session_id']}, timeout=2)['thread']
-                    self.rpc_state = thread.get('status', {}).get('type')
-                    self.rpc_health_error = None
-                except Exception as exc:
-                    self.rpc_health_error = f'{type(exc).__name__}: {exc}'
-                    raise
-            self.collect_quota()  # Single-flight TTL also refreshes idle workers, without inference.
-            self.handle_deferred_limit()
-            self.reconcile_if_needed()
-            if self.deferred_flush:
-                if not self.auto_paused():
-                    self.flush(guard=self.deferred_flush)
-                self.deferred_flush = None
-            # Pending text is durable: delivery must not depend on another client flush
-            # or on a completion event observed by this particular supervisor.
-            if not self.reconcile_pending and store.pending_answer_count(self.con, self.task_id) \
-                    and not self.auto_paused():
-                self.flush()
-            self.handle_deferred_limit()
-            # Viewer death releases human ownership; an idle FIFO can then flush.
-            had=self.con.execute('SELECT 1 FROM worker_viewers WHERE task_id=? AND generation=?',
-                                 (self.task_id,self.generation)).fetchone()
-            if had and not self.viewers():
-                self.deferred_flush = (self.generation,self.task()['session_id'],
-                                       self.task()['last_completed_turn'])
-            if not self.reconcile_pending and not self.deferred_flush and self.rpc_health_error is None \
-                    and self.rejected is None and time.monotonic() >= self.limit_until:
-                self.maintenance_error = None
-                self.backoff = 0
-                self.clear_note()
-        except Exception as exc:
-            self.fail_housekeeping(exc)
-
-    def auto_paused(self):
-        """True while a rate-limit pause runs, or while the pending answers are exactly the ones the server
-        refused (any change to those resumes)."""
-        if time.monotonic() < self.limit_until:
-            return True
-        if self.rejected is not None and frozenset(r['id'] for r in store.pending_answers(
-                self.con, self.task_id)) != self.rejected:
-            self.rejected = None
-        return self.rejected is not None
-
-    def fail_housekeeping(self, exc):
-        """Record why background work failed and delay the next attempt (0.2s doubling to 5s)."""
-        error = f'{type(exc).__name__}: {exc}'
-        self.maintenance_error = error
-        self.backoff = min(5, self.backoff * 2 or .2)
-        self.housekeeping_at = time.monotonic() + self.backoff
-        self.set_owned_note(f'app-server supervisor: {error}')
-
-    def set_owned_note(self, note):
-        try:
-            # Persist exact ownership in the same transaction as the note. A replacement
-            # supervisor can recover it; no prefix matching can claim a foreign note.
-            with store.immediate(self.con):
-                owned = self.con.execute(
-                    'SELECT note FROM worker_supervisor_notes WHERE task_id=? AND generation=?',
-                    (self.task_id, self.generation)).fetchone()
-                changed = self.con.execute(
-                    "UPDATE tasks SET note=? WHERE id=? AND generation=? AND backend='app-server' "
-                    "AND status<>'closed' AND (note IS NULL OR note='' OR note=?) AND note IS NOT ?",
-                    (note, self.task_id, self.generation, owned['note'] if owned else None, note)).rowcount
-                if changed:
-                    self.con.execute('INSERT OR REPLACE INTO worker_supervisor_notes VALUES(?,?,?)',
-                                     (self.task_id, self.generation, note))
-        except Exception:
-            pass  # the note is best effort; health still reports maintenance_error
-
-    def clear_note(self):
-        """Recovery removes only the durable exact note owned by this task attempt."""
-        try:
-            with store.immediate(self.con):
-                self.con.execute("UPDATE tasks SET note=NULL WHERE id=? AND generation=? AND status<>'closed' "
-                                 "AND note=(SELECT note FROM worker_supervisor_notes WHERE task_id=? AND generation=?)",
-                                 (self.task_id, self.generation, self.task_id, self.generation))
-                self.con.execute('DELETE FROM worker_supervisor_notes WHERE task_id=? AND generation=?',
-                                 (self.task_id, self.generation))
-        except Exception:
-            pass
-
-    def housekeep(self, task):
-        """Server liveness, reconnect, reconcile and maintenance. False means the server is gone."""
-        if self.server.poll() is not None:
-            self.update(turn_state='dead')
-            self.fail_housekeeping(RuntimeError('task app-server exited; pending retained'))
-            return False
-        if self.rpc.error:
-            self.update(turn_state='unknown')
-            if self.maintenance_error is None:
-                self.fail_housekeeping(self.rpc.error)
-            if time.monotonic()<self.reconnect_at:
-                return True
-            self.reconnect_at=time.monotonic()+2
-            self.rpc.close();self.rpc=RPC(task['endpoint'])
-            self.history_scan = None
-            self.health_refresh_at = 0
-            self.reconcile_pending = True
-        self.maintain()
-        return True
-
-    def serve(self, listener):
-        try:
-            peer,_=listener.accept()
-        except socket.timeout:
-            return
-        # A control RPC can itself be slow. Its peer thread must not hold accept up.
-        threading.Thread(target=self.serve_peer, args=(peer,), daemon=True).start()
-
-    def serve_peer(self, peer):
-        try:
-            with peer:
-                peer.settimeout(2)
-                with peer.makefile('r') as stream:
-                    request=json.loads(stream.readline(1024*1024))
-                acquired = False
-                try:
-                    if request.get('command') == 'health':
-                        reply = self.command(request)
-                    else:
-                        interrupt = request.get('command') == 'interrupt'
-                        # Urgent: wait for the lane (bounded) instead of reporting a busy that nobody retries.
-                        acquired = self.work_lock.acquire(timeout=INTERRUPT_LOCK_WAIT) if interrupt \
-                            else self.work_lock.acquire(blocking=False)
-                        if acquired:
-                            reply = self.command(request)
-                        elif request.get('generation') != self.generation or not self.current():
-                            raise ValueError('superseded attempt')
-                        elif interrupt:
-                            reply = dict(status='failed', interrupted=False, delivered=0, not_sent=True,
-                                         pending=store.pending_answer_count(self.con, self.task_id),
-                                         error='interrupt not delivered: supervisor busy; retry', supervisor_busy=True)
-                        elif request.get('command') != 'flush':
-                            raise RuntimeError('supervisor busy; retry control later')
-                        else:
-                            if request.get('command') == 'flush' and not request.get('guard'):
-                                self.rejected = None  # explicit flush lifts the pause; the next tick sends once
-                                self.limit_until = 0
-                            reply = dict(status='queued', interrupted=False, delivered=0,
-                                         pending=store.pending_answer_count(self.con, self.task_id),
-                                         reason='supervisor busy; text retained; will be delivered automatically',
-                                         supervisor_busy=True, supervisor_error=self.maintenance_error)
-                except Exception as exc:
-                    reply={'exception':f'{type(exc).__name__}: {exc}'}
-                finally:
-                    if acquired:
-                        self.work_lock.release()
-                peer.sendall((json.dumps(reply)+'\n').encode())
-        except (OSError, ValueError):
-            pass
-        finally:
-            if hasattr(self.connections, 'con'):
-                self.connections.con.close()
-
-    def background(self, task, stop):
-        try:
-            while not stop.is_set() and not self.stopping:
-                self.background_heartbeat = time.monotonic()
-                if time.monotonic() >= self.housekeeping_at and self.work_lock.acquire(blocking=False):
-                    try:
-                        if not self.current() or not self.housekeep(task):
-                            self.stopping = True
-                    except Exception as exc:
-                        self.fail_housekeeping(exc)
-                    finally:
-                        self.work_lock.release()
-                stop.wait(.2)
-        except BaseException as exc:
-            # Keep control alive so Operator can inspect the failure and explicitly retry.
-            # Never restart this lane blindly: an interrupted send may be uncertain.
-            self.background_error = f'supervisor background stopped: {type(exc).__name__}: {exc}'
-        finally:
-            if not stop.is_set() and not self.stopping:
-                self.background_error = self.background_error or 'supervisor background stopped unexpectedly'
-            if hasattr(self.connections, 'con'):
-                self.connections.con.close()
-
-    def loop(self, listener, task):
-        """One serialized RPC/delivery lane; accept and health never wait for it."""
-        stop = threading.Event()
-        worker = threading.Thread(target=self.background, args=(task, stop), daemon=True)
-        worker.start()
-        try:
-            while not self.stopping and self.current():
-                self.serve(listener)
-        finally:
-            stop.set()
-            worker.join(.3)
-            # run() closes RPC to wake a pending call during process shutdown.
-
     def run(self):
-        preload()
+        try:
+            preload()
+        except Exception as exc:
+            raise RuntimeError(f'app-server supervisor preload failed: {type(exc).__name__}: {exc}') from exc
         task = self.task()
         validate(task)
         directory=Path(task['endpoint']).parent
@@ -822,7 +519,51 @@ class Supervisor:
                 result=self.send(spec['prompt'],spec['pending'])
                 if result['status']!='delivered':
                     raise RuntimeError(str(result))
-                self.loop(listener, task)
+                while not self.stopping and self.current():
+                    try:
+                        if self.server.poll() is not None:
+                            self.update(turn_state='dead',note='task app-server exited; pending retained')
+                            break
+                        if self.rpc.error:
+                            self.update(turn_state='unknown',note='RPC disconnected; pending retained')
+                            if time.monotonic()<self.reconnect_at:
+                                time.sleep(.2);continue
+                            self.reconnect_at=time.monotonic()+2
+                            self.rpc.close();self.rpc=RPC(task['endpoint'])
+                            self.reconcile()
+                        self.drain()
+                        self.collect_quota()  # Single-flight TTL also refreshes idle workers, without inference.
+                        self.handle_deferred_limit()
+                        self.reconcile_if_needed()
+                        if self.deferred_flush:
+                            self.flush(guard=self.deferred_flush)
+                            self.deferred_flush = None
+                        self.handle_deferred_limit()
+                        # Viewer death releases human ownership; an idle FIFO can then flush.
+                        had=self.con.execute('SELECT 1 FROM worker_viewers WHERE task_id=? AND generation=?',
+                                             (self.task_id,self.generation)).fetchone()
+                        if had and not self.viewers():
+                            self.deferred_flush = (self.generation,self.task()['session_id'],
+                                                   self.task()['last_completed_turn'])
+                        try:
+                            peer,_=listener.accept()
+                        except socket.timeout:
+                            continue
+                        with peer:
+                            peer.settimeout(2)
+                            with peer.makefile('r') as stream:
+                                request=json.loads(stream.readline(1024*1024))
+                            try:
+                                reply=self.command(request)
+                            except Exception as exc:
+                                reply={'exception':f'{type(exc).__name__}: {exc}'}
+                            peer.sendall((json.dumps(reply)+'\n').encode())
+                    except TimeoutError:
+                        # Close/retry owns the lock; do not flush across it or block shutdown.
+                        continue
+                    except Exception as exc:
+                        self.update(note=f'app-server supervisor: {type(exc).__name__}: {exc}')
+                        time.sleep(.2)
         finally:
             if self.rpc:
                 self.rpc.close()

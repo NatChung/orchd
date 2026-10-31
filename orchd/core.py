@@ -511,12 +511,8 @@ def _answer(con, rt, task_id, text=None, flush=False, accept=None, finished_pid=
         try:
             return app_worker.control(store.get_task(con, task_id), "flush")
         except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"
-            _, supervisor_error = app_worker.health_detail(store.get_task(con, task_id))
-            if supervisor_error:
-                error += f" (supervisor: {supervisor_error})"
             return dict(status="failed", delivered=0, pending=store.pending_answer_count(con, task_id),
-                        error=error)
+                        error=f"{type(exc).__name__}: {exc}")
     if worker_kind(task["model"]) != "codex":
         try:
             with store.task_delivery(con, [task_id]):
@@ -699,19 +695,12 @@ def interrupt(con, rt, task_id, text):
     if task["status"] == "closed":
         raise ValueError(f"task {task_id} is closed")
     if app_worker.enabled(task):
-        queued_id = store.add_message(con, task_id, store.QUEUED,
-                                      "[interrupt] Codex cancelled your running turn. Check git status and "
-                                      f"any detached jobs before continuing; run ack, then follow this correction.\n\n{text}")
+        _queue_answer(con, task_id, "[interrupt] Codex cancelled your running turn. Check git status and "
+                      f"any detached jobs before continuing; run ack, then follow this correction.\n\n{text}", None)
         try:
-            reply = app_worker.control(store.get_task(con, task_id), "interrupt",
-                                       expected_generation=task["generation"], expected_thread=task["session_id"],
-                                       expected_turn=task["active_turn"])
-            if reply.get("not_sent"):
-                # The supervisor never touched the turn (still busy after the bounded wait). A failed interrupt is
-                # not queued: the supervisor would send it automatically later, after the moment has passed.
-                con.execute("DELETE FROM messages WHERE id=? AND read_at IS NULL", (queued_id,))
-                reply["pending"] = store.pending_answer_count(con, task_id)
-            return reply
+            return app_worker.control(store.get_task(con, task_id), "interrupt",
+                                      expected_generation=task["generation"], expected_thread=task["session_id"],
+                                      expected_turn=task["active_turn"])
         except Exception as exc:
             return dict(status="failed", interrupted=False, delivered=0,
                         pending=store.pending_answer_count(con, task_id), error=str(exc))
@@ -877,9 +866,8 @@ def list_open(con, rt):
         jobs = None
     out = []
     for t in store.open_tasks(con):
-        supervisor_error = None
         if app_worker.enabled(t):
-            alive, supervisor_error = app_worker.health_detail(t)
+            alive = app_worker.health(t)
         elif worker_kind(t["model"]) == "codex":  # between turns there is no process, only a resumable thread
             alive = True if t["job_id"] and rt.pid_alive(t["job_id"]) else (
                 None if t["status"] in ("question", "done", "blocked") else False)
@@ -890,10 +878,8 @@ def list_open(con, rt):
                         auto_model=bool(t['auto_model']), auto_retry_count=t['auto_retry_count'],
                         worker_alive=alive, goal_id=t["goal_id"], goal_critical=t["goal_critical"],
                         worktree=t["worktree"], branch=t["branch"],
-                        orch_thread=t["orch_thread"], backend=t["backend"],
-                        note=(t["note"] if not supervisor_error or supervisor_error in (t["note"] or "")
-                              else f"{t['note']}; {supervisor_error}" if t["note"] else supervisor_error),
-                        supervisor_error=supervisor_error, generation=t["generation"], turn_state=t["turn_state"],
+                        orch_thread=t["orch_thread"], note=t["note"], backend=t["backend"],
+                        generation=t["generation"], turn_state=t["turn_state"],
                         uncertain_delivery=bool(con.execute("SELECT 1 FROM worker_deliveries WHERE task_id=? "
                             "AND generation IS ? AND state IN ('sending','uncertain') LIMIT 1",
                             (t["id"], t["generation"])).fetchone()),
