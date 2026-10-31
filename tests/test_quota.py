@@ -16,6 +16,109 @@ REAL_CACHE = quota.Cache
 
 
 class QuotaTest(unittest.TestCase):
+    def test_weekly_only_replaces_old_session_with_explicit_unknown(self):
+        now = datetime.datetime(2026, 11, 1, 12, tzinfo=datetime.timezone.utc).timestamp()
+        display = (Path(__file__).parent / 'fixtures/claude_usage_weekly_only.txt').read_text()
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            self._sonnet_known(cache, now - 10)
+            quota.claude_usage(cache, display, now=now)
+            status = cache.status(now=now + 1)['sonnet']
+            session, week = status['windows']
+            self.assertEqual(status['state'], 'unknown')
+            self.assertEqual((session['state'], session['used_percent'], session['reason']),
+                             ('unknown', None, 'missing Current session window'))
+            self.assertNotIn('reset_at', session)
+            self.assertEqual((week['state'], week['used_percent']), ('known', 17))
+            self.assertEqual([w['observed_at'] for w in status['windows']], [now, now])
+
+    def test_weekly_only_auto_uses_known_window_and_reports_missing_session(self):
+        now = datetime.datetime(2026, 11, 1, 12, tzinfo=datetime.timezone.utc).timestamp()
+        display = (Path(__file__).parent / 'fixtures/claude_usage_weekly_only.txt').read_text()
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            for sol, week, limited, expected in [(60, 17, (), 'sonnet'), (10, 17, (), 'terra'),
+                    (95, 17, (), 'sonnet'), (60, 95, (), 'terra'),
+                    (10, 17, ('sol',), 'sonnet'), (60, 17, ('sonnet',), 'terra')]:
+                with self.subTest(sol=sol, week=week, limited=limited):
+                    quota.claude_usage(cache, display.replace('17%', f'{week}%'), now=now)
+                    cache.codex({'rateLimits': {'primary': {'usedPercent': sol,
+                        'windowDurationMins': 300, 'resetsAt': now + 10000}}}, now=now)
+                    for applied in (True, False):
+                        result = quota.shadow(cache.status(now=now), now=now, applied=applied,
+                                              recent_limited=limited)
+                        self.assertEqual(result['selected_alias'], expected)
+                        self.assertIn('missing Current session window', result['reason'])
+
+    def test_independent_usage_windows_reject_invalid_fields_without_fabrication(self):
+        now = datetime.datetime(2026, 11, 1, 12, tzinfo=datetime.timezone.utc).timestamp()
+        week = (Path(__file__).parent / 'fixtures/claude_usage_weekly_only.txt').read_text()
+        valid = 'Current session: 5% used · resets Nov 1 at 9pm (Asia/Taipei)'
+        bad = ['Current session: 5% used · resets tomorrow', valid.replace('5%', '101%'),
+               valid.replace('Nov 1', 'Nov 9'), valid.replace('9pm', '13pm'),
+               valid.replace('Taipei', 'PrivateZone'), valid.replace('Nov 1', 'Nov 32'),
+               valid.replace('9pm', '9:99pm'), valid.replace('Current session', '目前工作階段')]
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            for line in bad:
+                with self.subTest(line=line):
+                    quota.claude_usage(cache, line + '\n' + week, now=now)
+                    session, weekly = cache.status(now=now)['sonnet']['windows']
+                    self.assertEqual((session['state'], session['used_percent']), ('unknown', None))
+                    self.assertNotIn('reset_at', session)
+                    self.assertEqual(weekly['used_percent'], 17)
+                    with self.assertRaises(ValueError):
+                        quota.claude_usage(cache, line, now=now)
+            quota.claude_usage(cache, valid, now=now)
+            session, weekly = cache.status(now=now)['sonnet']['windows']
+            self.assertEqual(session['used_percent'], 5)
+            self.assertEqual(weekly['reason'], 'missing Current week (all models) window')
+
+    def test_partial_probe_failure_and_complete_recovery_preserve_diagnostics(self):
+        import subprocess
+        now = datetime.datetime(2026, 11, 1, 12, tzinfo=datetime.timezone.utc).timestamp()
+        week = (Path(__file__).parent / 'fixtures/claude_usage_weekly_only.txt').read_text()
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            displays = [week, 'PRIVATE unsupported', week +
+                        'Current session: 5% used · resets Nov 1 at 9pm (Asia/Taipei)']
+            for index, display in enumerate(displays):
+                result = subprocess.CompletedProcess([], 0, json.dumps(dict(result=display,
+                    num_turns=0, local_command='usage', duration_api_ms=0)), '')
+                stamp = now + index * 10
+                with patch.object(quota, '_run', return_value=result), \
+                        patch.object(quota.time, 'time', return_value=stamp):
+                    self.assertEqual(quota.probe(cache, 'sonnet'), index != 1)
+                status = cache.status(now=stamp)['sonnet']
+                self.assertEqual(status['windows'][1]['observed_at'], now if index == 1 else stamp)
+                self.assertEqual(status['refresh']['last_success_at'], now if index == 1 else stamp)
+                self.assertEqual(status['refresh']['error'] is not None, index == 1)
+                self.assertNotIn('PRIVATE', json.dumps(status))
+            self.assertEqual(status['state'], 'known')
+            self.assertIsNotNone(status['refresh']['history'][-2]['error'])
+            self.assertNotIn('missing', json.dumps(status['windows']))
+
+    def test_weekly_only_auto_aliases_expiry_and_unknown_fallback(self):
+        from orchd import models
+        now = datetime.datetime(2026, 11, 1, 12, tzinfo=datetime.timezone.utc).timestamp()
+        week = (Path(__file__).parent / 'fixtures/claude_usage_weekly_only.txt').read_text()
+        catalog = {'custom_codex': dict(models.DEFAULTS['terra']),
+                   'custom_claude': dict(models.DEFAULTS['sonnet'])}
+        with tempfile.TemporaryDirectory() as tmp, patch.object(models, 'catalog', return_value=catalog):
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            quota.claude_usage(cache, week, now=now)
+            cache.codex({'rateLimits': {'primary': {'usedPercent': 60,
+                'windowDurationMins': 300, 'resetsAt': now + 10000}}}, now=now)
+            snap = cache.status(now=now)
+            self.assertEqual(quota.shadow(snap, applied=True)['selected_alias'], 'custom_claude')
+            self.assertEqual(quota.shadow(snap, backend='app-server', applied=True)['selected_alias'],
+                             'custom_codex')
+            # Expired receipts cannot qualify as partial known capacity.
+            stale = cache.status(now=now + quota.TTL + 1)
+            result = quota.shadow(stale, applied=True)
+            self.assertEqual(result['selected_alias'], 'custom_codex')
+            self.assertIn('fallback', result['reason'])
+
     def test_claude_cli_small_future_observation_is_known_with_zero_age(self):
         now = datetime.datetime(2026, 12, 31, 22, 0, tzinfo=datetime.timezone.utc).timestamp()
         display = ('Current session: 5% used · resets Jan 1 at 1am (UTC)\n'

@@ -128,6 +128,23 @@ different providers are not equivalent token quantities.
   retained separately; opus and overage are ignored. No SDK dependency or paid
   request is added. SDK receipts remain supported independently of the native worker collector below.
 
+Claude CLI `/usage` parses the session and all-models week independently. A
+partial display replaces the entire subscription receipt: valid windows get a
+new observation time; absent or invalid windows become unknown with a bounded
+reason such as `missing Current session window`. No percentage or reset is
+inferred for those windows. If no window parses, the probe fails and retains
+previous receipts with their original ages and sanitized refresh diagnostics.
+A later complete display replaces the missing-window reasons; refresh history
+remains bounded.
+
+For ordinary auto selection, fresh partial CLI receipts use only their known
+windows for the remaining-percent comparison and the 95% threshold. The provider
+status stays unknown to show incomplete telemetry, and the selection reason lists
+unknown-window reasons even when Codex wins. This is provisional capacity, with
+no guarantee about the missing window. Expired receipts and wholly unknown
+providers retain the existing fallback. Review pairing still requires complete
+known capacity, and app-server restrictions remain in force.
+
 ## Shadow policy
 
 Explicit/omitted-model dispatch has `applied=false` and policy `quota-shadow-v1`.
