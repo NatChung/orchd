@@ -1,6 +1,8 @@
 import json
 import os
+import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -65,6 +67,125 @@ class DoctorCase(unittest.TestCase):
                           which=which or (lambda n: n), profile=profile)
         d.run_all()
         return d, {c.name: c for c in d.checks}
+
+
+class McpLaunchCheck(DoctorCase):
+    def write_cfg(self, folder, server, command, args, extra=""):
+        (folder / ".codex").mkdir(parents=True, exist_ok=True)
+        (folder / ".codex" / "config.toml").write_text(
+            f'{extra}[mcp_servers.{server}]\ncommand = {json.dumps(command, ensure_ascii=False)}\nargs = {json.dumps(args, ensure_ascii=False)}\n')
+
+    def script(self, name, first_line):
+        path = Path(self.tmp.name) / name
+        path.write_text(first_line + "\nexec true\n")
+        path.chmod(0o755)
+        return str(path)
+
+    def test_bare_orchd_command_in_a_managed_config_warns_with_the_fix(self):
+        legacy = self.script("orchd", "#!/usr/bin/env python3")
+        self.write_cfg(self.orch, "orchd", legacy, ["mcp"])
+        self.write_cfg(self.home / "orch" / "interface", "orchd_entry", legacy, ["mcp", "--role", "entry"])
+        _, by = self.run_doctor()
+        check = by["Codex MCP launch"]
+        self.assertEqual(check.status, doctor.WARN)
+        self.assertIn("orchd", check.detail)
+        self.assertIn("orchd_entry", check.detail)
+        self.assertIn(json.dumps(sys.executable), check.fix)
+        self.assertIn(json.dumps([legacy, "mcp", "--role", "entry"]), check.fix)
+
+    def test_fix_edits_one_table_and_never_tells_the_user_to_delete_the_config(self):
+        legacy = self.script("orchd", "#!/usr/bin/env python3")
+        self.write_cfg(self.orch, "orchd", legacy, ["mcp"], extra='model = "mine"\n\n[custom]\nkeep = 1\n\n')
+        _, by = self.run_doctor()
+        fix = by["Codex MCP launch"].fix
+        self.assertNotIn("Delete", fix)
+        self.assertNotIn("$", fix)  # no unresolved template placeholder
+        self.assertIn("only inside [mcp_servers.orchd]", fix)
+        self.assertIn("every other setting", fix)
+
+    @needs_toml
+    def test_following_the_fix_keeps_custom_settings_and_clears_the_warning(self):
+        for name in ("orchd", "orchd-🚀"):
+            with self.subTest(name=name):
+                legacy = self.script(name, "#!/usr/bin/env python3")
+                extra = 'model = "mine"\n\n[custom]\nkeep = 1\n\n'
+                self.write_cfg(self.orch, "orchd", legacy, ["mcp"], extra=extra)
+                cfg = self.orch / ".codex" / "config.toml"
+                cfg.write_text(cfg.read_text() + 'tools = ["one"]\ntimeout = 42\n'
+                               '[mcp_servers.orchd.env]\nKEEP = "yes"\n')
+                before = doctor.tomllib.loads(cfg.read_text())
+                _, by = self.run_doctor()
+                check = by["Codex MCP launch"]
+                self.assertEqual(check.status, doctor.WARN)
+                # Apply the literal values doctor printed, rather than recreating its fix.
+                command, args = re.search(r"set command = (.+) and args = (\[.*\])", check.fix).groups()
+                updated = re.sub(r"^command = .*", lambda m: "command = " + command,
+                                 cfg.read_text(), flags=re.M)
+                updated = re.sub(r"^args = .*", lambda m: "args = " + args, updated, flags=re.M)
+                cfg.write_text(updated)
+                data = doctor.tomllib.loads(updated)
+                expected = before["mcp_servers"]["orchd"]
+                expected.update(command=sys.executable, args=[legacy, "mcp"])
+                self.assertEqual(data, before)
+                _, by = self.run_doctor()
+                self.assertEqual(by["Codex MCP launch"].status, doctor.PASS)
+
+    def test_interpreter_launch_passes(self):
+        self.write_cfg(self.orch, "orchd", sys.executable, ["/x/bin/orchd", "mcp"])
+        _, by = self.run_doctor()
+        self.assertEqual(by["Codex MCP launch"].status, doctor.PASS)
+
+    def test_other_python_interpreter_warns_and_fix_preserves_script_args(self):
+        script = self.script("needs-psutil.py", "#!/usr/bin/env python3")
+        Path(script).write_text("import psutil\n")
+        self.write_cfg(self.orch, "orchd", "/usr/bin/python3", [script, "mcp"])
+        _, by = self.run_doctor()
+        check = by["Codex MCP launch"]
+        self.assertEqual(check.status, doctor.WARN)
+        self.assertIn(json.dumps([script, "mcp"]), check.fix)
+        self.assertNotIn(json.dumps(["/usr/bin/python3", script, "mcp"]), check.fix)
+
+    def test_path_command_resolves_the_actual_script(self):
+        legacy = self.script("orchd", "#!/usr/bin/python3")
+        self.write_cfg(self.orch, "orchd", "orchd", ["mcp"])
+        _, by = self.run_doctor(which=lambda n: legacy if n == "orchd" else n)
+        self.assertEqual(by["Codex MCP launch"].status, doctor.WARN)
+
+    def test_path_python_and_env_shebang_use_the_resolved_interpreter(self):
+        for command in ("python3", self.script("env-orchd", "#!/usr/bin/env -S python3 -u")):
+            with self.subTest(command=command):
+                self.write_cfg(self.orch, "orchd", command, ["mcp"])
+                for interpreter, status in ((sys.executable, doctor.PASS), ("/other/bin/python3", doctor.WARN)):
+                    _, by = self.run_doctor(which=lambda n: interpreter if n == "python3" else n)
+                    self.assertEqual(by["Codex MCP launch"].status, status)
+
+    def test_distinct_venvs_sharing_a_python_binary_are_not_the_same_interpreter(self):
+        other = Path(self.tmp.name) / "other-venv"
+        (other / "bin").mkdir(parents=True)
+        (other / "pyvenv.cfg").write_text("include-system-site-packages = false\n")
+        executable = other / "bin" / "python3"
+        executable.symlink_to(Path(sys.executable).resolve())
+        self.write_cfg(self.orch, "orchd", str(executable), ["/x/bin/orchd", "mcp"])
+        _, by = self.run_doctor()
+        self.assertEqual(by["Codex MCP launch"].status, doctor.WARN)
+
+    def test_native_command_passes(self):
+        self.write_cfg(self.orch, "orchd", "/bin/echo", ["mcp"])
+        _, by = self.run_doctor()
+        self.assertEqual(by["Codex MCP launch"].status, doctor.PASS)
+
+    def test_healthy_shell_wrapper_with_mcp_arg_passes(self):
+        wrapper = self.script("wrapper", "#!/bin/sh")
+        self.write_cfg(self.orch, "orchd", wrapper, ["mcp"])
+        self.write_cfg(self.home / "orch" / "interface", "orchd_entry", wrapper, ["mcp", "--role", "entry"])
+        _, by = self.run_doctor()
+        self.assertEqual(by["Codex MCP launch"].status, doctor.PASS)
+
+    def test_script_whose_shebang_is_the_orchd_interpreter_passes(self):
+        own = self.script("orchd", f"#!{sys.executable}")
+        self.write_cfg(self.orch, "orchd", own, ["mcp"])
+        _, by = self.run_doctor()
+        self.assertEqual(by["Codex MCP launch"].status, doctor.PASS)
 
 
 class OrchdCommandCheck(DoctorCase):
