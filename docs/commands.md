@@ -172,6 +172,8 @@ is created `0600` in a `0700` directory.
 which one chose the file (`file-source`).
 `config show` also reports `worker-backend` with source `model-default`: `app-server` for effective `sol`, `exec` for `sonnet` (its existing Claude runtime). This derived field is read-only, not a config key; override it per dispatch with `backend=exec`. Retry retains a stored Codex attempt backend unless explicitly overridden. Existing exec workers are not migrated and can open a viewer only between turns. New app-server workers and Claude workers support native attach while busy or idle; app-server FIFO answers/followups wait until all viewer windows close.
 
+`answer` and `followup` on a Claude exec worker that has already ended (its socket is gone) fail with `the Claude worker has ended` (MCP `answer`/`followup` are the only entry points; there is no separate CLI command, so there is one message). Nothing was delivered; the text is not discarded but stored as a queued answer, and `retry` on that task starts a new worker that keeps the context and receives the queued answers. For `followup`, the acceptance event is marked `failed` while the instruction stays queued. Orchd never retries or respawns by itself, and Codex workers are unchanged.
+
 Review always uses the other vendor than the author and has no setting.
 
 ```bash

@@ -432,7 +432,17 @@ def _deliver_to_claude(con, rt, task, text, keep_sent=False, entry_reply_id=None
     if not task["socket"] or not task["session_id"]:
         raise ValueError(f"task {task_id} has no running worker"
                          + (f"; {len(pending)} queued answer(s) stay pending" if pending else ""))
-    rt.send_uds(task["socket"], task["session_id"], "\n\n".join(f"[orchd answer {task_id}]\n{b}" for b in bodies))
+    try:
+        rt.send_uds(task["socket"], task["session_id"], "\n\n".join(f"[orchd answer {task_id}]\n{b}" for b in bodies))
+    except (FileNotFoundError, ConnectionRefusedError) as gone:  # nobody listens: the worker has ended
+        if text is not None:  # keep it for `retry`, which hands pending answers to the new worker
+            store.add_message(con, task_id, store.QUEUED, text, entry_reply_id=entry_reply_id,
+                              evidence=json.dumps(dict(followup_id=followup_id)) if followup_id is not None else None)
+        kept = f" ({len(pending)} earlier queued answer(s) also wait)" if pending else ""
+        raise ValueError(f"task {task_id}: the Claude worker has ended (its socket is gone), so nothing was delivered. "
+                         + ("Your text was kept as a queued answer" if text is not None else "Nothing new was queued")
+                         + f"{kept}; run retry on this task to start a new worker that keeps the context and "
+                         "receives the queued answers.") from gone
     try:
         with store.immediate(con):
             store.mark_read(con, [row["id"] for row in pending])

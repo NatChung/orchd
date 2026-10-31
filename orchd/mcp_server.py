@@ -120,7 +120,10 @@ TOOLS = [
                     "flush=true instead of resending the text. failed with uncertain=true: a turn did start but its "
                     "receipt could not be written, so it was stopped (or the error says MAY STILL BE RUNNING). The "
                     "answers already reached that worker but still read as pending, so a later flush sends them "
-                    "again: check its log or wait for its report first. flush=true with no text also just shows pending.",
+                    "again: check its log or wait for its report first. flush=true with no text also just shows pending. "
+                    "A Claude worker that has ended (its socket is gone) raises \"the Claude worker has ended\": "
+                    "nothing was delivered, the text is kept as a queued answer, and retry on the task starts a new "
+                    "worker that keeps the context and receives it.",
      "inputSchema": {"type": "object", "required": ["task_id"], "properties": {
          "task_id": {"type": "string"}, "text": {"type": "string", "description": "The answer; omit only with flush"},
          "flush": {"type": "boolean", "description": "Send queued answers to an idle Codex worker"},
@@ -174,7 +177,8 @@ TOOLS = [
                     "with delivered and pending counts, and errors if it could not be sent (nothing is lost if "
                     "queued). A delivered result with record_error was sent; only orchd's bookkeeping failed, so do "
                     "not resend it. If the task lock stays busy (close, retry or adopt running) it raises and nothing "
-                    "is accepted: call again later. The worker's earlier report and events are kept; it acks, may send progress, and ends "
+                    "is accepted: call again later. A Claude worker that has ended raises \"the Claude worker has ended\" "
+                    "(instruction kept as a queued answer; run retry to continue). The worker's earlier report and events are kept; it acks, may send progress, and ends "
                     "with a new report, which wakes you as usual.",
      "inputSchema": {"type": "object", "required": ["task_id", "message"], "properties": {
          "task_id": {"type": "string"},
