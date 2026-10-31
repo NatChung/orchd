@@ -108,16 +108,22 @@ def control(task, command, timeout=25, **fields):
         return result
 
 
-def health(task):
+def health_detail(task):
+    """(worker_alive, supervisor_error). The error is why a live supervisor is degraded; None when it is not."""
     try:
         sup, server = process(task['supervisor_identity']), process(task['server_identity'])
         if sup is None and server is None:
-            return 'dead'
+            return 'dead', None
         if sup is None or server is None:
-            return 'unknown'
-        return control(task, 'health', timeout=3)['worker_alive']
-    except Exception:
-        return 'unknown'
+            return 'unknown', None
+        reply = control(task, 'health', timeout=3)
+        return reply['worker_alive'], reply.get('supervisor_error')
+    except Exception as exc:
+        return 'unknown', f'control: {type(exc).__name__}: {exc}'
+
+
+def health(task):
+    return health_detail(task)[0]
 
 
 def stop(con, task):
@@ -186,7 +192,10 @@ def app_server_command(task):
 
 def preload():
     """Import everything the supervisor loads lazily, so the worker editing orchd on disk cannot skew it later."""
-    from . import core, quota, routing  # noqa: F401
+    # config, models and paths are reached through Runtime() and core.auto_retry_pending; the isolation test walks
+    # those paths and fails if anything else is still imported late.
+    from . import config, core, models, paths, quota, routing  # noqa: F401
+    from .runtime import Runtime  # noqa: F401
 
 
 class Supervisor:
@@ -203,6 +212,9 @@ class Supervisor:
         self.deferred_flush = None
         self.deferred_limit = None
         self.reconcile_pending = False
+        self.housekeeping_at = 0
+        self.written_note = None
+        self.backoff = 0
 
     def task(self):
         return store.get_task(self.con, self.task_id)
@@ -304,7 +316,7 @@ class Supervisor:
         turns, cursor = [], None
         while True:
             page = self.rpc.call('thread/turns/list', {'threadId':thread_id, 'cursor':cursor, 'limit':100,
-                                                      'sortDirection':'asc', 'itemsView':'full'})
+                                                      'sortDirection':'asc', 'itemsView':'full'}, timeout=5)
             turns.extend(page['data'])
             cursor = page.get('nextCursor')
             if not cursor:
@@ -317,7 +329,7 @@ class Supervisor:
         positively matching client id is sufficient to finish its durable receipt.
         """
         task = self.task()
-        self.rpc.call('thread/resume', {'threadId': task['session_id']})
+        self.rpc.call('thread/resume', {'threadId': task['session_id']}, timeout=5)
         turns = self.history(task['session_id'])
         for delivery in self.con.execute("SELECT * FROM worker_deliveries WHERE task_id=? AND generation=? "
                                          "AND state IN ('sending','uncertain')", (self.task_id,self.generation)).fetchall():
@@ -453,10 +465,15 @@ class Supervisor:
             raise ValueError('superseded attempt')
         cmd = request['command']
         if cmd == 'health':
-            thread = self.rpc.call('thread/read', {'threadId':self.task()['session_id']})['thread']
-            state = thread.get('status',{}).get('type')
+            error = self.maintenance_error
+            try:
+                thread = self.rpc.call('thread/read', {'threadId':self.task()['session_id']}, timeout=2)['thread']
+                state = thread.get('status',{}).get('type')
+            except Exception as exc:  # a dead/stuck RPC must still leave the control socket answering
+                state = None
+                error = error or f'{type(exc).__name__}: {exc}'
             return dict(worker_alive='active' if state=='active' else 'idle' if state=='idle' else 'unknown',
-                        supervisor_error=self.maintenance_error)
+                        supervisor_error=error)
         if cmd == 'flush':
             self.drain()
             return self.flush(tuple(request['guard']) if request.get('guard') else None)
@@ -481,7 +498,7 @@ class Supervisor:
         raise ValueError('unknown control command')
 
     def maintain(self):
-        """Periodic work. A failure is recorded, never allowed to stop the loop from serving control requests."""
+        """Periodic work. Any failure (TimeoutError included) is recorded and backed off, never raised."""
         try:
             self.drain()
             self.collect_quota()  # Single-flight TTL also refreshes idle workers, without inference.
@@ -497,12 +514,82 @@ class Supervisor:
             if had and not self.viewers():
                 self.deferred_flush = (self.generation,self.task()['session_id'],
                                        self.task()['last_completed_turn'])
-            self.maintenance_error = None
-        except TimeoutError:
-            raise
+            if not self.reconcile_pending and not self.deferred_flush:  # work still owed means the failure stands
+                self.maintenance_error = None
+                self.backoff = 0
+                self.clear_note()
         except Exception as exc:
-            self.maintenance_error = f'{type(exc).__name__}: {exc}'
-            self.update(note=f'app-server supervisor: {self.maintenance_error}')
+            self.fail_housekeeping(exc)
+
+    def fail_housekeeping(self, exc):
+        """Record why background work failed and delay the next attempt (0.2s doubling to 5s)."""
+        error = f'{type(exc).__name__}: {exc}'
+        changed = error != self.maintenance_error
+        self.maintenance_error = error
+        self.backoff = min(5, self.backoff * 2 or .2)
+        self.housekeeping_at = time.monotonic() + self.backoff
+        if changed:  # one write per distinct failure, not one per retry
+            try:
+                self.written_note = f'app-server supervisor: {error}'
+                self.update(note=self.written_note)
+            except Exception:
+                pass  # the note is best effort; health still reports maintenance_error
+
+    def clear_note(self):
+        """Recovery removes only the note this supervisor wrote, never a later one from delivery or rate limits."""
+        if self.written_note is None:
+            return
+        try:
+            if self.task()['note'] == self.written_note:
+                self.update(note=None)
+        except Exception:
+            pass
+        self.written_note = None
+
+    def housekeep(self, task):
+        """Server liveness, reconnect, reconcile and maintenance. False means the server is gone."""
+        if self.server.poll() is not None:
+            self.update(turn_state='dead',note='task app-server exited; pending retained')
+            return False
+        if self.rpc.error:
+            self.update(turn_state='unknown',note='RPC disconnected; pending retained')
+            if time.monotonic()<self.reconnect_at:
+                return True
+            self.reconnect_at=time.monotonic()+2
+            self.rpc.close();self.rpc=RPC(task['endpoint'])
+            self.reconcile()
+        self.maintain()
+        return True
+
+    def serve(self, listener):
+        try:
+            peer,_=listener.accept()
+        except socket.timeout:
+            return
+        with peer:
+            peer.settimeout(2)
+            try:
+                with peer.makefile('r') as stream:
+                    request=json.loads(stream.readline(1024*1024))
+                try:
+                    reply=self.command(request)
+                except Exception as exc:
+                    reply={'exception':f'{type(exc).__name__}: {exc}'}
+                peer.sendall((json.dumps(reply)+'\n').encode())
+            except (OSError, ValueError):
+                pass  # a bad or vanished client must not stop the loop
+
+    def loop(self, listener, task):
+        """Control is served first on every pass; background work runs after it and can only delay itself."""
+        while not self.stopping and self.current():
+            self.serve(listener)
+            if time.monotonic() < self.housekeeping_at:
+                continue
+            try:
+                if not self.housekeep(task):
+                    break
+            except Exception as exc:
+                self.fail_housekeeping(exc)
 
     def run(self):
         preload()
@@ -539,38 +626,7 @@ class Supervisor:
                 result=self.send(spec['prompt'],spec['pending'])
                 if result['status']!='delivered':
                     raise RuntimeError(str(result))
-                while not self.stopping and self.current():
-                    try:
-                        if self.server.poll() is not None:
-                            self.update(turn_state='dead',note='task app-server exited; pending retained')
-                            break
-                        if self.rpc.error:
-                            self.update(turn_state='unknown',note='RPC disconnected; pending retained')
-                            if time.monotonic()<self.reconnect_at:
-                                time.sleep(.2);continue
-                            self.reconnect_at=time.monotonic()+2
-                            self.rpc.close();self.rpc=RPC(task['endpoint'])
-                            self.reconcile()
-                        self.maintain()
-                        try:
-                            peer,_=listener.accept()
-                        except socket.timeout:
-                            continue
-                        with peer:
-                            peer.settimeout(2)
-                            with peer.makefile('r') as stream:
-                                request=json.loads(stream.readline(1024*1024))
-                            try:
-                                reply=self.command(request)
-                            except Exception as exc:
-                                reply={'exception':f'{type(exc).__name__}: {exc}'}
-                            peer.sendall((json.dumps(reply)+'\n').encode())
-                    except TimeoutError:
-                        # Close/retry owns the lock; do not flush across it or block shutdown.
-                        continue
-                    except Exception as exc:
-                        self.update(note=f'app-server supervisor: {type(exc).__name__}: {exc}')
-                        time.sleep(.2)
+                self.loop(listener, task)
         finally:
             if self.rpc:
                 self.rpc.close()

@@ -164,7 +164,7 @@ class AppWorkerHealthTest(AppBase):
             self.assertEqual(assess("running",state,False)["worker_health"],expected)
 
     def test_list_shows_backend_state_and_uncertain_delivery(self):
-        with patch("orchd.app_worker.health",return_value="idle"):
+        with patch("orchd.app_worker.health_detail",return_value=("idle",None)):
             result=core.list_open(self.con,self.rt)[0]
         self.assertEqual(result["backend"],"app-server")
         self.assertEqual(result["worker_alive"],"idle")

@@ -870,8 +870,9 @@ def list_open(con, rt):
         jobs = None
     out = []
     for t in store.open_tasks(con):
+        supervisor_error = None
         if app_worker.enabled(t):
-            alive = app_worker.health(t)
+            alive, supervisor_error = app_worker.health_detail(t)
         elif worker_kind(t["model"]) == "codex":  # between turns there is no process, only a resumable thread
             alive = True if t["job_id"] and rt.pid_alive(t["job_id"]) else (
                 None if t["status"] in ("question", "done", "blocked") else False)
@@ -882,8 +883,10 @@ def list_open(con, rt):
                         auto_model=bool(t['auto_model']), auto_retry_count=t['auto_retry_count'],
                         worker_alive=alive, goal_id=t["goal_id"], goal_critical=t["goal_critical"],
                         worktree=t["worktree"], branch=t["branch"],
-                        orch_thread=t["orch_thread"], note=t["note"], backend=t["backend"],
-                        generation=t["generation"], turn_state=t["turn_state"],
+                        orch_thread=t["orch_thread"], backend=t["backend"],
+                        note=(t["note"] if not supervisor_error or supervisor_error in (t["note"] or "")
+                              else f"{t['note']}; {supervisor_error}" if t["note"] else supervisor_error),
+                        supervisor_error=supervisor_error, generation=t["generation"], turn_state=t["turn_state"],
                         uncertain_delivery=bool(con.execute("SELECT 1 FROM worker_deliveries WHERE task_id=? "
                             "AND generation IS ? AND state IN ('sending','uncertain') LIMIT 1",
                             (t["id"], t["generation"])).fetchone()),
