@@ -66,6 +66,8 @@ class FakeRuntime:
     def wake_orch(self, codex_bin, thread, text):
         if self.wake_fails:
             raise OSError("queue down")
+        if not isinstance(text, str):  # the real queue takes the text as one argv string
+            raise TypeError(f"wake_orch text must be str, got {type(text).__name__}")
         self.woken.append((codex_bin, thread, text))
 
     def live_jobs(self):

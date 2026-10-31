@@ -219,14 +219,16 @@ TOOLS += [
                     "pending|delivered|failed|held|uncertain: delivered = it reached the Desktop queue, not that Operator "
                     "read or approved it; pending = not sent yet (no Desktop thread yet, or waiting behind an earlier "
                     "message), retried automatically; failed = a send was tried and errored, retried on the entry's "
-                    "next call; held = failed 3 times, no longer retried and no longer blocks later messages, use "
-                    "resend_to_nat; uncertain = it may have arrived but the receipt was not saved, never resent "
-                    f"automatically. Text over {entry.MAX_SEND_BYTES} UTF-8 bytes is rejected with an error and "
+                    "next call; held = a send failed 3 times, no longer retried and no longer blocks later messages, use "
+                    "resend_to_nat (listed in entry_status from_orch until resent); uncertain = it may have arrived but the receipt was not saved, never resent "
+                    f"automatically. Text over {entry.MAX_SEND_BYTES} UTF-8 bytes (a policy cap, same for ask_nat) is rejected with an error and "
                     "nothing is stored: split it into numbered messages (1/3, 2/3, ...).",
      "inputSchema": {"type": "object", "required": ["text"], "properties": {"text": {"type": "string"}}}},
     {"name": "resend_to_nat",
-     "description": "Retry one of your own send_to_nat/ask_nat messages whose delivery is failed or held, right now. "
-                    "A held message arrives after the messages that went out while it was held.",
+     "description": "Retry one of your own send_to_nat/ask_nat messages whose send failed (delivery failed, or held after 3 "
+                    "failed sends), right now. It arrives after the messages that went out while it was held. A queued "
+                    "ask_nat question also shows delivery held but was never sent: resend refuses it, it goes out when "
+                    "it becomes current.",
      "inputSchema": {"type": "object", "required": ["message_id"], "properties": {"message_id": {"type": "integer"}}}},
     {"name": "ask_nat",
      "description": "Ask Operator one question through the Desktop entry. Only one question is open at a time: if one is "

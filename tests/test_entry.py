@@ -412,6 +412,43 @@ class EntryTest(unittest.TestCase):
         self.assertEqual(entry.resend_to_nat(self.con, self.rt, self.orch, sent["message_id"])["delivery"],
                          "delivered")
 
+    def test_resend_refuses_a_queued_question_that_was_never_sent(self):
+        self.relay_thread_seen()
+        first = entry.ask_nat(self.con, self.rt, self.orch, "first")
+        second = entry.ask_nat(self.con, self.rt, self.orch, "second")
+        self.assertEqual(second["state"], "queued")
+        before = len(self.rt.woken)
+        with self.assertRaisesRegex(ValueError, "queued"):
+            entry.resend_to_nat(self.con, self.rt, self.orch, second["question_id"])
+        self.assertEqual(len(self.rt.woken), before)
+        row = entry._row(self.con, second["question_id"])
+        self.assertEqual((row["delivery"], row["question_state"]), ("held", "queued"))
+        self.assertEqual(entry._row(self.con, first["question_id"])["delivery"], "delivered")
+
+    def test_held_message_stays_visible_in_status_with_resend_hint(self):
+        self.relay_thread_seen()
+        self.rt.wake_fails = True
+        sent = entry.send_to_nat(self.con, self.rt, self.orch, "poison")
+        for _ in range(entry.MAX_SEND_ATTEMPTS - 1):
+            entry.deliver_outbound(self.con, self.rt, "desktop")
+        self.rt.wake_fails = False
+        self.assertEqual(entry._state(entry._row(self.con, sent["message_id"])), "held")
+        listed = entry.status(self.con, self.rt, "desktop", "desk-1")["from_orch"]
+        self.assertEqual([m["message_id"] for m in listed], [sent["message_id"]])
+        self.assertEqual(listed[0]["delivery"], "held")
+        self.assertIn("resend_to_nat", listed[0]["note"])
+        self.assertEqual(entry._state(entry._row(self.con, sent["message_id"])), "held")  # status must not mark it delivered
+        self.assertEqual(entry.resend_to_nat(self.con, self.rt, self.orch, sent["message_id"])["delivery"], "delivered")
+        self.assertEqual(entry.status(self.con, self.rt, "desktop", "desk-1")["from_orch"], [])
+
+    def test_ask_nat_over_limit_is_rejected_and_not_stored(self):
+        self.relay_thread_seen()
+        with self.assertRaisesRegex(ValueError, "at most 64000 bytes"):
+            entry.ask_nat(self.con, self.rt, self.orch, "x" * (entry.MAX_SEND_BYTES + 1))
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM entry_messages WHERE direction='out'").fetchone()[0], 0)
+        self.assertEqual(entry.MAX_SEND_BYTES, 64000)
+        self.assertIn("question_id", entry.ask_nat(self.con, self.rt, self.orch, "x" * 1000))
+
     # -- binding and permissions -----------------------------------------------------------------------
 
     def test_bind_refuses_codex_stopped_dead_and_silent_rebind(self):
