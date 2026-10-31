@@ -142,7 +142,7 @@ class CoreTest(unittest.TestCase):
         finally:
             os.environ.pop("ORCHD_HOME")
         self.assertIn("ORCHD_HOME='/tmp/iso home' ", self.rt.brief)
-        self.assertIn(f"ORCHD_HOME='/tmp/iso home' {shlex.quote(paths.orchd_executable())} ack {t['id']}", self.rt.sent[0][2])
+        self.assertIn(f"ORCHD_HOME='/tmp/iso home' {shlex.join(paths.orchd_command())} ack {t['id']}", self.rt.sent[0][2])
 
     def test_dispatch_without_thread_is_refused(self):
         with self.assertRaises(ValueError):
