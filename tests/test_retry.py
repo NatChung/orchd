@@ -387,6 +387,7 @@ class RetryReviewRegressionTest(unittest.TestCase):
 
     def test_answer_kept_after_ended_claude_worker_reaches_the_retried_worker(self):
         t = self.dispatch("sonnet")
+        self.rt.jobs = {}
 
         def gone(*args):
             raise FileNotFoundError(2, "No such file or directory", "/x/worker-abc12345.sock")
@@ -397,6 +398,20 @@ class RetryReviewRegressionTest(unittest.TestCase):
         core.retry(self.con, self.rt, t["id"], "sonnet", "worker ended")
         self.assertIn("yes please", self.rt.sent[-1][2])
         self.assertEqual(store.pending_answers(self.con, t["id"]), [])
+
+    def test_failed_claude_interrupt_is_not_sent_to_the_retried_worker(self):
+        t = self.dispatch("sonnet")
+
+        def gone(*args):
+            raise ConnectionRefusedError("refused")
+        real, self.rt.send_uds = self.rt.send_uds, gone
+        self.rt.jobs.clear()  # the daemon no longer lists the worker: ended
+        with self.assertRaisesRegex(ValueError, "interrupt was not delivered.*retry"):
+            core.interrupt(self.con, self.rt, t["id"], "STALE urgent fix")
+        self.assertEqual(store.pending_answers(self.con, t["id"]), [])
+        self.rt.send_uds = real
+        core.retry(self.con, self.rt, t["id"], "sonnet", "worker ended")
+        self.assertNotIn("STALE urgent fix", "".join(s[2] for s in self.rt.sent) + self.rt.brief)
 
     # 1. queued answers survive a cross-vendor retry: FIFO in the new prompt, one receipt each, nothing duplicated
     def test_queued_codex_answers_go_fifo_to_new_claude_worker_with_receipts(self):

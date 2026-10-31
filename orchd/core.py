@@ -419,11 +419,20 @@ class _ToClaude(Exception):
     pass
 
 
-def _deliver_to_claude(con, rt, task, text, keep_sent=False, entry_reply_id=None, followup_id=None):
+def _live_jobs(rt):
+    try:
+        return rt.live_jobs()
+    except Exception:  # a failed status probe is not proof the worker ended
+        return None
+
+
+def _deliver_to_claude(con, rt, task, text, keep_sent=False, entry_reply_id=None, followup_id=None, interrupt=False):
     """Caller holds the task lock. Queued answers left from a Codex worker go first, oldest first, then `text`,
     all in one message; the receipt (read_at + one `answer` row each) is written only after the send succeeded.
     A receipt that fails after a successful send raises, unless `keep_sent` (followup): then the result stays
-    `delivered` and carries `record_error` naming the queued rows that went out but still read as pending."""
+    `delivered` and carries `record_error` naming the queued rows that went out but still read as pending.
+    A failed send keeps `text` queued unless `interrupt`, which is never queued (see interrupt). Only a job the
+    Claude daemon no longer lists, or lists as dead, is called ended; unknown liveness is treated as alive."""
     task_id = task["id"]
     pending = store.pending_answers(con, task_id)
     bodies = [row["body"] for row in pending] + ([text] if text is not None else [])
@@ -434,15 +443,26 @@ def _deliver_to_claude(con, rt, task, text, keep_sent=False, entry_reply_id=None
                          + (f"; {len(pending)} queued answer(s) stay pending" if pending else ""))
     try:
         rt.send_uds(task["socket"], task["session_id"], "\n\n".join(f"[orchd answer {task_id}]\n{b}" for b in bodies))
-    except (FileNotFoundError, ConnectionRefusedError) as gone:  # nobody listens: the worker has ended
-        if text is not None:  # keep it for `retry`, which hands pending answers to the new worker
+    except OSError as gone:  # no socket, refused, reset, timed out: the send did not happen, so say nothing was delivered
+        ended = claude_job_alive(_live_jobs(rt), task["job_id"]) is False  # the daemon's job list, never the socket alone
+        if interrupt:  # a correction is only valid for this worker: never keep it for a replacement
+            raise ValueError(f"task {task_id}: interrupt was not delivered ({type(gone).__name__}: {gone}) and was not "
+                             "queued, so it will never be sent later. "
+                             + ("The Claude worker has ended: run retry on this task and give the instruction again."
+                                if ended else "The worker is not confirmed ended: call interrupt again; if it has ended, "
+                                "run retry and give the instruction again.")) from gone
+        if text is not None:  # kept as a queued answer; a flush or a retry hands it to a worker
             store.add_message(con, task_id, store.QUEUED, text, entry_reply_id=entry_reply_id,
                               evidence=json.dumps(dict(followup_id=followup_id)) if followup_id is not None else None)
         kept = f" ({len(pending)} earlier queued answer(s) also wait)" if pending else ""
-        raise ValueError(f"task {task_id}: the Claude worker has ended (its socket is gone), so nothing was delivered. "
-                         + ("Your text was kept as a queued answer" if text is not None else "Nothing new was queued")
-                         + f"{kept}; run retry on this task to start a new worker that keeps the context and "
-                         "receives the queued answers.") from gone
+        what = "Your text was kept as a queued answer" if text is not None else "Nothing new was queued"
+        if ended:
+            raise ValueError(f"task {task_id}: the Claude worker has ended (its socket is gone), so nothing was delivered. "
+                             f"{what}{kept}; run retry on this task to start a new worker that keeps the context and "
+                             "receives the queued answers.") from gone
+        raise ValueError(f"task {task_id}: cannot reach the Claude worker right now ({type(gone).__name__}: {gone}); it "
+                         f"is not confirmed ended, so nothing was delivered. {what}{kept}; send it later with "
+                         "answer(flush=true), do not retry.") from gone
     try:
         with store.immediate(con):
             store.mark_read(con, [row["id"] for row in pending])
@@ -492,7 +512,7 @@ def answer(con, rt, task_id, text=None, flush=False, *, entry_reply_id=None, orc
     return _answer(con, rt, task_id, text, flush, entry_reply_id=entry_reply_id)
 
 
-def _answer(con, rt, task_id, text=None, flush=False, accept=None, finished_pid=None, entry_reply_id=None):
+def _answer(con, rt, task_id, text=None, flush=False, accept=None, finished_pid=None, entry_reply_id=None, interrupt=False):
     """`answer`, plus the private `accept(task)` hook used only by followup: called under the task lock after its
     closed re-check and before anything is queued or sent. With a hook, a task lock that cannot be taken raises
     TimeoutError and accepts/queues/sends nothing (the caller may retry later). Without one, behavior is `answer`'s.
@@ -533,7 +553,10 @@ def _answer(con, rt, task_id, text=None, flush=False, accept=None, finished_pid=
                     event_id = accept(task)
                 if worker_kind(task["model"]) == "claude":
                     return _deliver_to_claude(con, rt, task, text, keep_sent=accept is not None, entry_reply_id=entry_reply_id,
-                                              followup_id=event_id if accept is not None else None)
+                                              followup_id=event_id if accept is not None else None, interrupt=interrupt)
+                if interrupt:
+                    raise ValueError(f"task {task_id}: interrupt was not delivered and was not queued: the worker was "
+                                     "replaced meanwhile; give the instruction again")
                 if text is not None:  # a retry switched it to Codex meanwhile: queue it for that worker's next turn
                     store.add_message(con, task_id, store.QUEUED, text,
                                       evidence=json.dumps(dict(followup_id=event_id)) if accept is not None else None,
@@ -542,6 +565,9 @@ def _answer(con, rt, task_id, text=None, flush=False, accept=None, finished_pid=
         except TimeoutError:  # a retry or close holds the task: keep the answer for the next answer or flush
             if accept is not None:  # followup: acceptance needs the lock; busy means not accepted
                 raise
+            if interrupt:
+                raise ValueError(f"task {task_id}: interrupt was not delivered and was not queued: task busy "
+                                 "(retry or close in progress); call interrupt again later") from None
             if text is not None:
                 store.add_message(con, task_id, store.QUEUED, text, entry_reply_id=entry_reply_id)
             return dict(status="queued", delivered=0, pending=len(store.pending_answers(con, task_id)),
@@ -697,7 +723,8 @@ def interrupt(con, rt, task_id, text):
     leftover processes), then resume the thread with `text` plus any answers already queued, as one new turn.
     The text is queued first, so a failed stop or resume loses nothing and `answer(flush=true)` retries it. A Codex
     worker that is between turns just gets the same resume. Claude: its socket takes a message mid-turn, so this
-    is a plain answer and nothing is stopped. Returns the answer's receipt plus `interrupted` (a running turn was
+    is a plain send and nothing is stopped; if the send fails the correction is NOT queued (it would reach a
+    replacement worker after retry) and the error says interrupt was not delivered. Returns the answer's receipt plus `interrupted` (a running turn was
     stopped) and `note`."""
     if not isinstance(text, str) or not text.strip():
         raise ValueError("interrupt needs a non-empty text")
@@ -715,7 +742,7 @@ def interrupt(con, rt, task_id, text):
             return dict(status="failed", interrupted=False, delivered=0,
                         pending=store.pending_answer_count(con, task_id), error=str(exc))
     if worker_kind(task["model"]) != "codex":
-        return dict(_answer(con, rt, task_id, text), interrupted=False,
+        return dict(_answer(con, rt, task_id, text, interrupt=True), interrupted=False,
                     note="Claude worker: sent over its socket, nothing was stopped")
     if not task["session_id"] or not task["worktree"]:
         raise ValueError(f"task {task_id} has no codex thread")
@@ -729,7 +756,7 @@ def interrupt(con, rt, task_id, text):
             if task["status"] == "closed":
                 raise ValueError(f"task {task_id} is closed")
             if worker_kind(task["model"]) == "claude":  # a retry replaced the Codex worker meanwhile
-                return dict(_deliver_to_claude(con, rt, task, text, keep_sent=False), interrupted=False,
+                return dict(_deliver_to_claude(con, rt, task, text, keep_sent=False, interrupt=True), interrupted=False,
                             note="Claude worker: sent over its socket, nothing was stopped")
             if not task["session_id"] or not task["worktree"]:
                 raise ValueError(f"task {task_id} has no codex thread")

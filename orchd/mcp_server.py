@@ -121,9 +121,10 @@ TOOLS = [
                     "receipt could not be written, so it was stopped (or the error says MAY STILL BE RUNNING). The "
                     "answers already reached that worker but still read as pending, so a later flush sends them "
                     "again: check its log or wait for its report first. flush=true with no text also just shows pending. "
-                    "A Claude worker that has ended (its socket is gone) raises \"the Claude worker has ended\": "
-                    "nothing was delivered, the text is kept as a queued answer, and retry on the task starts a new "
-                    "worker that keeps the context and receives it.",
+                    "If a Claude worker's socket cannot be reached, orchd checks the daemon's job list: a missing or dead job raises "
+                    "\"the Claude worker has ended\" (text kept as a queued answer; retry starts a new worker that "
+                    "receives it); an alive or unknown worker raises \"cannot reach the Claude worker right now\" "
+                    "(text kept as a queued answer; send it later with answer flush=true, do not retry).",
      "inputSchema": {"type": "object", "required": ["task_id"], "properties": {
          "task_id": {"type": "string"}, "text": {"type": "string", "description": "The answer; omit only with flush"},
          "flush": {"type": "boolean", "description": "Send queued answers to an idle Codex worker"},
@@ -139,7 +140,9 @@ TOOLS = [
                     "delivered|failed, pending) plus interrupted (true when a running turn was stopped) and note. If "
                     "the turn cannot be confirmed stopped nothing is resumed and the text stays queued. A Claude "
                     "worker needs no interrupt (its socket takes messages mid-turn): the text is sent like answer, "
-                    "nothing is stopped, and the note says so.",
+                    "nothing is stopped, and the note says so. If that send fails, the interrupt is NOT queued and is never "
+                    "resent (a replacement worker must not get a stale correction): it raises \"interrupt was not "
+                    "delivered\"; if the worker has ended, retry and give the instruction again.",
      "inputSchema": {"type": "object", "required": ["task_id", "text"], "properties": {
          "task_id": {"type": "string"}, "text": {"type": "string", "description": "The correction, in full"}}}},
     {"name": "close",
@@ -177,8 +180,9 @@ TOOLS = [
                     "with delivered and pending counts, and errors if it could not be sent (nothing is lost if "
                     "queued). A delivered result with record_error was sent; only orchd's bookkeeping failed, so do "
                     "not resend it. If the task lock stays busy (close, retry or adopt running) it raises and nothing "
-                    "is accepted: call again later. A Claude worker that has ended raises \"the Claude worker has ended\" "
-                    "(instruction kept as a queued answer; run retry to continue). The worker's earlier report and events are kept; it acks, may send progress, and ends "
+                    "is accepted: call again later. If a Claude worker cannot be reached it raises: \"the Claude worker has ended\" "
+                    "only when the daemon no longer lists it (instruction kept as a queued answer; run retry), otherwise "
+                    "\"cannot reach the Claude worker right now\" (instruction kept; answer flush=true later, do not retry). The worker's earlier report and events are kept; it acks, may send progress, and ends "
                     "with a new report, which wakes you as usual.",
      "inputSchema": {"type": "object", "required": ["task_id", "message"], "properties": {
          "task_id": {"type": "string"},
