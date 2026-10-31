@@ -226,6 +226,7 @@ class Supervisor:
         self.background_heartbeat = None
         self.background_error = None
         self.backoff = 0
+        self.rejected = None  # pending ids the server explicitly refused; in memory, so a restart retries once
 
     @property
     def con(self):
@@ -437,13 +438,21 @@ class Supervisor:
                        'clientUserMessageId': delivery_id, 'model': task['model'],
                        'approvalPolicy':'never', 'sandboxPolicy': {'type':'dangerFullAccess'}})
             self.receipt(delivery_id, result['turn']['id'], ids)
+            self.rejected = None
             return dict(status='delivered',delivered=len(ids),pending=store.pending_answer_count(self.con,self.task_id))
         except RPCError as exc:  # definitive server rejection: bytes did not start a turn
             self.con.execute("UPDATE worker_deliveries SET state='rejected',error=? WHERE id=?",(str(exc),delivery_id))
-            self.update(note=f"app-server delivery rejected; pending retained: {exc}")
             from .routing import limited
             if limited(exc.error):
+                self.update(note=f"app-server delivery rejected; pending retained: {exc}")
                 self.deferred_limit = (exc.error, self.generation + ':' + delivery_id)
+            else:
+                # Not transient: retrying only piles up journal rows. Hold automatic delivery until a new
+                # answer, answer(flush=true) or retry; the text stays pending.
+                self.rejected = frozenset(ids)
+                self.maintenance_error = (f'turn/start rejected: {exc}; automatic delivery paused, text retained. '
+                                          'Fix the cause, then answer(flush=true) or retry')
+                self.set_owned_note(f'app-server supervisor: {self.maintenance_error}')
             return dict(status='failed',delivered=0,pending=store.pending_answer_count(self.con,self.task_id),error=str(exc))
         except Exception as exc:
             self.con.execute("UPDATE worker_deliveries SET state='uncertain',error=? WHERE id=?",(str(exc),delivery_id))
@@ -528,6 +537,8 @@ class Supervisor:
                         supervisor_error=error, supervisor_busy=self.work_lock.locked())
         if cmd == 'flush':
             self.drain()
+            if not request.get('guard'):
+                self.rejected = None  # an explicit flush always sends once and reports the result
             return self.flush(tuple(request['guard']) if request.get('guard') else None)
         if cmd == 'interrupt':
             task=self.task()
@@ -566,11 +577,13 @@ class Supervisor:
             self.handle_deferred_limit()
             self.reconcile_if_needed()
             if self.deferred_flush:
-                self.flush(guard=self.deferred_flush)
+                if not self.auto_paused():
+                    self.flush(guard=self.deferred_flush)
                 self.deferred_flush = None
             # Pending text is durable: delivery must not depend on another client flush
             # or on a completion event observed by this particular supervisor.
-            if not self.reconcile_pending and store.pending_answer_count(self.con, self.task_id):
+            if not self.reconcile_pending and store.pending_answer_count(self.con, self.task_id) \
+                    and not self.auto_paused():
                 self.flush()
             self.handle_deferred_limit()
             # Viewer death releases human ownership; an idle FIFO can then flush.
@@ -579,12 +592,20 @@ class Supervisor:
             if had and not self.viewers():
                 self.deferred_flush = (self.generation,self.task()['session_id'],
                                        self.task()['last_completed_turn'])
-            if not self.reconcile_pending and not self.deferred_flush and self.rpc_health_error is None:
+            if not self.reconcile_pending and not self.deferred_flush and self.rpc_health_error is None \
+                    and self.rejected is None:
                 self.maintenance_error = None
                 self.backoff = 0
                 self.clear_note()
         except Exception as exc:
             self.fail_housekeeping(exc)
+
+    def auto_paused(self):
+        """True while the pending answers are exactly the ones the server refused; any change resumes."""
+        if self.rejected is not None and frozenset(r['id'] for r in store.pending_answers(
+                self.con, self.task_id)) != self.rejected:
+            self.rejected = None
+        return self.rejected is not None
 
     def fail_housekeeping(self, exc):
         """Record why background work failed and delay the next attempt (0.2s doubling to 5s)."""
@@ -592,8 +613,10 @@ class Supervisor:
         self.maintenance_error = error
         self.backoff = min(5, self.backoff * 2 or .2)
         self.housekeeping_at = time.monotonic() + self.backoff
+        self.set_owned_note(f'app-server supervisor: {error}')
+
+    def set_owned_note(self, note):
         try:
-            note = f'app-server supervisor: {error}'
             # Persist exact ownership in the same transaction as the note. A replacement
             # supervisor can recover it; no prefix matching can claim a foreign note.
             with store.immediate(self.con):
@@ -669,6 +692,8 @@ class Supervisor:
                         elif request.get('command') not in ('flush', 'interrupt'):
                             raise RuntimeError('supervisor busy; retry control later')
                         else:
+                            if request.get('command') == 'flush' and not request.get('guard'):
+                                self.rejected = None  # explicit flush lifts the pause; the next tick sends once
                             reply = dict(status='queued', interrupted=False, delivered=0,
                                          pending=store.pending_answer_count(self.con, self.task_id),
                                          reason='supervisor busy; text retained; will be delivered automatically',

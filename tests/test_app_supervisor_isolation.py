@@ -258,6 +258,109 @@ class ControlStaysResponsiveTest(AppBase):
         time.sleep(.4)
         self.assertEqual(len([m for m, _ in sup.rpc.calls if m == 'turn/start']), 1)
 
+    def reject_turns(self, sup, reasons):
+        """turn/start raises RPCError while `reasons` is truthy; every other RPC works as in FakeRPC."""
+        from orchd.app_transport import RPCError
+        base = sup.rpc.call
+        def call(method, params, timeout=20):
+            if method == 'turn/start':
+                sup.rpc.calls.append((method, params))
+                if reasons:
+                    raise RPCError(reasons[0])
+                return {'turn': {'id': 'next-turn', 'status': 'inProgress'}}
+            return base(method, params, timeout)
+        sup.rpc.call = call
+
+    def starts(self, sup):
+        return len([m for m, _ in sup.rpc.calls if m == 'turn/start'])
+
+    def deliveries(self):
+        return self.con.execute('SELECT COUNT(*) FROM worker_deliveries WHERE task_id=?', (self.id,)).fetchone()[0]
+
+    def test_explicit_rejection_pauses_auto_flush_until_flush_or_new_answer(self):
+        self.idle()
+        self.queue('bad model')
+        reasons = ['invalid model']
+        sup = self.serve(lambda s: self.reject_turns(s, reasons))
+        deadline = time.monotonic() + 3
+        while not self.starts(sup) and time.monotonic() < deadline:
+            time.sleep(.02)
+        time.sleep(1.5)  # ~7 maintenance ticks at 0.2s; the bug sent one turn/start per tick
+        self.assertEqual(self.starts(sup), 1)
+        self.assertEqual(self.deliveries(), 1)
+        self.assertEqual(store.pending_answer_count(self.con, self.id), 1)
+        reply, _ = self.health()
+        self.assertIn('invalid model', reply['supervisor_error'])
+        self.assertIn('flush', reply['supervisor_error'])
+        note = store.get_task(self.con, self.id)['note']
+        self.assertIn('invalid model', note)
+        self.assertIn('flush', note)
+        # An explicit flush really sends once and reports the result.
+        result = app_worker.control(self.task, 'flush', timeout=3)
+        self.assertEqual(result['status'], 'failed')
+        self.assertNotIn('uncertain', result)
+        self.assertEqual(self.starts(sup), 2)
+        time.sleep(1)
+        self.assertEqual(self.starts(sup), 2)
+        self.assertEqual(store.pending_answer_count(self.con, self.id), 1)
+        # A new answer resumes automatic delivery; the server now accepts it.
+        reasons.clear()
+        self.queue('second')
+        deadline = time.monotonic() + 3
+        while store.pending_answer_count(self.con, self.id) and time.monotonic() < deadline:
+            time.sleep(.02)
+        self.assertEqual(store.pending_answer_count(self.con, self.id), 0)
+        self.assertEqual(self.starts(sup), 3)
+        deadline = time.monotonic() + 3
+        while store.get_task(self.con, self.id)['note'] and time.monotonic() < deadline:
+            time.sleep(.05)
+        self.assertFalse(store.get_task(self.con, self.id)['note'])
+
+    def test_flush_while_supervisor_busy_lifts_pause_and_sends_once(self):
+        self.idle()
+        self.queue('bad model')
+        slow = threading.Event()
+        entered = threading.Event()
+        def setup(sup):
+            self.reject_turns(sup, ['invalid model'])
+            def quota():
+                if slow.is_set():
+                    entered.set()
+                    time.sleep(1)
+            sup.collect_quota = quota
+        sup = self.serve(setup)
+        deadline = time.monotonic() + 3
+        while self.starts(sup) < 1 and time.monotonic() < deadline:
+            time.sleep(.02)
+        time.sleep(.6)
+        self.assertEqual(self.starts(sup), 1)
+        slow.set()
+        self.assertTrue(entered.wait(2))
+        result = app_worker.control(self.task, 'flush', timeout=2)
+        self.assertEqual(result['status'], 'queued')
+        self.assertTrue(result['supervisor_busy'])
+        deadline = time.monotonic() + 4
+        while self.starts(sup) < 2 and time.monotonic() < deadline:
+            time.sleep(.02)
+        slow.clear()
+        time.sleep(1.5)
+        self.assertEqual(self.starts(sup), 2)  # exactly one more send, then paused again
+        self.assertEqual(store.pending_answer_count(self.con, self.id), 1)
+
+    def test_restart_after_rejection_retries_once_without_looping(self):
+        self.idle()
+        self.queue('still bad')
+        sup = self.serve(lambda s: self.reject_turns(s, ['invalid model']))
+        time.sleep(1)
+        self.assertEqual(self.starts(sup), 1)
+        sup.stopping = True
+        self.servers[0][1].join(3)
+        os.unlink(str(self.root / 'control.sock'))
+        sup2 = self.serve(lambda s: self.reject_turns(s, ['invalid model']))  # fresh process state: pause is in memory
+        time.sleep(1.5)
+        self.assertEqual(self.starts(sup2), 1)  # one retry after restart, then paused again
+        self.assertEqual(store.pending_answer_count(self.con, self.id), 1)
+
     def test_dead_background_thread_is_visible_over_control_socket(self):
         died = threading.Event()
         def setup(sup):
