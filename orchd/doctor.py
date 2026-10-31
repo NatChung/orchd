@@ -16,6 +16,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -379,8 +380,9 @@ class Doctor:
 
     def check_mcp_launch(self):
         """`orchd init` keeps config.toml files that differ from its version, so installs made before #89 still start
-        the MCP through bin/orchd's shebang (system python3, maybe without psutil)."""
-        stale = []
+        the MCP through bin/orchd's shebang (system python3, maybe without psutil). What counts is the program the
+        config really starts: a wrapper, a native binary or a Python interpreter running orchd is fine."""
+        stale, fixes = [], []
         for folder in (self.orch_home, paths.interface_home(self.home, self.env)):
             cfg = folder / ".codex" / "config.toml"
             try:
@@ -388,14 +390,24 @@ class Doctor:
             except (OSError, ValueError):
                 continue
             for name, spec in (servers if isinstance(servers, dict) else {}).items():
-                args = spec.get("args") if isinstance(spec, dict) else None
-                if name in ("orchd", "orchd_entry") and isinstance(args, list) and args[:1] == ["mcp"]:
-                    stale.append(f"{name} in {cfg}")
+                if name not in ("orchd", "orchd_entry") or not isinstance(spec, dict):
+                    continue
+                command, args = spec.get("command"), spec.get("args")
+                if not isinstance(command, str) or not isinstance(args, list) or "mcp" not in args:
+                    continue
+                if not paths.is_python_script(command):
+                    continue  # interpreter binary, native binary, shell wrapper: not the bin/orchd shebang
+                shebang = paths.shebang_interpreter(command)
+                if shebang not in (None, "env") and os.path.realpath(shebang) == os.path.realpath(sys.executable):
+                    continue  # the shebang already names orchd's own interpreter
+                stale.append(f"{name} in {cfg}")
+                fixes.append(f"in {cfg}, only inside [mcp_servers.{name}], set command = {json.dumps(sys.executable)} "
+                             f"and args = {json.dumps([command] + [str(a) for a in args])}")
         if stale:
             self.add("Codex MCP launch", OPTIONAL, WARN,
                      "starts bin/orchd directly (system python3 may lack psutil): " + "; ".join(stale),
-                     "Delete the listed config.toml and run `orchd init` to regenerate it, or set command to the "
-                     "orchd Python and args to [\"<orchd>\", \"mcp\", ...].")
+                     "Edit only that one table and leave every other setting as it is (`orchd init` keeps edited "
+                     "files, so it will not rewrite it): " + "; ".join(fixes) + ".")
         else:
             self.add("Codex MCP launch", OPTIONAL, PASS, "orchd MCP servers run under the orchd interpreter")
 

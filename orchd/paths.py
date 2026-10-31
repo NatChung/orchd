@@ -98,17 +98,49 @@ def orchd_executable(env=None):
     raise RuntimeError("cannot find the orchd command; install it (uv tool install ...) or set ORCHD_EXECUTABLE")
 
 
+_NATIVE_MAGIC = (b"\x7fELF", b"MZ", b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf", b"\xce\xfa\xed\xfe",
+                 b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca")
+
+
+def _head(executable):
+    try:
+        with open(executable, "rb") as f:
+            return f.read(200)
+    except OSError:
+        return None
+
+
+def is_python_script(executable):
+    """True when `executable` has to be run by a Python interpreter: a `#!...python...` script, or a shebang-less
+    `.py` file. A native binary, a script with any other shebang (a shell wrapper) and a file we cannot read or
+    classify (missing, unreadable, shebang-less without `.py`) are launched directly: the path is what the
+    operator asked for, and guessing "Python" is what broke `/bin/echo` as an override."""
+    head = _head(executable)
+    if head is None or head.startswith(_NATIVE_MAGIC):
+        return False
+    if head.startswith(b"#!"):
+        return b"python" in head.split(b"\n", 1)[0]
+    return str(executable).endswith(".py")
+
+
+def shebang_interpreter(executable):
+    """The interpreter path in a `#!` line, "env" for `#!/usr/bin/env ...`, or None."""
+    head = _head(executable)
+    if not head or not head.startswith(b"#!"):
+        return None
+    words = head.split(b"\n", 1)[0][2:].decode("utf-8", "replace").split()
+    if not words:
+        return None
+    return "env" if Path(words[0]).name == "env" else words[0]
+
+
 def mcp_launch(executable):
     """(command, leading args) to start `<executable> mcp ...`.
 
     bin/orchd's shebang is the system python3, which may lack psutil, so a Python entry point is run under this
-    interpreter. A file that is plainly not Python (an ORCHD_EXECUTABLE shell wrapper) is launched directly.
+    interpreter. Anything else (a native binary, an ORCHD_EXECUTABLE shell wrapper, an unknown file) is launched
+    directly.
     """
-    try:
-        with open(executable, "rb") as f:
-            first = f.readline(200)
-    except OSError:
+    if is_python_script(executable):
         return sys.executable, [executable]
-    if first.startswith(b"#!") and b"python" not in first:
-        return executable, []
-    return sys.executable, [executable]
+    return executable, []
