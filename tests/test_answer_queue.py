@@ -247,8 +247,25 @@ class AnswerQueueTest(unittest.TestCase):
         def down(*args):
             raise ConnectionRefusedError("socket gone")
         self.rt.send_uds = down
-        with self.assertRaises(ConnectionRefusedError):
+        with self.assertRaisesRegex(ValueError, "worker has ended"):
             core.answer(self.con, self.rt, t["id"], "again")
+
+    def test_answer_to_ended_claude_worker_queues_text_and_points_to_retry(self):
+        t = self.dispatch(model="sonnet")
+
+        def gone(*args):
+            raise FileNotFoundError(2, "No such file or directory", "/x/worker-abc12345.sock")
+        self.rt.send_uds = gone
+        with self.assertRaises(ValueError) as caught:
+            core.answer(self.con, self.rt, t["id"], "yes please")
+        message = str(caught.exception)
+        self.assertIn("retry", message)
+        self.assertIn("kept as a queued answer", message)
+        self.assertNotIn("Errno", message)
+        self.assertEqual([r["body"] for r in store.pending_answers(self.con, t["id"])], ["yes please"])
+        with self.assertRaisesRegex(ValueError, "earlier queued answer"):  # flush: nothing new, old one still waits
+            core.answer(self.con, self.rt, t["id"], flush=True)
+        self.assertEqual(len(store.pending_answers(self.con, t["id"])), 1)
 
     def test_text_or_flush_is_required(self):
         t = self.dispatch()

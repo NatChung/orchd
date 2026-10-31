@@ -101,6 +101,21 @@ class FollowupTest(unittest.TestCase):
         self.assertIn("socket gone", event["error"])
         self.assertEqual(self.rows(t["id"], "answer"), [])  # not claimed as delivered
 
+    def test_ended_claude_worker_gives_retry_guidance_and_keeps_the_instruction(self):
+        t = self.dispatch()
+
+        def gone(*a):
+            raise FileNotFoundError(2, "No such file or directory", "/x/worker-abc12345.sock")
+        self.rt.send_uds = gone
+        with self.assertRaisesRegex(ValueError, "worker has ended.*retry") as caught:
+            core.followup(self.con, self.rt, t["id"], "do more")
+        self.assertNotIn("Errno", str(caught.exception))
+        (event,) = self.events(t["id"])
+        self.assertEqual(event["status"], "failed")
+        (queued,) = store.pending_answers(self.con, t["id"])
+        self.assertIn("do more", queued["body"])
+        self.assertEqual(self.rows(t["id"], "answer"), [])
+
     def test_claude_busy_lock_is_not_accepted(self):
         t = self.dispatch()
         orig = store.task_delivery
