@@ -1,20 +1,47 @@
+import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 from unittest import mock
 
 from orchd import core, store, worker_health
-from orchd.runtime import claude_job_alive
+from orchd.runtime import Runtime, claude_job_alive
 from tests.test_orchd import FakeRuntime
 
 
 class ClaudeJobAliveTest(unittest.TestCase):
-    def test_listed_job_is_alive_unless_failed(self):
-        self.assertTrue(claude_job_alive({"j": {"state": "working"}}, "j"))
-        self.assertTrue(claude_job_alive({"j": {"state": "blocked"}}, "j"))  # waiting for input, not dead
-        self.assertTrue(claude_job_alive({"j": {}}, "j"))
+    def test_listed_job_is_unknown_unless_confirmed_dead(self):
+        self.assertIsNone(claude_job_alive({"j": {"state": "working"}}, "j"))
+        self.assertIsNone(claude_job_alive({"j": {"state": "blocked"}}, "j"))  # waiting for input, not dead
+        self.assertIsNone(claude_job_alive({"j": {}}, "j"))
         self.assertFalse(claude_job_alive({"j": {"state": "failed", "reapedMidWorkAt": "2026-10-01T11:04:36Z"}}, "j"))
         self.assertFalse(claude_job_alive({}, "j"))
+        self.assertIsNone(claude_job_alive({"j": {"state": "failed", "pid": 4242, "status": "busy"}}, "j"))
+        self.assertIsNone(claude_job_alive({"j": {"state": "failed", "pid": 4242}}, "j"))
+
+    def assert_unverified_process_is_unknown(self, pid):
+        # These are the public agents fields in CLI 2.1.314. Neither a saved
+        # procStart nor the result of the CLI's birth probe reaches orchd.
+        for state in ("failed", "working", "blocked"):
+            with self.subTest(state=state):
+                rt = Runtime()
+                rt.run = mock.Mock(return_value=mock.Mock(stdout=json.dumps([
+                    {"id": "j", "state": state, "pid": pid, "status": "busy"}])))
+                self.assertIsNone(claude_job_alive(rt.live_jobs(), "j"))
+
+    def test_birth_missing_in_agents_json_is_unknown(self):
+        self.assert_unverified_process_is_unknown(4242)
+
+    def test_birth_probe_unreadable_in_agents_json_is_unknown(self):
+        # CLI still emits pid/status when its birth probe cannot read the birth.
+        # That failure is not represented in agents JSON, so it cannot be trusted.
+        self.assert_unverified_process_is_unknown(4243)
+
+    def test_reused_pid_in_agents_json_is_unknown(self):
+        # A stale job pointing at this unrelated test runner is not proof of a
+        # live Claude session, even though psutil can read its current birth.
+        self.assert_unverified_process_is_unknown(os.getpid())
 
     def test_failed_query_or_missing_job_id_is_unknown(self):
         self.assertIsNone(claude_job_alive(None, "j"))
@@ -41,8 +68,23 @@ class AssessTest(unittest.TestCase):
         self.assertEqual(got, dict(worker_health="unknown", recovery_hint=None))
 
     def test_statuses_outside_the_check_get_no_label(self):
-        for status in ("starting", "failed", "question"):
+        for status in ("starting", "failed"):
             self.assertIsNone(worker_health.assess(status, False, False)["worker_health"])
+
+    def test_question_with_dead_worker_is_orphan_and_unknown_stays_unknown(self):
+        got = worker_health.assess("question", False, False, task_id="t1", worktree="/wt/t1", branch="b", base="abc")
+        self.assertEqual(got["worker_health"], "orphan")
+        self.assertIn("rework_of=t1", got["recovery_hint"])
+        self.assertEqual(worker_health.assess("question", None, False)["worker_health"], "unknown")  # Codex between turns
+        self.assertEqual(worker_health.assess("question", True, False)["worker_health"], "alive")
+
+    def test_stale_is_a_label_for_watched_statuses_only(self):
+        hour = 3600
+        self.assertTrue(worker_health.is_stale("running", 100.0, 100.0 + 25 * hour, 24))
+        self.assertFalse(worker_health.is_stale("running", 100.0, 100.0 + 23 * hour, 24))
+        self.assertTrue(worker_health.is_stale("question", 100.0, 100.0 + 25 * hour, 24))
+        self.assertFalse(worker_health.is_stale("done", 100.0, 100.0 + 99 * hour, 24))
+        self.assertFalse(worker_health.is_stale("running", None, 100.0, 24))
 
 
 class ListOpenHealthTest(unittest.TestCase):
@@ -95,7 +137,7 @@ class ListOpenHealthTest(unittest.TestCase):
         row = self.row(t["id"])
         for key in ("owner_health", "notification_delivery", "worker_health", "worker_alive", "status", "branch"):
             self.assertIn(key, row)
-        self.assertEqual(row["worker_health"], "alive")
+        self.assertEqual(row["worker_health"], "unknown")
         self.assertEqual(row["owner_health"]["state"], "dead")  # owner-job is absent from the daemon
         self.assertEqual(self.con.total_changes, changes)
         self.assertEqual(self.snapshot(), before)
@@ -105,10 +147,10 @@ class ListOpenHealthTest(unittest.TestCase):
         self.rt.jobs = {}
         self.assertEqual(self.row(t["id"])["worker_health"], "orphan")
 
-    def test_live_worker_is_alive(self):
+    def test_job_outcome_alone_is_unknown(self):
         t = self.dispatch()
         self.rt.jobs = {"job1": {"state": "working"}}
-        self.assertEqual(self.row(t["id"])["worker_health"], "alive")
+        self.assertEqual(self.row(t["id"])["worker_health"], "unknown")
 
     def test_reported_worker_that_exited_is_not_orphan(self):
         t = self.dispatch()
@@ -169,3 +211,126 @@ class AppWorkerHealthTest(AppBase):
         self.assertEqual(result["backend"],"app-server")
         self.assertEqual(result["worker_alive"],"idle")
         self.assertFalse(result["uncertain_delivery"])
+
+
+class StaleAndLastReportTest(ListOpenHealthTest):
+    """last_report_at / stale / attention_only on list_open. Time is passed in, never slept."""
+
+    def set_times(self, task_id, when):
+        self.con.execute("UPDATE messages SET created_at=? WHERE task_id=?", (when, task_id))
+        self.con.execute("UPDATE tasks SET created_at=? WHERE id=?", (when, task_id))
+        self.con.commit()
+
+    def listing(self, now, **kw):
+        return {r["task_id"]: r for r in core.list_open(self.con, self.rt, now=now, **kw)}
+
+    def test_last_report_at_is_latest_worker_message_and_stale_appears_and_disappears(self):
+        t = self.dispatch()
+        core.ack(self.con, t["id"])
+        core.progress(self.con, self.rt, t["id"], "halfway")
+        self.set_times(t["id"], 1000.0)
+        self.rt.jobs = {"job1": {"state": "working"}}  # outcome alone is unknown, and silent
+        row = self.listing(1000.0 + 3600)[t["id"]]
+        self.assertEqual((row["last_report_at"], row["stale"], row["worker_alive"]), (1000.0, False, None))
+        row = self.listing(1000.0 + 25 * 3600)[t["id"]]
+        self.assertEqual((row["stale"], row["worker_health"], row["status"]), (True, "unknown", "acked"))
+        self.assertEqual(row["stale_after_hours"], 24)
+        store.add_message(self.con, t["id"], "progress", "still going")
+        self.con.execute("UPDATE messages SET created_at=? WHERE task_id=? AND body='still going'", (1000.0 + 24 * 3600, t["id"]))
+        self.con.commit()
+        row = self.listing(1000.0 + 25 * 3600)[t["id"]]
+        self.assertEqual((row["last_report_at"], row["stale"]), (1000.0 + 24 * 3600, False))
+
+    def test_stale_threshold_is_configurable_and_listing_never_changes_the_task(self):
+        t = self.dispatch()
+        core.ack(self.con, t["id"])
+        self.set_times(t["id"], 1000.0)
+        before = self.snapshot()
+        self.assertFalse(self.listing(1000.0 + 5 * 3600)[t["id"]]["stale"])
+        self.assertTrue(self.listing(1000.0 + 5 * 3600, stale_hours=4)[t["id"]]["stale"])
+        with mock.patch.dict(os.environ, {"ORCHD_STALE_HOURS": "2"}):
+            self.assertTrue(self.listing(1000.0 + 5 * 3600)[t["id"]]["stale"])
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(store.get_task(self.con, t["id"])["status"], "acked")
+
+    def test_task_with_no_worker_message_uses_creation_time_and_has_null_last_report(self):
+        t = self.dispatch()
+        self.con.execute("UPDATE tasks SET created_at=? WHERE id=?", (1000.0, t["id"]))
+        self.con.execute("DELETE FROM messages WHERE task_id=? AND kind NOT IN ('ack','progress','question','report')", (t["id"],))
+        self.con.commit()
+        row = self.listing(1000.0 + 30 * 3600)[t["id"]]
+        self.assertIsNone(row["last_report_at"])
+        self.assertEqual(row["stale"], row["status"] in worker_health.WATCHED + ("question",))
+
+    def test_question_with_dead_worker_is_orphan_in_list_open(self):
+        t = self.dispatch()
+        core.ask(self.con, self.rt, t["id"], "which one?")
+        self.rt.jobs = {}
+        row = self.listing(None)[t["id"]]
+        self.assertEqual((row["status"], row["worker_alive"], row["worker_health"]), ("question", False, "orphan"))
+        self.assertIn(f"rework_of={t['id']}", row["recovery_hint"])
+        self.assertEqual(store.get_task(self.con, t["id"])["status"], "question")
+
+    def test_default_lists_everything_and_attention_only_hides_healthy_running_tasks(self):
+        healthy = self.dispatch(model="sol")
+        core.ack(self.con, healthy["id"])
+        quiet = self.dispatch(model="sol")
+        core.ack(self.con, quiet["id"])
+        asking = self.dispatch()
+        core.ask(self.con, self.rt, asking["id"], "which one?")
+        self.rt.alive_pids = {"4242"}
+        self.set_times(quiet["id"], 1000.0)
+        now = 1000.0 + 48 * 3600
+        self.con.execute("UPDATE messages SET created_at=? WHERE task_id IN (?, ?)", (now, healthy["id"], asking["id"]))
+        self.con.commit()
+        self.assertEqual(set(self.listing(now)), {healthy["id"], quiet["id"], asking["id"]})  # default unchanged
+        self.assertEqual(set(self.listing(now, attention_only=True)), {quiet["id"], asking["id"]})
+
+    def test_question_with_failed_job_and_unverified_pid_is_unknown(self):
+        t = self.dispatch()
+        core.ask(self.con, self.rt, t["id"], "which one?")
+        self.rt.jobs = {"job1": {"state": "failed", "pid": 4242, "status": "idle"}}
+        row = self.listing(None)[t["id"]]
+        self.assertEqual((row["worker_alive"], row["worker_health"], row["recovery_hint"]), (None, "unknown", None))
+
+    def test_question_with_failed_job_and_partial_evidence_is_unknown(self):
+        t = self.dispatch()
+        core.ask(self.con, self.rt, t["id"], "which one?")
+        for extra in ({"pid": 4242}, {"status": "idle"}, {"pid": "4242", "status": "idle"}, {"pid": 4242, "status": "newstatus"}):
+            with self.subTest(extra=extra):
+                self.rt.jobs = {"job1": {"state": "failed", **extra}}
+                row = self.listing(None)[t["id"]]
+                self.assertEqual((row["worker_alive"], row["worker_health"]), (None, "unknown"))
+
+    def test_attention_only_keeps_health_unknown_running_tasks(self):
+        t = self.dispatch()
+        core.ack(self.con, t["id"])
+        self.rt.jobs = None  # status probe failed
+        self.assertEqual(self.listing(None)[t["id"]]["worker_health"], "unknown")
+        self.assertEqual(set(self.listing(None, attention_only=True)), {t["id"]})
+        self.rt.jobs = {"job1": {"state": "working"}}  # an outcome still cannot prove identity
+        self.assertEqual(set(self.listing(None, attention_only=True)), {t["id"]})
+
+    def test_attention_only_keeps_app_server_probe_failure(self):
+        from orchd import app_worker
+        t = self.dispatch()
+        core.ack(self.con, t["id"])
+        with patch("orchd.app_worker.enabled", return_value=True), patch("orchd.app_worker.health", return_value="unknown"):
+            self.assertEqual(set(self.listing(None, attention_only=True)), {t["id"]})
+        with patch("orchd.app_worker.enabled", return_value=True), patch("orchd.app_worker.health", return_value="idle"):
+            self.assertEqual(self.listing(None, attention_only=True), {})
+
+    def test_mcp_default_shape_is_unchanged_and_counts_are_opt_in(self):
+        from orchd import mcp_server
+        t = self.dispatch(model="sol")
+        core.ack(self.con, t["id"])
+        self.rt.alive_pids = {"4242"}
+        plain = mcp_server.call("list_open", {}, "thread-A", self.con, self.rt)
+        self.assertIsInstance(plain, list)
+        self.assertEqual(len(plain), 1)
+        self.assertIn("last_report_at", plain[0])
+        shown = mcp_server.call("list_open", {"attention_only": True, "with_counts": True}, "thread-A", self.con, self.rt)
+        self.assertEqual((shown["total"], shown["shown"], shown["tasks"]), (1, 0, []))
+        tool = next(x for x in mcp_server.TOOLS if x["name"] == "list_open")
+        self.assertIn("PID", tool["description"])
+        self.assertIn("attention_only", tool["inputSchema"]["properties"])
