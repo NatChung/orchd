@@ -172,6 +172,14 @@ is created `0600` in a `0700` directory.
 which one chose the file (`file-source`).
 `config show` also reports `worker-backend` with source `model-default`: `app-server` for effective `sol`, `exec` for `sonnet` (its existing Claude runtime). This derived field is read-only, not a config key; override it per dispatch with `backend=exec`. Retry retains a stored Codex attempt backend unless explicitly overridden. Existing exec workers are not migrated and can open a viewer only between turns. New app-server workers and Claude workers support native attach while busy or idle; app-server FIFO answers/followups wait until all viewer windows close.
 
+`answer` and `followup` on a Claude exec worker use three socket delivery outcomes (MCP entry points; there is no separate CLI command):
+
+- Failure before writing any frame data (for example, a missing socket or refused connection): nothing was delivered, and text is kept as a queued answer. Orchd checks the Claude daemon's job list. Only a missing or listed-dead job confirms the worker ended; the error then directs you to `retry`, which starts a new worker with the context and queued text. An alive or unknown result, including a failed or stale job query, says `cannot reach the Claude worker right now`: use `answer(flush=true)` later; if you have independently confirmed the worker ended, use `retry` and the queued text goes to the new worker. A followup event records `failed` while its instruction stays queued.
+- Failure during `sendall`: delivery is uncertain. The result is `status=failed` with `uncertain=true`; no new text is queued and a followup event records `uncertain`. The worker may have received the message: check worker status or read its log before deciding whether to resend. Earlier queued answers remain pending and may also have reached it; confirm before flushing them again.
+- Error after the complete frame was written, including a shutdown error after the peer read and closed: counts as delivered. Answer and followup report normal success, write their receipts and do not queue or automatically resend the text.
+
+A Claude `interrupt` follows the same stages, but never queues its correction for a replacement worker. A connect failure says `interrupt was not delivered`; a write failure returns `failed` with `uncertain=true` and asks you to check status or logs before resending. A completed frame counts as delivered. Orchd never retries or respawns by itself, and Codex workers are unchanged.
+
 Review always uses the other vendor than the author and has no setting.
 
 ```bash
