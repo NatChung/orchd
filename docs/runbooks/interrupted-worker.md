@@ -25,8 +25,11 @@ worktree. Every step below is manual, and the Orch decides what follows.
 `stale_after_hours` (default 24; set `ORCHD_STALE_HOURS`, or pass `stale_hours` to the MCP tool). `stale` is a label
 only: orchd never marks a stale task dead, fails it, retries it or closes it. Check the worktree (section 1) first.
 
-`list_open` still returns every open task as a plain list. Pass `attention_only: true` to hide healthy, non-stale
-`starting`/`running`/`acked` tasks (tasks whose health is `unknown` stay listed), and `with_counts: true` to get `{total, shown, tasks}` instead of a bare list.
+`list_open` returns a plain list while it fits the 60,000-byte wire budget. An oversized reply, `limit`, or
+`with_counts: true` returns a page with `{total, shown, showing, truncated, tasks}` (`shown` aliases `showing`).
+When truncated, the page also includes `hint` and `next_cursor`; pass the cursor with the same other arguments.
+New tasks wait for the next walk, and closed tasks are skipped. Pass `attention_only: true` to hide healthy,
+non-stale `starting`/`running`/`acked` tasks (tasks whose health is `unknown` stay listed).
 
 An orphan label says the worker is gone, not why. A daemon restart, a reap, or a crash all look the same here.
 
