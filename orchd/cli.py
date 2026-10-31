@@ -347,6 +347,7 @@ def build_parser():
     adopt.add_argument("--from", dest="from_orch", help="move all open tasks of this Orch (or limit TASK_IDs to it)")
     adopt.add_argument("--force", action="store_true", help="also move from an alive or unknown owner, and tell it")
     sub.add_parser("close").add_argument("task_id")
+    sub.add_parser("stuck-close", help="read-only: tasks stuck at 'close pending' with the last error and next step")
     cfg = sub.add_parser("config", help="personal settings in ~/.config/orchd/config.toml (worker-model, projects-dir)")
     cfg_actions = cfg.add_subparsers(dest="config_action", required=True)
     cfg_actions.add_parser("show", help="every setting with its source: flag, env, file or default")
@@ -499,7 +500,7 @@ HOME_POLICY = {
     ("task", "link"): "write", ("task", "unlink"): "write",
     ("ack",): "write", ("report",): "write", ("progress",): "write", ("flush",): "write",
     ("watch",): "warn", ("summary",): "warn", ("_auto-retry",): "write", ("ask",): "write", ("verify",): "write", ("close",): "write", ("adopt",): "write",
-    ("list",): "warn", ("stats",): "warn", ("snapshot",): "warn", ("board",): "warn",
+    ("list",): "warn", ("stuck-close",): "warn", ("stats",): "warn", ("snapshot",): "warn", ("board",): "warn",
     ("goal", "add"): "write", ("goal", "set"): "write",
     ("goal", "show"): "warn", ("goal", "list"): "warn", ("goal", "export"): "warn",
 }
@@ -918,6 +919,8 @@ def main(argv=None):
         return 0 if result["passed"] else 1
     elif args.cmd == "list":
         print(json.dumps(core.list_open(con, rt), ensure_ascii=False, indent=1))
+    elif args.cmd == "stuck-close":
+        print(json.dumps(core.stuck_closes(con), ensure_ascii=False, indent=1))
     elif args.cmd == "adopt":
         try:
             print(json.dumps(core.adopt(con, rt, args.new_orch, args.task_ids, args.from_orch, args.force),

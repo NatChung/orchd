@@ -246,25 +246,46 @@ class Runtime:
         git only removes a worktree holding submodules with --force, which checks nothing. Anything that cannot
         be proven safe to delete is therefore kept: a clean-at-check submodule is no reason to force."""
         held = None
-        for path in self.submodule_paths(worktree):
+        try:
+            paths_ = self.submodule_paths(worktree)
+        except (subprocess.SubprocessError, OSError) as e:
+            return f"cannot verify submodules: {error_detail(e)}"
+        for path in paths_:
             name = os.path.relpath(os.path.realpath(path), os.path.realpath(worktree))
-            if self.dirty(path):
-                return f"uncommitted changes in submodule {name}"
-            if self.run(["git", "-C", path, "stash", "list"]).stdout.strip():
-                return f"stash in submodule {name}"
-            unpushed = self.run(["git", "-C", path, "rev-list", "--count", "HEAD", "--branches", "--tags",
-                                 "--not", "--remotes"]).stdout.strip()
-            if unpushed != "0":
-                return f"commits not pushed in submodule {name}"
+            try:
+                loss = self._submodule_unsaved(path, name)
+            except (subprocess.SubprocessError, OSError) as e:
+                return f"cannot verify submodule {name}: {error_detail(e)}"
+            if loss:
+                return loss
             held = held or (f"initialized submodule {name}: git can only remove it with --force, which would "
                             "delete its git dir unchecked; remove the worktree by hand after saving what you need")
         return held
+
+    def _submodule_unsaved(self, path, name):
+        """What in one submodule would be lost on removal, else None. Raises when git cannot be asked."""
+        if self.dirty(path):
+            return f"uncommitted changes in submodule {name}"
+        if self.run(["git", "-C", path, "stash", "list"]).stdout.strip():
+            return f"stash in submodule {name}"
+        unpushed = self.run(["git", "-C", path, "rev-list", "--count", "HEAD", "--branches", "--tags",
+                             "--not", "--remotes"]).stdout.strip()
+        if unpushed != "0":
+            return f"commits not pushed in submodule {name}"
+        return None
 
     def worktree_state(self, worktree, base):
         """Return (removable, reason). Removable only when nothing local would be lost."""
         if not self.exists(worktree):
             return True, "worktree already gone"
-        if self.dirty(worktree):
+        try:
+            dirty = self.dirty(worktree)
+        except subprocess.CalledProcessError as e:
+            if not self.exists(os.path.join(worktree, ".gitmodules")):
+                raise
+            # git cannot read a submodule it lists (damaged git dir): doubt means keep, not stuck
+            return False, f"cannot verify submodule state: {error_detail(e)}"
+        if dirty:
             return False, "uncommitted changes"
         loss = self.submodule_loss(worktree)
         if loss:
@@ -286,8 +307,8 @@ class Runtime:
 
     def remove_worktree(self, repo_path, worktree, base=None):
         """Remove a worktree the caller found safe; never with --force. Returns None when removed, or the reason
-        it was kept because something unsaved showed up after the caller's check. Raises RuntimeError carrying
-        git's stderr when git itself fails. The state is re-checked right before removal (`base` given) and git's
+        it was kept because something unsaved showed up after the caller's check, or because git refused the
+        removal (its stderr is in the reason; git does not force, so nothing was deleted). The state is re-checked right before removal (`base` given) and git's
         own clean check runs with untracked files forced visible, so only a sub-millisecond window remains, and
         git still refuses a dirty tree inside it. The branch ref survives removal, so late commits are not lost."""
         if not self.exists(worktree):
@@ -303,7 +324,7 @@ class Runtime:
             detail = error_detail(e)
             if "contains modified or untracked files" in detail:
                 return "uncommitted changes appeared; worktree kept"
-            raise RuntimeError(f"git worktree remove failed (exit {e.returncode}): {detail}") from None
+            return f"git worktree remove failed (exit {e.returncode}), worktree kept; remove it by hand after saving what you need: {detail}"
         return None
 
     # -- claude workers ---------------------------------------------------------

@@ -17,7 +17,11 @@ KILL_GRACE = 2.0
 
 def _descendants(proc, mark, found):
     """Do not cross into another task, even if a worker dispatched that task."""
-    for child in proc.children():
+    try:
+        children = proc.children()
+    except psutil.NoSuchProcess:  # already gone: nothing of it left to track
+        return
+    for child in children:
         try:
             owner = child.environ().get("ORCHD_WORKTREE")
             if owner and owner != mark:
