@@ -282,3 +282,14 @@ MCP warnings appear only in the result, after validation succeeds; they are not
 also printed to stderr. Warnings do not mean the question was rejected or approved.
 
 Home rules are updated automatically after program upgrade, using versioned steps, backups and managed blocks. See [migration behavior](upgrade-migrations.md) for `orchd upgrade --dry-run`, `--migrations-only`, custom paths and legacy first-run instructions.
+
+
+## Output size limits
+
+MCP `list_open` returns a bare list of tasks while its final reply fits 60,000 bytes on the wire. If it would not
+fit, or you pass `limit` or `with_counts`, it returns `{total, showing, truncated, tasks, hint, next_cursor}`
+(`with_counts` also keeps `shown`); pass `next_cursor` as `cursor`, with the same other arguments, to read the rest.
+A single task too large for a page has its long text fields shortened with a `…[truncated N chars]` marker.
+`model_reason` in `list_open` and `inbox` is text-capped (500 characters, with a marker). `intake_pending` pages are
+cut so the final reply stays within 60,000 bytes as well as by `limit`; follow `next_cursor`. CLI `list` output is not
+limited. `inbox` is not paged here (it consumes what it returns).

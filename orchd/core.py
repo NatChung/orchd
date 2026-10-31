@@ -9,7 +9,7 @@ import time
 import uuid
 from pathlib import Path
 
-from . import models, app_worker, intake, orch_revive, paths, question_summary, store, verify as verification, worker_health
+from . import limits, models, app_worker, intake, orch_revive, paths, question_summary, store, verify as verification, worker_health
 from .orch_health import owner_health
 from .runtime import (DEFAULT_ORCH_MODEL, ORCH_MODELS, WORKER_MODELS,
                       claude_job_alive, error_detail, worker_kind)
@@ -407,7 +407,8 @@ def inbox(con, orch_thread, group_id=None):
     store.mark_read(con, [r["id"] for r in rows])
     return [dict(task_id=r["task_id"], repo=r["repo"], title=r["title"], kind=r["kind"],
                  body=r["body"], evidence=r["evidence"], task_status=r["status"],
-                 model=task_model(r), model_reason=r['model_reason'], group_id=r['group_id'], pending=pending[r["task_id"]],
+                 model=task_model(r), model_reason=limits.cap_text(r['model_reason']), group_id=r['group_id'],
+                 pending=pending[r["task_id"]],
                  verification=checked[r["task_id"]]) for r in rows]
 
 
@@ -858,13 +859,33 @@ def followup(con, rt, task_id, message):
     return result
 
 
-def list_open(con, rt):
+def retry_summary(con, task_id):
+    """retry_count and the latest retry's target model and reason; the full history stays in the retry events."""
+    rows = con.execute("SELECT body FROM messages WHERE task_id=? AND kind='retry' ORDER BY id", (task_id,)).fetchall()
+    last = None
+    if rows:
+        try:
+            body = json.loads(rows[-1]["body"])
+            last = dict(model=body.get("to_model"), reason=limits.cap_text(body.get("reason")))
+        except (ValueError, AttributeError):
+            last = None
+    return dict(retry_count=len(rows), last_retry=last)
+
+
+def list_open(con, rt, *, now=None, stale_hours=None, attention_only=False):
+    """Every open task. `worker_alive` only means the process/job exists, not that it is working; `last_report_at`
+    (latest worker ack/progress/question/report) and `stale` (no such message for stale_hours, default 24 or
+    ORCHD_STALE_HOURS) show silence. Both are labels: nothing here changes a task. attention_only drops healthy,
+    non-stale running/acked/starting tasks;
+    health-unknown ones stay listed."""
     from . import task_question_answers
     try:
         jobs = rt.live_jobs()
     except Exception:  # a failed status probe is not proof an Orch has exited
         jobs = None
     out = []
+    now = time.time() if now is None else now
+    hours = worker_health.stale_hours(stale_hours)
     for t in store.open_tasks(con):
         if app_worker.enabled(t):
             alive = app_worker.health(t)
@@ -873,8 +894,13 @@ def list_open(con, rt):
                 None if t["status"] in ("question", "done", "blocked") else False)
         else:
             alive = claude_job_alive(jobs, t["job_id"])
+        heard = worker_health.last_report_at(con, t["id"])
+        stale = worker_health.is_stale(t["status"], heard if heard is not None else t["created_at"], now, hours)
+        health = worker_health.assess(t["status"], alive, worker_health.has_report(con, t["id"]),
+                                      task_id=t["id"], worktree=t["worktree"], branch=t["branch"], base=t["base"])
         out.append(dict(task_id=t["id"], repo=t["repo"], title=t["title"], status=t["status"],
-                        model=task_model(t), model_reason=t['model_reason'], group_id=t['group_id'],
+                        model=task_model(t), model_reason=limits.cap_text(t['model_reason']), group_id=t['group_id'],
+                        **retry_summary(con, t['id']),
                         auto_model=bool(t['auto_model']), auto_retry_count=t['auto_retry_count'],
                         worker_alive=alive, goal_id=t["goal_id"], goal_critical=t["goal_critical"],
                         worktree=t["worktree"], branch=t["branch"],
@@ -887,9 +913,11 @@ def list_open(con, rt):
                         latest_question_answer=task_question_answers.latest(con, t["id"]),
                         owner_health=owner_health(store.get_orch(con, t["orch_thread"]), jobs),
                         notification_delivery=store.notification_delivery(con, t["id"]),
-                        **worker_health.assess(t["status"], alive, worker_health.has_report(con, t["id"]),
-                                               task_id=t["id"], worktree=t["worktree"], branch=t["branch"],
-                                               base=t["base"])))
+                        last_report_at=heard, stale=stale, stale_after_hours=hours,
+                        **health))
+    if attention_only:
+        out = [r for r in out if r["stale"] or r["worker_health"] in ("orphan", "unknown") or r["uncertain_delivery"]
+               or r["status"] not in ("starting", "running", "acked")]
     return out
 
 
@@ -1196,7 +1224,6 @@ def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT, backend=No
             try:
                 store.update_task(con, task_id, status="running", note=None)
                 current = app_worker.start(con, rt, task, prompt, to_model, pending, brief=app_brief())
-                store.update_task(con, task_id, model_reason=f"{task['model_reason'] or ''}; retry: {model}: {reason}")
                 store.add_message(con, task_id, "retry", json.dumps(dict(**fields,
                     from_model=from_model, new_job_id=current["job_id"], new_session_id=current["session_id"],
                     answers_delivered=len(pending), generation=current["generation"])))
@@ -1232,8 +1259,7 @@ def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT, backend=No
                     raise _Superseded("the task was closed or its worker changed while retrying")
                 store.update_task(con, task_id, backend="exec", generation=None, endpoint=None,
                                   control_endpoint=None, supervisor_identity=None, server_identity=None,
-                                  active_turn=None, turn_state=None, last_completed_turn=None,
-                                  model_reason=f"{task['model_reason'] or ''}; retry: {model}: {reason}")
+                                  active_turn=None, turn_state=None, last_completed_turn=None)
                 store.mark_read(con, [row["id"] for row in pending])  # the same receipt an answer flush writes
                 for row in pending:
                     store.add_message(con, task_id, "answer", row["body"], evidence=row["evidence"],
