@@ -96,3 +96,22 @@ def orchd_executable(env=None):
     if found:
         return found
     raise RuntimeError("cannot find the orchd command; install it (uv tool install ...) or set ORCHD_EXECUTABLE")
+
+
+def orchd_command(env=None):
+    """argv prefix that runs orchd under this interpreter when the script's shebang would pick another one.
+
+    bin/orchd starts with `#!/usr/bin/env python3`, which finds whatever python3 is first on PATH; that may lack
+    psutil. Hooks, quota, flush and worker commands run it from a bare environment, so name the interpreter.
+    An install's entry point or a non-Python override has its own shebang and is launched directly.
+    """
+    exe = orchd_executable(env)
+    try:
+        with open(exe, "rb") as f:
+            first = f.readline(256).decode("utf-8", "replace").strip()
+    except OSError:
+        return [exe]
+    words = first[2:].split() if first.startswith("#!") else []
+    if len(words) == 2 and words[0] == "/usr/bin/env" and words[1].startswith("python"):
+        return [sys.executable, exe]
+    return [exe]
