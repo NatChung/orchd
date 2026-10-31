@@ -137,6 +137,68 @@ class ListOpenWireTest(unittest.TestCase):
         self.assertFalse(pages[-1]["truncated"])
         self.assertEqual(seen, ids)
 
+    def page(self, args):
+        handled, page = tool_call(self.con, self.rt, "list_open", args)
+        self.assertLessEqual(wire(handled), limits.MAX_PAGE_BYTES)
+        return page
+
+    def test_cursor_continues_after_cursor_task_closed(self):
+        ids = self.dispatch(6, lambda i: f"T{i}")
+        first = self.page({"limit": 2})
+        core.close(self.con, self.rt, ids[1])
+        core.close(self.con, self.rt, ids[3])  # an unseen closed task is skipped too
+        core.close(self.con, self.rt, ids[5])  # the high-water task need not remain open either
+        _, seen = self.walk({"limit": 2, "cursor": first["next_cursor"]})
+        self.assertEqual(seen, [ids[2], ids[4]])
+
+    def test_cursor_continues_after_leaving_attention_with_group_filter(self):
+        ids = self.dispatch(5, lambda i: f"T{i}")
+        for task_id in ids:
+            store.update_task(self.con, task_id, status="question", group_id="selected")
+        store.update_task(self.con, ids[3], group_id="other")
+        args = {"limit": 1, "group_id": "selected", "attention_only": True}
+        first = self.page(args)
+        store.update_task(self.con, ids[0], status="starting")
+        _, seen = self.walk(dict(args, cursor=first["next_cursor"]))
+        self.assertEqual(seen, [ids[1], ids[2], ids[4]])
+
+    def test_new_tasks_wait_for_next_walk_and_walk_terminates(self):
+        ids = self.dispatch(4, lambda i: f"T{i}")
+        args = {"limit": 1}
+        seen, added = [], []
+        for _ in range(8):  # bounded even if a broken cursor keeps chasing new arrivals
+            page = self.page(args)
+            seen.extend(t["task_id"] for t in page["tasks"])
+            added += self.dispatch(1, lambda i: "new")
+            if not page.get("next_cursor"):
+                break
+            self.assertIn("next", page["hint"])
+            args["cursor"] = page["next_cursor"]
+        else:
+            self.fail("walk did not terminate while tasks were added")
+        self.assertEqual(seen, ids)
+        self.assertEqual(self.walk()[1], ids + added)
+
+    def test_equal_created_at_uses_task_id_order_with_filters(self):
+        with mock.patch.object(store, "new_task_id", side_effect=["cccccccc", "aaaaaaaa", "bbbbbbbb", "dddddddd"]):
+            ids = self.dispatch(4, lambda i: f"T{i}")
+        for task_id in ids:
+            store.update_task(self.con, task_id, status="question", group_id="selected", created_at=1234)
+        store.update_task(self.con, ids[3], group_id="other")
+        args = {"limit": 1, "attention_only": True, "group_id": "selected"}
+        self.assertEqual(self.walk(args)[1], sorted(ids[:3]))
+
+    def test_malformed_cursors_have_clear_errors(self):
+        for cursor in ("t1:aaaaaaaa", "t2:nope", 't2:[1,"aaaaaaaa"]',
+                       't2:[true,"aaaaaaaa",2,"bbbbbbbb"]',
+                       't2:[NaN,"aaaaaaaa",2,"bbbbbbbb"]',
+                       't2:[3,"aaaaaaaa",2,"bbbbbbbb"]', 42):
+            with self.subTest(cursor=cursor):
+                handled = mcp_server.handle(dict(jsonrpc="2.0", id=1, method="tools/call",
+                    params=dict(name="list_open", arguments={"cursor": cursor})), self.con, self.rt)
+                self.assertTrue(handled["result"]["isError"])
+                self.assertIn("invalid cursor", handled["result"]["content"][0]["text"])
+
     def test_bad_limit_and_unknown_cursor_are_refused(self):
         self.dispatch(1, lambda i: "T")
         with self.assertRaises(ValueError):

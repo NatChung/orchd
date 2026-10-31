@@ -11,6 +11,7 @@ own tools only; the Codex host's other tools are limited by the entry project's 
 """
 import contextlib
 import json
+import math
 import os
 import re
 import sys
@@ -113,7 +114,7 @@ TOOLS = [
                     "Includes model_reason (the first dispatch reason, text-capped), retry_count and last_retry (latest retry model and reason; "
                     "full history is in the task's retry events), group_id, auto_model and auto_retry_count; optional group_id filters a batch. "
                     "Returns a bare list; if that would exceed about 60 KB on the wire (or limit is given) it returns "
-                    "{total, showing, truncated, tasks, hint, next_cursor}: pass next_cursor as cursor (same other arguments) for the rest. "
+                    "{total, showing, truncated, tasks, hint, next_cursor}: pass next_cursor as cursor (same other arguments) for the rest. New tasks wait for the next walk; closed tasks are skipped. "
                     "This does not adopt tasks or change their owner.",
      "inputSchema": {"type": "object", "properties": {"group_id": {"type": "string"}, "attention_only": {"type": "boolean"},
                                                        "with_counts": {"type": "boolean"}, "stale_hours": {"type": "number"},
@@ -402,18 +403,38 @@ ENTRY_INSTRUCTIONS = (
     "through and why. delivered never means read or approved.")
 
 
-def list_open_result(rows, total, args):
-    """A bare list while it fits MAX_PAGE_BYTES on the wire; else (or with_counts / limit) a page whose next_cursor
-    continues after the last task shown. The cursor is the last task id: pass it with the same other arguments."""
+def list_open_cursor(cursor):
+    """Decode a stable last position and the first page's inclusive high-water position."""
+    try:
+        if not isinstance(cursor, str) or not cursor.startswith('t2:') or len(cursor) > 256:
+            raise ValueError()
+        parts = json.loads(cursor[3:])
+        if not isinstance(parts, list) or len(parts) != 4:
+            raise ValueError()
+        for timestamp, task_id in (parts[:2], parts[2:]):
+            if (type(timestamp) not in (int, float) or not math.isfinite(timestamp) or
+                    not isinstance(task_id, str) or not re.fullmatch(r"[0-9a-f]{8}", task_id)):
+                raise ValueError()
+        last, high_water = tuple(parts[:2]), tuple(parts[2:])
+        if last > high_water:
+            raise ValueError()
+        return last, high_water
+    except (ValueError, TypeError, OverflowError):
+        raise ValueError("invalid cursor: expected a t2 list_open position; start again without cursor") from None
+
+
+def list_open_result(rows, total, args, positions):
+    """Keep small bare lists; page by (created_at, id), bounded by the first page's high-water."""
     limit, cursor = args.get('limit'), args.get('cursor')
     if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0):
         raise ValueError("limit must be a positive integer")
+    key = lambda task: positions[task['task_id']]
+    rows = sorted(rows, key=key)
     if cursor is not None:
-        ids = [t['task_id'] for t in rows]
-        last = cursor[3:] if isinstance(cursor, str) and cursor.startswith('t1:') else None
-        if last not in ids:
-            raise ValueError("invalid cursor, or its task is no longer in this list; start again without cursor")
-        rows = rows[ids.index(last) + 1:]
+        last, high_water = list_open_cursor(cursor)
+        rows = [t for t in rows if last < key(t) <= high_water]
+    else:
+        high_water = key(rows[-1]) if rows else None
     candidates = rows if limit is None else rows[:limit]
     if cursor is None and limit is None and not args.get('with_counts') and \
             limits.wire_bytes(candidates) <= limits.MAX_PAGE_BYTES:
@@ -424,8 +445,9 @@ def list_open_result(rows, total, args):
         out = dict(total=total, shown=len(chunk), showing=len(chunk), truncated=cut, tasks=chunk)
         if cut:
             out["hint"] = (f"{len(rows) - len(chunk)} more tasks not shown; pass next_cursor as cursor "
-                           "(same other arguments), or narrow with group_id / attention_only")
-            out["next_cursor"] = f"t1:{chunk[-1]['task_id']}"
+                           "(same other arguments), or narrow with group_id / attention_only. "
+                           "Tasks created after this walk's high-water wait for the next walk; closed tasks are skipped.")
+            out["next_cursor"] = "t2:" + json.dumps([*key(chunk[-1]), *high_water], separators=(',', ':'))
         return out
 
     return build(limits.fit_wire(candidates, build))
@@ -516,7 +538,10 @@ def call(name, args, thread, con, rt):
         rows = core.list_open(con, rt, stale_hours=args.get('stale_hours'), attention_only=bool(args.get('attention_only')))
         shown = [t for t in rows if args.get('group_id') is None or t['group_id'] == args['group_id']]
         total = len(core.list_open(con, rt, stale_hours=args.get('stale_hours'))) if args.get('with_counts') else len(shown)
-        return list_open_result(shown, total, args)
+        # Include closed tasks: a concurrent close after the health read must not erase a position.
+        positions = {t['id']: (t['created_at'], t['id'])
+                     for t in con.execute("SELECT id,created_at FROM tasks")}
+        return list_open_result(shown, total, args, positions)
     if name == "answer":
         text = args.get("text")
         if args.get("entry_reply_id") is not None and not thread:
