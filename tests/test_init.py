@@ -1,4 +1,6 @@
 """Issue #50: `orchd init` creates ~/orch/home and ~/orch/interface, trusts them in Codex, migrates an old home."""
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,12 +31,15 @@ class InitTest(unittest.TestCase):
         self.home.mkdir()
         self.env = {}
         self.rt = TrustRuntime()
+        self.orchd_bin = str(Path(self.tmp.name) / "bin" / "orchd")
+        Path(self.orchd_bin).parent.mkdir()
+        Path(self.orchd_bin).write_text("#!/usr/bin/env python3\n")
 
     def tearDown(self):
         self.tmp.cleanup()
 
     def init(self, **kw):
-        return bootstrap.init(self.rt, home=self.home, env=self.env, orchd_bin="/opt/orchd/bin/orchd", **kw)
+        return bootstrap.init(self.rt, home=self.home, env=self.env, orchd_bin=self.orchd_bin, **kw)
 
     def codex(self):
         return tomllib.loads((self.home / ".codex" / "config.toml").read_text())
@@ -133,8 +138,8 @@ class InitTest(unittest.TestCase):
         home_cfg = tomllib.loads((orch / ".codex" / "config.toml").read_text())
         fs = home_cfg["permissions"]["orch"]["filesystem"]
         self.assertEqual((fs[str(self.home)], fs[str(orch)]), ("deny", "write"))
-        self.assertEqual(home_cfg["mcp_servers"]["orchd"]["command"], "/opt/orchd/bin/orchd")
-        self.assertEqual(home_cfg["mcp_servers"]["orchd"]["args"], ["mcp"])
+        self.assertEqual(home_cfg["mcp_servers"]["orchd"]["command"], sys.executable)
+        self.assertEqual(home_cfg["mcp_servers"]["orchd"]["args"], [self.orchd_bin, "mcp"])
         self.assertEqual(set(home_cfg["mcp_servers"]["orchd"]["tools"]), {t["name"] for t in mcp_server.TOOLS})
         iface = tomllib.loads((interface / ".codex" / "config.toml").read_text())
         self.assertEqual(iface["model"], "gpt-6.1-terra")
@@ -145,8 +150,8 @@ class InitTest(unittest.TestCase):
         self.assertEqual(iface["web_search"], "disabled")  # web search ignores network.enabled (#55)
         for feature in ("shell_tool", "unified_exec", "image_generation", "view_image", "goals", "multi_agent"):
             self.assertIs(iface["features"][feature], False, feature)
-        self.assertEqual(iface["mcp_servers"]["orchd_entry"]["command"], "/opt/orchd/bin/orchd")
-        self.assertEqual(iface["mcp_servers"]["orchd_entry"]["args"], ["mcp", "--role", "entry"])
+        self.assertEqual(iface["mcp_servers"]["orchd_entry"]["command"], sys.executable)
+        self.assertEqual(iface["mcp_servers"]["orchd_entry"]["args"], [self.orchd_bin, "mcp", "--role", "entry"])
         self.assertNotIn("/usr/bin/python3", (interface / ".codex" / "config.toml").read_text())
         self.assertEqual({k: v["approval_mode"] for k, v in iface["mcp_servers"]["orchd_entry"]["tools"].items()},
                          {"relay": "approve", "status": "approve", "foreground": "approve"})
@@ -215,6 +220,60 @@ class InitTest(unittest.TestCase):
         self.assertNotEqual((orch / "AGENTS.md").read_text(), "old rules")
         self.assertFalse((orch / ".git").exists())
         self.assertEqual((old / "groups" / "o1.md").read_text(), "notes")  # source untouched
+
+    def test_codex_templates_launch_mcp_under_the_orchd_interpreter(self):
+        # bin/orchd's shebang is the system python3, which may lack psutil (#89, same crash as #88).
+        self.init()
+        orch, interface = self.home / "orch" / "home", self.home / "orch" / "interface"
+        for folder, server, tail in ((orch, "orchd", ["mcp"]), (interface, "orchd_entry", ["mcp", "--role", "entry"])):
+            spec = tomllib.loads((folder / ".codex" / "config.toml").read_text())["mcp_servers"][server]
+            self.assertEqual((spec["command"], spec["args"]), (sys.executable, [self.orchd_bin, *tail]), server)
+
+    def test_non_python_orchd_override_is_launched_directly(self):
+        script = Path(self.tmp.name) / "wrapper"
+        script.write_text("#!/bin/sh\nexec true\n")
+        files = bootstrap.planned_files(self.home, {"ORCHD_EXECUTABLE": str(script)})
+        spec = tomllib.loads(files[self.home / "orch" / "home" / ".codex" / "config.toml"])["mcp_servers"]["orchd"]
+        self.assertEqual((spec["command"], spec["args"]), (str(script), ["mcp"]))
+
+    def test_shell_interpreter_directory_named_python_tools_is_not_python(self):
+        folder = self.home / "python-tools"
+        folder.mkdir()
+        shell = folder / "sh"
+        shell.symlink_to("/bin/sh")
+        wrapper = folder / "wrapper"
+        wrapper.write_text(f"#!{shell}\nexit 0\n")
+        wrapper.chmod(0o755)
+        self.assertEqual(subprocess.run([str(wrapper)], capture_output=True).returncode, 0)
+        command, args = paths.mcp_launch(str(wrapper))
+        self.assertEqual(subprocess.run([command, *args], capture_output=True).returncode, 0)
+
+    def test_shebang_uses_interpreter_basename_and_env_command_token(self):
+        script = self.home / "script"
+        for shebang, expected in (("/usr/bin/env python3", True),
+                                  ("/usr/bin/env -S python3 -u", True),
+                                  ("/usr/bin/env sh python-helper", False),
+                                  ("/usr/bin/env -S sh python-helper", False),
+                                  ("/bin/sh # python", False)):
+            with self.subTest(shebang=shebang):
+                script.write_text("#!" + shebang + "\n")
+                self.assertEqual(paths.is_python_script(script), expected)
+
+    def test_native_orchd_override_is_launched_directly(self):
+        # /bin/echo has no shebang; running it under python is a SyntaxError (rc 1).
+        echo = next(p for p in ("/bin/echo", "/usr/bin/echo") if Path(p).is_file())
+        self.assertEqual(paths.mcp_launch(echo), (echo, []))
+        files = bootstrap.planned_files(self.home, {"ORCHD_EXECUTABLE": echo})
+        spec = tomllib.loads(files[self.home / "orch" / "home" / ".codex" / "config.toml"])["mcp_servers"]["orchd"]
+        self.assertEqual((spec["command"], spec["args"]), (echo, ["mcp"]))
+
+    def test_unclassifiable_override_falls_back_to_direct_launch(self):
+        d = Path(self.tmp.name)
+        (d / "plain").write_text("not a script\n")
+        for target in (d / "missing", d / "plain"):
+            self.assertEqual(paths.mcp_launch(str(target)), (str(target), []), target.name)
+        (d / "tool.py").write_text("print(1)\n")
+        self.assertEqual(paths.mcp_launch(str(d / "tool.py")), (sys.executable, [str(d / "tool.py")]))
 
     def test_paths_follow_overrides(self):
         self.assertEqual(paths.orch_home(self.home, {}), self.home / "orch" / "home")
