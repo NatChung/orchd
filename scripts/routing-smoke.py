@@ -127,7 +127,7 @@ def main():
             pids = [int(t['job_id']) for t in tasks]
             assert len(set(pids)) == 2 and all(rt.pid_alive(p) for p in pids)
             assert len({t['worktree'] for t in tasks}) == 2
-            grouped = mcp_server.call('list_open', {'group_id': batch['group_id']}, 'smoke', con, rt)['tasks']
+            grouped = mcp_server.call('list_open', {'group_id': batch['group_id']}, 'smoke', con, rt)
             assert len(grouped) == 2 and all(t['worker_alive'] for t in grouped)
             print(json.dumps(dict(case='c: batch parallel', group_id=batch['group_id'], pids=pids,
                 simultaneous_alive=True, distinct_git_worktrees=True, grouped_tasks=len(grouped))))

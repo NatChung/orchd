@@ -872,13 +872,20 @@ def retry_summary(con, task_id):
     return dict(retry_count=len(rows), last_retry=last)
 
 
-def list_open(con, rt):
+def list_open(con, rt, *, now=None, stale_hours=None, attention_only=False):
+    """Every open task. `worker_alive` only means the process/job exists, not that it is working; `last_report_at`
+    (latest worker ack/progress/question/report) and `stale` (no such message for stale_hours, default 24 or
+    ORCHD_STALE_HOURS) show silence. Both are labels: nothing here changes a task. attention_only drops healthy,
+    non-stale running/acked/starting tasks;
+    health-unknown ones stay listed."""
     from . import task_question_answers
     try:
         jobs = rt.live_jobs()
     except Exception:  # a failed status probe is not proof an Orch has exited
         jobs = None
     out = []
+    now = time.time() if now is None else now
+    hours = worker_health.stale_hours(stale_hours)
     for t in store.open_tasks(con):
         if app_worker.enabled(t):
             alive = app_worker.health(t)
@@ -887,6 +894,10 @@ def list_open(con, rt):
                 None if t["status"] in ("question", "done", "blocked") else False)
         else:
             alive = claude_job_alive(jobs, t["job_id"])
+        heard = worker_health.last_report_at(con, t["id"])
+        stale = worker_health.is_stale(t["status"], heard if heard is not None else t["created_at"], now, hours)
+        health = worker_health.assess(t["status"], alive, worker_health.has_report(con, t["id"]),
+                                      task_id=t["id"], worktree=t["worktree"], branch=t["branch"], base=t["base"])
         out.append(dict(task_id=t["id"], repo=t["repo"], title=t["title"], status=t["status"],
                         model=task_model(t), model_reason=limits.cap_text(t['model_reason']), group_id=t['group_id'],
                         **retry_summary(con, t['id']),
@@ -902,9 +913,11 @@ def list_open(con, rt):
                         latest_question_answer=task_question_answers.latest(con, t["id"]),
                         owner_health=owner_health(store.get_orch(con, t["orch_thread"]), jobs),
                         notification_delivery=store.notification_delivery(con, t["id"]),
-                        **worker_health.assess(t["status"], alive, worker_health.has_report(con, t["id"]),
-                                               task_id=t["id"], worktree=t["worktree"], branch=t["branch"],
-                                               base=t["base"])))
+                        last_report_at=heard, stale=stale, stale_after_hours=hours,
+                        **health))
+    if attention_only:
+        out = [r for r in out if r["stale"] or r["worker_health"] in ("orphan", "unknown") or r["uncertain_delivery"]
+               or r["status"] not in ("starting", "running", "acked")]
     return out
 
 

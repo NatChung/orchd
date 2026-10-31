@@ -220,11 +220,15 @@ def pending(con, owner=None, limit=100, *, after_id=None, high_water_id=None, cu
     rows = con.execute("SELECT * FROM intake_events WHERE state='received' AND " + clause +
                        " AND id>? AND id<=? ORDER BY id LIMIT ?",
                        (*params, after_id, high_water_id, limit + 1)).fetchall()
-    events = limits.fit_bytes([_event_view(r) for r in rows[:limit]], max_bytes)  # a page is bounded in bytes too
-    has_more = len(rows) > len(events)
-    last_id = events[-1]["id"] if events else after_id
-    return dict(owner=owner, events=events, has_more=has_more, high_water_id=high_water_id,
-                next_cursor=f"p1:{last_id}:{high_water_id}:{scope}" if has_more else None)
+    views = [_event_view(r) for r in rows[:limit]]
+
+    def build(events):
+        more = len(rows) > len(events)
+        last_id = events[-1]["id"] if events else after_id
+        return dict(owner=owner, events=events, has_more=more, high_water_id=high_water_id,
+                    next_cursor=f"p1:{last_id}:{high_water_id}:{scope}" if more else None)
+
+    return build(limits.fit_wire(views, build, max_bytes))  # bounded on the final reply, not on the events alone
 
 
 def exclude(con, receipt_ids, *, reason, rule_version, actor):

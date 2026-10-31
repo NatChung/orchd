@@ -286,7 +286,10 @@ Home rules are updated automatically after program upgrade, using versioned step
 
 ## Output size limits
 
-MCP `list_open` returns `{total, showing, truncated, tasks, hint}` with at most `limit` tasks (default 50);
-when `truncated` is true, narrow with `group_id` or pass a larger `limit`. `model_reason` in `list_open` and
-`inbox` is text-capped (500 characters, with a truncation marker). `intake_pending` pages are cut by bytes as
-well as by `limit`; follow `next_cursor`. `inbox` is not paged here (it consumes what it returns).
+MCP `list_open` returns a bare list of tasks while its final reply fits 60,000 bytes on the wire. If it would not
+fit, or you pass `limit` or `with_counts`, it returns `{total, showing, truncated, tasks, hint, next_cursor}`
+(`with_counts` also keeps `shown`); pass `next_cursor` as `cursor`, with the same other arguments, to read the rest.
+A single task too large for a page has its long text fields shortened with a `…[truncated N chars]` marker.
+`model_reason` in `list_open` and `inbox` is text-capped (500 characters, with a marker). `intake_pending` pages are
+cut so the final reply stays within 60,000 bytes as well as by `limit`; follow `next_cursor`. CLI `list` output is not
+limited. `inbox` is not paged here (it consumes what it returns).

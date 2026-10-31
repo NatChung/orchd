@@ -3,7 +3,8 @@ import json
 
 TEXT_CAP = 500        # characters kept per free-text field in a list row
 DEFAULT_LIMIT = 50    # rows per list_open page
-MAX_PAGE_BYTES = 60_000  # serialized bytes per intake_pending page
+MAX_PAGE_BYTES = 60_000  # bytes of the final wire reply per list_open / intake_pending page
+ID_MARGIN = 32           # room for the JSON-RPC id, which the page builders do not know
 
 
 def cap_text(value, cap=TEXT_CAP):
@@ -30,12 +31,47 @@ def page(items, limit=None, *, noun="items", hint=None):
     return out
 
 
-def fit_bytes(items, max_bytes=MAX_PAGE_BYTES):
-    """Longest prefix of items whose JSON stays within max_bytes (always at least one item)."""
-    used, count = 0, 0
-    for item in items:
-        used += len(json.dumps(item, ensure_ascii=False).encode()) + 1
-        if count and used > max_bytes:
+def tool_text(data):
+    """The text a tool result carries: what the client reads, and what the byte budget is measured on."""
+    return json.dumps(data, ensure_ascii=False, indent=1)
+
+
+def wire_bytes(data):
+    """Bytes of the one-line JSON-RPC reply carrying `data` (the tool text is escaped a second time inside it).
+    The id is unknown here, so a fixed margin stands in for it."""
+    reply = {"jsonrpc": "2.0", "id": 0, "result": {"content": [{"type": "text", "text": tool_text(data)}]}}
+    return len(json.dumps(reply, ensure_ascii=False).encode()) + ID_MARGIN
+
+
+def cap_strings(value, cap, floor=64):
+    """Copy of value with every string longer than max(cap, floor) cut to cap characters plus a marker.
+    Short strings (ids, statuses, timestamps) are never touched."""
+    if isinstance(value, str):
+        return cap_text(value, cap) if len(value) > max(cap, floor) else value
+    if isinstance(value, dict):
+        return {k: cap_strings(v, cap, floor) for k, v in value.items()}
+    if isinstance(value, list):
+        return [cap_strings(v, cap, floor) for v in value]
+    return value
+
+
+def fit_wire(items, build, max_bytes=MAX_PAGE_BYTES):
+    """Longest prefix of items whose final reply, build(prefix), fits max_bytes on the wire.
+
+    A first item that is too big alone is shortened (long text fields cut, with a marker) rather than dropped,
+    so a paging cursor always advances. At least one item is returned when items is non-empty."""
+    if not items:
+        return []
+    fits = lambda n: wire_bytes(build(items[:n])) <= max_bytes
+    low, high = 0, len(items)
+    while low < high:  # largest n that fits; fits() only gets harder as n grows
+        mid = (low + high + 1) // 2
+        low, high = (mid, high) if fits(mid) else (low, mid - 1)
+    if low:
+        return items[:low]
+    first = items[0]
+    for cap in (TEXT_CAP, 200, 100, 50):
+        first = cap_strings(items[0], cap)
+        if wire_bytes(build([first])) <= max_bytes:
             break
-        count += 1
-    return items[:count]
+    return [first]

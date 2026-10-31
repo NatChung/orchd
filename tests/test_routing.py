@@ -256,7 +256,7 @@ class RoutingTest(unittest.TestCase):
         extra = self.dispatch()
         for t in result['tasks'] + [dict(task_id=extra['id'])]:
             core.progress(self.con, self.rt, t['task_id'], 'Synthetic')
-        self.assertEqual(len(mcp_server.call('list_open', {'group_id': group}, 'orch', self.con, self.rt)['tasks']), 2)
+        self.assertEqual(len(mcp_server.call('list_open', {'group_id': group}, 'orch', self.con, self.rt)), 2)
         self.assertEqual(len(core.inbox(self.con, 'orch', group)), 2)
         self.assertEqual(len(core.inbox(self.con, 'orch')), 1)
 

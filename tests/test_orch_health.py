@@ -51,7 +51,7 @@ class OrchHealthTest(unittest.TestCase):
             row, = core.list_open(self.con, self.rt)
             self.assertIn("owner_health", row)
             self.assertEqual(row["owner_health"], {"state": "dead", "reason": "job_absent"})
-            self.assertTrue(row["worker_alive"])
+            self.assertIsNone(row["worker_alive"])
             delivery = row["notification_delivery"]
             self.assertEqual(delivery["unread_count"], 2)
             self.assertEqual(delivery["unread_wake_failed_count"], 2)
@@ -70,7 +70,7 @@ class OrchHealthTest(unittest.TestCase):
         self.task()
         for jobs, state, reason, worker in (
             ({"owner-job": {"pid": 4242, "status": "idle"}}, "alive", "job_present", False),
-            ({"job1": {}}, "dead", "job_absent", True),
+            ({"job1": {}}, "dead", "job_absent", None),
             (None, "unknown", "runtime_unavailable", None),
         ):
             with self.subTest(state=state):
@@ -193,7 +193,7 @@ class OrchHealthTest(unittest.TestCase):
         self.con.execute("UPDATE messages SET wake_error='RuntimeError: SECRET',read_at=1 WHERE id=?", (old,))
         before = list(self.con.iterdump())
         # MCP list_open spans groups but must not make other groups' messages public.
-        rows = mcp_server.call("list_open", {}, "owner-C", self.con, self.rt)["tasks"]
+        rows = mcp_server.call("list_open", {}, "owner-C", self.con, self.rt)
         by_task = {r["task_id"]: r["notification_delivery"] for r in rows}
         self.assertEqual(by_task[a["id"]]["unread_count"], 3)
         self.assertEqual(by_task[a["id"]]["unread_wake_failed_count"], 1)
@@ -230,7 +230,7 @@ class OrchHealthTest(unittest.TestCase):
         row, = core.list_open(self.con, self.rt)
         self.assertEqual({k: row[k] for k in (
             "task_id", "repo", "title", "status", "worker_alive", "worktree", "branch", "orch_thread", "note"
-        )}, dict(task_id=t["id"], repo="demo", title="T", status="running", worker_alive=True,
+        )}, dict(task_id=t["id"], repo="demo", title="T", status="running", worker_alive=None,
                  worktree=t["worktree"], branch=t["branch"], orch_thread="owner-A", note=None))
         cli = runpy.run_path(str(Path(__file__).resolve().parents[1] / "bin" / "orchd"))
         output = io.StringIO()

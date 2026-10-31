@@ -1,8 +1,9 @@
-import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from orchd import core, intake, limits, mcp_server, store
 from tests.test_intake import IntakeBase
@@ -56,37 +57,137 @@ class ModelReasonBoundTest(unittest.TestCase):
         self.assertIn("truncated", msg["model_reason"])
 
 
-class ListOpenPageTest(unittest.TestCase):
-    def call(self, args, count):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        con = store.connect(Path(tmp.name) / "t.db")
-        rt = FakeRuntime()
-        for i in range(count):
-            core.dispatch(con, rt, orch_thread="thread-A", repo="demo", title=f"T{i}", instructions="i",
-                          done_when="d", model_reason="r", task_type="code")
-        out = io.StringIO()
-        message = dict(jsonrpc="2.0", id=1, method="tools/call", params=dict(name="list_open", arguments=args))
-        mcp_server.serve(io.StringIO(json.dumps(message) + "\n"), out, con, rt)
-        return json.loads(json.loads(out.getvalue())["result"]["content"][0]["text"])
+SAMPLES = {"ascii": "a", "cjk": "漢", "quote": '"', "control": "\x01\n\t\\", "emoji": "😀"}
 
-    def test_oversized_list_is_bounded_with_total_and_next_step_hint(self):
-        result = self.call({"limit": 2}, 5)
-        self.assertEqual((result["total"], result["showing"], result["truncated"]), (5, 2, True))
-        self.assertEqual(len(result["tasks"]), 2)
-        self.assertIn("limit", result["hint"])
 
-    def test_default_limit_applies_and_small_list_is_not_truncated(self):
-        result = self.call({}, 3)
-        self.assertEqual((result["total"], result["showing"], result["truncated"]), (3, 3, False))
-        self.assertNotIn("hint", result)
+def wire(handled):
+    """What the client actually reads: the one-line JSON-RPC reply, serialized the way serve() writes it."""
+    return len(json.dumps(handled, ensure_ascii=False).encode())
 
-    def test_bad_limit_is_refused(self):
+
+def tool_call(con, rt, name, args, thread="thread-A"):
+    message = dict(jsonrpc="2.0", id=1, method="tools/call", params=dict(name=name, arguments=args))
+    with mock.patch.dict(os.environ, {"ORCHD_ORCH_ID": thread}):
+        handled = mcp_server.handle(message, con, rt)
+    assert "isError" not in handled["result"], handled["result"]
+    return handled, json.loads(handled["result"]["content"][0]["text"])
+
+
+class ListOpenWireTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.con = store.connect(Path(self.tmp.name) / "t.db")
+        self.addCleanup(self.con.close)
+        self.rt = FakeRuntime()
+
+    def dispatch(self, count, title):
+        return [core.dispatch(self.con, self.rt, orch_thread="thread-A", repo="demo", title=title(i), instructions="i",
+                              done_when="d", model_reason="r", task_type="code")["id"] for i in range(count)]
+
+    def walk(self, args=None):
+        """Follow next_cursor to the end; returns (pages, task ids read) with every reply's wire size checked."""
+        args, pages, seen = dict(args or {}), [], []
+        while True:
+            handled, data = tool_call(self.con, self.rt, "list_open", args)
+            self.assertLessEqual(wire(handled), limits.MAX_PAGE_BYTES)
+            rows = data if isinstance(data, list) else data["tasks"]
+            pages.append(data)
+            seen += [t["task_id"] for t in rows]
+            if isinstance(data, list) or not data.get("next_cursor"):
+                return pages, seen
+            args["cursor"] = data["next_cursor"]
+
+    def test_small_list_stays_a_bare_list(self):
+        ids = self.dispatch(3, lambda i: f"T{i}")
+        _, data = tool_call(self.con, self.rt, "list_open", {})
+        self.assertIsInstance(data, list)
+        self.assertEqual([t["task_id"] for t in data], ids)
+
+    def test_with_counts_is_always_a_dict(self):
+        self.dispatch(2, lambda i: f"T{i}")
+        _, data = tool_call(self.con, self.rt, "list_open", {"with_counts": True})
+        self.assertEqual((data["total"], data["shown"], data["showing"], data["truncated"]), (2, 2, 2, False))
+
+    def test_final_wire_stays_within_budget_for_every_character_class(self):
+        for name, ch in SAMPLES.items():
+            with self.subTest(name):
+                self.setUp()
+                ids = self.dispatch(50, lambda i: ch * 400 + str(i))
+                handled, _ = tool_call(self.con, self.rt, "list_open", {})
+                self.assertLessEqual(wire(handled), limits.MAX_PAGE_BYTES)
+                pages, seen = self.walk()
+                self.assertIsInstance(pages[0], dict)  # only an overflow turns the list into a page
+                self.assertEqual(set(pages[0]) - {"hint"}, {"total", "shown", "showing", "truncated", "tasks", "next_cursor"})
+                self.assertTrue(pages[0]["truncated"])
+                self.assertEqual(seen, ids)  # nothing lost, nothing repeated
+
+    def test_one_huge_title_is_shortened_and_the_cursor_still_advances(self):
+        ids = self.dispatch(3, lambda i: ("T" * 1_400_000) if i == 0 else f"T{i}")
+        handled, data = tool_call(self.con, self.rt, "list_open", {})
+        self.assertLessEqual(wire(handled), limits.MAX_PAGE_BYTES)
+        self.assertIn("truncated", data["tasks"][0]["title"])
+        self.assertEqual(self.walk()[1], ids)
+
+    def test_limit_pages_with_a_cursor(self):
+        ids = self.dispatch(5, lambda i: f"T{i}")
+        pages, seen = self.walk({"limit": 2})
+        self.assertEqual([len(p["tasks"]) for p in pages], [2, 2, 1])
+        self.assertEqual((pages[0]["total"], pages[0]["truncated"]), (5, True))
+        self.assertFalse(pages[-1]["truncated"])
+        self.assertEqual(seen, ids)
+
+    def test_bad_limit_and_unknown_cursor_are_refused(self):
+        self.dispatch(1, lambda i: "T")
         with self.assertRaises(ValueError):
             limits.page([1], 0)
+        with self.assertRaises(AssertionError):  # tool_call asserts the reply is not an error
+            tool_call(self.con, self.rt, "list_open", {"limit": 0})
+        with self.assertRaises(AssertionError):
+            tool_call(self.con, self.rt, "list_open", {"cursor": "t1:nope"})
 
 
 class IntakePendingBytesTest(IntakeBase):
+    def setUp(self):
+        super().setUp()
+        store.register_orch(self.con, "thread-A", "claude")
+
+    def pending(self, args=None):
+        return tool_call(self.con, FakeRuntime(), "intake_pending", args or {})
+
+    def walk(self, **args):
+        """Follow next_cursor to the end, checking each reply's wire size; returns the event ids in order."""
+        seen = []
+        while True:
+            handled, page = self.pending(args)
+            self.assertLessEqual(wire(handled), limits.MAX_PAGE_BYTES)
+            seen += [e["event_id"] for e in page["events"]]
+            if not page["has_more"]:
+                return seen
+            args["cursor"] = page["next_cursor"]
+
+    def own(self, count, make):
+        ids = []
+        for i in range(count):
+            r = self.submit(event_id=f"ev-{i}", **make(i))
+            intake.bind_owner(self.con, r["receipt_id"], "thread-A")
+            ids.append(f"ev-{i}")
+        return ids
+
+    def test_final_wire_stays_within_budget_for_every_character_class(self):
+        for name, ch in SAMPLES.items():
+            with self.subTest(name):
+                self.setUp()
+                ids = self.own(100, lambda i: dict(summary=(ch * 900)[:900], source_ref=(ch * 100)[:100]))
+                self.assertEqual(self.walk(), ids)  # no gap, no repeat
+
+    def test_oversized_first_row_is_shortened_and_the_cursor_advances(self):
+        ids = self.own(3, lambda i: dict(summary="s", source_ref=("R" * 1_400_000) if i == 0 else "ref"))
+        handled, page = self.pending()
+        self.assertLessEqual(wire(handled), limits.MAX_PAGE_BYTES)
+        self.assertIn("truncated", page["events"][0]["source_ref"])
+        self.assertEqual(self.walk(), ids)
+
     def test_page_is_cut_by_bytes_and_cursor_continues_without_loss(self):
         for i in range(6):
             self.submit(event_id=f"big-{i}", summary="s" * 900)

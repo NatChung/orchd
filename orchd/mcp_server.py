@@ -93,6 +93,13 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {"group_id": {"type": "string"}}}},
     {"name": "list_open",
      "description": "List every task that is not closed, across all Orch sessions, with worker liveness. "
+                    "worker_alive true only means the worker's PID/job exists, not that it is working; "
+                    "last_report_at is the latest worker ack/progress/question/report time, and stale (label only, never "
+                    "an automatic death verdict or close) means a running/acked/question task has been silent for "
+                    "stale_after_hours (default 24, env ORCHD_STALE_HOURS or the stale_hours argument). "
+                    "Default output is unchanged (all open tasks, a plain list); attention_only=true hides healthy "
+                    "non-stale running/acked/starting tasks (health-unknown ones stay); with_counts=true wraps the result as "
+                    "{total, shown, tasks}. "
                     "model is the task's stored full model id (\"unknown\" if none was stored). "
                     "pending counts undelivered queued answers and followups without revealing their bodies, "
                     "consuming them or flushing; it remains nonzero until delivery is recorded, including "
@@ -105,9 +112,12 @@ TOOLS = [
                     "and safe wake-failure metadata without consuming inbox or revealing message content. "
                     "Includes model_reason (the first dispatch reason, text-capped), retry_count and last_retry (latest retry model and reason; "
                     "full history is in the task's retry events), group_id, auto_model and auto_retry_count; optional group_id filters a batch. "
-                    "Returns {total, showing, truncated, tasks, hint}: at most `limit` tasks (default 50). This does not adopt tasks or change their owner.",
-     "inputSchema": {"type": "object", "properties": {"group_id": {"type": "string"},
-                                                      "limit": {"type": "integer", "minimum": 1}}}},
+                    "Returns a bare list; if that would exceed about 60 KB on the wire (or limit is given) it returns "
+                    "{total, showing, truncated, tasks, hint, next_cursor}: pass next_cursor as cursor (same other arguments) for the rest. "
+                    "This does not adopt tasks or change their owner.",
+     "inputSchema": {"type": "object", "properties": {"group_id": {"type": "string"}, "attention_only": {"type": "boolean"},
+                                                       "with_counts": {"type": "boolean"}, "stale_hours": {"type": "number"},
+                                                       "limit": {"type": "integer", "minimum": 1}, "cursor": {"type": "string"}}}},
     {"name": "answer",
      "description": "Send an answer to a worker's question. For outward sends, pass Operator's decision verbatim. "
                     "Returns status delivered|queued|failed with delivered and pending counts. A Codex worker gets "
@@ -392,6 +402,35 @@ ENTRY_INSTRUCTIONS = (
     "through and why. delivered never means read or approved.")
 
 
+def list_open_result(rows, total, args):
+    """A bare list while it fits MAX_PAGE_BYTES on the wire; else (or with_counts / limit) a page whose next_cursor
+    continues after the last task shown. The cursor is the last task id: pass it with the same other arguments."""
+    limit, cursor = args.get('limit'), args.get('cursor')
+    if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0):
+        raise ValueError("limit must be a positive integer")
+    if cursor is not None:
+        ids = [t['task_id'] for t in rows]
+        last = cursor[3:] if isinstance(cursor, str) and cursor.startswith('t1:') else None
+        if last not in ids:
+            raise ValueError("invalid cursor, or its task is no longer in this list; start again without cursor")
+        rows = rows[ids.index(last) + 1:]
+    candidates = rows if limit is None else rows[:limit]
+    if cursor is None and limit is None and not args.get('with_counts') and \
+            limits.wire_bytes(candidates) <= limits.MAX_PAGE_BYTES:
+        return candidates
+
+    def build(chunk):
+        cut = len(chunk) < len(rows)
+        out = dict(total=total, shown=len(chunk), showing=len(chunk), truncated=cut, tasks=chunk)
+        if cut:
+            out["hint"] = (f"{len(rows) - len(chunk)} more tasks not shown; pass next_cursor as cursor "
+                           "(same other arguments), or narrow with group_id / attention_only")
+            out["next_cursor"] = f"t1:{chunk[-1]['task_id']}"
+        return out
+
+    return build(limits.fit_wire(candidates, build))
+
+
 def intake_call(name, args, thread, con, rt=None):
     """The caller's own thread id is the only identity; arguments cannot name another owner or an actor."""
     from . import intake, intake_bridge, intake_decide
@@ -474,9 +513,10 @@ def call(name, args, thread, con, rt):
     if name == "list_orchs":
         return inventory.list_orchs(con, rt, observe=True)
     if name == "list_open":
-        rows = [t for t in core.list_open(con, rt) if args.get('group_id') is None or t['group_id'] == args['group_id']]
-        return limits.page(rows, args.get('limit'), noun="tasks",
-                           hint="more tasks not shown; pass group_id to narrow, or a larger limit")
+        rows = core.list_open(con, rt, stale_hours=args.get('stale_hours'), attention_only=bool(args.get('attention_only')))
+        shown = [t for t in rows if args.get('group_id') is None or t['group_id'] == args['group_id']]
+        total = len(core.list_open(con, rt, stale_hours=args.get('stale_hours'))) if args.get('with_counts') else len(shown)
+        return list_open_result(shown, total, args)
     if name == "answer":
         text = args.get("text")
         if args.get("entry_reply_id") is not None and not thread:
@@ -612,7 +652,7 @@ def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY):
                     if thread and params.get("name") not in ("list_orchs", "quota_status"):
                         store.register_orch(con, thread, "codex")
                 data = call(params.get("name"), params.get("arguments") or {}, thread, con, rt)
-            result = {"content": [{"type": "text", "text": json.dumps(data, ensure_ascii=False, indent=1)}]}
+            result = {"content": [{"type": "text", "text": limits.tool_text(data)}]}
             if (role != "entry" and params.get("name") in ("list_orchs", "quota_status")) or (role == "entry" and params.get("name") == "foreground"):
                 result["structuredContent"] = data
         except Exception as error:
