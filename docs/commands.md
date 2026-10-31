@@ -219,7 +219,7 @@ orchd orch restart --dry-run
 orchd orch restart
 ```
 
-Restart already stops the old Orch, confirms death using fresh runtime/socket probes, starts the replacement, adopts open tasks and rebinds Desktop when it was bound to the old Orch. You do not need a separate `binding` command. It leaves the daemon and task workers running. The model defaults to the old Orch's model; use `orchd orch restart OLD_ID --model sonnet` to select explicitly. Without OLD_ID, a missing/stale Desktop binding prints candidates and stops for selection.
+Restart already stops the old Orch, confirms death using fresh runtime/socket probes, starts the replacement, adopts open tasks and rebinds Desktop when it was bound to the old Orch. After starting, it waits up to 30 seconds for the new Orch's job to publish a pid/status (`wait-alive` step, ADR-0004); a job that stays retired fails there with the manual recovery hint. You do not need a separate `binding` command. It leaves the daemon and task workers running. The model defaults to the old Orch's model; use `orchd orch restart OLD_ID --model sonnet` to select explicitly. Without OLD_ID, a missing/stale Desktop binding prints candidates and stops for selection.
 
 After success, use the printed new Orch ID and first prompt `盤點上次` (take stock of previous work). If any step fails or is uncertain, follow the printed recovery commands and inspect task ownership before retrying: adopt can be committed even if notifications fail. An explicitly selected Orch that was not Desktop-bound leaves Desktop binding alone; use `orchd orch attach NEW_ID` to talk to it.
 
