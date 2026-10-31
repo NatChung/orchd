@@ -96,3 +96,19 @@ def orchd_executable(env=None):
     if found:
         return found
     raise RuntimeError("cannot find the orchd command; install it (uv tool install ...) or set ORCHD_EXECUTABLE")
+
+
+def mcp_launch(executable):
+    """(command, leading args) to start `<executable> mcp ...`.
+
+    bin/orchd's shebang is the system python3, which may lack psutil, so a Python entry point is run under this
+    interpreter. A file that is plainly not Python (an ORCHD_EXECUTABLE shell wrapper) is launched directly.
+    """
+    try:
+        with open(executable, "rb") as f:
+            first = f.readline(200)
+    except OSError:
+        return sys.executable, [executable]
+    if first.startswith(b"#!") and b"python" not in first:
+        return executable, []
+    return sys.executable, [executable]

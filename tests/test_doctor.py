@@ -67,6 +67,28 @@ class DoctorCase(unittest.TestCase):
         return d, {c.name: c for c in d.checks}
 
 
+class McpLaunchCheck(DoctorCase):
+    def write_cfg(self, folder, server, command, args):
+        (folder / ".codex").mkdir(parents=True, exist_ok=True)
+        (folder / ".codex" / "config.toml").write_text(
+            f'[mcp_servers.{server}]\ncommand = "{command}"\nargs = {json.dumps(args)}\n')
+
+    def test_bare_orchd_command_in_a_managed_config_warns_with_the_fix(self):
+        self.write_cfg(self.orch, "orchd", "/x/bin/orchd", ["mcp"])
+        self.write_cfg(self.home / "orch" / "interface", "orchd_entry", "/x/bin/orchd", ["mcp", "--role", "entry"])
+        _, by = self.run_doctor()
+        check = by["Codex MCP launch"]
+        self.assertEqual(check.status, doctor.WARN)
+        self.assertIn("orchd", check.detail)
+        self.assertIn("orchd_entry", check.detail)
+        self.assertIn("orchd init", check.fix)
+
+    def test_interpreter_launch_passes(self):
+        self.write_cfg(self.orch, "orchd", "/py/bin/python3", ["/x/bin/orchd", "mcp"])
+        _, by = self.run_doctor()
+        self.assertEqual(by["Codex MCP launch"].status, doctor.PASS)
+
+
 class OrchdCommandCheck(DoctorCase):
     def test_reports_install_checkout_or_missing(self):
         _, by = self.run_doctor(which=lambda n: None if n == "orchd" else n)

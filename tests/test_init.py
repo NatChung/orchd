@@ -1,4 +1,5 @@
 """Issue #50: `orchd init` creates ~/orch/home and ~/orch/interface, trusts them in Codex, migrates an old home."""
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -133,8 +134,8 @@ class InitTest(unittest.TestCase):
         home_cfg = tomllib.loads((orch / ".codex" / "config.toml").read_text())
         fs = home_cfg["permissions"]["orch"]["filesystem"]
         self.assertEqual((fs[str(self.home)], fs[str(orch)]), ("deny", "write"))
-        self.assertEqual(home_cfg["mcp_servers"]["orchd"]["command"], "/opt/orchd/bin/orchd")
-        self.assertEqual(home_cfg["mcp_servers"]["orchd"]["args"], ["mcp"])
+        self.assertEqual(home_cfg["mcp_servers"]["orchd"]["command"], sys.executable)
+        self.assertEqual(home_cfg["mcp_servers"]["orchd"]["args"], ["/opt/orchd/bin/orchd", "mcp"])
         self.assertEqual(set(home_cfg["mcp_servers"]["orchd"]["tools"]), {t["name"] for t in mcp_server.TOOLS})
         iface = tomllib.loads((interface / ".codex" / "config.toml").read_text())
         self.assertEqual(iface["model"], "gpt-6.1-terra")
@@ -145,8 +146,8 @@ class InitTest(unittest.TestCase):
         self.assertEqual(iface["web_search"], "disabled")  # web search ignores network.enabled (#55)
         for feature in ("shell_tool", "unified_exec", "image_generation", "view_image", "goals", "multi_agent"):
             self.assertIs(iface["features"][feature], False, feature)
-        self.assertEqual(iface["mcp_servers"]["orchd_entry"]["command"], "/opt/orchd/bin/orchd")
-        self.assertEqual(iface["mcp_servers"]["orchd_entry"]["args"], ["mcp", "--role", "entry"])
+        self.assertEqual(iface["mcp_servers"]["orchd_entry"]["command"], sys.executable)
+        self.assertEqual(iface["mcp_servers"]["orchd_entry"]["args"], ["/opt/orchd/bin/orchd", "mcp", "--role", "entry"])
         self.assertNotIn("/usr/bin/python3", (interface / ".codex" / "config.toml").read_text())
         self.assertEqual({k: v["approval_mode"] for k, v in iface["mcp_servers"]["orchd_entry"]["tools"].items()},
                          {"relay": "approve", "status": "approve", "foreground": "approve"})
@@ -215,6 +216,21 @@ class InitTest(unittest.TestCase):
         self.assertNotEqual((orch / "AGENTS.md").read_text(), "old rules")
         self.assertFalse((orch / ".git").exists())
         self.assertEqual((old / "groups" / "o1.md").read_text(), "notes")  # source untouched
+
+    def test_codex_templates_launch_mcp_under_the_orchd_interpreter(self):
+        # bin/orchd's shebang is the system python3, which may lack psutil (#89, same crash as #88).
+        self.init()
+        orch, interface = self.home / "orch" / "home", self.home / "orch" / "interface"
+        for folder, server, tail in ((orch, "orchd", ["mcp"]), (interface, "orchd_entry", ["mcp", "--role", "entry"])):
+            spec = tomllib.loads((folder / ".codex" / "config.toml").read_text())["mcp_servers"][server]
+            self.assertEqual((spec["command"], spec["args"]), (sys.executable, ["/opt/orchd/bin/orchd", *tail]), server)
+
+    def test_non_python_orchd_override_is_launched_directly(self):
+        script = Path(self.tmp.name) / "wrapper"
+        script.write_text("#!/bin/sh\nexec true\n")
+        files = bootstrap.planned_files(self.home, {"ORCHD_EXECUTABLE": str(script)})
+        spec = tomllib.loads(files[self.home / "orch" / "home" / ".codex" / "config.toml"])["mcp_servers"]["orchd"]
+        self.assertEqual((spec["command"], spec["args"]), (str(script), ["mcp"]))
 
     def test_paths_follow_overrides(self):
         self.assertEqual(paths.orch_home(self.home, {}), self.home / "orch" / "home")

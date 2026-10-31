@@ -377,6 +377,28 @@ class Doctor:
             self.add("config paths match this home", OPTIONAL, PASS,
                      f"trusted paths and MCP command/args/cwd checked in {', '.join(sources)}: all under {self.home}")
 
+    def check_mcp_launch(self):
+        """`orchd init` keeps config.toml files that differ from its version, so installs made before #89 still start
+        the MCP through bin/orchd's shebang (system python3, maybe without psutil)."""
+        stale = []
+        for folder in (self.orch_home, paths.interface_home(self.home, self.env)):
+            cfg = folder / ".codex" / "config.toml"
+            try:
+                servers = tomllib.loads(cfg.read_text(encoding="utf-8")).get("mcp_servers") if tomllib else None
+            except (OSError, ValueError):
+                continue
+            for name, spec in (servers if isinstance(servers, dict) else {}).items():
+                args = spec.get("args") if isinstance(spec, dict) else None
+                if name in ("orchd", "orchd_entry") and isinstance(args, list) and args[:1] == ["mcp"]:
+                    stale.append(f"{name} in {cfg}")
+        if stale:
+            self.add("Codex MCP launch", OPTIONAL, WARN,
+                     "starts bin/orchd directly (system python3 may lack psutil): " + "; ".join(stale),
+                     "Delete the listed config.toml and run `orchd init` to regenerate it, or set command to the "
+                     "orchd Python and args to [\"<orchd>\", \"mcp\", ...].")
+        else:
+            self.add("Codex MCP launch", OPTIONAL, PASS, "orchd MCP servers run under the orchd interpreter")
+
     def check_repos_trust(self):
         if self._projects_problem:
             self.add("projects dir", REQUIRED, FAIL, self._projects_problem,
@@ -519,6 +541,7 @@ class Doctor:
         self.check_cli_and_flags()
         self.check_auth()
         self.check_orch_home()
+        self.check_mcp_launch()
         self.check_repos_trust()
         self.check_data_dir()
         self.check_socket_dir()
