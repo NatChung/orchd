@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -5,19 +6,42 @@ from unittest.mock import patch
 from unittest import mock
 
 from orchd import core, store, worker_health
-from orchd.runtime import claude_job_alive
+from orchd.runtime import Runtime, claude_job_alive
 from tests.test_orchd import FakeRuntime
 
 
 class ClaudeJobAliveTest(unittest.TestCase):
-    def test_listed_job_is_alive_unless_failed(self):
-        self.assertTrue(claude_job_alive({"j": {"state": "working"}}, "j"))
-        self.assertTrue(claude_job_alive({"j": {"state": "blocked"}}, "j"))  # waiting for input, not dead
-        self.assertTrue(claude_job_alive({"j": {}}, "j"))
+    def test_listed_job_is_unknown_unless_confirmed_dead(self):
+        self.assertIsNone(claude_job_alive({"j": {"state": "working"}}, "j"))
+        self.assertIsNone(claude_job_alive({"j": {"state": "blocked"}}, "j"))  # waiting for input, not dead
+        self.assertIsNone(claude_job_alive({"j": {}}, "j"))
         self.assertFalse(claude_job_alive({"j": {"state": "failed", "reapedMidWorkAt": "2026-10-01T11:04:36Z"}}, "j"))
         self.assertFalse(claude_job_alive({}, "j"))
-        self.assertTrue(claude_job_alive({"j": {"state": "failed", "pid": 4242, "status": "busy"}}, "j"))
+        self.assertIsNone(claude_job_alive({"j": {"state": "failed", "pid": 4242, "status": "busy"}}, "j"))
         self.assertIsNone(claude_job_alive({"j": {"state": "failed", "pid": 4242}}, "j"))
+
+    def assert_unverified_process_is_unknown(self, pid):
+        # These are the public agents fields in CLI 2.1.314. Neither a saved
+        # procStart nor the result of the CLI's birth probe reaches orchd.
+        for state in ("failed", "working", "blocked"):
+            with self.subTest(state=state):
+                rt = Runtime()
+                rt.run = mock.Mock(return_value=mock.Mock(stdout=json.dumps([
+                    {"id": "j", "state": state, "pid": pid, "status": "busy"}])))
+                self.assertIsNone(claude_job_alive(rt.live_jobs(), "j"))
+
+    def test_birth_missing_in_agents_json_is_unknown(self):
+        self.assert_unverified_process_is_unknown(4242)
+
+    def test_birth_probe_unreadable_in_agents_json_is_unknown(self):
+        # CLI still emits pid/status when its birth probe cannot read the birth.
+        # That failure is not represented in agents JSON, so it cannot be trusted.
+        self.assert_unverified_process_is_unknown(4243)
+
+    def test_reused_pid_in_agents_json_is_unknown(self):
+        # A stale job pointing at this unrelated test runner is not proof of a
+        # live Claude session, even though psutil can read its current birth.
+        self.assert_unverified_process_is_unknown(os.getpid())
 
     def test_failed_query_or_missing_job_id_is_unknown(self):
         self.assertIsNone(claude_job_alive(None, "j"))
@@ -113,7 +137,7 @@ class ListOpenHealthTest(unittest.TestCase):
         row = self.row(t["id"])
         for key in ("owner_health", "notification_delivery", "worker_health", "worker_alive", "status", "branch"):
             self.assertIn(key, row)
-        self.assertEqual(row["worker_health"], "alive")
+        self.assertEqual(row["worker_health"], "unknown")
         self.assertEqual(row["owner_health"]["state"], "dead")  # owner-job is absent from the daemon
         self.assertEqual(self.con.total_changes, changes)
         self.assertEqual(self.snapshot(), before)
@@ -123,10 +147,10 @@ class ListOpenHealthTest(unittest.TestCase):
         self.rt.jobs = {}
         self.assertEqual(self.row(t["id"])["worker_health"], "orphan")
 
-    def test_live_worker_is_alive(self):
+    def test_job_outcome_alone_is_unknown(self):
         t = self.dispatch()
         self.rt.jobs = {"job1": {"state": "working"}}
-        self.assertEqual(self.row(t["id"])["worker_health"], "alive")
+        self.assertEqual(self.row(t["id"])["worker_health"], "unknown")
 
     def test_reported_worker_that_exited_is_not_orphan(self):
         t = self.dispatch()
@@ -205,11 +229,11 @@ class StaleAndLastReportTest(ListOpenHealthTest):
         core.ack(self.con, t["id"])
         core.progress(self.con, self.rt, t["id"], "halfway")
         self.set_times(t["id"], 1000.0)
-        self.rt.jobs = {"job1": {"state": "working"}}  # worker_alive true, but silent
+        self.rt.jobs = {"job1": {"state": "working"}}  # outcome alone is unknown, and silent
         row = self.listing(1000.0 + 3600)[t["id"]]
-        self.assertEqual((row["last_report_at"], row["stale"], row["worker_alive"]), (1000.0, False, True))
+        self.assertEqual((row["last_report_at"], row["stale"], row["worker_alive"]), (1000.0, False, None))
         row = self.listing(1000.0 + 25 * 3600)[t["id"]]
-        self.assertEqual((row["stale"], row["worker_health"], row["status"]), (True, "alive", "acked"))
+        self.assertEqual((row["stale"], row["worker_health"], row["status"]), (True, "unknown", "acked"))
         self.assertEqual(row["stale_after_hours"], 24)
         store.add_message(self.con, t["id"], "progress", "still going")
         self.con.execute("UPDATE messages SET created_at=? WHERE task_id=? AND body='still going'", (1000.0 + 24 * 3600, t["id"]))
@@ -248,13 +272,13 @@ class StaleAndLastReportTest(ListOpenHealthTest):
         self.assertEqual(store.get_task(self.con, t["id"])["status"], "question")
 
     def test_default_lists_everything_and_attention_only_hides_healthy_running_tasks(self):
-        healthy = self.dispatch()
+        healthy = self.dispatch(model="sol")
         core.ack(self.con, healthy["id"])
-        quiet = self.dispatch()
+        quiet = self.dispatch(model="sol")
         core.ack(self.con, quiet["id"])
         asking = self.dispatch()
         core.ask(self.con, self.rt, asking["id"], "which one?")
-        self.rt.jobs = {"job1": {"state": "working"}}
+        self.rt.alive_pids = {"4242"}
         self.set_times(quiet["id"], 1000.0)
         now = 1000.0 + 48 * 3600
         self.con.execute("UPDATE messages SET created_at=? WHERE task_id IN (?, ?)", (now, healthy["id"], asking["id"]))
@@ -262,12 +286,12 @@ class StaleAndLastReportTest(ListOpenHealthTest):
         self.assertEqual(set(self.listing(now)), {healthy["id"], quiet["id"], asking["id"]})  # default unchanged
         self.assertEqual(set(self.listing(now, attention_only=True)), {quiet["id"], asking["id"]})
 
-    def test_question_with_failed_job_but_live_process_evidence_is_not_orphan(self):
+    def test_question_with_failed_job_and_unverified_pid_is_unknown(self):
         t = self.dispatch()
         core.ask(self.con, self.rt, t["id"], "which one?")
         self.rt.jobs = {"job1": {"state": "failed", "pid": 4242, "status": "idle"}}
         row = self.listing(None)[t["id"]]
-        self.assertEqual((row["worker_alive"], row["worker_health"], row["recovery_hint"]), (True, "alive", None))
+        self.assertEqual((row["worker_alive"], row["worker_health"], row["recovery_hint"]), (None, "unknown", None))
 
     def test_question_with_failed_job_and_partial_evidence_is_unknown(self):
         t = self.dispatch()
@@ -284,8 +308,8 @@ class StaleAndLastReportTest(ListOpenHealthTest):
         self.rt.jobs = None  # status probe failed
         self.assertEqual(self.listing(None)[t["id"]]["worker_health"], "unknown")
         self.assertEqual(set(self.listing(None, attention_only=True)), {t["id"]})
-        self.rt.jobs = {"job1": {"state": "working"}}  # confirmed healthy: hidden again
-        self.assertEqual(self.listing(None, attention_only=True), {})
+        self.rt.jobs = {"job1": {"state": "working"}}  # an outcome still cannot prove identity
+        self.assertEqual(set(self.listing(None, attention_only=True)), {t["id"]})
 
     def test_attention_only_keeps_app_server_probe_failure(self):
         from orchd import app_worker
@@ -298,9 +322,9 @@ class StaleAndLastReportTest(ListOpenHealthTest):
 
     def test_mcp_default_shape_is_unchanged_and_counts_are_opt_in(self):
         from orchd import mcp_server
-        t = self.dispatch()
+        t = self.dispatch(model="sol")
         core.ack(self.con, t["id"])
-        self.rt.jobs = {"job1": {"state": "working"}}
+        self.rt.alive_pids = {"4242"}
         plain = mcp_server.call("list_open", {}, "thread-A", self.con, self.rt)
         self.assertIsInstance(plain, list)
         self.assertEqual(len(plain), 1)

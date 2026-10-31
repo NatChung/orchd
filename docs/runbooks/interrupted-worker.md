@@ -1,8 +1,8 @@
 # Interrupted workers and their worktrees
 
 What to do when `list_open` shows `worker_health: "orphan"`: the task is `running`, `acked` or `question`, its worker is
-confirmed dead (the Claude daemon lists the job as `failed` or no longer lists it; a Codex turn exited), and it never
-sent `report`. See issue #17.
+confirmed dead (the Claude daemon lists the job as `failed` with no evidence of a live process, or no longer
+lists it; a Codex turn exited), and it never sent `report`. See issue #17.
 
 orchd only labels the task. It does not change the task's status, stop anything, retry, adopt, or remove a
 worktree. Every step below is manual, and the Orch decides what follows.
@@ -12,7 +12,7 @@ worktree. Every step below is manual, and the Orch decides what follows.
 | `worker_health` | Meaning | Action |
 |---|---|---|
 | `alive` | The worker process or job is running. | None. |
-| `unknown` | Liveness could not be confirmed: `claude agents` failed, or a Codex thread is between turns (`worker_alive: null`). | Not a death. Do not guess from timestamps; check again later. |
+| `unknown` | Liveness could not be confirmed: `claude agents` failed or supplied no verifiable process identity, or a Codex thread is between turns (`worker_alive: null`). | Not a death. Do not guess from timestamps; check again later. |
 | `finished` | The task is `done`/`blocked` or the worker sent a report. A gone worker is a normal exit. | Read the report as usual. |
 | `orphan` | `running`/`acked`/`question`, worker confirmed dead, no report. | Follow this runbook. |
 | `null` | Status outside this check (`starting`, `failed`). | — |
