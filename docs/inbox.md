@@ -35,7 +35,9 @@
   with a truncation marker, so even escape-heavy rows make bounded progress.
 - `inbox(message_id=ID, field=..., offset=..., length=...)` returns `text`, `total` and `next_offset`
   (null at the end) for one field (`body`, `evidence`, `title`, `model_reason`, or `metadata`); `length` is at most 20000, so a
-  message of any size can be read in slices. Read-only, read state unchanged.
+  message of any size can be read in slices. Each slice also fits the 60,000-byte final envelope budget:
+  escape-heavy or multibyte text can return fewer characters than requested. Slices end on character boundaries;
+  continue from the returned `next_offset` to reconstruct the exact original text. Read-only, read state unchanged.
 - `field="metadata"` returns full metadata as JSON, including verification state and command; it uses the
   same authorization and read-only slicing rules. Core calls apply the same envelope budget with a null reply ID.
 - It only serves the kinds `inbox` itself shows (ack, progress, report, question, adopt, task_question_answer,

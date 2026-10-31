@@ -487,7 +487,7 @@ def call(name, args, thread, con, rt, sent=None, *, reply_id=None):
             raise ValueError("inbox needs the caller's thread id")
         if args.get('message_id') is not None:
             return core.inbox_message(con, thread, args['message_id'], args.get('field', 'body'),
-                                      args.get('offset', 0), args.get('length', core.INBOX_READ_LENGTH))
+                                      args.get('offset', 0), args.get('length', core.INBOX_READ_LENGTH), reply_id=reply_id)
         rows, ids = core.inbox_page(con, thread, args.get('group_id'), args.get('limit'), reply_id=reply_id)
         if sent is None:  # direct caller, no reply to wait for
             store.mark_read(con, ids)

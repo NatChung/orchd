@@ -126,6 +126,47 @@ class InboxLimitTest(unittest.TestCase):
     def wire_size(self, reply):
         return len((json.dumps(reply, ensure_ascii=False) + "\n").encode("utf-8"))
 
+    def assert_slices_fit_and_restore(self, mid, field, expected):
+        offset, pieces = 0, []
+        before = self.unread()
+        while offset is not None:
+            reply = self.mcp("inbox", dict(message_id=mid, field=field, offset=offset))
+            size = self.wire_size(reply)
+            self.assertLessEqual(size, core.INBOX_PAGE_BUDGET)
+            part = self.mcp_rows(reply)
+            self.assertEqual(part["offset"], offset)
+            self.assertEqual(part["total"], len(expected))
+            self.assertTrue(part["text"])
+            self.assertLessEqual(len(part["text"]), core.INBOX_READ_LENGTH)
+            pieces.append(part["text"])
+            end = offset + len(part["text"])
+            self.assertEqual(part["next_offset"], end if end < len(expected) else None)
+            offset = part["next_offset"]
+        self.assertEqual("".join(pieces), expected)
+        self.assertEqual(self.unread(), before)
+
+    def test_full_text_slices_fit_final_wire_and_restore_all_fields(self):
+        t = self.dispatch()
+        for label, char in (("quotes", '"'), ("controls", "\x00"), ("cjk", "字"), ("emoji", "😀")):
+            text = char * 20_000
+            store.update_task(self.con, t["id"], title=text, model_reason=text)
+            mid = store.add_message(self.con, t["id"], "report", text, text)
+            for field in core.INBOX_CAPS:
+                with self.subTest(characters=label, field=field):
+                    self.assert_slices_fit_and_restore(mid, field, text)
+
+    def test_metadata_slices_fit_final_wire_and_restore_all_characters(self):
+        t = self.dispatch()
+        mid = store.add_message(self.con, t["id"], "report", "done")
+        for label, char in (("quotes", '"'), ("controls", "\x00"), ("cjk", "字"), ("emoji", "😀")):
+            value = char * 20_000
+            store.update_task(self.con, t["id"], repo=value, model=value, group_id=value)
+            state = dict(state="locked", command=value)
+            with self.subTest(characters=label), mock.patch.object(core, "_inbox_verification", return_value=state):
+                expected = json.dumps(dict(task_id=t["id"], repo=value, task_status=t["status"],
+                                           model=value, group_id=value, verification=state), ensure_ascii=False)
+                self.assert_slices_fit_and_restore(mid, "metadata", expected)
+
     def test_70k_verification_command_and_metadata_are_bounded_and_recoverable(self):
         t = self.dispatch()
         core.inbox(self.con, "thread-A")
@@ -313,6 +354,7 @@ class InboxLimitTest(unittest.TestCase):
             while offset is not None:
                 part = core.inbox_message(self.con, "thread-A", mid, field, offset)
                 self.assertLessEqual(len(part["text"]), core.INBOX_READ_LENGTH)
+                self.assertLessEqual(core._inbox_size(part), core.INBOX_PAGE_BUDGET)
                 got += part["text"]
                 offset = part["next_offset"]
             self.assertEqual(got, full)

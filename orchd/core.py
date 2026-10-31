@@ -438,7 +438,7 @@ def _inbox_verification(con, task):
         return dict(state="error", error=type(error).__name__)
 
 
-def inbox_message(con, orch_thread, message_id, field="body", offset=0, length=INBOX_READ_LENGTH):
+def inbox_message(con, orch_thread, message_id, field="body", offset=0, length=INBOX_READ_LENGTH, *, reply_id=None):
     """One slice of one field of an inbox message of this Orch's tasks, for text a page only previews. Only
     ORCH_KINDS rows of tasks this Orch owns: the same rows `inbox` can show. Read-only; read state unchanged.
     Returns text, total (chars) and next_offset (None at the end): call again with next_offset to read on."""
@@ -461,9 +461,26 @@ def inbox_message(con, orch_thread, message_id, field="body", offset=0, length=I
                                verification=_inbox_verification(con, task)), ensure_ascii=False)
     else:
         text = row[field] or ""
-    end = offset + length
-    return dict(message_id=row["id"], task_id=row["task_id"], kind=row["kind"], field=field, offset=offset,
-                text=text[offset:end], total=len(text), next_offset=end if end < len(text) else None)
+    def slice_result(size):
+        end = offset + size
+        return dict(message_id=row["id"], task_id=row["task_id"], kind=row["kind"], field=field, offset=offset,
+                    text=text[offset:end], total=len(text), next_offset=end if end < len(text) else None)
+
+    result = slice_result(length)
+    if _inbox_size(result, reply_id) <= INBOX_PAGE_BUDGET:
+        return result
+    # Search character boundaries, measuring both JSON encodings and the final envelope each time.
+    low, high, result = 1, len(result["text"]) - 1, None
+    while low <= high:
+        size = (low + high) // 2
+        candidate = slice_result(size)
+        if _inbox_size(candidate, reply_id) <= INBOX_PAGE_BUDGET:
+            result, low = candidate, size + 1
+        else:
+            high = size - 1
+    if result is None:
+        raise ValueError("inbox envelope cannot fit one character within the wire budget")
+    return result
 
 
 def inbox_page(con, orch_thread, group_id=None, limit=INBOX_DEFAULT_LIMIT, *, reply_id=None):
