@@ -20,8 +20,8 @@
 
 - Messages are marked read only after the page was fully assembled and serialized, and for the MCP server only
   after the reply was written and flushed to you. If assembly, serialization or the write fails, nothing is marked
-  and the same messages come back on the next `inbox` call. A reply that was written but lost on your side
-  is not detectable: read those messages again with `inbox(message_id=...)` (read-only).
+  and the same messages come back on the next `inbox` call. A reply that was written and flushed but then lost
+  on the client side is outside this guarantee: orchd cannot see it and the messages count as read.
 
 ## Previews and full text
 
