@@ -159,6 +159,8 @@ Run `orchd pr-watch OWNER/REPO [OWNER/REPO ...]` to print JSON for open PRs on
 `orchd/` branches or with the `ai-agent` label. The command only reads GitHub.
 It uses the PR author as the reply owner. Inline replies are matched by thread;
 issue comments have no thread, so any later author comment is treated as a reply.
-GitHub does not reliably expose the last push time: candidates may include comments
-from before that push. Commit time is shown separately and is not a push time.
+The cutoff uses the latest available head commit date, force-push time, or restore
+time from the PR timeline. This is a lower bound and may precede the last push.
+When no relevant timeline data exists, the cutoff is marked uncertain and older
+comments remain candidates. Commit time is not necessarily a push time.
 Review the linked conversations before acting on the suggested action.

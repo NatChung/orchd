@@ -26,6 +26,14 @@ def watch(repos):
             commit = _get(f'{root}/commits/{sha}')
             head_time = commit['commit']['committer']['date']
             owner = pr['user']['login']
+            timeline = _get(f'{root}/issues/{number}/timeline?per_page=100')
+            times = [event['committer']['date'] for event in timeline
+                     if event.get('event') == 'committed' and event.get('sha') == sha
+                     and event.get('committer') and event['committer'].get('date')]
+            times += [event['created_at'] for event in timeline
+                      if event.get('event') in ('head_ref_force_pushed', 'head_ref_restored')
+                      and event.get('created_at')]
+            cutoff = max(times, default=None)
             reviews = _get(f'{root}/pulls/{number}/reviews?per_page=100')
             inline = _get(f'{root}/pulls/{number}/comments?per_page=100')
             issue = _get(f'{root}/issues/{number}/comments?per_page=100')
@@ -49,11 +57,11 @@ def watch(repos):
                     continue
                 replies = [x['time'] for x in comments if x['author'].lower() == owner.lower() and x['kind'] == c['kind']
                            and (c['kind'] == 'issue' or thread(x) == thread(c))]
-                if c['time'] > max([''] + replies):
+                if c['time'] > max([cutoff or ''] + replies):
                     new.append(c)
             for review in reviews:
                 if (review.get('submitted_at') and review.get('body') and review['user']['login'].lower() != owner.lower()
-                        and review['submitted_at'] > max([''] + [c['time'] for c in comments if c['kind'] == 'issue' and c['author'].lower() == owner.lower()])):
+                        and review['submitted_at'] > max([cutoff or ''] + [c['time'] for c in comments if c['kind'] == 'issue' and c['author'].lower() == owner.lower()])):
                     new.append(dict(kind='review', author=review['user']['login'], time=review['submitted_at'],
                                     body=review['body'], url=review['html_url']))
             requested = [name for name, review in latest.items() if review['state'] == 'CHANGES_REQUESTED']
@@ -62,6 +70,7 @@ def watch(repos):
                       'Check review and CI status')
             match = re.fullmatch(r'orchd/([0-9a-f]{8})', branch)
             output.append(dict(repo=repo, number=number, title=pr['title'], url=pr['html_url'], owner=owner,
-                               task_id=match.group(1) if match else None, head_sha=sha, head_commit_time=head_time, timestamp_note="Last push time is unavailable; unanswered candidates include comments before the last push. Issue replies are inferred from any later author comment; verify manually.",
+                               task_id=match.group(1) if match else None, head_sha=sha, head_commit_time=head_time, push_cutoff=cutoff, push_cutoff_uncertain=cutoff is None,
+                               timestamp_note="The timeline cutoff is a lower bound, not necessarily the push time. Issue replies are inferred from later author comments; verify manually.",
                                reviews=latest, unanswered=new, suggested_action=action))
     return output
