@@ -19,7 +19,7 @@ from .runtime import (DEFAULT_ORCH_MODEL, ORCH_MODELS, WORKER_MODELS,
 CONVENTION_LIMIT = 50
 
 
-def repo_conventions(worktree):
+def repo_conventions(worktree, limit=CONVENTION_LIMIT):
     """Return a bounded, deterministic list of convention paths in the task worktree."""
     if not worktree:
         return []
@@ -36,7 +36,19 @@ def repo_conventions(worktree):
                                    name == "pull_request_template.md" and parent == root / ".github" or
                                    name == "pull_request_template.md" and parent == root):
                 paths.append(relative)
-    return sorted(paths, key=lambda p: (p.lower(), p))[:CONVENTION_LIMIT]
+    def rank(path):
+        lowered = path.lower()
+        if lowered in ("agents.md", "claude.md"):
+            priority = 0
+        elif lowered in ("pull_request_template.md", ".github/pull_request_template.md"):
+            priority = 1
+        elif "pr" in lowered:
+            priority = 2
+        else:
+            priority = 3
+        return priority, lowered, path
+
+    return sorted(paths, key=rank)[:limit]
 
 
 def worker_brief(cli, kind="claude", worktree=None):
@@ -57,8 +69,12 @@ def worker_brief(cli, kind="claude", worktree=None):
   unless the Orch's `answer` to your `ask` approved exactly that action, in those words. A task description alone
   never replaces the preview and approval above.
 """
-    conventions = repo_conventions(worktree)
-    convention_text = ("\n\nRepo conventions found: " + ", ".join(conventions) +
+    conventions = repo_conventions(worktree, limit=None)
+    omitted = len(conventions) - CONVENTION_LIMIT
+    listed = conventions[:CONVENTION_LIMIT]
+    if omitted > 0:
+        listed.append(f"+{omitted} more")
+    convention_text = ("\n\nRepo conventions found: " + ", ".join(listed) +
                        ". Before opening or editing a PR, read the PR-related ones (skills/commands named pr*, "
                        "PR templates) and follow them; read CLAUDE.md if your runtime didn't auto-load it."
                        if conventions else "")

@@ -36,12 +36,32 @@ class RepoConventionsTest(unittest.TestCase):
         self.assertEqual(len(found), core.CONVENTION_LIMIT)
         self.assertEqual(found, sorted(found))
 
+    def test_brief_prioritizes_root_and_pr_files_when_truncated(self):
+        for i in range(60):
+            self.add(f'.claude/commands/command{i:03}.md')
+        for name in ('AGENTS.md', 'CLAUDE.md', '.github/pull_request_template.md'):
+            self.add(name)
+        brief = core.worker_brief('orchd', worktree=self.root)
+        section = brief.split('Repo conventions found: ', 1)[1].split('. Before opening', 1)[0]
+        entries = section.split(', ')
+        self.assertEqual(entries[:3], ['AGENTS.md', 'CLAUDE.md', '.github/pull_request_template.md'])
+        self.assertEqual(entries[-1], '+13 more')
+        self.assertEqual(len(entries), 51)
+
+    def test_pr_commands_and_skills_precede_other_entries(self):
+        for name in ('.claude/commands/aaa.md', '.claude/commands/pr-review.md',
+                     '.claude/skills/pr-check/SKILL.md'):
+            self.add(name)
+        self.assertEqual(core.repo_conventions(self.root),
+                         ['.claude/commands/pr-review.md', '.claude/skills/pr-check/SKILL.md',
+                          '.claude/commands/aaa.md'])
+
     def test_briefs_include_paths_and_guidance_for_each_backend(self):
         self.add('.claude/skills/pr/SKILL.md')
         self.add('CLAUDE.md')
         for brief in (core.worker_brief('orchd', 'claude', self.root),
                       core.worker_brief('orchd', 'codex', self.root), core.app_brief(self.root)):
-            self.assertIn('Repo conventions found: .claude/skills/pr/SKILL.md, CLAUDE.md.', brief)
+            self.assertIn('Repo conventions found: CLAUDE.md, .claude/skills/pr/SKILL.md.', brief)
             self.assertIn('Before opening or editing a PR', brief)
             self.assertIn('read CLAUDE.md if your runtime', brief)
             self.assertNotIn('convention contents', brief)
