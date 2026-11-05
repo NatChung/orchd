@@ -143,6 +143,9 @@ def app_brief(worktree=None, repo=None, projects=None):
 
 
 def task_message(task):
+    remote_branch = task["remote_branch"] if "remote_branch" in task.keys() else None
+    push = (f"\nFor the first push use `git push -u --force-with-lease=refs/heads/{task['remote_branch']}: origin HEAD:refs/heads/{task['remote_branch']}`; "
+            f"subsequent pushes use `git push origin HEAD:refs/heads/{task['remote_branch']}`." if remote_branch else '')
     return f"""[orchd task {task['id']}]
 Repo: {task['repo']}
 Worktree: {task['worktree']}
@@ -155,7 +158,7 @@ Instructions:
 Done when:
 {task['done_when']}
 
-Start with: {worker_cli()} ack {task['id']}"""
+Start with: {worker_cli()} ack {task['id']}{push}"""
 
 
 TASK_TYPES = ("code", "docs", "investigation", "outward", "review", "ops", "other")
@@ -228,13 +231,30 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
     if base_branch is not None:  # explicit PR target (#121 prerequisite); checked on origin before a task exists
         rt.verify_base_branch(repo_path, base_branch)
     task_id = store.new_task_id()
+    remote_branch = remote_repo = None
+    if repo in config.delivery_flows():
+        from . import branch_names, delivery_checks
+        enabled = delivery_checks.load(repo) is not None
+    else:
+        enabled = False
+    if enabled:
+        import subprocess
+        origin = subprocess.run(["git", "-C", str(repo_path), "config", "--get", "remote.origin.url"],
+                                capture_output=True, text=True, check=True)
+        owner_repo = delivery_checks._owner_repo(origin.stdout)
+        if branch_names.github_origin(origin.stdout) and owner_repo and owner_repo[0] != 'natchung':
+            remote_repo = '/'.join(owner_repo)
+            occupied = branch_names.remote_refs(repo_path)
+            occupied.update(r[0] for r in con.execute("SELECT remote_branch FROM tasks WHERE remote_repo=? AND remote_branch IS NOT NULL", (remote_repo,)))
+            remote_branch = branch_names.choose(title, issue_ref, task_type, task_id, occupied)
     with store.immediate(con) if goal_id is not None else contextlib.nullcontext():
         task = store.create_task(con, id=task_id, repo=repo, repo_path=str(repo_path), title=title,
                                  instructions=instructions, done_when=done_when,
                                  orch_thread=orch_thread, codex_bin=rt.codex, model=WORKER_MODELS[model],
                                  model_reason=model_reason, task_type=task_type, rework_of=rework_of, found_by=found_by,
                                  verify=verify, manual_checks=manual_checks, verifies=verifies, backend=backend,
-                                 goal_id=goal_id, goal_critical=goal_critical, group_id=group_id, auto_model=auto_model)
+                                 goal_id=goal_id, goal_critical=goal_critical, group_id=group_id, auto_model=auto_model,
+                                 remote_branch=remote_branch, remote_repo=remote_repo)
         goals.record_dispatch(con, goal_id, task_id, f"orch:{orch_thread}")
     spec = {k: v for k, v in dict(verify=verify, manual_checks=manual_checks, verifies=verifies).items() if v}
     from .quota import dispatch_shadow

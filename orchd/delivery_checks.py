@@ -331,6 +331,8 @@ def gate_worktree(con, worktree, args, refuse=None, projects=None):
     names = [row["repo"]] if row is not None else _repo_candidates(resolved)
     # A repo the Hub does not list in `repos` is unconfigured whatever its task's state, like no definition at all.
     if not any(n in flows and load(n, projects) is not None for n in names):
+        if row is not None and row["remote_branch"]:
+            raise _problem("pr", "the task has a readable remote branch but its delivery pipeline is unavailable")
         return list(args)
     if refuse:
         raise _problem("pr", refuse)
@@ -368,6 +370,7 @@ def gate_pr(con, task, args, projects=None):
     if inputs["body_file"] == "-":
         raise _problem("pr", "--body-file - reads stdin, which cannot be checked; write the body to a file")
     branch = task["branch"] or ""
+    remote_branch = task["remote_branch"] or branch
     try:
         if _dirty(worktree):
             raise _problem("pr", "the worktree has uncommitted changes; commit them so the check sees the exact head")
@@ -379,6 +382,8 @@ def gate_pr(con, task, args, projects=None):
         origin = _owner_repo(remote.stdout) if remote.returncode == 0 else None
         if origin is None:
             raise _problem("pr", "origin is not a recognizable GitHub remote, so the target repo cannot be set")
+        if task["remote_repo"] and "/".join(origin) != task["remote_repo"]:
+            raise _problem("pr", "origin no longer matches the repository recorded at dispatch")
         base_branch = task["base_branch"]
         if not base_branch:
             raise _problem("pr", "the task has no recorded base branch, so the PR target cannot be verified; "
@@ -391,19 +396,23 @@ def gate_pr(con, task, args, projects=None):
         if base_fetch.returncode != 0:
             raise _problem("pr", f"could not fetch origin/{base_branch} ({worker_flow._error(base_fetch.stderr)}); "
                                  "it must exist on origin and origin must be reachable")
-        head_fetch = _fetch_branch(worktree, branch)
+        head_fetch = _fetch_branch(worktree, remote_branch)
         if head_fetch.returncode != 0 and "couldn't find remote ref" not in head_fetch.stderr:
-            raise _problem("pr", f"could not fetch origin/{branch} ({worker_flow._error(head_fetch.stderr)})")
+            raise _problem("pr", f"could not fetch origin/{remote_branch} ({worker_flow._error(head_fetch.stderr)})")
         on_origin = head_fetch.returncode == 0
+        if task["remote_branch"] and not on_origin:
+            raise _problem("pr", f"origin/{remote_branch} has not been pushed")
         tip = _git(worktree, "rev-parse", "--verify", f"refs/remotes/origin/{base_branch}^{{commit}}")
         if subprocess.run(["git", "-C", str(worktree), "merge-base", "--is-ancestor", task["base"], tip],
                           capture_output=True).returncode != 0:
             raise _problem("pr", f"origin/{base_branch} does not contain the task's base {task['base'][:12]} that "
                                  "preflight ran on; the base was rewritten, so re-dispatch the task")
         pushed = subprocess.run(["git", "-C", str(worktree), "rev-parse", "--verify", "-q",
-                                 f"refs/remotes/origin/{branch}^{{commit}}"], capture_output=True, text=True)
-        if on_origin and pushed.returncode == 0 and pushed.stdout.strip() != head:
-            raise _problem("pr", f"origin/{branch} is at {pushed.stdout.strip()[:12]} but the checked head is "
+                                 f"refs/remotes/origin/{remote_branch}^{{commit}}"], capture_output=True, text=True)
+        if on_origin and pushed.returncode != 0:
+            raise _problem("pr", f"cannot read fetched origin/{remote_branch}")
+        if on_origin and pushed.stdout.strip() != head:
+            raise _problem("pr", f"origin/{remote_branch} is at {pushed.stdout.strip()[:12]} but the checked head is "
                                  f"{head[:12]}; push (or fetch) so the PR head is the checked commit")
     except (OSError, subprocess.SubprocessError) as error:
         raise _problem("pr", f"cannot read the worktree: {worker_flow._error(error)}") from error
@@ -432,7 +441,7 @@ def gate_pr(con, task, args, projects=None):
             inputs["body"] = Path(inputs["body_file"]).read_text()
         except (OSError, UnicodeDecodeError) as error:
             raise _problem("pr", f"cannot read the body file: {error}") from error
-    inputs.update(head=branch, repo=f"{origin[0]}/{origin[1]}", base=base_branch)
+    inputs.update(head=remote_branch, repo=f"{origin[0]}/{origin[1]}", base=base_branch)
     order = inputs.pop("order")
     inputs.update(base_sha=task["base"], head_sha=head, task_id=task_id)
     directory = Path(os.environ.get("ORCHD_HOME", Path.home() / ".local/share/orchd")) / "pr-inputs"
@@ -451,4 +460,4 @@ def gate_pr(con, task, args, projects=None):
         if name == "--body-file":
             name, value = "--body", inputs["body"]
         final += [name] if value is None else [name, value]
-    return final + ["--base", base_branch, "--head", branch, "--repo", inputs["repo"]]
+    return final + ["--base", base_branch, "--head", remote_branch, "--repo", inputs["repo"]]

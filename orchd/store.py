@@ -339,7 +339,8 @@ TASK_COLUMNS = ("goal_id TEXT REFERENCES goals(id)", "goal_critical INTEGER CHEC
                 "verify TEXT", "manual_checks TEXT", "verifies TEXT",
                 "backend TEXT NOT NULL DEFAULT 'exec'", "generation TEXT", "endpoint TEXT",
                 "control_endpoint TEXT", "supervisor_identity TEXT", "server_identity TEXT",
-                "active_turn TEXT", "turn_state TEXT", "last_completed_turn TEXT", "base_branch TEXT")
+                "active_turn TEXT", "turn_state TEXT", "last_completed_turn TEXT", "base_branch TEXT",
+                "remote_branch TEXT", "remote_repo TEXT")
 MESSAGE_COLUMNS = ("recipient_orch TEXT", "notice_error TEXT", "notice_recipient TEXT",
                    "entry_reply_id INTEGER REFERENCES entry_messages(id)")
 ORCH_COLUMNS = ("first_seen_dead REAL", "last_verified_dead REAL", "archived_at REAL", "codex_probe TEXT")
@@ -386,6 +387,8 @@ def connect(path=None):
             for column in columns:
                 if column.split()[0] not in have:
                     con.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
+        con.execute("CREATE UNIQUE INDEX IF NOT EXISTS task_remote_branch ON tasks(remote_repo, remote_branch) "
+                    "WHERE remote_branch IS NOT NULL")
         # After the columns exist: on an early-draft DB this index would fail inside SCHEMA.
         con.execute("CREATE INDEX IF NOT EXISTS interface_interim_route ON interface_requests(interface_id, conversation, id) "
                     "WHERE interim IS NOT NULL AND interim_ack_at IS NULL")
