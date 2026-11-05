@@ -357,6 +357,7 @@ def build_parser():
         check_actions.add_parser(action).add_argument("task_id")
     gate = check_actions.add_parser("gate", help="used by the worker gh wrapper before `gh pr create`")
     gate.add_argument("--worktree", required=True)
+    gate.add_argument("--refuse", help="wrapper-detected problem; refused only if the repo has a pipeline")
     gate.add_argument("gh_args", nargs=argparse.REMAINDER)
     sub.add_parser("stuck-close", help="read-only: tasks stuck at 'close pending' with the last error and next step")
     cfg = sub.add_parser("config", help="personal settings in ~/.config/orchd/config.toml (worker-model, projects-dir)")
@@ -535,14 +536,9 @@ def _check_main(args):
     con = store.connect()
     try:
         if args.check_action == "gate":
-            worktree = str(Path(args.worktree).resolve())
-            row = next((t for t in store.open_tasks(con) if t["worktree"] and str(Path(t["worktree"]).resolve()) == worktree), None)
-            if row is None:
-                print(f"orchd check: no open task owns worktree {worktree}; refusing gh pr create", file=sys.stderr)
-                return 1
             given = args.gh_args[1:] if args.gh_args[:1] == ["--"] else args.gh_args
-            final = delivery_checks.gate_pr(con, row, given)
-            print(json.dumps(given if final is None else final))  # the arguments the wrapper passes to gh
+            final = delivery_checks.gate_worktree(con, args.worktree, given, args.refuse)
+            print(json.dumps(final))  # the arguments the wrapper passes to gh
             return 0
         task = store.get_task(con, args.task_id)
         if args.check_action == "show":

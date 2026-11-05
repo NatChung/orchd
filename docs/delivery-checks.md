@@ -21,6 +21,11 @@ A Hub without the file, or a repo not in `[delivery_flows]`, behaves as before.
   copy must contain the base commit preflight ran on; orchd always passes `--base <that branch>`. A task without a
   recorded base branch is refused. Each argument except `--label`/`--reviewer`/`--assignee` may appear once, and
   `--body` and `--body-file` are mutually exclusive.
+- Before comparing, the gate runs `git fetch origin <base branch>` and `git fetch origin <task branch>` (only those two
+  refs) so a stale local `origin/*` cannot vouch for a rewritten remote; a failed base fetch (missing branch, unreachable
+  origin) refuses. A task branch not on origin yet is allowed.
+- A repo with no pipeline is never touched: the wrapper asks orchd first and runs the original `gh` command unchanged,
+  whatever the task's state. Only a configured repo refuses a closed or unknown task.
 - Only these `gh pr create` arguments are accepted: `--title`, `--body`, `--body-file` (not `-`), `--base`, `--draft`,
   `--label`, `--reviewer`, `--assignee`. Anything else is refused before gh runs, and `--head` and `--repo` cannot be
   given: orchd passes gh the checked body (a `--body-file` is sent as `--body`), `--head <task branch>` and

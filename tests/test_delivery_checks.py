@@ -43,9 +43,13 @@ class ChecksBase(unittest.TestCase):
                                  'echo "leak=${SECRET:-none}"')
         self.script("check-pr", 'echo "input=$ORCHD_PR_INPUT"; test -f "$ORCHD_PR_INPUT"')
         git("-C", str(self.work), "remote", "add", "origin", "https://github.com/acme/product.git")
+        self.remote = self.root / "remote-product.git"
+        git("init", "-q", "--bare", str(self.remote))
+        self.redirect(self.remote)
         self.commit(self.work, "README", "x")
         self.base = git("-C", str(self.work), "rev-parse", "HEAD")
-        git("-C", str(self.work), "update-ref", "refs/remotes/origin/main", self.base)
+        self.push(self.base, "main")
+        git("-C", str(self.work), "fetch", "-q", "origin")
         self.con = store.connect(self.root / "home" / "orchd.db")
         store.create_task(self.con, id="abc12345", repo="product", repo_path=str(self.work), title="T",
                           instructions="i", done_when="d", orch_thread="o", codex_bin="c", base=self.base, base_branch="main",
@@ -69,6 +73,16 @@ class ChecksBase(unittest.TestCase):
         file.parent.mkdir(exist_ok=True)
         file.write_text("#!/bin/sh\n" + body + "\n")
         file.chmod(file.stat().st_mode | stat.S_IXUSR)
+
+    def redirect(self, target):
+        """Fetches from the GitHub-looking origin URL go to a local bare repo; the URL itself stays parseable."""
+        if getattr(self, "redirected", None):
+            git("-C", str(self.work), "config", "--unset", f"url.{self.redirected}.insteadOf")
+        self.redirected = str(target)
+        git("-C", str(self.work), "config", "url." + str(target) + ".insteadOf", "https://github.com/acme/product.git")
+
+    def push(self, sha, branch):
+        git("-C", str(self.work), "push", "-q", "-f", str(self.remote), f"{sha}:refs/heads/{branch}")
 
     def script_at_base(self, name, body):
         """Commit the script and move the task's base to it, as if the worktree had been created from that commit."""
@@ -301,18 +315,44 @@ class BaseAndHeadTest(ChecksBase):
             self.gate(["pr", "create"])
         self.assertIn("base branch", str(raised.exception))
 
-    def test_base_branch_that_moved_ahead_is_allowed_but_a_diverged_one_is_refused(self):
+    def test_base_branch_that_moved_ahead_is_allowed(self):
         self.prepare()
         self.commit(self.work, "g", "2")
         ahead = git("-C", str(self.work), "rev-parse", "HEAD")
         git("-C", str(self.work), "reset", "-q", "--hard", "HEAD~1")
-        git("-C", str(self.work), "update-ref", "refs/remotes/origin/main", ahead)
+        self.push(ahead, "main")
         self.assertIsNotNone(self.gate(["pr", "create"]))
+
+    def test_rewritten_remote_base_is_refused_even_though_the_local_ref_is_stale(self):
+        self.prepare()
+        git("-C", str(self.work), "fetch", "-q", "origin")  # local origin/main still contains the base
         other = git("-C", str(self.work), "commit-tree", "-m", "x", git("-C", str(self.work), "rev-parse", "HEAD^{tree}"))
-        git("-C", str(self.work), "update-ref", "refs/remotes/origin/main", other)
+        self.push(other, "main")
         with self.assertRaises(delivery_checks.CheckError) as raised:
             self.gate(["pr", "create"])
         self.assertIn("does not contain", str(raised.exception))
+
+    def test_base_branch_missing_on_origin_is_refused(self):
+        self.prepare()
+        self.con.execute("UPDATE tasks SET base_branch='gone'")
+        with self.assertRaises(delivery_checks.CheckError) as raised:
+            self.gate(["pr", "create"])
+        self.assertIn("gone", str(raised.exception))
+        self.assertIn("fetch", str(raised.exception))
+
+    def test_stale_local_base_ref_for_a_branch_deleted_on_origin_is_refused(self):
+        self.prepare()
+        git("-C", str(self.work), "update-ref", "refs/remotes/origin/gone", self.base)
+        self.con.execute("UPDATE tasks SET base_branch='gone'")
+        with self.assertRaises(delivery_checks.CheckError):
+            self.gate(["pr", "create"])
+
+    def test_unreachable_origin_fails_closed(self):
+        self.prepare()
+        self.redirect(self.root / "nowhere.git")
+        with self.assertRaises(delivery_checks.CheckError) as raised:
+            self.gate(["pr", "create"])
+        self.assertIn("could not fetch", str(raised.exception))
 
     def test_dispatch_records_the_base_branch(self):
         from orchd.runtime import Runtime
@@ -324,7 +364,6 @@ class BaseAndHeadTest(ChecksBase):
         git("--git-dir", str(self.root / "o.git"), "symbolic-ref", "HEAD", "refs/heads/trunk")
         git("-C", str(self.root / "clone"), "remote", "set-head", "origin", "-a")
         self.assertEqual(Runtime().base_branch(self.root / "clone"), "trunk")
-        self.assertIsNone(Runtime().base_branch(self.work))
 
     def test_unparseable_origin_is_refused(self):
         self.prepare()
@@ -335,12 +374,16 @@ class BaseAndHeadTest(ChecksBase):
     def test_pushed_branch_that_differs_from_the_checked_head_is_refused(self):
         self.prepare()
         branch = self.task["branch"]
-        old = git("-C", str(self.work), "rev-parse", "HEAD~1")
-        git("-C", str(self.work), "update-ref", f"refs/remotes/origin/{branch}", old)
+        self.push(git("-C", str(self.work), "rev-parse", "HEAD~1"), branch)
         with self.assertRaises(delivery_checks.CheckError) as raised:
             self.gate(["pr", "create"])
         self.assertIn("push", str(raised.exception))
-        git("-C", str(self.work), "update-ref", f"refs/remotes/origin/{branch}", "HEAD")
+        self.push("HEAD", branch)
+        self.assertIsNotNone(self.gate(["pr", "create"]))
+
+    def test_unpushed_task_branch_is_allowed_even_with_a_stale_local_ref(self):
+        self.prepare()
+        git("-C", str(self.work), "update-ref", f"refs/remotes/origin/{self.task['branch']}", self.base)
         self.assertIsNotNone(self.gate(["pr", "create"]))
 
     def test_pr_check_refuses_a_dirty_worktree_directly(self):
@@ -465,7 +508,18 @@ class WrapperGateTest(unittest.TestCase):
         gh.write_text(f'#!/bin/sh\necho "gh $@" >> {self.calls}\n')
         gh.chmod(0o755)
         self.orchd = root / "orchd"
-        self.orchd.write_text(f'#!/bin/sh\necho "orchd $@" >> {self.calls}\necho "refused: $ORCHD_FAKE" >&2\necho \'["pr","create","--head","b","--repo","o/r"]\'\nexit ${{ORCHD_FAKE_EXIT:-0}}\n')
+        self.orchd.write_text(f'''#!/usr/bin/env python3
+import json, os, sys
+a = sys.argv[1:]
+open({str(self.calls)!r}, "a").write("orchd " + " ".join(a) + "\\n")
+if "--refuse" in a:
+    print("refused: " + a[a.index("--refuse") + 1], file=sys.stderr)
+    sys.exit(1)
+if os.environ.get("ORCHD_FAKE_EXIT", "0") != "0":
+    print("refused: " + os.environ.get("ORCHD_FAKE", ""), file=sys.stderr)
+    sys.exit(int(os.environ["ORCHD_FAKE_EXIT"]))
+print(json.dumps(["pr", "create", "--head", "b", "--repo", "o/r"]))
+''')
         self.orchd.chmod(0o755)
         self.wrapper = Path(__file__).resolve().parents[1] / "orchd" / "worker_bin" / "gh"
         self.env = {"PATH": f"{self.bin}:{os.defpath}", "ORCHD_CONFIG_DIR": str(root / "cfg"), "HOME": str(root)}
@@ -505,7 +559,8 @@ class WrapperGateTest(unittest.TestCase):
                 result = self.worker(*args)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("before the subcommand", result.stderr)
-                self.assertEqual(self.called(), "")
+                self.assertIn("--refuse", self.called())
+                self.assertFalse([l for l in self.called().splitlines() if l.startswith("gh ")])
 
     def test_pr_new_alias_goes_through_the_gate_as_create(self):
         result = self.worker("pr", "new", "--title", "T")
@@ -515,10 +570,11 @@ class WrapperGateTest(unittest.TestCase):
     def test_unknown_global_flags_fail_closed_for_workers(self):
         for args in (("--bogus", "pr", "create"), ("--bogus=1", "pr", "view"), ("-Z", "pr", "create")):
             with self.subTest(args=args):
+                self.calls.unlink(missing_ok=True)
                 result = self.worker(*args)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("unrecognized global flag", result.stderr)
-        self.assertEqual(self.called(), "")
+                self.assertFalse([l for l in self.called().splitlines() if l.startswith("gh ")])
 
     def test_harmless_global_flags_and_other_subcommands_pass_through(self):
         self.worker("-R", "x/y", "pr", "view", "5")
@@ -548,6 +604,90 @@ class WrapperGateTest(unittest.TestCase):
         with patch.dict(os.environ, {"ORCHD_HOME": self.temp.name}):
             env = worker_env("/w")
         self.assertTrue(env["ORCHD_BIN"].endswith("orchd"))
+
+
+class DispatchBaseBranchTest(unittest.TestCase):
+    def test_dispatch_records_the_branch_origin_head_points_at(self):
+        from orchd import core
+        from orchd.runtime import Runtime
+        try:
+            from test_orchd import FakeRuntime
+        except ImportError:  # run as tests.test_delivery_checks rather than through discover -s tests
+            from tests.test_orchd import FakeRuntime
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            git("init", "-q", "--bare", str(root / "o.git"))
+            git("clone", "-q", str(root / "o.git"), str(root / "clone"))
+            git("-C", str(root / "clone"), "checkout", "-q", "-b", "trunk")
+            (root / "clone" / "a").write_text("1")
+            git("-C", str(root / "clone"), "add", ".")
+            git("-C", str(root / "clone"), "-c", "user.name=T", "-c", "user.email=t@example.invalid", "commit", "-qm", "a")
+            git("-C", str(root / "clone"), "push", "-q", "origin", "trunk")
+            git("--git-dir", str(root / "o.git"), "symbolic-ref", "HEAD", "refs/heads/trunk")
+            git("-C", str(root / "clone"), "remote", "set-head", "origin", "-a")
+
+            class Runtime_(FakeRuntime):
+                def repo_path(self, repo):
+                    return root / "clone"
+
+                def base_branch(self, repo_path):
+                    return Runtime().base_branch(repo_path)
+
+            con = store.connect(root / "orchd.db")
+            self.addCleanup(con.close)
+            task = core.dispatch(con, Runtime_(), orch_thread="o", repo="example", title="T", instructions="i",
+                                 done_when="d", model_reason="r", task_type="code")
+            expected = git("-C", str(root / "clone"), "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+            self.assertEqual(expected, "origin/trunk")
+            self.assertEqual(store.get_task(con, task["id"])["base_branch"], "trunk")
+
+
+class UnconfiguredCompatTest(ChecksBase):
+    def gate(self, worktree=None, refuse=None, args=("pr", "create", "--head", "x", "-R", "o/r", "--fill")):
+        return delivery_checks.gate_worktree(self.con, worktree or str(self.work), list(args), refuse, self.root)
+
+    def test_unconfigured_repo_passes_through_for_open_closed_and_unknown_tasks(self):
+        (self.root / "config.toml").write_text("")
+        original = ["pr", "create", "--head", "x", "-R", "o/r", "--fill"]
+        for status in ("running", "closed", "failed"):
+            with self.subTest(status=status):
+                self.con.execute("UPDATE tasks SET status=?", (status,))
+                self.assertEqual(self.gate(), original)
+        self.assertEqual(self.gate(str(self.root / "nowhere")), original)
+        self.assertEqual(self.gate(refuse="unrecognized global flag"), original)
+
+    def test_configured_repo_refuses_closed_and_unknown_tasks_and_wrapper_errors(self):
+        self.con.execute("UPDATE tasks SET status='closed'")
+        with self.assertRaises(delivery_checks.CheckError) as raised:
+            self.gate()
+        self.assertIn("closed", str(raised.exception))
+        with self.assertRaises(delivery_checks.CheckError) as raised:
+            self.gate(str(self.root / "product-cafebabe"))
+        self.assertIn("no task", str(raised.exception))
+        self.con.execute("UPDATE tasks SET status='running'")
+        with self.assertRaises(delivery_checks.CheckError) as raised:
+            self.gate(refuse="global flags before the subcommand")
+        self.assertIn("before the subcommand", str(raised.exception))
+
+    def test_unknown_worktree_of_a_configured_repo_is_refused_by_its_directory_name(self):
+        elsewhere = self.root / "product-deadbeef"
+        elsewhere.mkdir()
+        with self.assertRaises(delivery_checks.CheckError):
+            self.gate(str(elsewhere))
+
+    def test_cli_gate_prints_original_args_when_unconfigured(self):
+        import contextlib
+        import io
+        from orchd import cli
+        (self.root / "config.toml").write_text("")
+        out = io.StringIO()
+        real = store.connect
+        with patch.object(store, "connect", lambda *a: real(self.root / "home" / "orchd.db")), \
+                patch("orchd.cli._home_policy", return_value="skip"), contextlib.redirect_stdout(out):
+            code = cli.main(["check", "gate", "--worktree", str(self.root / "gone"), "--refuse", "x", "--", "pr",
+                            "create", "--fill"])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out.getvalue()), ["pr", "create", "--fill"])
 
 
 class CliAndMcpTest(ChecksBase):
@@ -593,10 +733,12 @@ class CliAndMcpTest(ChecksBase):
         self.cli("check", "preflight", "abc12345")
         self.assertEqual(self.cli("check", "gate", "--worktree", str(self.work), "--", "pr", "create")[0], 0)
 
-    def test_gate_refuses_unknown_worktree(self):
-        code, _, err = self.cli("check", "gate", "--worktree", str(self.root / "elsewhere"), "--", "pr", "create")
+    def test_gate_refuses_unknown_worktree_of_a_configured_repo_and_passes_others(self):
+        code, _, err = self.cli("check", "gate", "--worktree", str(self.root / "product-cafebabe"), "--", "pr", "create")
         self.assertEqual(code, 1)
-        self.assertIn("no open task", err)
+        self.assertIn("no task", err)
+        code, out, _ = self.cli("check", "gate", "--worktree", str(self.root / "elsewhere"), "--", "pr", "create")
+        self.assertEqual((code, json.loads(out)), (0, ["pr", "create"]))
 
     def test_mcp_check_runs_is_read_only_and_scoped_to_the_task(self):
         from orchd import mcp_server

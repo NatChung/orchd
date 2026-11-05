@@ -14,7 +14,7 @@ from hashlib import sha256
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from . import config, paths, worker_flow
+from . import config, paths, store, worker_flow
 from .runtime import redact
 
 DEFINITION = "docs/development/delivery.pipeline.json"
@@ -264,6 +264,47 @@ def _problem(kind, message):
     return CheckError(f"gh pr create refused by orchd ({kind}): {message}")
 
 
+def _fetch_branch(worktree, branch):
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="true")
+    return subprocess.run(["git", "-C", str(worktree), "fetch", "--quiet", "origin",
+                           f"+refs/heads/{branch}:refs/remotes/origin/{branch}"], capture_output=True, text=True,
+                          timeout=worker_flow.BRIEF_BUDGET, env=env)
+
+
+def _repo_candidates(worktree):
+    """Repo names a worktree no task owns could belong to: its directory name minus a task id, and origin's name."""
+    names = {re.sub(r"-[0-9a-f]{8}$", "", Path(worktree).name)}
+    remote = subprocess.run(["git", "-C", str(worktree), "config", "--get", "remote.origin.url"],
+                            capture_output=True, text=True)
+    origin = _owner_repo(remote.stdout) if remote.returncode == 0 else None
+    if origin:
+        names.add(origin[1])
+    return names
+
+
+def gate_worktree(con, worktree, args, refuse=None, projects=None):
+    """What the worker gh wrapper calls. Returns the exact args for gh. A repo with no pipeline gets its command back
+    unchanged whatever the task's state; only a configured repo refuses (closed or unknown task, wrapper error)."""
+    try:
+        flows = config.delivery_flows()
+    except ValueError as error:
+        raise CheckError(f"delivery flow configuration: {error}") from error
+    resolved = str(Path(worktree).resolve())
+    row = next((t for t in con.execute("SELECT * FROM tasks WHERE worktree IS NOT NULL")
+                if str(Path(t["worktree"]).resolve()) == resolved), None)
+    configured = row["repo"] in flows if row is not None else any(n in flows for n in _repo_candidates(resolved))
+    if not configured:
+        return list(args)
+    if refuse:
+        raise _problem("pr", refuse)
+    if row is None:
+        raise _problem("pr", f"no task owns worktree {resolved}, so its checks cannot be found")
+    if row["status"] not in store.OPEN:
+        raise _problem("pr", f"task {row['id']} is {row['status']}; a closed task cannot open a PR")
+    final = gate_pr(con, row, list(args), projects)
+    return list(args) if final is None else final
+
+
 def gate_pr(con, task, args, projects=None):
     """Raise CheckError unless the pinned checks allow this `gh pr create`. Returns the exact gh arguments to run
     (whitelisted flags, --head and --repo set by orchd), or None when the repo has no pipeline."""
@@ -296,8 +337,8 @@ def gate_pr(con, task, args, projects=None):
         head = _git(worktree, "rev-parse", "HEAD")
         if not branch or _git(worktree, "rev-parse", "--abbrev-ref", "HEAD") != branch:
             raise _problem("pr", f"the worktree is not on the task branch {branch}; the check would not see the PR head")
-        remote = subprocess.run(["git", "-C", str(worktree), "remote", "get-url", "origin"],
-                                capture_output=True, text=True)
+        remote = subprocess.run(["git", "-C", str(worktree), "config", "--get", "remote.origin.url"],
+                                capture_output=True, text=True)  # the configured URL, not an insteadOf rewrite
         origin = _owner_repo(remote.stdout) if remote.returncode == 0 else None
         if origin is None:
             raise _problem("pr", "origin is not a recognizable GitHub remote, so the target repo cannot be set")
@@ -308,17 +349,23 @@ def gate_pr(con, task, args, projects=None):
         if inputs["base"] is not None and inputs["base"] != base_branch:
             raise _problem("pr", f"--base {inputs['base']} is not the task's base branch {base_branch}; preflight ran on "
                                  f"{base_branch}, so a PR may only target it (omit --base)")
-        tip = subprocess.run(["git", "-C", str(worktree), "rev-parse", "--verify", "-q",
-                              f"refs/remotes/origin/{base_branch}^{{commit}}"], capture_output=True, text=True)
-        if tip.returncode != 0:
-            raise _problem("pr", f"origin/{base_branch} is unknown here; run `git fetch origin`")
-        if subprocess.run(["git", "-C", str(worktree), "merge-base", "--is-ancestor", task["base"], tip.stdout.strip()],
+        # Refresh just these two refs first: a stale local origin/<base> must not vouch for a rewritten remote.
+        base_fetch = _fetch_branch(worktree, base_branch)
+        if base_fetch.returncode != 0:
+            raise _problem("pr", f"could not fetch origin/{base_branch} ({worker_flow._error(base_fetch.stderr)}); "
+                                 "it must exist on origin and origin must be reachable")
+        head_fetch = _fetch_branch(worktree, branch)
+        if head_fetch.returncode != 0 and "couldn't find remote ref" not in head_fetch.stderr:
+            raise _problem("pr", f"could not fetch origin/{branch} ({worker_flow._error(head_fetch.stderr)})")
+        on_origin = head_fetch.returncode == 0
+        tip = _git(worktree, "rev-parse", "--verify", f"refs/remotes/origin/{base_branch}^{{commit}}")
+        if subprocess.run(["git", "-C", str(worktree), "merge-base", "--is-ancestor", task["base"], tip],
                           capture_output=True).returncode != 0:
-            raise _problem("pr", f"origin/{base_branch} does not contain the task's base {task['base'][:12]} that preflight "
-                                 "ran on; the base was rewritten, so re-dispatch the task")
+            raise _problem("pr", f"origin/{base_branch} does not contain the task's base {task['base'][:12]} that "
+                                 "preflight ran on; the base was rewritten, so re-dispatch the task")
         pushed = subprocess.run(["git", "-C", str(worktree), "rev-parse", "--verify", "-q",
                                  f"refs/remotes/origin/{branch}^{{commit}}"], capture_output=True, text=True)
-        if pushed.returncode == 0 and pushed.stdout.strip() != head:
+        if on_origin and pushed.returncode == 0 and pushed.stdout.strip() != head:
             raise _problem("pr", f"origin/{branch} is at {pushed.stdout.strip()[:12]} but the checked head is "
                                  f"{head[:12]}; push (or fetch) so the PR head is the checked commit")
     except (OSError, subprocess.SubprocessError) as error:

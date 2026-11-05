@@ -110,19 +110,17 @@ def gate_pr_create(args):
     worktree = os.environ.get("ORCHD_WORKTREE")
     if not worktree:
         return 0, args
-    create, args, error = classify(args)
-    if error:
-        print(f"orchd gh: {error}", file=sys.stderr)
-        return 1, args
-    if not create:
+    create, normalized, error = classify(args)
+    if not create and not error:
         return 0, args
     orchd = os.environ.get("ORCHD_BIN")
     if not orchd or not os.access(orchd, os.X_OK):
         print("orchd gh: cannot run the delivery checks (ORCHD_BIN missing or not executable); refusing gh pr create",
               file=sys.stderr)
         return 1, args
-    result = subprocess.run([orchd, "check", "gate", "--worktree", worktree, "--", *args], stdout=subprocess.PIPE,
-                            text=True)
+    # orchd decides whether this repo has a pipeline at all: if not, gh gets the original command unchanged.
+    command = [orchd, "check", "gate", "--worktree", worktree] + (["--refuse", error] if error else [])
+    result = subprocess.run([*command, "--", *(args if error else normalized)], stdout=subprocess.PIPE, text=True)
     if result.returncode:
         return result.returncode, args
     try:
