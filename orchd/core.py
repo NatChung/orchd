@@ -241,6 +241,9 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
     try:
         base, branch, worktree = rt.create_worktree(repo_path, repo, task_id)
         store.update_task(con, task_id, base=base, branch=branch, worktree=worktree)
+        base_branch = getattr(rt, "base_branch", lambda path: None)(repo_path)
+        if isinstance(base_branch, str):  # the branch PRs may target (#119); recorded beside the base commit
+            store.update_task(con, task_id, base_branch=base_branch)
         if backend == "app-server":
             task = store.get_task(con, task_id)
             app_worker.start(con, rt, task, task_message(task), WORKER_MODELS[model], brief=app_brief(worktree, task["repo"], paths.projects_dir()))

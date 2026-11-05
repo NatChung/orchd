@@ -206,6 +206,7 @@ def records(con, task_id):
 VALUE_FLAGS = {"--title": "title", "--body": "body", "--body-file": "body_file", "--base": "base", "--label": "label",
                "--reviewer": "reviewer", "--assignee": "assignee"}
 BOOL_FLAGS = {"--draft": "draft"}
+REPEATABLE = ("--label", "--reviewer", "--assignee")
 ALLOWED = ", ".join([*VALUE_FLAGS, *BOOL_FLAGS])
 
 
@@ -217,6 +218,10 @@ def parse_pr_args(args):
     while rest:
         arg = rest.pop(0)
         name, equals, value = arg.partition("=") if arg.startswith("--") else (arg, "", "")
+        if (name in BOOL_FLAGS and not equals) or name in VALUE_FLAGS:
+            if name not in REPEATABLE and any(seen == name for seen, _ in found["order"]):
+                raise _problem("pr", f"{name} was given more than once; give each of {ALLOWED} at most once "
+                                     f"(only {', '.join(REPEATABLE)} may repeat)")
         if name in BOOL_FLAGS and not equals:
             found["draft"] = True
             found["order"].append((name, None))
@@ -234,6 +239,9 @@ def parse_pr_args(args):
         else:
             raise _problem("pr", f"argument {arg!r} is not allowed. gh pr create accepts only: {ALLOWED}; "
                                  "--head and --repo are set by orchd from the task branch and origin")
+    given = {name for name, _ in found["order"]}
+    if {"--body", "--body-file"} <= given:
+        raise _problem("pr", "--body and --body-file are mutually exclusive; give one")
     found["labels"] = [part for value in found["labels"] for part in value.split(",") if part]
     return found
 
@@ -293,11 +301,21 @@ def gate_pr(con, task, args, projects=None):
         origin = _owner_repo(remote.stdout) if remote.returncode == 0 else None
         if origin is None:
             raise _problem("pr", "origin is not a recognizable GitHub remote, so the target repo cannot be set")
-        if inputs["base"] is not None and subprocess.run(
-                ["git", "-C", str(worktree), "rev-parse", "--verify", "-q", f"refs/remotes/origin/{inputs['base']}"],
-                capture_output=True).returncode != 0:
-            raise _problem("pr", f"--base {inputs['base']} is not a known branch of origin; `git fetch origin` or "
-                                 "pick an existing branch")
+        base_branch = task["base_branch"]
+        if not base_branch:
+            raise _problem("pr", "the task has no recorded base branch, so the PR target cannot be verified; "
+                                 "re-dispatch the task")
+        if inputs["base"] is not None and inputs["base"] != base_branch:
+            raise _problem("pr", f"--base {inputs['base']} is not the task's base branch {base_branch}; preflight ran on "
+                                 f"{base_branch}, so a PR may only target it (omit --base)")
+        tip = subprocess.run(["git", "-C", str(worktree), "rev-parse", "--verify", "-q",
+                              f"refs/remotes/origin/{base_branch}^{{commit}}"], capture_output=True, text=True)
+        if tip.returncode != 0:
+            raise _problem("pr", f"origin/{base_branch} is unknown here; run `git fetch origin`")
+        if subprocess.run(["git", "-C", str(worktree), "merge-base", "--is-ancestor", task["base"], tip.stdout.strip()],
+                          capture_output=True).returncode != 0:
+            raise _problem("pr", f"origin/{base_branch} does not contain the task's base {task['base'][:12]} that preflight "
+                                 "ran on; the base was rewritten, so re-dispatch the task")
         pushed = subprocess.run(["git", "-C", str(worktree), "rev-parse", "--verify", "-q",
                                  f"refs/remotes/origin/{branch}^{{commit}}"], capture_output=True, text=True)
         if pushed.returncode == 0 and pushed.stdout.strip() != head:
@@ -310,7 +328,7 @@ def gate_pr(con, task, args, projects=None):
             inputs["body"] = Path(inputs["body_file"]).read_text()
         except (OSError, UnicodeDecodeError) as error:
             raise _problem("pr", f"cannot read the body file: {error}") from error
-    inputs.update(head=branch, repo=f"{origin[0]}/{origin[1]}")
+    inputs.update(head=branch, repo=f"{origin[0]}/{origin[1]}", base=base_branch)
     order = inputs.pop("order")
     inputs.update(base_sha=task["base"], head_sha=head, task_id=task_id)
     directory = Path(os.environ.get("ORCHD_HOME", Path.home() / ".local/share/orchd")) / "pr-inputs"
@@ -324,7 +342,9 @@ def gate_pr(con, task, args, projects=None):
     # The exact arguments gh gets: the checked body, and the task branch and origin repo as head and repo.
     final = ["pr", "create"]
     for name, value in order:
+        if name == "--base":
+            continue
         if name == "--body-file":
             name, value = "--body", inputs["body"]
         final += [name] if value is None else [name, value]
-    return final + ["--head", branch, "--repo", inputs["repo"]]
+    return final + ["--base", base_branch, "--head", branch, "--repo", inputs["repo"]]

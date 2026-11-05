@@ -48,7 +48,7 @@ class ChecksBase(unittest.TestCase):
         git("-C", str(self.work), "update-ref", "refs/remotes/origin/main", self.base)
         self.con = store.connect(self.root / "home" / "orchd.db")
         store.create_task(self.con, id="abc12345", repo="product", repo_path=str(self.work), title="T",
-                          instructions="i", done_when="d", orch_thread="o", codex_bin="c", base=self.base,
+                          instructions="i", done_when="d", orch_thread="o", codex_bin="c", base=self.base, base_branch="main",
                           branch=git("-C", str(self.work), "rev-parse", "--abbrev-ref", "HEAD"), worktree=str(self.work))
         self.addCleanup(self.con.close)
         self.task = store.get_task(self.con, "abc12345")
@@ -248,13 +248,83 @@ class BaseAndHeadTest(ChecksBase):
         self.assertNotIn("--body-file", out)
         self.assertEqual(out[out.index("--body") + 1], "exact")
 
-    def test_base_must_exist_on_origin(self):
+    def test_base_must_be_the_task_base_branch(self):
         self.prepare()
-        with self.assertRaises(delivery_checks.CheckError) as raised:
-            self.gate(["pr", "create", "--base", "nonexistent"])
-        self.assertIn("--base", str(raised.exception))
+        git("-C", str(self.work), "update-ref", "refs/remotes/origin/other", self.base)
+        for extra in (["--base", "other"], ["--base", "nonexistent"], ["--base=other"], ["--base", "origin/main"]):
+            with self.subTest(extra=extra), self.assertRaises(delivery_checks.CheckError) as raised:
+                self.gate(["pr", "create", *extra])
+            self.assertIn("--base", str(raised.exception))
+            self.assertIn("main", str(raised.exception))
         self.assertIsNotNone(self.gate(["pr", "create", "--base", "main"]))
+
+    def test_repeated_single_value_arguments_are_refused(self):
+        self.prepare()
+        good = self.root / "ok.md"
+        good.write_text("ok")
+        cases = [["--body-file", "-", "--body-file", str(good)], ["--body-file", str(good), "--body-file", "-"],
+                 ["--title", "a", "--title", "b"], ["--title=a", "--title", "b"], ["--body", "a", "--body=b"],
+                 ["--base", "main", "--base", "main"], ["--draft", "--draft"]]
+        for extra in cases:
+            with self.subTest(extra=extra), self.assertRaises(delivery_checks.CheckError) as raised:
+                self.gate(["pr", "create", *extra])
+            self.assertIn("more than once", str(raised.exception))
+
+    def test_body_and_body_file_are_mutually_exclusive(self):
+        self.prepare()
+        body = self.root / "b.md"
+        body.write_text("x")
+        for extra in (["--body", "a", "--body-file", str(body)], ["--body-file", str(body), "--body=a"]):
+            with self.subTest(extra=extra), self.assertRaises(delivery_checks.CheckError) as raised:
+                self.gate(["pr", "create", *extra])
+            self.assertIn("mutually exclusive", str(raised.exception))
+
+    def test_label_reviewer_assignee_may_repeat(self):
+        self.prepare()
+        out = self.gate(["pr", "create", "--label", "a", "--label", "b", "--reviewer", "x", "--reviewer", "y",
+                         "--assignee", "m", "--assignee", "n"])
+        self.assertEqual(out.count("--label"), 2)
+        self.assertEqual(out.count("--reviewer"), 2)
+        self.assertEqual(out.count("--assignee"), 2)
+
+    def test_gh_always_gets_the_task_base_branch(self):
+        self.prepare()
+        for given in ([], ["--base", "main"]):
+            out = self.gate(["pr", "create", *given])
+            self.assertEqual(out.count("--base"), 1)
+            self.assertEqual(out[out.index("--base") + 1], "main")
+
+    def test_task_without_a_recorded_base_branch_is_refused(self):
+        self.prepare()
+        self.con.execute("UPDATE tasks SET base_branch=NULL")
+        with self.assertRaises(delivery_checks.CheckError) as raised:
+            self.gate(["pr", "create"])
+        self.assertIn("base branch", str(raised.exception))
+
+    def test_base_branch_that_moved_ahead_is_allowed_but_a_diverged_one_is_refused(self):
+        self.prepare()
+        self.commit(self.work, "g", "2")
+        ahead = git("-C", str(self.work), "rev-parse", "HEAD")
+        git("-C", str(self.work), "reset", "-q", "--hard", "HEAD~1")
+        git("-C", str(self.work), "update-ref", "refs/remotes/origin/main", ahead)
         self.assertIsNotNone(self.gate(["pr", "create"]))
+        other = git("-C", str(self.work), "commit-tree", "-m", "x", git("-C", str(self.work), "rev-parse", "HEAD^{tree}"))
+        git("-C", str(self.work), "update-ref", "refs/remotes/origin/main", other)
+        with self.assertRaises(delivery_checks.CheckError) as raised:
+            self.gate(["pr", "create"])
+        self.assertIn("does not contain", str(raised.exception))
+
+    def test_dispatch_records_the_base_branch(self):
+        from orchd.runtime import Runtime
+        git("init", "-q", "--bare", str(self.root / "o.git"))
+        git("clone", "-q", str(self.root / "o.git"), str(self.root / "clone"))
+        git("-C", str(self.root / "clone"), "checkout", "-q", "-b", "trunk")
+        self.commit(self.root / "clone", "a", "1")
+        git("-C", str(self.root / "clone"), "push", "-q", "origin", "trunk")
+        git("--git-dir", str(self.root / "o.git"), "symbolic-ref", "HEAD", "refs/heads/trunk")
+        git("-C", str(self.root / "clone"), "remote", "set-head", "origin", "-a")
+        self.assertEqual(Runtime().base_branch(self.root / "clone"), "trunk")
+        self.assertIsNone(Runtime().base_branch(self.work))
 
     def test_unparseable_origin_is_refused(self):
         self.prepare()

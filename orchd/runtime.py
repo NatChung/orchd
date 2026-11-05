@@ -295,6 +295,13 @@ class Runtime:
                          "refs/remotes/origin/HEAD"], check=False)
         return head.stdout.strip() if head.returncode == 0 and head.stdout.strip() else "HEAD"
 
+    def base_branch(self, repo_path):
+        """Branch name origin/HEAD points at (the branch new worktrees are cut from), or None when unknown."""
+        head = self.run(["git", "-C", str(repo_path), "symbolic-ref", "--quiet", "--short",
+                         "refs/remotes/origin/HEAD"], check=False)
+        name = head.stdout.strip() if head.returncode == 0 else ""
+        return name[len("origin/"):] if name.startswith("origin/") and len(name) > len("origin/") else None
+
     def create_worktree(self, repo_path, repo, task_id):
         base = self.base_ref(repo_path)
         base_commit = self.run(["git", "-C", str(repo_path), "rev-parse", base]).stdout.strip()

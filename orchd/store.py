@@ -339,7 +339,7 @@ TASK_COLUMNS = ("goal_id TEXT REFERENCES goals(id)", "goal_critical INTEGER CHEC
                 "verify TEXT", "manual_checks TEXT", "verifies TEXT",
                 "backend TEXT NOT NULL DEFAULT 'exec'", "generation TEXT", "endpoint TEXT",
                 "control_endpoint TEXT", "supervisor_identity TEXT", "server_identity TEXT",
-                "active_turn TEXT", "turn_state TEXT", "last_completed_turn TEXT")
+                "active_turn TEXT", "turn_state TEXT", "last_completed_turn TEXT", "base_branch TEXT")
 MESSAGE_COLUMNS = ("recipient_orch TEXT", "notice_error TEXT", "notice_recipient TEXT",
                    "entry_reply_id INTEGER REFERENCES entry_messages(id)")
 ORCH_COLUMNS = ("first_seen_dead REAL", "last_verified_dead REAL", "archived_at REAL", "codex_probe TEXT")

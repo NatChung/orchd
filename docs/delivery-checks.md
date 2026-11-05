@@ -17,6 +17,10 @@ A Hub without the file, or a repo not in `[delivery_flows]`, behaves as before.
   against the current definition and ran on the task's base commit, the worktree is clean and on the task branch,
   `origin/<branch>` (if known) equals HEAD, `--base` (if given) is a known origin branch, and `checks.pr` passes on that
   head. The PR inputs (title, body, base, head, labels, repo) are written to a JSON file named by `ORCHD_PR_INPUT`.
+- `--base` must be the task's recorded base branch (`tasks.base_branch`, set at dispatch from origin/HEAD) and origin's
+  copy must contain the base commit preflight ran on; orchd always passes `--base <that branch>`. A task without a
+  recorded base branch is refused. Each argument except `--label`/`--reviewer`/`--assignee` may appear once, and
+  `--body` and `--body-file` are mutually exclusive.
 - Only these `gh pr create` arguments are accepted: `--title`, `--body`, `--body-file` (not `-`), `--base`, `--draft`,
   `--label`, `--reviewer`, `--assignee`. Anything else is refused before gh runs, and `--head` and `--repo` cannot be
   given: orchd passes gh the checked body (a `--body-file` is sent as `--body`), `--head <task branch>` and
