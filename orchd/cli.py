@@ -29,6 +29,8 @@
   orchd config show|get KEY|set KEY VALUE|unset KEY   personal settings (worker-model, projects-dir); show prints each value's source
   orchd doctor [--profile example] [--json] [--no-input]   machine check; first-run terminal setup; exit 1 required fail, 2 required unknown
   orchd adopt NEW_ORCH [TASK_ID...] [--from OLD_ORCH] [--force]   move open tasks to another Orch (operator only)
+  orchd check preflight|pr TASK               worker: run the Hub-pinned delivery check in the task worktree and record it (#119)
+  orchd check show TASK                       the recorded check runs for a task
   orchd close ID                              stop a task's worker and clean its worktree if safe
 
 Orch actions require an explicit subcommand; see `orchd orch --help`.
@@ -349,6 +351,13 @@ def build_parser():
     adopt.add_argument("--from", dest="from_orch", help="move all open tasks of this Orch (or limit TASK_IDs to it)")
     adopt.add_argument("--force", action="store_true", help="also move from an alive or unknown owner, and tell it")
     sub.add_parser("close").add_argument("task_id")
+    check = sub.add_parser("check", help="Hub-pinned delivery checks: preflight, pre-PR check, recorded runs (#119)")
+    check_actions = check.add_subparsers(dest="check_action", required=True)
+    for action in ("preflight", "pr", "show"):
+        check_actions.add_parser(action).add_argument("task_id")
+    gate = check_actions.add_parser("gate", help="used by the worker gh wrapper before `gh pr create`")
+    gate.add_argument("--worktree", required=True)
+    gate.add_argument("gh_args", nargs=argparse.REMAINDER)
     sub.add_parser("stuck-close", help="read-only: tasks stuck at 'close pending' with the last error and next step")
     cfg = sub.add_parser("config", help="personal settings in ~/.config/orchd/config.toml (worker-model, projects-dir)")
     cfg_actions = cfg.add_subparsers(dest="config_action", required=True)
@@ -499,6 +508,7 @@ HOME_POLICY = {
     **{("intake", a): "write" for a in ("submit", "draft", "approve", "receipt", "classify", "suggest", "deliver",
                                         "notify-reconcile", "decide", "resolve", "exclude", "bind", "ack", "claim", "cancel")},
     **{("intake", a): "warn" for a in ("show", "decisions", "backlog", "pending", "draft-show")},
+    **{("check", a): "skip" for a in ("preflight", "pr", "show", "gate")},
     ("task", "link"): "write", ("task", "unlink"): "write",
     ("ack",): "write", ("report",): "write", ("progress",): "write", ("flush",): "write",
     ("watch",): "warn", ("summary",): "warn", ("_auto-retry",): "write", ("ask",): "write", ("verify",): "write", ("close",): "write", ("adopt",): "write",
@@ -507,7 +517,7 @@ HOME_POLICY = {
     ("goal", "show"): "warn", ("goal", "list"): "warn", ("goal", "export"): "warn",
 }
 ACTION_DEST = ("interface_action", "orch_action", "entry_action", "question_action", "task_action", "task_question_action",
-               "intake_action", "goal_cmd", "config_action")
+               "intake_action", "goal_cmd", "config_action", "check_action")
 
 
 def _home_policy(args):
@@ -518,6 +528,37 @@ def _home_policy(args):
                               or (cmd in ("entry", "intake") and action == "reconcile" and not args.apply)):
         return "warn"
     return policy
+
+
+def _check_main(args):
+    from orchd import delivery_checks
+    con = store.connect()
+    try:
+        if args.check_action == "gate":
+            worktree = str(Path(args.worktree).resolve())
+            row = next((t for t in store.open_tasks(con) if t["worktree"] and str(Path(t["worktree"]).resolve()) == worktree), None)
+            if row is None:
+                print(f"orchd check: no open task owns worktree {worktree}; refusing gh pr create", file=sys.stderr)
+                return 1
+            delivery_checks.gate_pr(con, row, args.gh_args[1:] if args.gh_args[:1] == ["--"] else args.gh_args)
+            return 0
+        task = store.get_task(con, args.task_id)
+        if args.check_action == "show":
+            rows = [{k: r[k] for k in r.keys()}
+                    for r in delivery_checks.records(con, args.task_id)]
+            print(json.dumps(rows, ensure_ascii=False, indent=1))
+            return 0
+        row = delivery_checks.run(con, task, args.check_action)
+        print(f"{args.check_action} {'passed' if row['passed'] else 'FAILED'} (exit {row['exit_code']}, "
+              f"namespace {row['namespace']}, head {row['head_sha'][:12]}); recorded as check run {row['id']}")
+        if not row["passed"]:
+            print(row["output"], file=sys.stderr)
+        return 0 if row["passed"] else 1
+    except (delivery_checks.CheckError, KeyError) as error:
+        print(f"orchd check: {error}", file=sys.stderr)
+        return 1
+    finally:
+        con.close()
 
 
 def main(argv=None):
@@ -791,6 +832,8 @@ def main(argv=None):
                 snap.close()
     if args.cmd == "intake":
         return _intake_main(args)
+    if args.cmd == "check":
+        return _check_main(args)
     if args.cmd == "task":
         import sqlite3
         from orchd import issue_links

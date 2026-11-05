@@ -161,5 +161,161 @@ class PreflightTest(ChecksBase):
         self.assertFalse(record["passed"])
 
 
+class PrGateTest(ChecksBase):
+    ARGS = ["pr", "create", "--title", "T", "--body", "Body", "--base", "main", "--label", "a,b", "-l", "c"]
+
+    def gate(self, args=None):
+        return delivery_checks.gate_pr(self.con, store.get_task(self.con, "abc12345"), args or self.ARGS, self.root)
+
+    def preflight(self):
+        return delivery_checks.run(self.con, store.get_task(self.con, "abc12345"), "preflight", self.root)
+
+    def test_unconfigured_repo_is_not_gated(self):
+        (self.root / "config.toml").write_text("")
+        self.assertIsNone(self.gate())
+        self.assertEqual(delivery_checks.records(self.con, "abc12345"), [])
+
+    def test_missing_preflight_is_refused_with_the_command_to_run(self):
+        with self.assertRaises(delivery_checks.CheckError) as raised:
+            self.gate()
+        self.assertIn("preflight", str(raised.exception))
+        self.assertIn("orchd check preflight abc12345", str(raised.exception))
+
+    def test_failed_preflight_is_refused(self):
+        self.script("preflight", "exit 1")
+        self.commit(self.work, "f", "1")
+        self.preflight()
+        with self.assertRaises(delivery_checks.CheckError) as raised:
+            self.gate()
+        self.assertIn("did not pass", str(raised.exception))
+
+    def test_preflight_from_an_older_definition_is_refused(self):
+        self.preflight()
+        self.publish(dict(self.definition, version="1.0.1"))
+        with self.assertRaises(delivery_checks.CheckError) as raised:
+            self.gate()
+        self.assertIn("definition changed", str(raised.exception))
+
+    def test_preflight_from_another_base_is_refused(self):
+        self.preflight()
+        self.con.execute("UPDATE check_runs SET base_sha='deadbeef'")
+        with self.assertRaises(delivery_checks.CheckError):
+            self.gate()
+
+    def test_optional_preflight_is_not_required(self):
+        self.publish(dict(self.definition, checks={"preflight": dict(PREFLIGHT, required=False), "pr": PR}))
+        self.assertIsNone(self.gate())
+
+    def test_dirty_worktree_is_refused(self):
+        self.preflight()
+        (self.work / "dirty").write_text("x")
+        with self.assertRaises(delivery_checks.CheckError) as raised:
+            self.gate()
+        self.assertIn("uncommitted", str(raised.exception))
+
+    def test_pr_check_receives_exact_inputs_and_is_recorded(self):
+        self.script("check-pr", f'cp "$ORCHD_PR_INPUT" {self.root}/pr-input.json')
+        self.commit(self.work, "f", "1")
+        self.preflight()
+        self.assertIsNone(self.gate())
+        sent = json.loads((self.root / "pr-input.json").read_text())
+        self.assertEqual(sent["title"], "T")
+        self.assertEqual(sent["body"], "Body")
+        self.assertEqual(sent["base"], "main")
+        self.assertEqual(sent["labels"], ["a", "b", "c"])
+        self.assertEqual(sent["head_sha"], git("-C", str(self.work), "rev-parse", "HEAD"))
+        self.assertEqual(sent["base_sha"], self.base)
+        rows = delivery_checks.records(self.con, "abc12345")
+        self.assertEqual([r["kind"] for r in rows], ["preflight", "pr"])
+        self.assertEqual(rows[1]["head_sha"], sent["head_sha"])
+
+    def test_failed_pr_check_is_refused_with_its_output(self):
+        self.script("check-pr", "echo 'missing section: TDD red/green'; exit 1")
+        self.commit(self.work, "f", "1")
+        self.preflight()
+        with self.assertRaises(delivery_checks.CheckError) as raised:
+            self.gate()
+        self.assertIn("missing section: TDD red/green", str(raised.exception))
+        self.assertEqual(delivery_checks.records(self.con, "abc12345")[-1]["passed"], 0)
+
+    def test_definition_without_pr_check_runs_none(self):
+        self.publish(dict(self.definition, checks={"preflight": PREFLIGHT}))
+        self.preflight()
+        self.assertIsNone(self.gate())  # no checks.pr defined: nothing to run
+
+    def test_body_file_is_read_and_stdin_is_refused(self):
+        body = self.root / "body.md"
+        body.write_text("from file")
+        self.script("check-pr", f'cp "$ORCHD_PR_INPUT" {self.root}/pr-input.json')
+        self.commit(self.work, "f", "1")
+        self.preflight()
+        self.gate(["pr", "create", "--body-file", str(body)])
+        self.assertEqual(json.loads((self.root / "pr-input.json").read_text())["body"], "from file")
+        with self.assertRaises(delivery_checks.CheckError) as raised:
+            self.gate(["pr", "create", "--body-file", "-"])
+        self.assertIn("stdin", str(raised.exception))
+
+    def test_parse_pr_args_forms(self):
+        parsed = delivery_checks.parse_pr_args(["pr", "create", "--title=X", "-B", "dev", "--head", "me:br",
+                                                "--draft", "--fill", "-R", "o/r", "--label=z"])
+        self.assertEqual((parsed["title"], parsed["base"], parsed["head"], parsed["repo"]), ("X", "dev", "me:br", "o/r"))
+        self.assertEqual(parsed["labels"], ["z"])
+        self.assertTrue(parsed["draft"] and parsed["fill"])
+
+
+class WrapperGateTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name)
+        self.calls = root / "calls"
+        self.bin = root / "bin"
+        self.bin.mkdir()
+        gh = self.bin / "gh"
+        gh.write_text(f'#!/bin/sh\necho "gh $@" >> {self.calls}\n')
+        gh.chmod(0o755)
+        self.orchd = root / "orchd"
+        self.orchd.write_text(f'#!/bin/sh\necho "orchd $@" >> {self.calls}\necho "refused: $ORCHD_FAKE" >&2\nexit ${{ORCHD_FAKE_EXIT:-0}}\n')
+        self.orchd.chmod(0o755)
+        self.wrapper = Path(__file__).resolve().parents[1] / "orchd" / "worker_bin" / "gh"
+        self.env = {"PATH": f"{self.bin}:{os.defpath}", "ORCHD_CONFIG_DIR": str(root / "cfg"), "HOME": str(root)}
+
+    def run_gh(self, *args, **extra):
+        return subprocess.run([str(self.wrapper), *args], env=dict(self.env, **extra), capture_output=True, text=True)
+
+    def called(self):
+        return self.calls.read_text() if self.calls.exists() else ""
+
+    def test_pr_create_goes_through_orchd_gate_then_gh(self):
+        result = self.run_gh("pr", "create", "--title", "T", ORCHD_WORKTREE="/w", ORCHD_BIN=str(self.orchd))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.called().splitlines(),
+                         ["orchd check gate --worktree /w -- pr create --title T", "gh pr create --title T"])
+
+    def test_refusal_stops_gh_and_shows_the_reason(self):
+        result = self.run_gh("pr", "create", ORCHD_WORKTREE="/w", ORCHD_BIN=str(self.orchd),
+                             ORCHD_FAKE="no preflight", ORCHD_FAKE_EXIT="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("refused: no preflight", result.stderr)
+        self.assertNotIn("gh pr create", self.called())
+
+    def test_other_commands_and_non_workers_are_not_gated(self):
+        self.run_gh("pr", "view", ORCHD_WORKTREE="/w", ORCHD_BIN=str(self.orchd))
+        self.run_gh("pr", "create")
+        self.assertEqual(self.called().splitlines(), ["gh pr view", "gh pr create"])
+
+    def test_worker_without_orchd_binary_fails_closed(self):
+        result = self.run_gh("pr", "create", ORCHD_WORKTREE="/w", ORCHD_BIN="/nonexistent/orchd")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot run", result.stderr)
+        self.assertNotIn("gh pr create", self.called())
+
+    def test_worker_env_names_the_orchd_binary(self):
+        from orchd.runtime import worker_env
+        with patch.dict(os.environ, {"ORCHD_HOME": self.temp.name}):
+            env = worker_env("/w")
+        self.assertTrue(env["ORCHD_BIN"].endswith("orchd"))
+
+
 if __name__ == "__main__":
     unittest.main()

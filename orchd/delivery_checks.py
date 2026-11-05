@@ -156,3 +156,89 @@ def run(con, task, kind, projects=None, env=None):
 
 def records(con, task_id):
     return con.execute("SELECT * FROM check_runs WHERE task_id=? ORDER BY id", (task_id,)).fetchall()
+
+
+# gh pr create flags that carry a value, mapped to the input field they fill.
+_VALUE_FLAGS = {"--title": "title", "-t": "title", "--body": "body", "-b": "body", "--body-file": "body_file",
+                "-F": "body_file", "--base": "base", "-B": "base", "--head": "head", "-H": "head",
+                "--label": "label", "-l": "label", "--repo": "repo", "-R": "repo"}
+
+
+def parse_pr_args(args):
+    """The PR inputs a `gh pr create` invocation carries. Flags that do not affect the checks are ignored."""
+    found = {"title": None, "body": None, "base": None, "head": None, "repo": None, "labels": [], "draft": False,
+             "fill": False, "body_file": None}
+    rest = list(args[2:])
+    while rest:
+        arg = rest.pop(0)
+        if arg == "--":
+            break
+        name, value = arg, None
+        if arg.startswith("--"):
+            name, equals, value = arg.partition("=")
+            value = value if equals else None
+        elif len(arg) > 2 and arg[:2] in _VALUE_FLAGS:
+            name, value = arg[:2], arg[2:]
+        if name in _VALUE_FLAGS:
+            if value is None:
+                value = rest.pop(0) if rest else ""
+            field = _VALUE_FLAGS[name]
+            if field == "label":
+                found["labels"] += [part for part in value.split(",") if part]
+            else:
+                found[field] = value
+        elif arg in ("--draft", "-d"):
+            found["draft"] = True
+        elif arg in ("--fill", "-f", "--fill-first", "--fill-verbose"):
+            found["fill"] = True
+    return found
+
+
+def _problem(kind, message):
+    return CheckError(f"gh pr create refused by orchd ({kind}): {message}")
+
+
+def gate_pr(con, task, args, projects=None):
+    """Raise CheckError unless the pinned checks allow this `gh pr create`. None when the repo has no pipeline."""
+    loaded = load(task["repo"], projects)
+    if loaded is None:
+        return None
+    checks, task_id = loaded["checks"], task["id"]
+    if checks.get("preflight", {}).get("required"):
+        rows = [r for r in records(con, task_id) if r["kind"] == "preflight"]
+        if not rows:
+            raise _problem("preflight", f"no preflight has been run; run `orchd check preflight {task_id}`")
+        last = rows[-1]
+        if last["definition_sha256"] != loaded["definition_sha256"] or last["base_sha"] != task["base"]:
+            raise _problem("preflight", "the pipeline definition changed or the base moved since the last preflight; "
+                                        f"run `orchd check preflight {task_id}` again")
+        if not last["passed"]:
+            raise _problem("preflight", f"the last preflight did not pass (exit {last['exit_code']}); fix it and run "
+                                        f"`orchd check preflight {task_id}` again. Output:\n{last['output']}")
+    if "pr" not in checks:
+        return None
+    worktree = task["worktree"] or ""
+    try:
+        dirty = _git(worktree, "status", "--porcelain", "--untracked-files=all")
+        head = _git(worktree, "rev-parse", "HEAD")
+    except (OSError, subprocess.SubprocessError) as error:
+        raise _problem("pr", f"cannot read the worktree: {worker_flow._error(error)}") from error
+    if dirty:
+        raise _problem("pr", "the worktree has uncommitted changes; commit them so the check sees the exact head")
+    inputs = parse_pr_args(args)
+    if inputs["body_file"] == "-":
+        raise _problem("pr", "--body-file - reads stdin, which cannot be checked; write the body to a file")
+    if inputs["body_file"]:
+        try:
+            inputs["body"] = Path(inputs["body_file"]).read_text()
+        except (OSError, UnicodeDecodeError) as error:
+            raise _problem("pr", f"cannot read the body file: {error}") from error
+    inputs.update(base_sha=task["base"], head_sha=head, task_id=task_id)
+    directory = Path(os.environ.get("ORCHD_HOME", Path.home() / ".local/share/orchd")) / "pr-inputs"
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / f"{task_id}-{head[:12]}.json"
+    target.write_text(json.dumps(inputs, ensure_ascii=False, indent=1))
+    row = run(con, task, "pr", projects, env={"ORCHD_PR_INPUT": str(target)})
+    if not row["passed"]:
+        raise _problem("pr", f"checks.pr failed (exit {row['exit_code']}). Output:\n{row['output']}")
+    return None

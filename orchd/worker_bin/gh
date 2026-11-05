@@ -71,12 +71,29 @@ def target_owner(args, credential):
     return owner(result.stdout.strip()) if result.returncode == 0 else None
 
 
+def gate_pr_create(args):
+    """A worker's `gh pr create` runs orchd's pinned delivery checks first; a refusal stops it. Not a security
+    boundary: gh api, git push and a direct gh binary bypass this, which is what credential isolation (#121) is for."""
+    worktree = os.environ.get("ORCHD_WORKTREE")
+    if args[:2] != ["pr", "create"] or not worktree:
+        return 0
+    orchd = os.environ.get("ORCHD_BIN")
+    if not orchd or not os.access(orchd, os.X_OK):
+        print("orchd gh: cannot run the delivery checks (ORCHD_BIN missing or not executable); refusing gh pr create",
+              file=sys.stderr)
+        return 1
+    return subprocess.run([orchd, "check", "gate", "--worktree", worktree, "--", *args]).returncode
+
+
 def main():
     real = real_gh()
     if not real:
         print("orchd gh: no real gh executable found in PATH", file=sys.stderr)
         return 127
     args = sys.argv[1:]
+    refused = gate_pr_create(args)
+    if refused:
+        return refused
     is_credential = args[:2] == ["auth", "git-credential"]
     # Auth inspection/management must retain gh semantics, including auth status.
     if "GH_TOKEN" in os.environ or (args[:1] == ["auth"] and not is_credential):

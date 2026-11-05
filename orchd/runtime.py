@@ -123,12 +123,19 @@ def worker_bin_dir():
     return str(directory)
 
 
+def orchd_bin():
+    """The orchd executable the gh wrapper calls for delivery checks: the one installed beside this interpreter."""
+    beside = Path(sys.executable).parent / "orchd"
+    return str(beside) if beside.is_file() else shutil.which("orchd") or str(beside)
+
+
 def worker_env(worktree=None):
     """Session-only gh routing; Claude also receives this via settings (daemon launch)."""
     env = launch_env()
     if worktree:
         env["ORCHD_WORKTREE"] = str(Path(worktree).resolve())
     env["PATH"] = worker_bin_dir() + os.pathsep + env.get("PATH", os.defpath)
+    env["ORCHD_BIN"] = orchd_bin()
     # Replace even absolute gh credential helpers for GitHub, without writing git config.
     count = int(env.get("GIT_CONFIG_COUNT", "0"))
     for key, value in [("credential.https://github.com.helper", ""),
