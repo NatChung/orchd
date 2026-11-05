@@ -150,6 +150,19 @@ def file_projects_dir(env=None, home=None):
     return _file_value(_read(env, home)[1], path(env, home), "projects-dir")
 
 
+def delivery_flows(env=None, home=None):
+    """Map product repo names to Hub repo names; absent configuration means no mapping."""
+    section = _read(env, home)[1].get("delivery_flows", {})
+    if not isinstance(section, dict):
+        raise ValueError(f"{path(env, home)}: [delivery_flows] must be a table")
+    for repo, hub in section.items():
+        if (not isinstance(hub, str) or not hub or not repo or "\\" in repo or "\\" in hub
+                or repo in (".", "..") or hub in (".", "..")
+                or Path(repo).name != repo or Path(hub).name != hub):
+            raise ValueError(f"{path(env, home)}: delivery flow names must be single repo names")
+    return section
+
+
 def intake_producers(env=None, home=None):
     """{producer: {providers, accounts}} from [intake.producers.NAME] (read only; edit the file by hand).
     Absent means no producer is allowed. A wrong-shaped section raises ValueError, so intake fails closed."""
