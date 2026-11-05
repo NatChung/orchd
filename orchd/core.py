@@ -100,6 +100,10 @@ Rules:
   The map is the JSON file named by ORCHD_GH_ACCOUNTS, else ~/.config/orchd/gh-accounts.json
   (case-insensitive owners, "*" default); with neither, gh runs unchanged. Missing mappings/tokens warn and
   keep gh's original behavior. Writes and outward actions still require the existing preview/approval.
+- If the repo has a Hub delivery pipeline, run `{cli} check preflight <task-id>` before you start and keep your
+  work committed: `gh pr create` is refused until the preflight and the pipeline's PR check pass
+  (`{cli} check show <task-id>` lists the recorded runs). Tests that share a DB or Redis must use the
+  ORCHD_TEST_NAMESPACE, ORCHD_TEST_DB_NAME and ORCHD_TEST_REDIS_PREFIX values the checks receive.
 - Reviewing a PR: every worker pushes as the same GitHub account, and GitHub does not let you approve
   your own account's PR, so never use `gh pr review --approve`, `--request-changes`, `--admin`, or any
   bypass of branch protection. Check the PR's current head SHA, the latest main, the task's done_when

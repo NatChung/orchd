@@ -317,5 +317,69 @@ class WrapperGateTest(unittest.TestCase):
         self.assertTrue(env["ORCHD_BIN"].endswith("orchd"))
 
 
+class CliAndMcpTest(ChecksBase):
+    def cli(self, *argv):
+        import contextlib
+        import io
+        from orchd import cli
+        out, err = io.StringIO(), io.StringIO()
+        real = store.connect
+        with patch.object(store, "connect", lambda *a: real(self.root / "home" / "orchd.db")), \
+                patch("orchd.cli._home_policy", return_value="skip"), \
+                patch.dict(os.environ, {"ORCHD_PROJECTS": str(self.root)}), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(list(argv))
+        return code, out.getvalue(), err.getvalue()
+
+    def test_check_preflight_records_and_show_lists(self):
+        code, out, _ = self.cli("check", "preflight", "abc12345")
+        self.assertEqual(code, 0)
+        self.assertIn("preflight passed", out)
+        self.assertIn("orchd_abc12345", out)
+        code, out, _ = self.cli("check", "show", "abc12345")
+        rows = json.loads(out)
+        self.assertEqual([(r["kind"], r["passed"]) for r in rows], [("preflight", 1)])
+
+    def test_failed_preflight_exits_nonzero_with_output(self):
+        self.script("preflight", "echo nope; exit 2")
+        code, _, err = self.cli("check", "preflight", "abc12345")
+        self.assertEqual(code, 1)
+        self.assertIn("nope", err)
+
+    def test_unknown_task_and_unconfigured_repo_are_errors(self):
+        self.assertEqual(self.cli("check", "preflight", "nosuch")[0], 1)
+        (self.root / "config.toml").write_text("")
+        code, _, err = self.cli("check", "preflight", "abc12345")
+        self.assertEqual(code, 1)
+        self.assertIn("no delivery pipeline", err)
+
+    def test_gate_finds_task_by_worktree_and_refuses_without_preflight(self):
+        code, _, err = self.cli("check", "gate", "--worktree", str(self.work), "--", "pr", "create", "--title", "T")
+        self.assertEqual(code, 1)
+        self.assertIn("orchd check preflight abc12345", err)
+        self.cli("check", "preflight", "abc12345")
+        self.assertEqual(self.cli("check", "gate", "--worktree", str(self.work), "--", "pr", "create")[0], 0)
+
+    def test_gate_refuses_unknown_worktree(self):
+        code, _, err = self.cli("check", "gate", "--worktree", str(self.root / "elsewhere"), "--", "pr", "create")
+        self.assertEqual(code, 1)
+        self.assertIn("no open task", err)
+
+    def test_mcp_check_runs_is_read_only_and_scoped_to_the_task(self):
+        from orchd import mcp_server
+        delivery_checks.run(self.con, self.task, "preflight", self.root)
+        rows = mcp_server.call("check_runs", {"task_id": "abc12345"}, "o", self.con, None)
+        self.assertEqual([r["kind"] for r in rows], ["preflight"])
+        tool = next(t for t in mcp_server.TOOLS if t["name"] == "check_runs")
+        self.assertTrue(tool["annotations"]["readOnlyHint"])
+        with self.assertRaises(KeyError):
+            mcp_server.call("check_runs", {"task_id": "nosuch"}, "o", self.con, None)
+
+    def test_worker_brief_mentions_the_checks(self):
+        from orchd import core
+        for kind in ("claude", "codex"):
+            self.assertIn("orchd check preflight <task-id>", core.worker_brief("orchd", kind))
+
+
 if __name__ == "__main__":
     unittest.main()
