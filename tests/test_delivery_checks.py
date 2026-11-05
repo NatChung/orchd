@@ -493,6 +493,45 @@ class WrapperGateTest(unittest.TestCase):
         self.run_gh("pr", "create", "--head", "attacker:main", ORCHD_WORKTREE="/w", ORCHD_BIN=str(self.orchd))
         self.assertNotIn("attacker", self.called().splitlines()[-1])
 
+    def worker(self, *args, **extra):
+        return self.run_gh(*args, ORCHD_WORKTREE="/w", ORCHD_BIN=str(self.orchd), **extra)
+
+    def test_global_flags_before_pr_create_are_refused_with_the_reason(self):
+        for args in (("-R", "x/y", "pr", "create"), ("--repo=x/y", "pr", "create"), ("--repo", "x/y", "pr", "create"),
+                     ("-Rx/y", "pr", "new"), ("--hostname", "h", "pr", "create", "--title", "T"),
+                     ("--hostname=h", "pr", "new"), ("pr", "-R", "x/y", "create"), ("pr", "--repo=x/y", "new")):
+            with self.subTest(args=args):
+                self.calls.unlink(missing_ok=True)
+                result = self.worker(*args)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("before the subcommand", result.stderr)
+                self.assertEqual(self.called(), "")
+
+    def test_pr_new_alias_goes_through_the_gate_as_create(self):
+        result = self.worker("pr", "new", "--title", "T")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.called().splitlines()[0], "orchd check gate --worktree /w -- pr create --title T")
+
+    def test_unknown_global_flags_fail_closed_for_workers(self):
+        for args in (("--bogus", "pr", "create"), ("--bogus=1", "pr", "view"), ("-Z", "pr", "create")):
+            with self.subTest(args=args):
+                result = self.worker(*args)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("unrecognized global flag", result.stderr)
+        self.assertEqual(self.called(), "")
+
+    def test_harmless_global_flags_and_other_subcommands_pass_through(self):
+        self.worker("-R", "x/y", "pr", "view", "5")
+        self.worker("--version")
+        self.worker("pr", "comment", "5", "--body", "create")
+        self.worker("api", "repos/x/y/pulls")
+        self.assertEqual(self.called().splitlines(), ["gh -R x/y pr view 5", "gh --version",
+                                                      "gh pr comment 5 --body create", "gh api repos/x/y/pulls"])
+
+    def test_non_workers_are_not_restricted(self):
+        self.run_gh("-R", "x/y", "pr", "create")
+        self.assertEqual(self.called().splitlines(), ["gh -R x/y pr create"])
+
     def test_other_commands_and_non_workers_are_not_gated(self):
         self.run_gh("pr", "view", ORCHD_WORKTREE="/w", ORCHD_BIN=str(self.orchd))
         self.run_gh("pr", "create")

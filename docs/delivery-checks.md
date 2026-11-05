@@ -27,5 +27,10 @@ A Hub without the file, or a repo not in `[delivery_flows]`, behaves as before.
   `--repo <origin owner/repo>`.
 - A configured Hub that cannot be fetched or whose definition is invalid blocks the PR (fail closed).
 
-The wrapper is not a security boundary: `gh api`, plain `git push` and a direct `gh` binary bypass it. Credential
+The wrapper finds the real subcommand (global flags `-R`, `--repo`, `--hostname`; `pr new` is `pr create`) and sends every
+`pr create` through the gate. Global flags before the subcommand, or between `pr` and `create`, are refused for `pr create`,
+and an unrecognized global flag is refused for any worker `gh` call (fail closed).
+
+The wrapper is not a security boundary: `gh api` (including a POST to `/pulls` or the GraphQL `createPullRequest` mutation),
+user-defined `gh alias`es, plain `git push` and a direct `gh` binary bypass it. Credential
 isolation and the red/green, baseline and document-SHA manifests belong to #121.

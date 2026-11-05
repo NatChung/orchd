@@ -71,13 +71,50 @@ def target_owner(args, credential):
     return owner(result.stdout.strip()) if result.returncode == 0 else None
 
 
+GLOBAL_VALUE_FLAGS = ("-R", "--repo", "--hostname")  # change the target repo or host; take a value
+GLOBAL_FLAGS = ("-h", "--help", "--version")
+
+
+def classify(args):
+    """Find the real gh subcommand. Returns (is_pr_create, normalized args, error). Global flags (-R, --repo,
+    --hostname, with or without =) may precede the subcommand; any flag not listed here fails closed because we
+    cannot tell whether it takes a value or retargets gh. `pr new` is gh's alias of `pr create`."""
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        name = args[i].split("=", 1)[0]
+        if name in GLOBAL_VALUE_FLAGS:
+            i += 1 if "=" in args[i] else 2
+        elif name in GLOBAL_FLAGS:
+            i += 1
+        elif args[i].startswith("-R") and not args[i].startswith("--"):
+            i += 1  # -Rowner/repo
+        else:
+            return False, args, f"unrecognized global flag {args[i]!r}; refusing it for a worker"
+    rest = args[i:]
+    if rest[:1] == ["pr"] and len(rest) > 1 and rest[1].startswith("-") and any(a in ("create", "new") for a in rest[2:]):
+        return True, args, ("flags before the subcommand (e.g. gh pr -R x create) are not allowed for pr create: "
+                            "they can retarget the repo")
+    if rest[:1] == ["pr"] and rest[1:2] in (["create"], ["new"]):
+        if i:
+            return True, args, ("global flags before the subcommand (e.g. gh -R x pr create) are not allowed for "
+                                "pr create: they can retarget the repo; orchd sets --repo itself")
+        return True, ["pr", "create", *rest[2:]], None
+    return False, args, None
+
+
 def gate_pr_create(args):
     """A worker's `gh pr create` runs orchd's pinned delivery checks first; a refusal stops it, and gh then gets the
     arguments orchd returns (whitelisted flags, --head and --repo set from the task). A wrapper-level guard, not a
-    security boundary: gh api, git push and a direct gh binary bypass it; credential isolation is #121.
-    Returns (exit code, args for gh)."""
+    security boundary: gh api (POST /pulls), git push, user-defined gh aliases and a direct gh binary bypass it;
+    credential isolation is #121. Returns (exit code, args for gh)."""
     worktree = os.environ.get("ORCHD_WORKTREE")
-    if args[:2] != ["pr", "create"] or not worktree:
+    if not worktree:
+        return 0, args
+    create, args, error = classify(args)
+    if error:
+        print(f"orchd gh: {error}", file=sys.stderr)
+        return 1, args
+    if not create:
         return 0, args
     orchd = os.environ.get("ORCHD_BIN")
     if not orchd or not os.access(orchd, os.X_OK):
