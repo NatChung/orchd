@@ -66,6 +66,8 @@ def build_parser():
     parser = CommandParser(prog="orchd", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
+    watcher = sub.add_parser("pr-watch", help="read-only AI pull request review inventory")
+    watcher.add_argument("repos", nargs="+", metavar="OWNER/REPO")
     mcp = sub.add_parser("mcp")
     mcp.add_argument("--role", choices=["orch", "entry"], default="orch")
     mcp.add_argument("--entry", default="desktop", help="entry name (with --role entry)")
@@ -492,7 +494,7 @@ def _intake_main(args):
 #   skip  - does not touch the Orch home rules (init/upgrade manage them; the rest never read the home)
 # Plain `list` is warn: core.list_open only reads.
 HOME_POLICY = {
-    ("mcp",): "write",
+    ("mcp",): "write", ("pr-watch",): "skip",
     **{("interface", a): "skip" for a in ("register", "submit", "fetch", "ack", "deregister", "list", "rebind")},
     ("orch", "start"): "write", ("orch", "stop"): "write", ("orch", "restart"): "write",  # --dry-run -> warn
     ("orch", "list"): "write", ("orch", "attach"): "write",
@@ -566,6 +568,15 @@ def main(argv=None):
         from orchd import home_migrations
         for line in home_migrations.ensure_current(write=policy == "write"):
             print(line, file=sys.stderr)
+    if args.cmd == "pr-watch":
+        from orchd import pr_watch
+        import subprocess
+        try:
+            print(json.dumps(pr_watch.watch(args.repos), ensure_ascii=False, indent=2))
+            return 0
+        except (ValueError, OSError, subprocess.SubprocessError) as error:
+            print(f"orchd pr-watch: {error}", file=sys.stderr)
+            return 1
     if args.cmd == "interface":
         from orchd import interface
         import sqlite3
