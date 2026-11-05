@@ -970,6 +970,9 @@ def main(argv=None):
         core.ack(con, args.task_id)
         print(f"acked {args.task_id}")
     elif args.cmd == "report":
+        if "skills read:" not in args.evidence.lower():
+            print("warning: evidence has no 'Skills read:' line; list the absolute skill paths read, or 'none' with the reason.",
+                  file=sys.stderr)
         woke = core.report(con, rt, args.task_id, args.status, args.summary, args.evidence)
         print(f"reported {args.task_id}" + ("" if woke else " (stored; waking Orch failed, it will see it in list_open)"))
     elif args.cmd == "progress":

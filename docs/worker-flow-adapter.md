@@ -2,7 +2,25 @@
 
 The task scope and orchd's worker rules govern all work. Follow the configured delivery flow as well when available; report missing guidance instead of assuming it does not apply.
 
-Use only the pstack how, why, tdd and blast-radius methods where applicable. Read the relevant `SKILL.md` directly; do not invoke slash commands. This host's defaults are configurable, not guaranteed: Claude uses `~/.claude/skills/pstack-X/SKILL.md` and Codex uses `~/.agents/skills/pstack-X/SKILL.md`, where X is the method name. Report an unavailable skill as a gap.
+## Skills to read before starting
+
+The pstack skills set `disable-model-invocation`, so the Skill tool and slash commands are disabled for them. Read each file with Read/cat. Use the path for your runtime, where X is the skill name:
+
+- Claude workers: `~/.claude/skills/pstack-X/SKILL.md`
+- Codex workers: `~/.agents/skills/pstack-X/SKILL.md`
+
+Read these before starting, by the task's `task_type` (the task message states it; if it does not, pick the closest row and say so in the report):
+
+| task_type | Read |
+| --- | --- |
+| investigation | `pstack-how`; add `pstack-why` for root-cause questions |
+| design | `pstack-architect` |
+| code | `pstack-tdd` and `pstack-blast-radius`; add `pstack-how` when the code area is unfamiliar |
+| review | `pstack-why`; add `pstack-blast-radius` |
+
+Other task types need no pstack skill unless the task names one. Examples: Claude code task reads `~/.claude/skills/pstack-tdd/SKILL.md` and `~/.claude/skills/pstack-blast-radius/SKILL.md`; Codex investigation task reads `~/.agents/skills/pstack-how/SKILL.md`. Report an unavailable skill as a gap.
+
+Every report must include a `Skills read:` line in its evidence, listing the absolute paths actually read, or `none` with the reason. List any skill step you adapted or skipped under gaps. This is not a hard failure; the Orch checks it.
 
 Do the work yourself: do not start subagents, conduct cross-vendor reviews, send outward messages, or merge. Where a skill asks for those actions, do the applicable investigation yourself or report the gap. Follow orchd's preview and approval rules for outward actions.
 

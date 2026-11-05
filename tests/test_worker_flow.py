@@ -117,3 +117,27 @@ class WorkerFlowTest(unittest.TestCase):
             brief = worker_flow.brief(None, self.root)
         self.assertIn('fatal https://***@example.com/path', brief)
         self.assertNotIn('secret', brief)
+
+
+class SkillsReadTest(unittest.TestCase):
+    def test_adapter_names_skill_paths_per_task_type_for_both_runtimes(self):
+        text = (Path(__file__).resolve().parent.parent / worker_flow.ADAPTER).read_text()
+        for needle in ('~/.claude/skills/pstack-X/SKILL.md', '~/.agents/skills/pstack-X/SKILL.md',
+                       'Read/cat', 'Skill tool and slash commands are disabled', 'Skills read:',
+                       '| investigation |', '| design |', '| code |', '| review |',
+                       'pstack-architect', 'pstack-tdd', 'pstack-blast-radius', 'pstack-why', 'pstack-how',
+                       '~/.claude/skills/pstack-tdd/SKILL.md', '~/.agents/skills/pstack-how/SKILL.md'):
+            self.assertIn(needle, text)
+        for limit in ('do not start subagents', 'cross-vendor', 'merge'):
+            self.assertIn(limit, text)
+
+    def test_brief_requires_skills_read_line_for_both_kinds(self):
+        for kind in ('claude', 'codex'):
+            self.assertIn('`Skills read:` line', core.worker_brief('orchd', kind, projects=Path('/nonexistent')))
+
+    def test_task_message_states_task_type(self):
+        task = {'id': 't', 'repo': 'r', 'worktree': '/w', 'branch': 'b', 'title': 'T', 'instructions': 'i',
+                'done_when': 'd', 'task_type': 'code'}
+        self.assertIn('Task type: code', core.task_message(task))
+        del task['task_type']
+        self.assertIn('Task type: unspecified', core.task_message(task))
