@@ -908,3 +908,77 @@ class CliAndMcpTest(ChecksBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class ArtifactGateTest(ChecksBase):
+    def gate(self):
+        return delivery_checks.gate_pr(self.con, self.task, ["pr", "create"], self.root)
+
+    policy = {"forbidden_globs": [".task-evidence/**"], "forbidden_extensions": [".png"],
+              "allowlist": ["docs/allowed.png"],
+              "exceptions": {"durable product tests": ["tests/fixtures/**"]}}
+
+    def configure(self, policy=True, repos=None):
+        definition = dict(self.definition, checks={"pr": PR})
+        if policy:
+            definition["artifact_rules"] = {"product": self.policy}
+        if repos is not None:
+            definition["repos"] = repos
+        self.publish(definition)
+
+    def add_file(self, path):
+        target = self.work / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self.commit(self.work, path, "artifact")
+
+    def test_blocked_artifacts_are_listed(self):
+        self.configure()
+        self.add_file(".task-evidence/run.txt")
+        self.add_file("screen.png")
+        with self.assertRaises(delivery_checks.CheckError) as raised:
+            self.gate()
+        self.assertIn(".task-evidence/run.txt", str(raised.exception))
+        self.assertIn("screen.png", str(raised.exception))
+
+    def test_allowed_path(self):
+        self.configure()
+        self.add_file("src/product.py")
+        self.assertIsNotNone(self.gate())
+
+    def test_allowlist_and_named_exception(self):
+        self.configure()
+        self.add_file("docs/allowed.png")
+        self.add_file("tests/fixtures/test.png")
+        self.assertIsNotNone(self.gate())
+
+    def test_no_config_repo(self):
+        self.configure(policy=False)
+        self.add_file("screen.png")
+        self.assertIsNotNone(self.gate())
+
+    def test_unlisted_repo(self):
+        self.configure(repos=["other"])
+        self.add_file("screen.png")
+        self.assertIsNone(self.gate())
+
+    def test_deletion_is_allowed_but_rename_destination_is_checked(self):
+        self.add_file("old.png")
+        base = git("-C", str(self.work), "rev-parse", "HEAD")
+        self.con.execute("UPDATE tasks SET base=? WHERE id='abc12345'", (base,))
+        self.task = store.get_task(self.con, "abc12345")
+        self.push(base, "main")
+        self.configure()
+        git("-C", str(self.work), "rm", "old.png")
+        self.commit(self.work, "safe.txt", "x")
+        self.assertIsNotNone(self.gate())
+        git("-C", str(self.work), "mv", "safe.txt", "renamed.png")
+        git("-C", str(self.work), "-c", "user.name=T", "-c", "user.email=t@example.invalid", "commit", "-qm", "rename")
+        with self.assertRaisesRegex(delivery_checks.CheckError, "renamed.png"):
+            self.gate()
+
+    def test_invalid_policy_fails_closed(self):
+        for policy in ({"forbidden_globs": "*.png"}, {"exceptions": {"": ["x"]}},
+                       {"forbidden_extensions": ["png"]}, {"typo": []}):
+            with self.subTest(policy=policy):
+                self.publish(dict(self.definition, artifact_rules={"product": policy}))
+                with self.assertRaises(delivery_checks.CheckError):
+                    delivery_checks.load("product", self.root)
