@@ -32,6 +32,14 @@ Example, abbreviated only in the command arguments; all stage names and required
   "id": "delivery",
   "version": "1.0.0",
   "repos": ["product"],
+  "artifact_rules": {
+    "product": {
+      "forbidden_globs": [".task-evidence/**", "evidence/**"],
+      "forbidden_extensions": [".png"],
+      "allowlist": ["docs/architecture.png"],
+      "exceptions": {"durable product tests": ["tests/fixtures/**"]}
+    }
+  },
   "stages": [
     {"id":"plan", "skills":["how","why","architect","blast-radius","show-me-your-work"], "codegraph":true, "model_rule":"configured", "artifact_schema":"plan-v1", "decision_log_schema":"decision-log-v1.schema.json"},
     {"id":"implement", "skills":["tdd","test-behavior-not-implementation","fix-root-causes","laziness-protocol","prove-it-works","show-me-your-work"], "model_rule":"configured", "artifact_schema":"implement-v1", "decision_log_schema":"decision-log-v1.schema.json"},

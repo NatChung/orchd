@@ -2,7 +2,7 @@
 
 Implements phase 1 of [the staged pipeline design](design/staged-pipeline.md) (#119). A product repo listed in
 `[delivery_flows]` may have a Hub definition at `docs/development/delivery.pipeline.json`. Orchd fetches the Hub,
-pins `origin/HEAD` and reads only `checks.preflight` and `checks.pr` (each with exactly `argv`, `cwd`,
+pins `origin/HEAD` and reads `artifact_rules`, `checks.preflight` and `checks.pr` (each with exactly `argv`, `cwd`,
 `timeout_seconds`, `allowed_exit_codes`, `env_allowlist`, `required`). Stages are #121 and are ignored here.
 A Hub without the file, or a repo not in `[delivery_flows]`, behaves as before.
 
@@ -39,3 +39,18 @@ and an unrecognized global flag is refused for any worker `gh` call (fail closed
 The wrapper is not a security boundary: `gh api` (including a POST to `/pulls` or the GraphQL `createPullRequest` mutation),
 user-defined `gh alias`es, plain `git push` and a direct `gh` binary bypass it. Credential
 isolation and the red/green, baseline and document-SHA manifests belong to #121.
+
+## PR artifact rules
+
+The optional top-level `artifact_rules` object maps orchd repo names to policies. Each policy accepts
+`forbidden_globs`, `forbidden_extensions`, and `allowlist` arrays, and an `exceptions` object mapping descriptive
+names to arrays of globs. All fields are optional; unknown keys and invalid values fail validation. Extensions
+include the leading dot and match case-sensitively. Globs use Python `fnmatchcase` on the whole repo-relative path:
+`*` can match `/`, and `**` has the same meaning as `*`. Allowlist and named exception globs override both deny
+lists; keep them narrow and review their names and paths in the Hub definition. See the example in the
+[staged pipeline design](design/staged-pipeline.md).
+
+Before `checks.pr` runs, the PR gate compares the merge base of the fetched target branch and checked head to that
+head. It checks added, modified and renamed destination paths, skips deletions, and lists every blocked path. A
+repo without a policy is unchanged; a repo absent from `repos` remains unconfigured. This rule is part of the
+wrapper gate and does not run in a standalone `orchd check pr` invocation.

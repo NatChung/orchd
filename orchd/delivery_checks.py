@@ -1,7 +1,8 @@
 """Hub-defined delivery checks run by orchd (#119): a preflight and a check before `gh pr create`.
 
 The definition is `docs/development/delivery.pipeline.json` at the Hub's fetched origin/HEAD commit (see
-docs/design/staged-pipeline.md). Only `repos` and `checks` are read here; stages belong to the staged pipeline (#121)."""
+docs/design/staged-pipeline.md). Only `repos`, `artifact_rules` and `checks` are read here; stages belong to the staged pipeline (#121)."""
+import fnmatch
 import json
 import os
 import re
@@ -44,6 +45,25 @@ def _validate(definition):
     if (not isinstance(repos, list) or not all(isinstance(r, str) and r for r in repos)
             or len(set(repos)) != len(repos)):
         raise CheckError("pipeline definition: repos must be an array of unique, non-empty orchd repo names")
+    rules = definition.get("artifact_rules", {})
+    if not isinstance(rules, dict):
+        raise CheckError("pipeline definition: artifact_rules must be an object keyed by repo")
+    for repo, policy in rules.items():
+        where = f"pipeline definition: artifact_rules.{repo}"
+        keys = {"forbidden_globs", "forbidden_extensions", "allowlist", "exceptions"}
+        if not isinstance(repo, str) or not repo or not isinstance(policy, dict) or set(policy) - keys:
+            raise CheckError(f"{where}: invalid repo or unknown policy key")
+        for key in ("forbidden_globs", "forbidden_extensions", "allowlist"):
+            value = policy.get(key, [])
+            if not isinstance(value, list) or not all(isinstance(x, str) and x for x in value):
+                raise CheckError(f"{where}.{key} must be an array of non-empty strings")
+        if any(not x.startswith(".") or "/" in x for x in policy.get("forbidden_extensions", [])):
+            raise CheckError(f"{where}.forbidden_extensions must contain extensions starting with a dot")
+        exceptions = policy.get("exceptions", {})
+        if (not isinstance(exceptions, dict) or any(not isinstance(k, str) or not k or
+                not isinstance(v, list) or not v or not all(isinstance(x, str) and x for x in v)
+                for k, v in exceptions.items())):
+            raise CheckError(f"{where}.exceptions must map names to non-empty arrays of globs")
     checks = definition.get("checks")
     if not isinstance(checks, dict):
         raise CheckError("pipeline definition: checks must be an object")
@@ -105,7 +125,7 @@ def load(repo, projects=None):
     if repo not in definition["repos"]:
         return None  # the Hub defines a pipeline, but not for this repo: same as no definition
     return {"hub": hub, "hub_commit": commit, "definition_sha256": sha256(blob).hexdigest(),
-            "checks": definition["checks"]}
+            "checks": definition["checks"], "artifact_rules": definition.get("artifact_rules", {}).get(repo)}
 
 
 def _git(worktree, *args):
@@ -380,6 +400,26 @@ def gate_pr(con, task, args, projects=None):
                                  f"{head[:12]}; push (or fetch) so the PR head is the checked commit")
     except (OSError, subprocess.SubprocessError) as error:
         raise _problem("pr", f"cannot read the worktree: {worker_flow._error(error)}") from error
+    policy = loaded.get("artifact_rules")
+    if policy is not None:
+        try:
+            diff = subprocess.run(["git", "-C", str(worktree), "diff", "--name-status", "-z", "--no-renames",
+                                   f"{tip}...{head}", "--"], capture_output=True, check=True).stdout
+        except (OSError, subprocess.SubprocessError) as error:
+            raise _problem("pr", f"cannot read the PR diff: {worker_flow._error(error)}") from error
+        fields = diff.decode("utf-8", "surrogateescape").split("\0")
+        allowed = policy.get("allowlist", []) + [glob for globs in policy.get("exceptions", {}).values() for glob in globs]
+        offenders = []
+        for status, path in zip(fields[0::2], fields[1::2]):
+            if status == "D":
+                continue
+            if any(fnmatch.fnmatchcase(path, glob) for glob in allowed):
+                continue
+            if (any(fnmatch.fnmatchcase(path, glob) for glob in policy.get("forbidden_globs", [])) or
+                    any(path.endswith(ext) for ext in policy.get("forbidden_extensions", []))):
+                offenders.append(path)
+        if offenders:
+            raise _problem("pr", "forbidden artifact paths in PR diff:\n" + "\n".join(repr(p) for p in offenders))
     if inputs["body_file"]:
         try:
             inputs["body"] = Path(inputs["body_file"]).read_text()
