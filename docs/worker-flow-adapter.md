@@ -22,7 +22,7 @@ Do the work yourself: do not start subagents, conduct cross-vendor reviews, send
 
 ## mobile-flutter-app PR gate
 
-When its Hub pipeline lists `mobile-flutter-app`, dispatch defaults to the highest numeric `release-X.Y.Z` branch on origin. An explicit `base_branch` overrides it; if no release branch exists, dispatch fails and reports the missing branch. The PR wrapper uses the recorded task base. Unlike web-next, APP runs Flutter analysis and tests, and does not add browser or device acceptance.
+When its Hub pipeline lists `mobile-flutter-app`, dispatch defaults to the highest numeric `release-X.Y.Z` branch on origin. An explicit `base_branch` overrides it; if no release branch exists, dispatch fails and reports the missing branch. The PR wrapper uses the recorded task base. Unlike web-next, APP compares Flutter analysis and test failures with the recorded base in the PR check, and does not add browser or device acceptance. Existing failures are tolerated; new diagnostics or failures block the PR. The comparison checks out the base in a temporary worktree and runs both commands on base and head; unrecognized diagnostics or incomplete test output fails closed.
 
 Hub configuration proposal (merge with the existing pipeline; do not replace other repos' settings):
 
@@ -31,7 +31,15 @@ Hub configuration proposal (merge with the existing pipeline; do not replace oth
   "repo_checks": {
     "mobile-flutter-app": {
       "preflight": {
-        "argv": ["sh", "-c", "flutter analyze && flutter test"],
+        "argv": ["flutter", "--version"],
+        "cwd": ".",
+        "timeout_seconds": 3600,
+        "allowed_exit_codes": [0],
+        "env_allowlist": ["PATH", "HOME"],
+        "required": true
+      },
+      "pr": {
+        "argv": ["orchd-flutter-gate"],
         "cwd": ".",
         "timeout_seconds": 3600,
         "allowed_exit_codes": [0],
