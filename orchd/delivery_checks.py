@@ -1,7 +1,7 @@
 """Hub-defined delivery checks run by orchd (#119): a preflight and a check before `gh pr create`.
 
 The definition is `docs/development/delivery.pipeline.json` at the Hub's fetched origin/HEAD commit (see
-docs/design/staged-pipeline.md). Only `repos`, `artifact_rules` and `checks` are read here; stages belong to the staged pipeline (#121)."""
+docs/design/staged-pipeline.md). Only `repos`, `artifact_rules`, `checks` and `repo_checks` are read here; stages belong to the staged pipeline (#121)."""
 import fnmatch
 import json
 import os
@@ -64,7 +64,14 @@ def _validate(definition):
                 not isinstance(v, list) or not v or not all(isinstance(x, str) and x for x in v)
                 for k, v in exceptions.items())):
             raise CheckError(f"{where}.exceptions must map names to non-empty arrays of globs")
-    checks = definition.get("checks")
+    overrides = definition.get("repo_checks", {})
+    if not isinstance(overrides, dict) or any(repo not in repos for repo in overrides):
+        raise CheckError("pipeline definition: repo_checks must be keyed by listed repos")
+    for checks in [definition.get("checks"), *overrides.values()]:
+        _validate_checks(checks)
+
+
+def _validate_checks(checks):
     if not isinstance(checks, dict):
         raise CheckError("pipeline definition: checks must be an object")
     for kind, check in checks.items():
@@ -125,7 +132,7 @@ def load(repo, projects=None):
     if repo not in definition["repos"]:
         return None  # the Hub defines a pipeline, but not for this repo: same as no definition
     return {"hub": hub, "hub_commit": commit, "definition_sha256": sha256(blob).hexdigest(),
-            "checks": definition["checks"], "artifact_rules": definition.get("artifact_rules", {}).get(repo)}
+            "checks": definition.get("repo_checks", {}).get(repo, definition["checks"]), "artifact_rules": definition.get("artifact_rules", {}).get(repo)}
 
 
 def _git(worktree, *args):

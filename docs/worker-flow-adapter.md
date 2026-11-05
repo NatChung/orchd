@@ -19,3 +19,36 @@ Do the work yourself: do not start subagents, conduct cross-vendor reviews, send
 - Treat only expected not-found responses (for example, 404) as missing config; log and surface 5xx and network errors.
 - Use PR title `type(TICKET-KEY): summary`, with a Conventional Commits type matching the runtime change.
 - For cross-service work, the ticket must name the backend contract source and owner; otherwise mark the work provisional and do not report it complete.
+
+## mobile-flutter-app PR gate
+
+When its Hub pipeline lists `mobile-flutter-app`, dispatch defaults to the highest numeric `release-X.Y.Z` branch on origin. An explicit `base_branch` overrides it; if no release branch exists, dispatch fails and reports the missing branch. The PR wrapper uses the recorded task base. Unlike web-next, APP runs Flutter analysis and tests, and does not add browser or device acceptance.
+
+Hub configuration proposal (merge with the existing pipeline; do not replace other repos' settings):
+
+```json
+{
+  "repo_checks": {
+    "mobile-flutter-app": {
+      "preflight": {
+        "argv": ["sh", "-c", "flutter analyze && flutter test"],
+        "cwd": ".",
+        "timeout_seconds": 3600,
+        "allowed_exit_codes": [0],
+        "env_allowlist": ["PATH", "HOME"],
+        "required": true
+      }
+    }
+  },
+  "artifact_rules": {
+    "mobile-flutter-app": {
+      "forbidden_globs": [".task-evidence/**", "plan.md", "**/plan.md", "decision-log.md", "**/decision-log.md", "build/**", "**/build/**", "screenshots/**", "**/screenshots/**"],
+      "forbidden_extensions": [".png", ".jpg", ".jpeg"],
+      "allowlist": [],
+      "exceptions": {"product assets and test fixtures": ["assets/**", "test/fixtures/**"]}
+    }
+  }
+}
+```
+
+Add `mobile-flutter-app` to `repos` as well. `repo_checks` replaces the shared `checks` for the named repo; include any additional required PR checks explicitly. Artifact exceptions should be reviewed against the APP's real asset layout before enabling. These settings are a proposal, not a change to Hub.
