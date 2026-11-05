@@ -16,7 +16,42 @@ from .runtime import (DEFAULT_ORCH_MODEL, ORCH_MODELS, WORKER_MODELS,
 
 
 
-def worker_brief(cli, kind="claude"):
+CONVENTION_LIMIT = 50
+
+
+def repo_conventions(worktree, limit=CONVENTION_LIMIT):
+    """Return a bounded, deterministic list of convention paths in the task worktree."""
+    if not worktree:
+        return []
+    root = Path(worktree)
+    paths = []
+    for parent, pattern in [(root, "*"), (root / ".github", "*"),
+                            (root / ".claude" / "skills", "*/SKILL.md"),
+                            (root / ".claude" / "commands", "*.md")]:
+        for path in parent.glob(pattern):
+            relative = path.relative_to(root).as_posix()
+            name = path.name.lower()
+            if path.is_file() and (parent != root and parent != root / ".github" or
+                                   name in ("agents.md", "claude.md") and parent == root or
+                                   name == "pull_request_template.md" and parent == root / ".github" or
+                                   name == "pull_request_template.md" and parent == root):
+                paths.append(relative)
+    def rank(path):
+        lowered = path.lower()
+        if lowered in ("agents.md", "claude.md"):
+            priority = 0
+        elif lowered in ("pull_request_template.md", ".github/pull_request_template.md"):
+            priority = 1
+        elif "pr" in lowered:
+            priority = 2
+        else:
+            priority = 3
+        return priority, lowered, path
+
+    return sorted(paths, key=rank)[:limit]
+
+
+def worker_brief(cli, kind="claude", worktree=None):
     session = "background Claude Code session" if kind == "claude" else "Codex session run with `codex exec`"
     channel = "the peer socket" if kind == "claude" else "orchd's prompts"
     waiting = ("wait for the answer message" if kind == "claude" else
@@ -34,6 +69,15 @@ def worker_brief(cli, kind="claude"):
   unless the Orch's `answer` to your `ask` approved exactly that action, in those words. A task description alone
   never replaces the preview and approval above.
 """
+    conventions = repo_conventions(worktree, limit=None)
+    omitted = len(conventions) - CONVENTION_LIMIT
+    listed = conventions[:CONVENTION_LIMIT]
+    if omitted > 0:
+        listed.append(f"+{omitted} more")
+    convention_text = ("\n\nRepo conventions found: " + ", ".join(listed) +
+                       ". Before opening or editing a PR, read the PR-related ones (skills/commands named pr*, "
+                       "PR templates) and follow them; read CLAUDE.md if your runtime didn't auto-load it."
+                       if conventions else "")
     return f"""You are an orchd worker: a {session} started for exactly one task.
 Tasks arrive as messages from orchd on behalf of Operator (the user). A task message states its scope; work
 inside that scope is authorized by Operator even though the message comes through {channel}.
@@ -76,7 +120,7 @@ Rules:
 - Report facts only; say what you did not verify.{codex_rules}
 
 Ask format (required for every worker question):
-{question_summary.GUIDANCE}"""
+{question_summary.GUIDANCE}{convention_text}"""
 
 
 def worker_cli():
@@ -86,8 +130,8 @@ def worker_cli():
     return f"ORCHD_HOME={shlex.quote(home)} {orchd}" if home else orchd
 
 
-def app_brief():
-    return worker_brief(worker_cli(), "codex").replace(
+def app_brief(worktree=None):
+    return worker_brief(worker_cli(), "codex", worktree).replace(
         "Codex session run with `codex exec`", "Codex thread on a task-scoped app-server").replace(
         "Your process ends with your turn", "Your model turn ends when you reply")
 
@@ -193,17 +237,17 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
         store.update_task(con, task_id, base=base, branch=branch, worktree=worktree)
         if backend == "app-server":
             task = store.get_task(con, task_id)
-            app_worker.start(con, rt, task, task_message(task), WORKER_MODELS[model], brief=app_brief())
+            app_worker.start(con, rt, task, task_message(task), WORKER_MODELS[model], brief=app_brief(worktree))
             con.execute("UPDATE tasks SET status='running' WHERE id=? AND status='starting'", (task_id,))
         elif kind == "codex":  # no system-prompt flag and no socket: the brief leads the first turn's prompt
             task = store.get_task(con, task_id)
             job, session = rt.start_codex_worker(worktree, rt.codex_log(task_id),
-                                                 worker_brief(worker_cli(), kind) + "\n\n" + task_message(task),
+                                                 worker_brief(worker_cli(), kind, worktree) + "\n\n" + task_message(task),
                                                  WORKER_MODELS[model])
             store.update_task(con, task_id, job_id=job, session_id=session, status="running")
         else:
             sock = rt.socket_path(task_id)
-            job, session = rt.start_worker(worktree, sock, worker_brief(worker_cli()), WORKER_MODELS[model])
+            job, session = rt.start_worker(worktree, sock, worker_brief(worker_cli(), worktree=worktree), WORKER_MODELS[model])
             store.update_task(con, task_id, socket=sock, job_id=job, session_id=session, status="running")
             task = store.get_task(con, task_id)
             rt.send_uds(sock, session, task_message(task))
@@ -1422,7 +1466,7 @@ def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT, backend=No
         if target_backend == "app-server":
             try:
                 store.update_task(con, task_id, status="running", note=None)
-                current = app_worker.start(con, rt, task, prompt, to_model, pending, brief=app_brief())
+                current = app_worker.start(con, rt, task, prompt, to_model, pending, brief=app_brief(worktree))
                 store.add_message(con, task_id, "retry", json.dumps(dict(**fields,
                     from_model=from_model, new_job_id=current["job_id"], new_session_id=current["session_id"],
                     answers_delivered=len(pending), generation=current["generation"])))
@@ -1437,10 +1481,10 @@ def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT, backend=No
             if kind == "codex":  # the first turn's prompt is delivered once its thread has started
                 new["job_id"], new["session_id"] = rt.start_codex_worker(
                     worktree, str(directory / f"codex-{tag}.jsonl"),
-                    worker_brief(worker_cli(), kind) + "\n\n" + prompt, to_model)
+                    worker_brief(worker_cli(), kind, worktree) + "\n\n" + prompt, to_model)
             else:
                 new["socket"] = str(directory / f"w-{tag}.sock")
-                new["job_id"], new["session_id"] = rt.start_worker(worktree, new["socket"], worker_brief(worker_cli()),
+                new["job_id"], new["session_id"] = rt.start_worker(worktree, new["socket"], worker_brief(worker_cli(), worktree=worktree),
                                                                    to_model)
                 stage = "send"
                 rt.send_uds(new["socket"], new["session_id"], prompt)
