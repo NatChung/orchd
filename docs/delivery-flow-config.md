@@ -7,4 +7,4 @@ The optional `[delivery_flows]` table in orchd's `config.toml` maps product repo
 product-repo = "hub-repo"
 ```
 
-The adapter is read from the `orchd` checkout under `projects_dir`, pinned to its current HEAD. Commit the adapter there before launching workers; an unavailable adapter is reported as missing.
+The adapter is read from the `orchd` checkout under `projects_dir`, fetched from origin and pinned to origin/HEAD, just like the Hub. A failed fetch or unavailable adapter is reported as missing; the local HEAD is never used. Successful and failed fetches are cached per process for five minutes. Each brief has a 30-second Git budget, with a 12-second maximum per Git command. Retry resolves SHAs again.

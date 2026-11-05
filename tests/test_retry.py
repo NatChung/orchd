@@ -113,6 +113,14 @@ class RetryTest(unittest.TestCase):
         return [json.loads(r["body"]) for r in self.con.execute(
             "SELECT body FROM messages WHERE task_id=? AND kind=? ORDER BY id", (task_id, kind))]
 
+    def test_retry_resolves_worker_flow_again(self):
+        with patch("orchd.worker_flow.brief", side_effect=[" first SHA", " retry SHA"]) as flow:
+            task = self.dispatch()
+            self.assertIn("first SHA", self.rt.brief)
+            core.retry(self.con, self.rt, task["id"], "sonnet", "retry")
+            self.assertIn("retry SHA", self.rt.brief)
+            self.assertEqual(flow.call_count, 2)
+
     def test_reason_is_required(self):
         t = self.dispatch()
         for reason in (None, "", "   "):

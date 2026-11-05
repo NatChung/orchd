@@ -156,7 +156,8 @@ def delivery_flows(env=None, home=None):
     if not isinstance(section, dict):
         raise ValueError(f"{path(env, home)}: [delivery_flows] must be a table")
     for repo, hub in section.items():
-        if (not isinstance(hub, str) or not hub or repo in (".", "..") or hub in (".", "..")
+        if (not isinstance(hub, str) or not hub or not repo or "\\" in repo or "\\" in hub
+                or repo in (".", "..") or hub in (".", "..")
                 or Path(repo).name != repo or Path(hub).name != hub):
             raise ValueError(f"{path(env, home)}: delivery flow names must be single repo names")
     return section

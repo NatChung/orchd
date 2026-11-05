@@ -239,17 +239,17 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
         store.update_task(con, task_id, base=base, branch=branch, worktree=worktree)
         if backend == "app-server":
             task = store.get_task(con, task_id)
-            app_worker.start(con, rt, task, task_message(task), WORKER_MODELS[model], brief=app_brief(worktree, task["repo"], Path(task["repo_path"]).parent))
+            app_worker.start(con, rt, task, task_message(task), WORKER_MODELS[model], brief=app_brief(worktree, task["repo"], paths.projects_dir()))
             con.execute("UPDATE tasks SET status='running' WHERE id=? AND status='starting'", (task_id,))
         elif kind == "codex":  # no system-prompt flag and no socket: the brief leads the first turn's prompt
             task = store.get_task(con, task_id)
             job, session = rt.start_codex_worker(worktree, rt.codex_log(task_id),
-                                                 worker_brief(worker_cli(), kind, worktree, task["repo"], Path(task["repo_path"]).parent) + "\n\n" + task_message(task),
+                                                 worker_brief(worker_cli(), kind, worktree, task["repo"], paths.projects_dir()) + "\n\n" + task_message(task),
                                                  WORKER_MODELS[model])
             store.update_task(con, task_id, job_id=job, session_id=session, status="running")
         else:
             sock = rt.socket_path(task_id)
-            job, session = rt.start_worker(worktree, sock, worker_brief(worker_cli(), worktree=worktree, repo=task["repo"], projects=Path(task["repo_path"]).parent), WORKER_MODELS[model])
+            job, session = rt.start_worker(worktree, sock, worker_brief(worker_cli(), worktree=worktree, repo=task["repo"], projects=paths.projects_dir()), WORKER_MODELS[model])
             store.update_task(con, task_id, socket=sock, job_id=job, session_id=session, status="running")
             task = store.get_task(con, task_id)
             rt.send_uds(sock, session, task_message(task))
@@ -1468,7 +1468,7 @@ def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT, backend=No
         if target_backend == "app-server":
             try:
                 store.update_task(con, task_id, status="running", note=None)
-                current = app_worker.start(con, rt, task, prompt, to_model, pending, brief=app_brief(worktree, task["repo"], Path(task["repo_path"]).parent))
+                current = app_worker.start(con, rt, task, prompt, to_model, pending, brief=app_brief(worktree, task["repo"], paths.projects_dir()))
                 store.add_message(con, task_id, "retry", json.dumps(dict(**fields,
                     from_model=from_model, new_job_id=current["job_id"], new_session_id=current["session_id"],
                     answers_delivered=len(pending), generation=current["generation"])))
@@ -1483,10 +1483,10 @@ def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT, backend=No
             if kind == "codex":  # the first turn's prompt is delivered once its thread has started
                 new["job_id"], new["session_id"] = rt.start_codex_worker(
                     worktree, str(directory / f"codex-{tag}.jsonl"),
-                    worker_brief(worker_cli(), kind, worktree, task["repo"], Path(task["repo_path"]).parent) + "\n\n" + prompt, to_model)
+                    worker_brief(worker_cli(), kind, worktree, task["repo"], paths.projects_dir()) + "\n\n" + prompt, to_model)
             else:
                 new["socket"] = str(directory / f"w-{tag}.sock")
-                new["job_id"], new["session_id"] = rt.start_worker(worktree, new["socket"], worker_brief(worker_cli(), worktree=worktree, repo=task["repo"], projects=Path(task["repo_path"]).parent),
+                new["job_id"], new["session_id"] = rt.start_worker(worktree, new["socket"], worker_brief(worker_cli(), worktree=worktree, repo=task["repo"], projects=paths.projects_dir()),
                                                                    to_model)
                 stage = "send"
                 rt.send_uds(new["socket"], new["session_id"], prompt)
