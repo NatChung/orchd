@@ -301,8 +301,9 @@ def gate_worktree(con, worktree, args, refuse=None, projects=None):
     resolved = str(Path(worktree).resolve())
     row = next((t for t in con.execute("SELECT * FROM tasks WHERE worktree IS NOT NULL")
                 if str(Path(t["worktree"]).resolve()) == resolved), None)
-    configured = row["repo"] in flows if row is not None else any(n in flows for n in _repo_candidates(resolved))
-    if not configured:
+    names = [row["repo"]] if row is not None else _repo_candidates(resolved)
+    # A repo the Hub does not list in `repos` is unconfigured whatever its task's state, like no definition at all.
+    if not any(n in flows and load(n, projects) is not None for n in names):
         return list(args)
     if refuse:
         raise _problem("pr", refuse)

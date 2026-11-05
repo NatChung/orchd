@@ -619,6 +619,20 @@ class RepoEnablementTest(ChecksBase):
         args = ["pr", "create", "--head", "x", "-R", "o/r", "--fill"]
         self.assertEqual(delivery_checks.gate_worktree(self.con, str(self.work), args, None, self.root), args)
 
+    def test_unlisted_repo_passes_through_whatever_the_task_state(self):
+        self.publish(dict(self.definition, repos=["other"]))
+        original = ["pr", "create", "--head", "x", "-R", "o/r", "--fill"]
+
+        def gate(worktree=None, refuse=None):
+            return delivery_checks.gate_worktree(self.con, worktree or str(self.work), list(original), refuse, self.root)
+        for status in ("running", "closed", "failed"):
+            with self.subTest(status=status):
+                self.con.execute("UPDATE tasks SET status=?", (status,))
+                self.assertEqual(gate(), original)
+        self.con.execute("UPDATE tasks SET status='closed'")
+        self.assertEqual(gate(str(self.root / "product-cafebabe")), original)  # no task owns it
+        self.assertEqual(gate(refuse="global flags before the subcommand"), original)
+
     def test_unlisted_repo_cannot_run_checks(self):
         self.publish(dict(self.definition, repos=[]))
         with self.assertRaises(delivery_checks.CheckError) as raised:

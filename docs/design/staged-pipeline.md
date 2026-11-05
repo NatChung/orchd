@@ -24,13 +24,14 @@ The existing `[delivery_flows]` mapping selects the Hub checkout for a product r
 
 **Explicit base branch.** `dispatch` and `dispatch_batch` (CLI/MCP entry points through `core.dispatch`) accept an optional `base_branch`. When given, orchd validates the name, fetches that branch from `origin` and refuses the dispatch, before any task exists, if it is not there. The worktree is cut from `origin/<base_branch>`, `tasks.base_branch` records it, and `tasks.base` is its tip commit, so preflight (which runs on `base`) and the PR gate (which pins `--base` to `tasks.base_branch`) both follow it. This lets a repo that targets `release-X.Y.Z` be enabled. When omitted, behavior is unchanged: `origin/HEAD` is used.
 
-Example, abbreviated only in the command arguments; all stage names and required skills are shown:
+Example, abbreviated only in the command arguments; all stage names and required skills are shown. `repos` is required: copying an example without it is rejected, and listing no repo enables nothing:
 
 ```json
 {
   "schema_version": 1,
   "id": "delivery",
   "version": "1.0.0",
+  "repos": ["product"],
   "stages": [
     {"id":"plan", "skills":["how","why","architect","blast-radius","show-me-your-work"], "codegraph":true, "model_rule":"configured", "artifact_schema":"plan-v1", "decision_log_schema":"decision-log-v1.schema.json"},
     {"id":"implement", "skills":["tdd","test-behavior-not-implementation","fix-root-causes","laziness-protocol","prove-it-works","show-me-your-work"], "model_rule":"configured", "artifact_schema":"implement-v1", "decision_log_schema":"decision-log-v1.schema.json"},
