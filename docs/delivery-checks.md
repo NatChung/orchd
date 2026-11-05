@@ -6,13 +6,16 @@ pins `origin/HEAD` and reads only `checks.preflight` and `checks.pr` (each with 
 `timeout_seconds`, `allowed_exit_codes`, `env_allowlist`, `required`). Stages are #121 and are ignored here.
 A Hub without the file, or a repo not in `[delivery_flows]`, behaves as before.
 
-- `orchd check preflight TASK` / `orchd check pr TASK` run the pinned argv (no shell) in the task worktree with only the
+- `orchd check preflight TASK` runs the pinned argv (no shell) on a clean detached checkout of the task's base commit
+  (temporary, removed afterwards); `orchd check pr TASK` runs it in the task worktree, which must be clean, so it checks
+  exactly HEAD. Both run with only the
   allowlisted environment plus `ORCHD_TASK_ID`, `ORCHD_BASE_SHA`, `ORCHD_HEAD_SHA`, `ORCHD_CHECK_KIND` and a per-task
   test namespace: `ORCHD_TEST_NAMESPACE`, `ORCHD_TEST_DB_NAME`, `ORCHD_TEST_REDIS_PREFIX`. Each run is stored in
   `check_runs` with the Hub commit, definition SHA-256, SHAs, exit status and bounded, redacted output.
 - `orchd check show TASK` and the read-only MCP tool `check_runs` list the runs.
 - The worker `gh` wrapper calls `orchd check gate` before `gh pr create`. It refuses unless the latest preflight passed
-  against the current definition and base, the worktree is clean, and `checks.pr` passes on the exact head. The PR
+  against the current definition and ran on the task's base commit, the worktree is clean and on the task branch, any
+  `--head` names that branch, `origin/<branch>` (if known) equals HEAD, and `checks.pr` passes on that head. The PR
   inputs (title, body, base, head, labels, repo) are written to a JSON file named by `ORCHD_PR_INPUT`.
 - A configured Hub that cannot be fetched or whose definition is invalid blocks the PR (fail closed).
 

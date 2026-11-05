@@ -46,7 +46,7 @@ class ChecksBase(unittest.TestCase):
         self.con = store.connect(self.root / "home" / "orchd.db")
         store.create_task(self.con, id="abc12345", repo="product", repo_path=str(self.work), title="T",
                           instructions="i", done_when="d", orch_thread="o", codex_bin="c", base=self.base,
-                          branch="b", worktree=str(self.work))
+                          branch=git("-C", str(self.work), "rev-parse", "--abbrev-ref", "HEAD"), worktree=str(self.work))
         self.addCleanup(self.con.close)
         self.task = store.get_task(self.con, "abc12345")
 
@@ -66,6 +66,14 @@ class ChecksBase(unittest.TestCase):
         file.parent.mkdir(exist_ok=True)
         file.write_text("#!/bin/sh\n" + body + "\n")
         file.chmod(file.stat().st_mode | stat.S_IXUSR)
+
+    def script_at_base(self, name, body):
+        """Commit the script and move the task's base to it, as if the worktree had been created from that commit."""
+        self.script(name, body)
+        self.commit(self.work, f"{name}.touch", body)
+        self.base = git("-C", str(self.work), "rev-parse", "HEAD")
+        self.con.execute("UPDATE tasks SET base=? WHERE id='abc12345'", (self.base,))
+        self.task = store.get_task(self.con, "abc12345")
 
     def commit(self, repo, name, text):
         (repo / name).write_text(text)
@@ -133,20 +141,20 @@ class PreflightTest(ChecksBase):
         self.assertEqual(json.loads(rows[0]["argv"]), ["./scripts/preflight"])
 
     def test_failing_and_timed_out_checks_are_recorded_not_passed(self):
-        self.script("preflight", "echo boom >&2; exit 3")
+        self.script_at_base("preflight", "echo boom >&2; exit 3")
         record = delivery_checks.run(self.con, self.task, "preflight", self.root)
         self.assertFalse(record["passed"])
         self.assertEqual(record["exit_code"], 3)
         self.assertIn("boom", record["output"])
         self.publish(dict(self.definition, checks={"preflight": dict(PREFLIGHT, timeout_seconds=1)}))
-        self.script("preflight", "sleep 5")
+        self.script_at_base("preflight", "sleep 5")
         record = delivery_checks.run(self.con, self.task, "preflight", self.root)
         self.assertFalse(record["passed"])
         self.assertIsNone(record["exit_code"])
         self.assertIn("timed out", record["output"])
 
     def test_output_is_bounded(self):
-        self.script("preflight", "yes x | head -c 200000")
+        self.script_at_base("preflight", "yes x | head -c 200000")
         record = delivery_checks.run(self.con, self.task, "preflight", self.root)
         self.assertLessEqual(len(record["output"]), delivery_checks.OUTPUT_LIMIT + 200)
 
@@ -159,6 +167,75 @@ class PreflightTest(ChecksBase):
         self.publish(dict(self.definition, checks={"preflight": dict(PREFLIGHT, argv=["./nope"])}))
         record = delivery_checks.run(self.con, self.task, "preflight", self.root)
         self.assertFalse(record["passed"])
+
+
+class BaseAndHeadTest(ChecksBase):
+    def gate(self, args):
+        return delivery_checks.gate_pr(self.con, store.get_task(self.con, "abc12345"), args, self.root)
+
+    def test_preflight_runs_the_base_not_a_script_committed_after_it(self):
+        self.script_at_base("preflight", "echo base-version; exit 1")
+        self.script("preflight", "echo tampered; exit 0")
+        self.commit(self.work, "later", "x")
+        record = delivery_checks.run(self.con, self.task, "preflight", self.root)
+        self.assertFalse(record["passed"])
+        self.assertIn("base-version", record["output"])
+        self.assertEqual((record["base_sha"], record["head_sha"]), (self.base, self.base))
+        with self.assertRaises(delivery_checks.CheckError):
+            self.gate(["pr", "create"])
+
+    def test_preflight_ignores_uncommitted_changes(self):
+        self.script_at_base("preflight", "exit 1")
+        self.script("preflight", "exit 0")
+        self.assertFalse(delivery_checks.run(self.con, self.task, "preflight", self.root)["passed"])
+
+    def test_preflight_leaves_no_worktree_behind(self):
+        delivery_checks.run(self.con, self.task, "preflight", self.root)
+        self.assertEqual(git("-C", str(self.work), "worktree", "list").count("\n"), 0)
+
+    def test_gate_refuses_a_preflight_that_did_not_run_the_base(self):
+        delivery_checks.run(self.con, self.task, "preflight", self.root)
+        self.commit(self.work, "later", "x")
+        self.con.execute("UPDATE check_runs SET head_sha=?", (git("-C", str(self.work), "rev-parse", "HEAD"),))
+        with self.assertRaises(delivery_checks.CheckError) as raised:
+            self.gate(["pr", "create"])
+        self.assertIn("base", str(raised.exception))
+
+    def prepare(self):
+        self.commit(self.work, "f", "1")
+        delivery_checks.run(self.con, store.get_task(self.con, "abc12345"), "preflight", self.root)
+
+    def test_head_other_than_the_task_branch_is_refused(self):
+        self.prepare()
+        for head in ("other-branch", "someone:other-branch"):
+            with self.subTest(head=head), self.assertRaises(delivery_checks.CheckError) as raised:
+                self.gate(["pr", "create", "--head", head])
+            self.assertIn("--head", str(raised.exception))
+        self.assertEqual([r["kind"] for r in delivery_checks.records(self.con, "abc12345")], ["preflight"])
+
+    def test_head_naming_the_task_branch_is_checked_and_allowed(self):
+        self.prepare()
+        branch = self.task["branch"]
+        for head in (branch, f"me:{branch}"):
+            with self.subTest(head=head):
+                self.assertIsNone(self.gate(["pr", "create", "--head", head]))
+
+    def test_pushed_branch_that_differs_from_the_checked_head_is_refused(self):
+        self.prepare()
+        branch = self.task["branch"]
+        old = git("-C", str(self.work), "rev-parse", "HEAD~1")
+        git("-C", str(self.work), "update-ref", f"refs/remotes/origin/{branch}", old)
+        with self.assertRaises(delivery_checks.CheckError) as raised:
+            self.gate(["pr", "create"])
+        self.assertIn("push", str(raised.exception))
+        git("-C", str(self.work), "update-ref", f"refs/remotes/origin/{branch}", "HEAD")
+        self.assertIsNone(self.gate(["pr", "create"]))
+
+    def test_pr_check_refuses_a_dirty_worktree_directly(self):
+        self.prepare()
+        (self.work / "dirty").write_text("x")
+        with self.assertRaises(delivery_checks.CheckError):
+            delivery_checks.run(self.con, store.get_task(self.con, "abc12345"), "pr", self.root)
 
 
 class PrGateTest(ChecksBase):
@@ -182,8 +259,7 @@ class PrGateTest(ChecksBase):
         self.assertIn("orchd check preflight abc12345", str(raised.exception))
 
     def test_failed_preflight_is_refused(self):
-        self.script("preflight", "exit 1")
-        self.commit(self.work, "f", "1")
+        self.script_at_base("preflight", "exit 1")
         self.preflight()
         with self.assertRaises(delivery_checks.CheckError) as raised:
             self.gate()
@@ -341,7 +417,7 @@ class CliAndMcpTest(ChecksBase):
         self.assertEqual([(r["kind"], r["passed"]) for r in rows], [("preflight", 1)])
 
     def test_failed_preflight_exits_nonzero_with_output(self):
-        self.script("preflight", "echo nope; exit 2")
+        self.script_at_base("preflight", "echo nope; exit 2")
         code, _, err = self.cli("check", "preflight", "abc12345")
         self.assertEqual(code, 1)
         self.assertIn("nope", err)

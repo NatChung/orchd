@@ -5,8 +5,10 @@ docs/design/staged-pipeline.md). Only `checks` is read here; stages belong to th
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
+import tempfile
 import time
 from hashlib import sha256
 from pathlib import Path
@@ -107,8 +109,15 @@ def _bounded(text):
     return text[:OUTPUT_LIMIT] + f"\n[output truncated at {OUTPUT_LIMIT} characters]"
 
 
+def _dirty(worktree):
+    return _git(worktree, "status", "--porcelain", "--untracked-files=all")
+
+
 def run(con, task, kind, projects=None, env=None):
-    """Run one pinned check in the task's worktree without a shell and record it. Returns the stored row."""
+    """Run one pinned check without a shell and record it. Returns the stored row.
+
+    preflight runs on a clean detached checkout of the task's base commit; pr runs in the task worktree, which must
+    be clean, so it checks exactly HEAD. The SHA actually run is recorded as head_sha."""
     if kind not in KINDS:
         raise CheckError(f"unknown check {kind!r}; expected one of {', '.join(KINDS)}")
     loaded = load(task["repo"], projects)
@@ -120,30 +129,48 @@ def run(con, task, kind, projects=None, env=None):
     worktree = Path(task["worktree"] or "")
     if not worktree.is_dir():
         raise CheckError(f"task {task['id']} has no worktree to run the check in")
-    cwd = (worktree / check["cwd"]).resolve()
-    if worktree.resolve() not in (cwd, *cwd.parents):
-        raise CheckError(f"checks.{kind}.cwd leaves the worktree")
+    scratch = None
     try:
-        head = _git(worktree, "rev-parse", "HEAD")
+        if kind == "preflight":
+            if not task["base"]:
+                raise CheckError(f"task {task['id']} has no recorded base commit to run preflight on")
+            scratch = Path(tempfile.mkdtemp(prefix=f"preflight-{task['id']}-", dir=_scratch_dir()))
+            _git(worktree, "worktree", "add", "--detach", "--force", str(scratch / "tree"), task["base"])
+            root = scratch / "tree"
+        else:
+            if _dirty(worktree):
+                raise CheckError("the worktree has uncommitted changes; commit them so the check sees the exact head")
+            root = worktree
+        head = _git(root, "rev-parse", "HEAD")
     except (OSError, subprocess.SubprocessError) as error:
-        raise CheckError(f"cannot read the worktree's HEAD: {worker_flow._error(error)}") from error
-    space = namespace(task["id"])
-    child = {name: os.environ[name] for name in check["env_allowlist"] if name in os.environ}
-    child.update(space, ORCHD_TASK_ID=task["id"], ORCHD_CHECK_KIND=kind, ORCHD_BASE_SHA=task["base"] or "",
-                 ORCHD_HEAD_SHA=head, **(env or {}))
-    started = time.time()
-    exit_code, output = None, ""
+        _cleanup(worktree, scratch)
+        raise CheckError(f"cannot prepare the checkout: {worker_flow._error(error)}") from error
+    except CheckError:
+        _cleanup(worktree, scratch)
+        raise
     try:
-        proc = subprocess.Popen(check["argv"], cwd=cwd, env=child, stdin=subprocess.DEVNULL, text=True,
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+        cwd = (root / check["cwd"]).resolve()
+        if root.resolve() not in (cwd, *cwd.parents):
+            raise CheckError(f"checks.{kind}.cwd leaves the worktree")
+        space = namespace(task["id"])
+        child = {name: os.environ[name] for name in check["env_allowlist"] if name in os.environ}
+        child.update(space, ORCHD_TASK_ID=task["id"], ORCHD_CHECK_KIND=kind, ORCHD_BASE_SHA=task["base"] or "",
+                     ORCHD_HEAD_SHA=head, **(env or {}))
+        started = time.time()
+        exit_code, output = None, ""
         try:
-            output, _ = proc.communicate(timeout=check["timeout_seconds"])
-            exit_code = proc.returncode
-        except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
-            output = (proc.communicate()[0] or "") + f"\ntimed out after {check['timeout_seconds']}s"
-    except OSError as error:
-        output = f"could not start {check['argv'][0]}: {error.strerror or error}"
+            proc = subprocess.Popen(check["argv"], cwd=cwd, env=child, stdin=subprocess.DEVNULL, text=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                output, _ = proc.communicate(timeout=check["timeout_seconds"])
+                exit_code = proc.returncode
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                output = (proc.communicate()[0] or "") + f"\ntimed out after {check['timeout_seconds']}s"
+        except OSError as error:
+            output = f"could not start {check['argv'][0]}: {error.strerror or error}"
+    finally:
+        _cleanup(worktree, scratch)
     passed = int(exit_code in check["allowed_exit_codes"])
     cursor = con.execute(
         "INSERT INTO check_runs(task_id, kind, hub, hub_commit, definition_sha256, argv, cwd, namespace, base_sha, "
@@ -152,6 +179,21 @@ def run(con, task, kind, projects=None, env=None):
          json.dumps(check["argv"]), check["cwd"], space["ORCHD_TEST_NAMESPACE"], task["base"], head, exit_code,
          passed, _bounded(output), started, time.time() - started))
     return con.execute("SELECT * FROM check_runs WHERE id=?", (cursor.lastrowid,)).fetchone()
+
+
+def _scratch_dir():
+    directory = Path(os.environ.get("ORCHD_HOME", Path.home() / ".local/share/orchd")) / "check-worktrees"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _cleanup(worktree, scratch):
+    if scratch is None:
+        return
+    subprocess.run(["git", "-C", str(worktree), "worktree", "remove", "--force", str(scratch / "tree")],
+                   capture_output=True)
+    shutil.rmtree(scratch, ignore_errors=True)
+    subprocess.run(["git", "-C", str(worktree), "worktree", "prune"], capture_output=True)
 
 
 def records(con, task_id):
@@ -212,20 +254,33 @@ def gate_pr(con, task, args, projects=None):
         if last["definition_sha256"] != loaded["definition_sha256"] or last["base_sha"] != task["base"]:
             raise _problem("preflight", "the pipeline definition changed or the base moved since the last preflight; "
                                         f"run `orchd check preflight {task_id}` again")
+        if last["head_sha"] != task["base"]:
+            raise _problem("preflight", "the last preflight did not run on the task's base commit; "
+                                        f"run `orchd check preflight {task_id}` again")
         if not last["passed"]:
             raise _problem("preflight", f"the last preflight did not pass (exit {last['exit_code']}); fix it and run "
                                         f"`orchd check preflight {task_id}` again. Output:\n{last['output']}")
     if "pr" not in checks:
         return None
     worktree = task["worktree"] or ""
+    inputs = parse_pr_args(args)
+    branch = task["branch"] or ""
     try:
-        dirty = _git(worktree, "status", "--porcelain", "--untracked-files=all")
+        if _dirty(worktree):
+            raise _problem("pr", "the worktree has uncommitted changes; commit them so the check sees the exact head")
         head = _git(worktree, "rev-parse", "HEAD")
+        if _git(worktree, "rev-parse", "--abbrev-ref", "HEAD") != branch:
+            raise _problem("pr", f"the worktree is not on the task branch {branch}; the check would not see the PR head")
+        if inputs["head"] is not None and inputs["head"].rpartition(":")[2] != branch:
+            raise _problem("pr", f"--head {inputs['head']} is not the task branch {branch}; only the checked branch "
+                                 "can be used as the PR head (other head selections cannot be verified)")
+        pushed = subprocess.run(["git", "-C", str(worktree), "rev-parse", "--verify", "-q",
+                                 f"refs/remotes/origin/{branch}^{{commit}}"], capture_output=True, text=True)
+        if pushed.returncode == 0 and pushed.stdout.strip() != head:
+            raise _problem("pr", f"origin/{branch} is at {pushed.stdout.strip()[:12]} but the checked head is "
+                                 f"{head[:12]}; push (or fetch) so the PR head is the checked commit")
     except (OSError, subprocess.SubprocessError) as error:
         raise _problem("pr", f"cannot read the worktree: {worker_flow._error(error)}") from error
-    if dirty:
-        raise _problem("pr", "the worktree has uncommitted changes; commit them so the check sees the exact head")
-    inputs = parse_pr_args(args)
     if inputs["body_file"] == "-":
         raise _problem("pr", "--body-file - reads stdin, which cannot be checked; write the body to a file")
     if inputs["body_file"]:
