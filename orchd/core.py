@@ -221,6 +221,10 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
     if kind == "claude" and not rt.claude_trusted(repo_path):
         raise ValueError(f"Claude has not trusted {repo_path}. Ask Operator to run `claude` there once and accept "
                          "the trust prompt, then dispatch again.")
+    if base_branch is None and repo == "mobile-flutter-app":
+        from . import delivery_checks
+        if delivery_checks.load(repo) is not None:
+            base_branch = rt.latest_release_branch(repo_path)
     if base_branch is not None:  # explicit PR target (#121 prerequisite); checked on origin before a task exists
         rt.verify_base_branch(repo_path, base_branch)
     task_id = store.new_task_id()

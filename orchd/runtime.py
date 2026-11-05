@@ -299,6 +299,21 @@ class Runtime:
         if found.returncode != 0:
             raise ValueError(f"base_branch {branch!r} does not exist on origin of {repo_path}")
 
+    def latest_release_branch(self, repo_path):
+        """Resolve the highest numeric release-X.Y.Z from the live origin."""
+        result = self.run(["git", "-C", str(repo_path), "ls-remote", "--heads", "origin", "release-*"], timeout=60)
+        branches = []
+        for line in result.stdout.splitlines():
+            ref = line.split()[-1]
+            match = re.fullmatch(r"refs/heads/release-(\d+)\.(\d+)\.(\d+)", ref)
+            if match:
+                branches.append((tuple(map(int, match.groups())), ref.removeprefix("refs/heads/")))
+        if not branches:
+            raise ValueError("no release-X.Y.Z branch found on origin; specify base_branch explicitly")
+        branch = max(branches)[1]
+        self.verify_base_branch(repo_path, branch)
+        return branch
+
     def base_ref(self, repo_path):
         self.run(["git", "-C", str(repo_path), "fetch", "--quiet", "origin"], timeout=60, check=False)
         head = self.run(["git", "-C", str(repo_path), "symbolic-ref", "--quiet", "--short",

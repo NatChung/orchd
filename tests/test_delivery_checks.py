@@ -724,6 +724,17 @@ class DispatchExplicitBaseBranchTest(unittest.TestCase):
         self.assertEqual(row["base"], self.release_sha)
         self.assertEqual(git("-C", row["worktree"], "rev-parse", "HEAD"), self.release_sha)
 
+    def test_mobile_dispatch_defaults_to_latest_and_allows_override(self):
+        from orchd import core
+        git('-C', str(self.root / 'clone'), 'push', '-q', 'origin', 'main:release-1.10.0')
+        with patch('orchd.delivery_checks.load', return_value={'checks': {}}):
+            task = core.dispatch(self.con, self.rt, orch_thread='o', repo='mobile-flutter-app', title='T',
+                                 instructions='i', done_when='d', model_reason='r', task_type='code')
+            self.assertEqual(store.get_task(self.con, task['id'])['base_branch'], 'release-1.10.0')
+            task = core.dispatch(self.con, self.rt, orch_thread='o', repo='mobile-flutter-app', title='T',
+                                 instructions='i', done_when='d', model_reason='r', task_type='code', base_branch='main')
+            self.assertEqual(store.get_task(self.con, task['id'])['base_branch'], 'main')
+
     def test_missing_branch_is_refused_without_a_task(self):
         with self.assertRaises(ValueError) as raised:
             self.dispatch(base_branch="release-9.9.9")
@@ -982,3 +993,74 @@ class ArtifactGateTest(ChecksBase):
                 self.publish(dict(self.definition, artifact_rules={"product": policy}))
                 with self.assertRaises(delivery_checks.CheckError):
                     delivery_checks.load("product", self.root)
+
+class MobileReleaseTest(unittest.TestCase):
+    def test_latest_release_uses_numeric_version_and_rejects_missing(self):
+        from orchd.runtime import Runtime
+        from types import SimpleNamespace
+        rt = Runtime()
+        with patch.object(rt, 'run', return_value=SimpleNamespace(stdout=(
+                'a\trefs/heads/release-1.9.9\nb\trefs/heads/release-1.10.0\n'
+                'c\trefs/heads/release-9.0.0-beta\n'))), patch.object(rt, 'verify_base_branch'):
+            self.assertEqual(rt.latest_release_branch('/tmp'), 'release-1.10.0')
+        with patch.object(rt, 'run', return_value=SimpleNamespace(stdout='')):
+            with self.assertRaisesRegex(ValueError, 'no release-X.Y.Z'):
+                rt.latest_release_branch('/tmp')
+
+    def test_repo_checks_are_isolated_and_validated(self):
+        definition = dict(ChecksBase.definition, repos=['product', 'mobile-flutter-app'], repo_checks={
+            'mobile-flutter-app': {'preflight': dict(PREFLIGHT, argv=['flutter', 'analyze'])}})
+        delivery_checks._validate(definition)
+        with self.assertRaises(delivery_checks.CheckError):
+            delivery_checks._validate(dict(definition, repo_checks={'other': {}}))
+
+
+class MobileGateTest(ChecksBase):
+    def run_wrapper(self):
+        bindir = self.root / 'fake-bin'
+        bindir.mkdir(exist_ok=True)
+        fake = bindir / 'gh'
+        calls = self.root / 'gh-calls'
+        fake.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "' + str(calls) + '"\n')
+        fake.chmod(0o755)
+        wrapper = Path(__file__).resolve().parents[1] / 'orchd/worker_bin/gh'
+        launcher = self.root / 'orchd-cli'
+        launcher.write_text('#!' + os.sys.executable + '\nfrom orchd.cli import main\nraise SystemExit(main())\n')
+        launcher.chmod(0o755)
+        env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ['PATH'],
+                   ORCHD_BIN=str(launcher), ORCHD_WORKTREE=str(self.work), ORCHD_PROJECTS=str(self.root),
+                   PYTHONPATH=str(Path(__file__).resolve().parents[1]), GH_TOKEN='fake')
+        return subprocess.run([str(wrapper), 'pr', 'create'], env=env, capture_output=True, text=True), calls
+
+    def test_flutter_checks_and_artifacts_gate_pr(self):
+        (self.root / 'config.toml').write_text('[delivery_flows]\nmobile-flutter-app = \"hub\"\n')
+        self.con.execute("UPDATE tasks SET repo='mobile-flutter-app' WHERE id='abc12345'")
+        self.task = store.get_task(self.con, 'abc12345')
+        definition = dict(self.definition, repos=['mobile-flutter-app'], checks={},
+                          repo_checks={'mobile-flutter-app': {'preflight': dict(PREFLIGHT, argv=['sh', '-c', 'flutter analyze && flutter test'])}},
+                          artifact_rules={'mobile-flutter-app': {'forbidden_globs': ['build/**'],
+                                                       'forbidden_extensions': ['.png']}})
+        self.publish(definition)
+        patcher = patch.dict(os.environ, {'PATH': str(self.work / 'scripts') + os.pathsep + os.environ['PATH']})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.script_at_base('flutter', 'test "$1" != test')
+        self.push(self.base, 'main')
+        self.assertFalse(delivery_checks.run(self.con, self.task, 'preflight', self.root)['passed'])
+        result, calls = self.run_wrapper()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('preflight', result.stderr)
+        self.assertFalse(calls.exists())
+        self.script_at_base('flutter', 'exit 0')
+        self.push(self.base, 'main')
+        self.assertTrue(delivery_checks.run(self.con, self.task, 'preflight', self.root)['passed'])
+        self.commit(self.work, 'screenshot.png', 'x')
+        result, calls = self.run_wrapper()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('screenshot.png', result.stderr)
+        self.assertFalse(calls.exists())
+        git('-C', str(self.work), 'rm', 'screenshot.png')
+        self.commit(self.work, 'source.dart', 'ok')
+        result, calls = self.run_wrapper()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('--base main --head task-branch --repo acme/product', calls.read_text())
