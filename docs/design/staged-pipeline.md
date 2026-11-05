@@ -1,10 +1,24 @@
 # Staged delivery pipeline
 
-Status: proposed design. [#119](https://github.com/NatChung/orchd/issues/119) covers only the minimal preflight and PR-creation checks described in implementation phase 1. A separate new issue tracks phases 2–4 and the full pipeline; its issue number is pending creation. This document describes new behavior, not an installed capability. The tracker remains the source of scope and acceptance. Orchd stores execution state and evidence, keyed by the canonical issue reference. This design does not change issue content or labels.
+Status: proposed design. [#119](https://github.com/NatChung/orchd/issues/119) covers only the minimal preflight and PR-creation checks described in implementation phase 1. [#121](https://github.com/NatChung/orchd/issues/121) tracks phases 2–4 and the full pipeline, with #119 as its first phase. This document describes new behavior, not an installed capability. The tracker remains the source of scope and acceptance. Orchd stores execution state and evidence, keyed by the canonical issue reference. This design does not change issue content or labels.
+
+## Scope by issue
+
+| Section or phase | Issue scope |
+| --- | --- |
+| Definition and version | #121; #119 uses the existing Hub pin for its minimal checks. |
+| Artifacts and handoff | #121; #119 records preflight results and baseline. |
+| Gates and state | #121; #119 enforces preflight and checks before `gh pr create` without staged state. |
+| Interfaces and recovery | #121. |
+| Test plan | #119 covers its preflight and PR-creation checks; #121 covers the staged pipeline and remaining cases. |
+| Phase 1 | #119: preflight and checks before `gh pr create`. |
+| Phase 2 | #121. |
+| Phase 3 | #121. |
+| Phase 4 | #121. |
 
 ## Definition and version
 
-The existing `[delivery_flows]` mapping selects the Hub checkout for a product repo, as specified in [Worker delivery flow configuration](../delivery-flow-config.md). Orchd fetches that Hub and resolves `origin/HEAD` to a full commit, using the existing fetch cache and failure rules. The guide is `docs/development/delivery.md`; the machine definition is `docs/development/delivery.pipeline.json` at the same commit. The guide can describe additional human decisions, but cannot silently override the machine definition. There is no manual definition override. Orchd reads the exact committed blob, validates its schema and supported version, and stores the blob and SHA-256 in its DB at pipeline creation. It also records the Git commit and path. A failed fetch, missing blob, unsupported version, or invalid definition fails closed; local dirty files never supply the pinned bytes. Existing runs keep their pinned bytes; a new run picks up a new reviewed Hub version. A future explicit migration must validate and audit both definitions and preserve accepted evidence; editing Hub HEAD never changes a running pipeline.
+The existing `[delivery_flows]` mapping selects the Hub checkout for a product repo, as specified in [Worker delivery flow configuration](../delivery-flow-config.md). Orchd fetches that Hub and resolves `origin/HEAD` to a full commit, using the existing fetch cache and failure rules. The guide is `docs/development/delivery.md`; the machine definition is `docs/development/delivery.pipeline.json` at the same commit. The guide can describe additional human decisions, but cannot silently override the machine definition. There is no manual definition override. Orchd reads the exact committed blob, validates its schema and supported version, and stores the blob and SHA-256 in its DB at pipeline creation. It also records the Git commit and path. Failing closed when the pipeline Hub fetch fails is new behavior: the existing delivery flow reports fetch failure in the worker brief. A failed fetch, missing blob, unsupported version, or invalid definition fails closed; local dirty files never supply the pinned bytes. Existing runs keep their pinned bytes; a new run picks up a new reviewed Hub version. A future explicit migration must validate and audit both definitions and preserve accepted evidence; editing Hub HEAD never changes a running pipeline.
 
 Example, abbreviated only in the command arguments; all stage names and required skills are shown:
 
@@ -14,10 +28,10 @@ Example, abbreviated only in the command arguments; all stage names and required
   "id": "delivery",
   "version": "1.0.0",
   "stages": [
-    {"id":"plan", "skills":["how","why","architect","blast-radius","show-me-your-work"], "codegraph":true, "model_rule":"configured", "artifact_schema":"plan-v1"},
-    {"id":"implement", "skills":["tdd","test-behavior-not-implementation","fix-root-causes","laziness-protocol","prove-it-works","show-me-your-work"], "model_rule":"configured", "artifact_schema":"implement-v1"},
-    {"id":"verify", "skills":["interrogate","blast-radius","prove-it-works","show-me-your-work"], "model_rule":"different-vendor-from-implement", "artifact_schema":"verify-v1"},
-    {"id":"review_pr", "skills":["Opening a PR","technical-writing","unslop","no-comments","show-me-your-work"], "model_rule":"configured", "artifact_schema":"review-pr-v1"}
+    {"id":"plan", "skills":["how","why","architect","blast-radius","show-me-your-work"], "codegraph":true, "model_rule":"configured", "artifact_schema":"plan-v1", "decision_log_schema":"decision-log-v1.schema.json"},
+    {"id":"implement", "skills":["tdd","test-behavior-not-implementation","fix-root-causes","laziness-protocol","prove-it-works","show-me-your-work"], "model_rule":"configured", "artifact_schema":"implement-v1", "decision_log_schema":"decision-log-v1.schema.json"},
+    {"id":"verify", "skills":["interrogate","blast-radius","prove-it-works","show-me-your-work"], "model_rule":"different-vendor-from-implement", "artifact_schema":"verify-v1", "decision_log_schema":"decision-log-v1.schema.json"},
+    {"id":"review_pr", "skills":["Opening a PR","technical-writing","unslop","no-comments","show-me-your-work"], "model_rule":"different-vendor-from-author", "artifact_schema":"review_pr-v1", "decision_log_schema":"decision-log-v1.schema.json"}
   ],
   "checks": {
     "preflight": {"argv":["./scripts/preflight"], "cwd":".", "timeout_seconds":300, "allowed_exit_codes":[0], "env_allowlist":["PATH"], "required":true},
@@ -49,7 +63,7 @@ For a stage with no meaningful code query or test, the definition may define a n
 
 These examples show the complete v1 object shape for each stage. Repeated digest characters, IDs, commands and URLs are placeholders; a valid submission must replace them with real matching bytes and provenance. `inputs` contains accepted prior-manifest SHA-256 strings in stage order. The plan has no inputs. Every array shown with one entry may contain additional entries. Each stage requires all fields shown for it, and no unknown fields. A command record may add `test_identity` for red and green. Command `cwd` is relative to the task worktree. A stage validator checks types and required fields against these shapes, then checks the cross-field, file, identity and gate rules above. The examples alone do not establish that those checks pass.
 
-The decision log is UTF-8 JSON Lines. Each line is one object matching this JSON Schema (draft 2020-12); `evidence_id` references an ID in the manifest's evidence array. An empty log is invalid.
+Each stage definition names `decision-log-v1.schema.json`, the shared schema for a decision-log entry shown below. The decision log is UTF-8 JSON Lines. Each line is one object matching this JSON Schema (draft 2020-12); `evidence_id` references an ID in the manifest's evidence array. An empty log is invalid.
 
 ```json
 {"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","additionalProperties":false,"required":["decision","reason","evidence_id","result"],"properties":{"decision":{"type":"string","minLength":1},"reason":{"type":"string","minLength":1},"evidence_id":{"type":"string","minLength":1},"result":{"type":"string","minLength":1}}}
@@ -386,7 +400,7 @@ The decision log is UTF-8 JSON Lines. Each line is one object matching this JSON
   },
   "review_record": {
     "verdict": "PASS",
-    "reviewer_identity": "task-2",
+    "reviewer_identity": "task-5",
     "provider": "claude",
     "reviewed_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
   }
@@ -437,6 +451,6 @@ Existing dispatch remains available for repositories without a pipeline. For rep
 ## Implementation order
 
 1. **#119, independently deliverable:** add configured preflight and the checks immediately before `gh pr create`, with actionable failures and tests. Use the existing Hub pin and preserve behavior for unconfigured repos. This phase does not require pipeline tables or staged dispatch; it does not claim a wrapper alone prevents credential bypass.
-2. **New issue:** add pinned pipeline definitions, DB migrations, artifact storage, schemas, events, and read-only list and show, including old-DB compatibility and owner recovery. Ship as disabled capability with existing dispatch unchanged.
-3. **New issue:** add opt-in managed dispatch, provider selection, stage gates, idempotency, rework, dispatch bypass prevention, and crash reconciliation. Ship for configured repos with tests and an explicit rollout switch.
-4. **New issue:** link the phase 1 checks to stage gates and enforce the PR creation boundary with credential isolation. Add independent cross-vendor review linkage, exact-head invalidation, and the adapter changes; pilot before broader rollout. Until this phase is enabled, do not claim the complete pipeline is enforced.
+2. **#121:** add pinned pipeline definitions, DB migrations, artifact storage, schemas, events, and read-only list and show, including old-DB compatibility and owner recovery. Ship as disabled capability with existing dispatch unchanged.
+3. **#121:** add opt-in managed dispatch, provider selection, stage gates, idempotency, rework, dispatch bypass prevention, and crash reconciliation. Ship for configured repos with tests and an explicit rollout switch.
+4. **#121:** link the phase 1 checks to stage gates and enforce the PR creation boundary with credential isolation. Add independent cross-vendor review linkage, exact-head invalidation, and the adapter changes; pilot before broader rollout. Until this phase is enabled, do not claim the complete pipeline is enforced.
