@@ -526,7 +526,7 @@ class Runtime:
                 "hooks": hooks,
                 "env": {k: v for k, v in worker_env(worktree).items()
                         if k == "PATH" or k == "GH_TOKEN" or k == "ORCHD_GH_ACCOUNTS"
-                        or k == "ORCHD_WORKTREE"
+                        or k in ("ORCHD_WORKTREE", "ORCHD_BIN")
                         or k.startswith("GIT_CONFIG_")}}),
             "--append-system-prompt", brief])
 
