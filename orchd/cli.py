@@ -540,7 +540,9 @@ def _check_main(args):
             if row is None:
                 print(f"orchd check: no open task owns worktree {worktree}; refusing gh pr create", file=sys.stderr)
                 return 1
-            delivery_checks.gate_pr(con, row, args.gh_args[1:] if args.gh_args[:1] == ["--"] else args.gh_args)
+            given = args.gh_args[1:] if args.gh_args[:1] == ["--"] else args.gh_args
+            final = delivery_checks.gate_pr(con, row, given)
+            print(json.dumps(given if final is None else final))  # the arguments the wrapper passes to gh
             return 0
         task = store.get_task(con, args.task_id)
         if args.check_action == "show":

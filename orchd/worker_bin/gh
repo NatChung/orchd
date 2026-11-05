@@ -72,17 +72,30 @@ def target_owner(args, credential):
 
 
 def gate_pr_create(args):
-    """A worker's `gh pr create` runs orchd's pinned delivery checks first; a refusal stops it. Not a security
-    boundary: gh api, git push and a direct gh binary bypass this, which is what credential isolation (#121) is for."""
+    """A worker's `gh pr create` runs orchd's pinned delivery checks first; a refusal stops it, and gh then gets the
+    arguments orchd returns (whitelisted flags, --head and --repo set from the task). A wrapper-level guard, not a
+    security boundary: gh api, git push and a direct gh binary bypass it; credential isolation is #121.
+    Returns (exit code, args for gh)."""
     worktree = os.environ.get("ORCHD_WORKTREE")
     if args[:2] != ["pr", "create"] or not worktree:
-        return 0
+        return 0, args
     orchd = os.environ.get("ORCHD_BIN")
     if not orchd or not os.access(orchd, os.X_OK):
         print("orchd gh: cannot run the delivery checks (ORCHD_BIN missing or not executable); refusing gh pr create",
               file=sys.stderr)
-        return 1
-    return subprocess.run([orchd, "check", "gate", "--worktree", worktree, "--", *args]).returncode
+        return 1, args
+    result = subprocess.run([orchd, "check", "gate", "--worktree", worktree, "--", *args], stdout=subprocess.PIPE,
+                            text=True)
+    if result.returncode:
+        return result.returncode, args
+    try:
+        final = json.loads(result.stdout.strip().splitlines()[-1])
+        if not isinstance(final, list) or not all(isinstance(a, str) for a in final):
+            raise ValueError
+    except (ValueError, IndexError):
+        print("orchd gh: the delivery check returned no usable arguments; refusing gh pr create", file=sys.stderr)
+        return 1, args
+    return 0, final
 
 
 def main():
@@ -91,7 +104,7 @@ def main():
         print("orchd gh: no real gh executable found in PATH", file=sys.stderr)
         return 127
     args = sys.argv[1:]
-    refused = gate_pr_create(args)
+    refused, args = gate_pr_create(args)
     if refused:
         return refused
     is_credential = args[:2] == ["auth", "git-credential"]

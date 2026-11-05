@@ -14,9 +14,13 @@ A Hub without the file, or a repo not in `[delivery_flows]`, behaves as before.
   `check_runs` with the Hub commit, definition SHA-256, SHAs, exit status and bounded, redacted output.
 - `orchd check show TASK` and the read-only MCP tool `check_runs` list the runs.
 - The worker `gh` wrapper calls `orchd check gate` before `gh pr create`. It refuses unless the latest preflight passed
-  against the current definition and ran on the task's base commit, the worktree is clean and on the task branch, any
-  `--head` names that branch, `origin/<branch>` (if known) equals HEAD, and `checks.pr` passes on that head. The PR
-  inputs (title, body, base, head, labels, repo) are written to a JSON file named by `ORCHD_PR_INPUT`.
+  against the current definition and ran on the task's base commit, the worktree is clean and on the task branch,
+  `origin/<branch>` (if known) equals HEAD, `--base` (if given) is a known origin branch, and `checks.pr` passes on that
+  head. The PR inputs (title, body, base, head, labels, repo) are written to a JSON file named by `ORCHD_PR_INPUT`.
+- Only these `gh pr create` arguments are accepted: `--title`, `--body`, `--body-file` (not `-`), `--base`, `--draft`,
+  `--label`, `--reviewer`, `--assignee`. Anything else is refused before gh runs, and `--head` and `--repo` cannot be
+  given: orchd passes gh the checked body (a `--body-file` is sent as `--body`), `--head <task branch>` and
+  `--repo <origin owner/repo>`.
 - A configured Hub that cannot be fetched or whose definition is invalid blocks the PR (fail closed).
 
 The wrapper is not a security boundary: `gh api`, plain `git push` and a direct `gh` binary bypass it. Credential

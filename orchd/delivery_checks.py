@@ -201,39 +201,40 @@ def records(con, task_id):
     return con.execute("SELECT * FROM check_runs WHERE task_id=? ORDER BY id", (task_id,)).fetchall()
 
 
-# gh pr create flags that carry a value, mapped to the input field they fill.
-_VALUE_FLAGS = {"--title": "title", "-t": "title", "--body": "body", "-b": "body", "--body-file": "body_file",
-                "-F": "body_file", "--base": "base", "-B": "base", "--head": "head", "-H": "head",
-                "--label": "label", "-l": "label", "--repo": "repo", "-R": "repo"}
+# The only gh pr create arguments a worker may pass. --head and --repo are set by orchd from the task branch and
+# origin; everything else (--fill, --web, -R, -H, --template, positional values, ...) is refused before gh runs.
+VALUE_FLAGS = {"--title": "title", "--body": "body", "--body-file": "body_file", "--base": "base", "--label": "label",
+               "--reviewer": "reviewer", "--assignee": "assignee"}
+BOOL_FLAGS = {"--draft": "draft"}
+ALLOWED = ", ".join([*VALUE_FLAGS, *BOOL_FLAGS])
 
 
 def parse_pr_args(args):
-    """The PR inputs a `gh pr create` invocation carries. Flags that do not affect the checks are ignored."""
-    found = {"title": None, "body": None, "base": None, "head": None, "repo": None, "labels": [], "draft": False,
-             "fill": False, "body_file": None}
+    """The PR inputs of a `gh pr create` invocation, in order. Raises CheckError for anything not whitelisted."""
+    found = {"title": None, "body": None, "base": None, "body_file": None, "labels": [], "reviewers": [],
+             "assignees": [], "draft": False, "order": []}
     rest = list(args[2:])
     while rest:
         arg = rest.pop(0)
-        if arg == "--":
-            break
-        name, value = arg, None
-        if arg.startswith("--"):
-            name, equals, value = arg.partition("=")
-            value = value if equals else None
-        elif len(arg) > 2 and arg[:2] in _VALUE_FLAGS:
-            name, value = arg[:2], arg[2:]
-        if name in _VALUE_FLAGS:
-            if value is None:
-                value = rest.pop(0) if rest else ""
-            field = _VALUE_FLAGS[name]
-            if field == "label":
-                found["labels"] += [part for part in value.split(",") if part]
+        name, equals, value = arg.partition("=") if arg.startswith("--") else (arg, "", "")
+        if name in BOOL_FLAGS and not equals:
+            found["draft"] = True
+            found["order"].append((name, None))
+        elif name in VALUE_FLAGS:
+            if not equals:
+                if not rest:
+                    raise _problem("pr", f"{name} needs a value")
+                value = rest.pop(0)
+            field = VALUE_FLAGS[name]
+            if field in ("label", "reviewer", "assignee"):
+                found[field + "s"].append(value)
             else:
                 found[field] = value
-        elif arg in ("--draft", "-d"):
-            found["draft"] = True
-        elif arg in ("--fill", "-f", "--fill-first", "--fill-verbose"):
-            found["fill"] = True
+            found["order"].append((name, value))
+        else:
+            raise _problem("pr", f"argument {arg!r} is not allowed. gh pr create accepts only: {ALLOWED}; "
+                                 "--head and --repo are set by orchd from the task branch and origin")
+    found["labels"] = [part for value in found["labels"] for part in value.split(",") if part]
     return found
 
 
@@ -256,7 +257,8 @@ def _problem(kind, message):
 
 
 def gate_pr(con, task, args, projects=None):
-    """Raise CheckError unless the pinned checks allow this `gh pr create`. None when the repo has no pipeline."""
+    """Raise CheckError unless the pinned checks allow this `gh pr create`. Returns the exact gh arguments to run
+    (whitelisted flags, --head and --repo set by orchd), or None when the repo has no pipeline."""
     loaded = load(task["repo"], projects)
     if loaded is None:
         return None
@@ -275,36 +277,27 @@ def gate_pr(con, task, args, projects=None):
         if not last["passed"]:
             raise _problem("preflight", f"the last preflight did not pass (exit {last['exit_code']}); fix it and run "
                                         f"`orchd check preflight {task_id}` again. Output:\n{last['output']}")
-    if "pr" not in checks:
-        return None
     worktree = task["worktree"] or ""
     inputs = parse_pr_args(args)
+    if inputs["body_file"] == "-":
+        raise _problem("pr", "--body-file - reads stdin, which cannot be checked; write the body to a file")
     branch = task["branch"] or ""
     try:
         if _dirty(worktree):
             raise _problem("pr", "the worktree has uncommitted changes; commit them so the check sees the exact head")
         head = _git(worktree, "rev-parse", "HEAD")
-        if _git(worktree, "rev-parse", "--abbrev-ref", "HEAD") != branch:
+        if not branch or _git(worktree, "rev-parse", "--abbrev-ref", "HEAD") != branch:
             raise _problem("pr", f"the worktree is not on the task branch {branch}; the check would not see the PR head")
-        owner, _, name = (inputs["head"] or "").rpartition(":")
-        if inputs["head"] is not None and name != branch:
-            raise _problem("pr", f"--head {inputs['head']} is not the task branch {branch}; only the checked branch "
-                                 "can be used as the PR head (other head selections cannot be verified)")
-        selected = [r for r in (inputs["repo"], os.environ.get("GH_REPO")) if r]
-        if owner or selected:
-            remote = subprocess.run(["git", "-C", str(worktree), "remote", "get-url", "origin"],
-                                    capture_output=True, text=True)
-            origin = _owner_repo(remote.stdout) if remote.returncode == 0 else None
-            if origin is None:
-                raise _problem("pr", "--head owner:branch or --repo cannot be verified: origin is not a recognizable "
-                                     "GitHub remote; omit them")
-            if owner and owner.lower() != origin[0]:
-                raise _problem("pr", f"--head {inputs['head']} selects owner {owner}, not this repo's origin owner "
-                                     f"{origin[0]}; a fork's branch is not the checked head")
-            for repo in selected:
-                if _owner_repo(repo) != origin:
-                    raise _problem("pr", f"--repo {repo} is not the task repo {origin[0]}/{origin[1]}; PRs can only be "
-                                         "created on the repo the work was checked in")
+        remote = subprocess.run(["git", "-C", str(worktree), "remote", "get-url", "origin"],
+                                capture_output=True, text=True)
+        origin = _owner_repo(remote.stdout) if remote.returncode == 0 else None
+        if origin is None:
+            raise _problem("pr", "origin is not a recognizable GitHub remote, so the target repo cannot be set")
+        if inputs["base"] is not None and subprocess.run(
+                ["git", "-C", str(worktree), "rev-parse", "--verify", "-q", f"refs/remotes/origin/{inputs['base']}"],
+                capture_output=True).returncode != 0:
+            raise _problem("pr", f"--base {inputs['base']} is not a known branch of origin; `git fetch origin` or "
+                                 "pick an existing branch")
         pushed = subprocess.run(["git", "-C", str(worktree), "rev-parse", "--verify", "-q",
                                  f"refs/remotes/origin/{branch}^{{commit}}"], capture_output=True, text=True)
         if pushed.returncode == 0 and pushed.stdout.strip() != head:
@@ -312,19 +305,26 @@ def gate_pr(con, task, args, projects=None):
                                  f"{head[:12]}; push (or fetch) so the PR head is the checked commit")
     except (OSError, subprocess.SubprocessError) as error:
         raise _problem("pr", f"cannot read the worktree: {worker_flow._error(error)}") from error
-    if inputs["body_file"] == "-":
-        raise _problem("pr", "--body-file - reads stdin, which cannot be checked; write the body to a file")
     if inputs["body_file"]:
         try:
             inputs["body"] = Path(inputs["body_file"]).read_text()
         except (OSError, UnicodeDecodeError) as error:
             raise _problem("pr", f"cannot read the body file: {error}") from error
+    inputs.update(head=branch, repo=f"{origin[0]}/{origin[1]}")
+    order = inputs.pop("order")
     inputs.update(base_sha=task["base"], head_sha=head, task_id=task_id)
     directory = Path(os.environ.get("ORCHD_HOME", Path.home() / ".local/share/orchd")) / "pr-inputs"
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / f"{task_id}-{head[:12]}.json"
     target.write_text(json.dumps(inputs, ensure_ascii=False, indent=1))
-    row = run(con, task, "pr", projects, env={"ORCHD_PR_INPUT": str(target)})
-    if not row["passed"]:
-        raise _problem("pr", f"checks.pr failed (exit {row['exit_code']}). Output:\n{row['output']}")
-    return None
+    if "pr" in checks:
+        row = run(con, task, "pr", projects, env={"ORCHD_PR_INPUT": str(target)})
+        if not row["passed"]:
+            raise _problem("pr", f"checks.pr failed (exit {row['exit_code']}). Output:\n{row['output']}")
+    # The exact arguments gh gets: the checked body, and the task branch and origin repo as head and repo.
+    final = ["pr", "create"]
+    for name, value in order:
+        if name == "--body-file":
+            name, value = "--body", inputs["body"]
+        final += [name] if value is None else [name, value]
+    return final + ["--head", branch, "--repo", inputs["repo"]]

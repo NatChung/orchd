@@ -38,12 +38,14 @@ class ChecksBase(unittest.TestCase):
         # product worktree
         self.work = self.root / "product"
         git("init", "-q", str(self.work))
+        git("-C", str(self.work), "checkout", "-q", "-b", "task-branch")
         self.script("preflight", 'echo "ns=$ORCHD_TEST_NAMESPACE db=$ORCHD_TEST_DB_NAME redis=$ORCHD_TEST_REDIS_PREFIX"\n'
                                  'echo "leak=${SECRET:-none}"')
         self.script("check-pr", 'echo "input=$ORCHD_PR_INPUT"; test -f "$ORCHD_PR_INPUT"')
         git("-C", str(self.work), "remote", "add", "origin", "https://github.com/acme/product.git")
         self.commit(self.work, "README", "x")
         self.base = git("-C", str(self.work), "rev-parse", "HEAD")
+        git("-C", str(self.work), "update-ref", "refs/remotes/origin/main", self.base)
         self.con = store.connect(self.root / "home" / "orchd.db")
         store.create_task(self.con, id="abc12345", repo="product", repo_path=str(self.work), title="T",
                           instructions="i", done_when="d", orch_thread="o", codex_bin="c", base=self.base,
@@ -206,51 +208,59 @@ class BaseAndHeadTest(ChecksBase):
         self.commit(self.work, "f", "1")
         delivery_checks.run(self.con, store.get_task(self.con, "abc12345"), "preflight", self.root)
 
-    def test_head_other_than_the_task_branch_is_refused(self):
+    def test_head_and_repo_cannot_be_chosen_by_the_caller(self):
         self.prepare()
-        for head in ("other-branch", "someone:other-branch"):
-            with self.subTest(head=head), self.assertRaises(delivery_checks.CheckError) as raised:
-                self.gate(["pr", "create", "--head", head])
-            self.assertIn("--head", str(raised.exception))
+        branch = self.task["branch"]
+        cases = [["--head", f"attacker:{branch}"], ["--head", "attacker:main"], ["--head", branch],
+                 ["--head", f"acme:{branch}"], ["--head=other"], ["-H", "other"], ["--repo", "evil/product"],
+                 ["--repo", "acme/product"], ["-R", "acme/product"], ["--repo=acme/product"]]
+        for extra in cases:
+            with self.subTest(extra=extra), self.assertRaises(delivery_checks.CheckError) as raised:
+                self.gate(["pr", "create", *extra])
+            self.assertIn("allowed", str(raised.exception))
         self.assertEqual([r["kind"] for r in delivery_checks.records(self.con, "abc12345")], ["preflight"])
 
-    def test_head_naming_the_task_branch_is_checked_and_allowed(self):
+    def test_only_whitelisted_arguments_are_accepted(self):
         self.prepare()
-        branch = self.task["branch"]
-        for head in (branch, f"me:{branch}"):
-            with self.subTest(head=head):
-                self.assertIsNone(self.gate(["pr", "create", "--head", head]))
+        for extra in (["--fill"], ["-t", "T"], ["--web"], ["--unknown", "x"], ["positional"], ["--"],
+                      ["--no-maintainer-edit"], ["--template", "x"], ["-d"]):
+            with self.subTest(extra=extra), self.assertRaises(delivery_checks.CheckError) as raised:
+                self.gate(["pr", "create", *extra])
+            self.assertIn("--title, --body, --body-file", str(raised.exception))
 
-    def test_head_owner_must_be_the_origin_owner(self):
+    def test_gh_args_are_rebuilt_with_the_task_branch_and_origin_repo(self):
         self.prepare()
-        branch = self.task["branch"]
-        for head in (f"attacker:{branch}", "attacker:main", f"attacker:{branch}"):
-            with self.subTest(head=head), self.assertRaises(delivery_checks.CheckError) as raised:
-                self.gate(["pr", "create", "--head", head])
-            self.assertIn("--head", str(raised.exception))
-        self.assertIsNone(self.gate(["pr", "create", "--head", f"ACME:{branch}"]))
-        self.assertIsNone(self.gate(["pr", "create", "--head", f"acme:{branch}"]))
+        out = self.gate(["pr", "create", "--title", "T", "--body=B", "--base", "main", "--draft", "--label", "a",
+                         "--reviewer", "r", "--assignee=me"])
+        self.assertEqual(out[:2], ["pr", "create"])
+        self.assertEqual(out[out.index("--head") + 1], "task-branch")
+        self.assertEqual(out[out.index("--repo") + 1], "acme/product")
+        self.assertEqual(out.count("--head"), 1)
+        self.assertEqual(out.count("--repo"), 1)
+        for flag in ("--title", "--body", "--base", "--draft", "--label", "--reviewer", "--assignee"):
+            self.assertIn(flag, out)
 
-    def test_repo_must_be_the_task_repo(self):
+    def test_body_file_content_is_sent_as_body(self):
         self.prepare()
-        for repo in ("other/product", "acme/other", "github.com/evil/product", "https://github.com/evil/product"):
-            with self.subTest(repo=repo), self.assertRaises(delivery_checks.CheckError) as raised:
-                self.gate(["pr", "create", "--repo", repo])
-            self.assertIn("--repo", str(raised.exception))
-        with patch.dict(os.environ, {"GH_REPO": "evil/product"}), self.assertRaises(delivery_checks.CheckError):
-            self.gate(["pr", "create"])
-        for repo in ("acme/product", "ACME/Product", "github.com/acme/product", "https://github.com/acme/product"):
-            with self.subTest(repo=repo):
-                self.assertIsNone(self.gate(["pr", "create", "--repo", repo, "-R" + repo]))
+        body = self.root / "b.md"
+        body.write_text("exact")
+        out = self.gate(["pr", "create", "--body-file", str(body)])
+        self.assertNotIn("--body-file", out)
+        self.assertEqual(out[out.index("--body") + 1], "exact")
 
-    def test_unparseable_origin_refuses_owner_selection(self):
+    def test_base_must_exist_on_origin(self):
+        self.prepare()
+        with self.assertRaises(delivery_checks.CheckError) as raised:
+            self.gate(["pr", "create", "--base", "nonexistent"])
+        self.assertIn("--base", str(raised.exception))
+        self.assertIsNotNone(self.gate(["pr", "create", "--base", "main"]))
+        self.assertIsNotNone(self.gate(["pr", "create"]))
+
+    def test_unparseable_origin_is_refused(self):
         self.prepare()
         git("-C", str(self.work), "remote", "set-url", "origin", str(self.root / "somewhere"))
         with self.assertRaises(delivery_checks.CheckError):
-            self.gate(["pr", "create", "--head", f"acme:{self.task['branch']}"])
-        with self.assertRaises(delivery_checks.CheckError):
-            self.gate(["pr", "create", "--repo", "acme/product"])
-        self.assertIsNone(self.gate(["pr", "create"]))
+            self.gate(["pr", "create"])
 
     def test_pushed_branch_that_differs_from_the_checked_head_is_refused(self):
         self.prepare()
@@ -261,7 +271,7 @@ class BaseAndHeadTest(ChecksBase):
             self.gate(["pr", "create"])
         self.assertIn("push", str(raised.exception))
         git("-C", str(self.work), "update-ref", f"refs/remotes/origin/{branch}", "HEAD")
-        self.assertIsNone(self.gate(["pr", "create"]))
+        self.assertIsNotNone(self.gate(["pr", "create"]))
 
     def test_pr_check_refuses_a_dirty_worktree_directly(self):
         self.prepare()
@@ -271,7 +281,7 @@ class BaseAndHeadTest(ChecksBase):
 
 
 class PrGateTest(ChecksBase):
-    ARGS = ["pr", "create", "--title", "T", "--body", "Body", "--base", "main", "--label", "a,b", "-l", "c"]
+    ARGS = ["pr", "create", "--title", "T", "--body", "Body", "--base", "main", "--label", "a,b", "--label", "c"]
 
     def gate(self, args=None):
         return delivery_checks.gate_pr(self.con, store.get_task(self.con, "abc12345"), args or self.ARGS, self.root)
@@ -282,6 +292,7 @@ class PrGateTest(ChecksBase):
     def test_unconfigured_repo_is_not_gated(self):
         (self.root / "config.toml").write_text("")
         self.assertIsNone(self.gate())
+        self.assertIsNone(self.gate(["pr", "create", "--head", "anything"]))
         self.assertEqual(delivery_checks.records(self.con, "abc12345"), [])
 
     def test_missing_preflight_is_refused_with_the_command_to_run(self):
@@ -312,7 +323,7 @@ class PrGateTest(ChecksBase):
 
     def test_optional_preflight_is_not_required(self):
         self.publish(dict(self.definition, checks={"preflight": dict(PREFLIGHT, required=False), "pr": PR}))
-        self.assertIsNone(self.gate())
+        self.assertIsNotNone(self.gate())
 
     def test_dirty_worktree_is_refused(self):
         self.preflight()
@@ -325,7 +336,7 @@ class PrGateTest(ChecksBase):
         self.script("check-pr", f'cp "$ORCHD_PR_INPUT" {self.root}/pr-input.json')
         self.commit(self.work, "f", "1")
         self.preflight()
-        self.assertIsNone(self.gate())
+        self.assertIsNotNone(self.gate())
         sent = json.loads((self.root / "pr-input.json").read_text())
         self.assertEqual(sent["title"], "T")
         self.assertEqual(sent["body"], "Body")
@@ -349,7 +360,7 @@ class PrGateTest(ChecksBase):
     def test_definition_without_pr_check_runs_none(self):
         self.publish(dict(self.definition, checks={"preflight": PREFLIGHT}))
         self.preflight()
-        self.assertIsNone(self.gate())  # no checks.pr defined: nothing to run
+        self.assertIsNotNone(self.gate())  # no checks.pr defined: nothing to run
 
     def test_body_file_is_read_and_stdin_is_refused(self):
         body = self.root / "body.md"
@@ -364,11 +375,12 @@ class PrGateTest(ChecksBase):
         self.assertIn("stdin", str(raised.exception))
 
     def test_parse_pr_args_forms(self):
-        parsed = delivery_checks.parse_pr_args(["pr", "create", "--title=X", "-B", "dev", "--head", "me:br",
-                                                "--draft", "--fill", "-R", "o/r", "--label=z"])
-        self.assertEqual((parsed["title"], parsed["base"], parsed["head"], parsed["repo"]), ("X", "dev", "me:br", "o/r"))
-        self.assertEqual(parsed["labels"], ["z"])
-        self.assertTrue(parsed["draft"] and parsed["fill"])
+        parsed = delivery_checks.parse_pr_args(["pr", "create", "--title=X", "--base", "dev", "--draft", "--label=z",
+                                                "--label", "a,b", "--reviewer", "r"])
+        self.assertEqual((parsed["title"], parsed["base"]), ("X", "dev"))
+        self.assertEqual(parsed["labels"], ["z", "a", "b"])
+        self.assertTrue(parsed["draft"])
+        self.assertEqual(parsed["reviewers"], ["r"])
 
 
 class WrapperGateTest(unittest.TestCase):
@@ -383,7 +395,7 @@ class WrapperGateTest(unittest.TestCase):
         gh.write_text(f'#!/bin/sh\necho "gh $@" >> {self.calls}\n')
         gh.chmod(0o755)
         self.orchd = root / "orchd"
-        self.orchd.write_text(f'#!/bin/sh\necho "orchd $@" >> {self.calls}\necho "refused: $ORCHD_FAKE" >&2\nexit ${{ORCHD_FAKE_EXIT:-0}}\n')
+        self.orchd.write_text(f'#!/bin/sh\necho "orchd $@" >> {self.calls}\necho "refused: $ORCHD_FAKE" >&2\necho \'["pr","create","--head","b","--repo","o/r"]\'\nexit ${{ORCHD_FAKE_EXIT:-0}}\n')
         self.orchd.chmod(0o755)
         self.wrapper = Path(__file__).resolve().parents[1] / "orchd" / "worker_bin" / "gh"
         self.env = {"PATH": f"{self.bin}:{os.defpath}", "ORCHD_CONFIG_DIR": str(root / "cfg"), "HOME": str(root)}
@@ -398,7 +410,7 @@ class WrapperGateTest(unittest.TestCase):
         result = self.run_gh("pr", "create", "--title", "T", ORCHD_WORKTREE="/w", ORCHD_BIN=str(self.orchd))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.called().splitlines(),
-                         ["orchd check gate --worktree /w -- pr create --title T", "gh pr create --title T"])
+                         ["orchd check gate --worktree /w -- pr create --title T", "gh pr create --head b --repo o/r"])
 
     def test_refusal_stops_gh_and_shows_the_reason(self):
         result = self.run_gh("pr", "create", ORCHD_WORKTREE="/w", ORCHD_BIN=str(self.orchd),
@@ -406,6 +418,10 @@ class WrapperGateTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("refused: no preflight", result.stderr)
         self.assertNotIn("gh pr create", self.called())
+
+    def test_gh_gets_only_the_rewritten_arguments(self):
+        self.run_gh("pr", "create", "--head", "attacker:main", ORCHD_WORKTREE="/w", ORCHD_BIN=str(self.orchd))
+        self.assertNotIn("attacker", self.called().splitlines()[-1])
 
     def test_other_commands_and_non_workers_are_not_gated(self):
         self.run_gh("pr", "view", ORCHD_WORKTREE="/w", ORCHD_BIN=str(self.orchd))
