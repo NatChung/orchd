@@ -309,6 +309,26 @@ CREATE TABLE IF NOT EXISTS intake_decisions(
     completed_at REAL
 );
 CREATE INDEX IF NOT EXISTS intake_decisions_receipt ON intake_decisions(receipt_id, created_at);
+-- Delivery checks (#119): one immutable row per preflight or pre-PR check run.
+CREATE TABLE IF NOT EXISTS check_runs(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id TEXT NOT NULL REFERENCES tasks(id),
+    kind TEXT NOT NULL CHECK(kind IN ('preflight','pr')),
+    hub TEXT NOT NULL,
+    hub_commit TEXT NOT NULL,
+    definition_sha256 TEXT NOT NULL,
+    argv TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    base_sha TEXT,
+    head_sha TEXT,
+    exit_code INTEGER,
+    passed INTEGER NOT NULL CHECK(passed IN (0,1)),
+    output TEXT NOT NULL,
+    started_at REAL NOT NULL,
+    duration REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS check_runs_task ON check_runs(task_id, id);
 """
 
 # Columns added after v1. Nullable so old rows and old code keep working against the same DB.
@@ -319,7 +339,7 @@ TASK_COLUMNS = ("goal_id TEXT REFERENCES goals(id)", "goal_critical INTEGER CHEC
                 "verify TEXT", "manual_checks TEXT", "verifies TEXT",
                 "backend TEXT NOT NULL DEFAULT 'exec'", "generation TEXT", "endpoint TEXT",
                 "control_endpoint TEXT", "supervisor_identity TEXT", "server_identity TEXT",
-                "active_turn TEXT", "turn_state TEXT", "last_completed_turn TEXT")
+                "active_turn TEXT", "turn_state TEXT", "last_completed_turn TEXT", "base_branch TEXT")
 MESSAGE_COLUMNS = ("recipient_orch TEXT", "notice_error TEXT", "notice_recipient TEXT",
                    "entry_reply_id INTEGER REFERENCES entry_messages(id)")
 ORCH_COLUMNS = ("first_seen_dead REAL", "last_verified_dead REAL", "archived_at REAL", "codex_probe TEXT")
