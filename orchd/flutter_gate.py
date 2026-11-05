@@ -2,6 +2,8 @@
 import collections
 import json
 import os
+import time
+import psutil
 from pathlib import Path
 import re
 import subprocess
@@ -9,19 +11,39 @@ import sys
 import tempfile
 
 
-def run(argv, cwd):
-    return subprocess.run(argv, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+DEADLINE_SECONDS = 3300
+
+
+def run(argv, cwd, deadline=None):
+    timeout = max(0.001, deadline - time.monotonic()) if deadline else 30
+    proc = subprocess.Popen(argv, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            children = psutil.Process(proc.pid).children(recursive=True)
+            for child in reversed(children):
+                try:
+                    child.kill()
+                except psutil.NoSuchProcess:
+                    pass
+        except psutil.NoSuchProcess:
+            pass
+        proc.kill()
+        proc.communicate()
+        raise ValueError('Flutter comparison exceeded its overall time limit') from exc
+    return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
 
 
 def normalize(text, root):
     return re.sub(r':\d+(?::\d+)?', ':#', text.replace(str(root.resolve()), '<root>').replace(str(root), '<root>'))
 
 
-def analyze(root):
-    dependencies = run(['flutter', 'pub', 'get'], root)
+def analyze(root, deadline=None):
+    dependencies = run(['flutter', 'pub', 'get'], root, deadline)
     if dependencies.returncode:
         raise ValueError('flutter pub get failed: ' + (dependencies.stderr or dependencies.stdout)[-2000:])
-    result = run(['flutter', 'analyze', '--no-pub', '--no-preamble', '--no-congratulate'], root)
+    result = run(['flutter', 'analyze', '--no-pub', '--no-preamble', '--no-congratulate'], root, deadline)
     if result.returncode not in (0, 1):
         raise ValueError('flutter analyze could not complete: ' + result.stderr[-2000:])
     diagnostics = collections.Counter()
@@ -38,10 +60,12 @@ def analyze(root):
     return diagnostics
 
 
-def tests(root):
-    result = run(['flutter', 'test', '--no-pub', '--machine'], root)
+def tests(root, paths=(), deadline=None):
+    result = run(['flutter', 'test', '--no-pub', '--machine', '--timeout', '60s', *paths], root, deadline)
     tests_by_id, suites, failures, errors, done = {}, {}, collections.Counter(), collections.Counter(), None
     for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
         try:
             event = json.loads(line)
         except ValueError as exc:
@@ -70,20 +94,21 @@ def tests(root):
     return failures, errors
 
 
-def main():
+def main(paths=()):
     base = os.environ.get('ORCHD_BASE_SHA')
     if not base:
         raise ValueError('ORCHD_BASE_SHA is required')
     head = Path.cwd().resolve()
+    deadline = time.monotonic() + DEADLINE_SECONDS
     with tempfile.TemporaryDirectory(prefix='orchd-flutter-base-') as temp:
         checkout = Path(temp) / 'base'
         added = run(['git', 'worktree', 'add', '--detach', str(checkout), base], head)
         if added.returncode:
             raise ValueError('cannot check out base: ' + added.stderr[-2000:])
         try:
-            base_analyze, head_analyze = analyze(checkout), analyze(head)
-            base_tests, base_errors = tests(checkout)
-            head_tests, head_errors = tests(head)
+            base_analyze, head_analyze = analyze(checkout, deadline), analyze(head, deadline)
+            base_tests, base_errors = tests(checkout, paths, deadline)
+            head_tests, head_errors = tests(head, paths, deadline)
             new = [('diagnostic', head_analyze - base_analyze), ('test failure', head_tests - base_tests),
                    ('test error', head_errors - base_errors)]
             for label, items in new:
@@ -101,7 +126,7 @@ def main():
 
 def cli():
     try:
-        return main()
+        return main(sys.argv[1:])
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f'Flutter comparison failed: {error}', file=sys.stderr)
         return 1
