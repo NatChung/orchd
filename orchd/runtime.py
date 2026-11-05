@@ -289,6 +289,16 @@ class Runtime:
             return False
         return bool((data.get("projects") or {}).get(str(repo_path), {}).get("hasTrustDialogAccepted"))
 
+    def verify_base_branch(self, repo_path, branch):
+        """ValueError unless `branch` is a well-formed branch name that exists on origin (fetched fresh)."""
+        if (not isinstance(branch, str) or not branch or branch.startswith("-") or branch.strip() != branch
+                or self.run(["git", "check-ref-format", "--branch", branch], check=False).returncode != 0):
+            raise ValueError(f"base_branch {branch!r} is not a valid branch name")
+        found = self.run(["git", "-C", str(repo_path), "fetch", "--quiet", "origin",
+                          f"+refs/heads/{branch}:refs/remotes/origin/{branch}"], timeout=60, check=False)
+        if found.returncode != 0:
+            raise ValueError(f"base_branch {branch!r} does not exist on origin of {repo_path}")
+
     def base_ref(self, repo_path):
         self.run(["git", "-C", str(repo_path), "fetch", "--quiet", "origin"], timeout=60, check=False)
         head = self.run(["git", "-C", str(repo_path), "symbolic-ref", "--quiet", "--short",
@@ -302,8 +312,8 @@ class Runtime:
         name = head.stdout.strip() if head.returncode == 0 else ""
         return name[len("origin/"):] if name.startswith("origin/") and len(name) > len("origin/") else None
 
-    def create_worktree(self, repo_path, repo, task_id):
-        base = self.base_ref(repo_path)
+    def create_worktree(self, repo_path, repo, task_id, base_branch=None):
+        base = f"refs/remotes/origin/{base_branch}" if base_branch else self.base_ref(repo_path)
         base_commit = self.run(["git", "-C", str(repo_path), "rev-parse", base]).stdout.strip()
         branch = f"orchd/{task_id}"
         path = self.projects / ".orchd-worktrees" / f"{repo}-{task_id}"

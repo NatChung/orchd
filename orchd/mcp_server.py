@@ -57,6 +57,7 @@ TOOLS = [
                                   "sol = GPT-6.1 Sol (tier 2), fable = Claude Fable 5.1 and astra = GPT-6 Astra (tier 3); see `orchd config show`"},
          "goal_id": {"type": "string", "description": "Central goal id; must belong to repo"},
          "issue_ref": {"type": "string", "description": "Optional parent ref: github:owner/repo#N or jira:KEY-N; format validation only"},
+         "base_branch": {"type": "string", "description": "Optional. Branch on origin to cut the worktree from and to target PRs at (e.g. release-1.2.0); must exist on origin. Omitted = the branch origin/HEAD points at."},
          "goal_critical": {"type": "boolean", "description": "Requires goal_id; whether the task is critical to that goal"},
          "backend": {"type": "string", "enum": ["exec", "app-server"],
                      "description": "Optional. New sol workers default to app-server for native TUI attach while busy or idle; "
@@ -578,7 +579,8 @@ def call(name, args, thread, con, rt, sent=None, *, reply_id=None):
                           found_by=args.get("found_by"), verify=args.get("verify"),
                           manual_checks=args.get("manual_checks"), verifies=args.get("verifies"),
                           backend=args.get("backend"), goal_id=args.get("goal_id"),
-                          goal_critical=args.get("goal_critical"), issue_ref=args.get("issue_ref"))
+                          goal_critical=args.get("goal_critical"), issue_ref=args.get("issue_ref"),
+                          base_branch=args.get("base_branch"))
         return {"task_id": t["id"], "status": t["status"], "branch": t["branch"], "worktree": t["worktree"],
                 "orch_id": thread, "model": t["model"], "model_reason": t['model_reason'],
                 "quota_shadow": json.loads(con.execute(

@@ -1,7 +1,7 @@
 """Hub-defined delivery checks run by orchd (#119): a preflight and a check before `gh pr create`.
 
 The definition is `docs/development/delivery.pipeline.json` at the Hub's fetched origin/HEAD commit (see
-docs/design/staged-pipeline.md). Only `checks` is read here; stages belong to the staged pipeline (#121)."""
+docs/design/staged-pipeline.md). Only `repos` and `checks` are read here; stages belong to the staged pipeline (#121)."""
 import json
 import os
 import re
@@ -37,6 +37,13 @@ def namespace(task_id):
 def _validate(definition):
     if not isinstance(definition, dict) or definition.get("schema_version") != 1:
         raise CheckError("pipeline definition: unsupported schema_version (expected 1)")
+    repos = definition.get("repos")
+    if repos is None:
+        raise CheckError("pipeline definition: repos is required (a list of orchd repo names the checks apply to); "
+                         "add it to enable the pipeline per repo")
+    if (not isinstance(repos, list) or not all(isinstance(r, str) and r for r in repos)
+            or len(set(repos)) != len(repos)):
+        raise CheckError("pipeline definition: repos must be an array of unique, non-empty orchd repo names")
     checks = definition.get("checks")
     if not isinstance(checks, dict):
         raise CheckError("pipeline definition: checks must be an object")
@@ -95,6 +102,8 @@ def load(repo, projects=None):
     except (OSError, subprocess.SubprocessError, ValueError) as error:
         raise CheckError(f"Hub {hub}: {DEFINITION} at {commit} is unreadable ({type(error).__name__})") from error
     _validate(definition)
+    if repo not in definition["repos"]:
+        return None  # the Hub defines a pipeline, but not for this repo: same as no definition
     return {"hub": hub, "hub_commit": commit, "definition_sha256": sha256(blob).hexdigest(),
             "checks": definition["checks"]}
 

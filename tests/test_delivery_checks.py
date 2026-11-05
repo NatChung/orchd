@@ -19,7 +19,7 @@ def git(*args):
 
 
 class ChecksBase(unittest.TestCase):
-    definition = {"schema_version": 1, "id": "delivery", "version": "1.0.0", "stages": [],
+    definition = {"schema_version": 1, "id": "delivery", "version": "1.0.0", "stages": [], "repos": ["product"],
                   "checks": {"preflight": PREFLIGHT, "pr": PR}}
 
     def setUp(self):
@@ -604,6 +604,142 @@ print(json.dumps(["pr", "create", "--head", "b", "--repo", "o/r"]))
         with patch.dict(os.environ, {"ORCHD_HOME": self.temp.name}):
             env = worker_env("/w")
         self.assertTrue(env["ORCHD_BIN"].endswith("orchd"))
+
+
+class RepoEnablementTest(ChecksBase):
+    def test_listed_repo_is_gated(self):
+        self.assertIsNotNone(delivery_checks.load("product", self.root))
+
+    def test_unlisted_repo_is_unconfigured(self):
+        self.publish(dict(self.definition, repos=["other"]))
+        self.assertIsNone(delivery_checks.load("product", self.root))
+
+    def test_unlisted_repo_pr_passes_through_like_no_definition(self):
+        self.publish(dict(self.definition, repos=["other"]))
+        args = ["pr", "create", "--head", "x", "-R", "o/r", "--fill"]
+        self.assertEqual(delivery_checks.gate_worktree(self.con, str(self.work), args, None, self.root), args)
+
+    def test_unlisted_repo_cannot_run_checks(self):
+        self.publish(dict(self.definition, repos=[]))
+        with self.assertRaises(delivery_checks.CheckError) as raised:
+            delivery_checks.run(self.con, self.task, "preflight", self.root)
+        self.assertIn("no delivery pipeline", str(raised.exception))
+
+    def test_listed_repo_is_blocked_without_preflight(self):
+        args = ["pr", "create", "--head", "x", "-R", "o/r", "--fill"]
+        with self.assertRaises(delivery_checks.CheckError):
+            delivery_checks.gate_worktree(self.con, str(self.work), args, None, self.root)
+
+    def test_legacy_definition_without_repos_is_rejected(self):
+        legacy = {k: v for k, v in self.definition.items() if k != "repos"}
+        self.publish(legacy)
+        with self.assertRaises(delivery_checks.CheckError) as raised:
+            delivery_checks.load("product", self.root)
+        self.assertIn("repos", str(raised.exception))
+
+    def test_malformed_repos_fail_closed(self):
+        for bad in ("product", [1], [""], ["a", "a"], None):
+            with self.subTest(repos=bad):
+                self.publish(dict(self.definition, repos=bad))
+                with self.assertRaises(delivery_checks.CheckError):
+                    delivery_checks.load("product", self.root)
+
+
+class DispatchExplicitBaseBranchTest(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        git("init", "-q", "--bare", str(self.root / "o.git"))
+        git("clone", "-q", str(self.root / "o.git"), str(self.root / "clone"))
+        clone = self.root / "clone"
+        git("-C", str(clone), "checkout", "-q", "-b", "main")
+        self.commit(clone, "a", "1")
+        git("-C", str(clone), "push", "-q", "origin", "main")
+        git("-C", str(clone), "checkout", "-q", "-b", "release-1.2.0")
+        self.commit(clone, "b", "2")
+        git("-C", str(clone), "push", "-q", "origin", "release-1.2.0")
+        self.release_sha = git("-C", str(clone), "rev-parse", "HEAD")
+        git("--git-dir", str(self.root / "o.git"), "symbolic-ref", "HEAD", "refs/heads/main")
+        git("-C", str(clone), "remote", "set-head", "origin", "-a")
+        self.main_sha = git("-C", str(clone), "rev-parse", "origin/main")
+        self.con = store.connect(self.root / "orchd.db")
+        self.addCleanup(self.con.close)
+        root = self.root
+
+        from orchd.runtime import Runtime
+        try:
+            from test_orchd import FakeRuntime
+        except ImportError:
+            from tests.test_orchd import FakeRuntime
+
+        class Runtime_(FakeRuntime, Runtime):
+            projects = root
+
+            def __init__(self):
+                FakeRuntime.__init__(self)
+
+            def repo_path(self, repo):
+                return root / "clone"
+
+            def claude_trusted(self, repo_path):
+                return True
+
+            def create_worktree(self, repo_path, repo, task_id, base_branch=None):
+                return Runtime.create_worktree(self, repo_path, repo, task_id, base_branch)
+
+            def run(self, argv, **kwargs):
+                return Runtime.run(self, argv, **kwargs)
+
+        self.rt = Runtime_()
+
+    def commit(self, repo, name, text):
+        (repo / name).write_text(text)
+        git("-C", str(repo), "add", ".")
+        git("-C", str(repo), "-c", "user.name=T", "-c", "user.email=t@example.invalid", "commit", "-qm", name)
+
+    def dispatch(self, **extra):
+        from orchd import core
+        return core.dispatch(self.con, self.rt, orch_thread="o", repo="example", title="T", instructions="i",
+                             done_when="d", model_reason="r", task_type="code", **extra)
+
+    def test_release_branch_is_the_base(self):
+        task = self.dispatch(base_branch="release-1.2.0")
+        row = store.get_task(self.con, task["id"])
+        self.assertEqual(row["base_branch"], "release-1.2.0")
+        self.assertEqual(row["base"], self.release_sha)
+        self.assertEqual(git("-C", row["worktree"], "rev-parse", "HEAD"), self.release_sha)
+
+    def test_missing_branch_is_refused_without_a_task(self):
+        with self.assertRaises(ValueError) as raised:
+            self.dispatch(base_branch="release-9.9.9")
+        self.assertIn("release-9.9.9", str(raised.exception))
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM tasks").fetchone()[0], 0)
+
+    def test_malformed_branch_is_refused(self):
+        for bad in ("", "--upload-pack=x", "a..b", " main", 5):
+            with self.subTest(base_branch=bad), self.assertRaises(ValueError):
+                self.dispatch(base_branch=bad)
+
+    def test_omitted_keeps_origin_head(self):
+        task = self.dispatch()
+        row = store.get_task(self.con, task["id"])
+        self.assertEqual(row["base_branch"], "main")
+        self.assertEqual(row["base"], self.main_sha)
+
+    def test_batch_item_passes_base_branch(self):
+        from orchd import core
+        result = core.dispatch_batch(self.con, self.rt, orch_thread="o", tasks=[dict(
+            repo="example", title="T", instructions="i", done_when="d", model_reason="r", task_type="code",
+            model="sonnet", base_branch="release-1.2.0")])
+        row = store.get_task(self.con, result["tasks"][0]["task_id"])
+        self.assertEqual(row["base_branch"], "release-1.2.0")
+
+    def test_mcp_schemas_offer_base_branch(self):
+        from orchd import mcp_server
+        specs = {t["name"]: t["inputSchema"] for t in mcp_server.TOOLS}
+        self.assertIn("base_branch", specs["dispatch"]["properties"])
+        self.assertIn("base_branch", specs["dispatch_batch"]["properties"]["tasks"]["items"]["properties"])
 
 
 class DispatchBaseBranchTest(unittest.TestCase):
