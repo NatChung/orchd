@@ -12,6 +12,7 @@ import tempfile
 import time
 from hashlib import sha256
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from . import config, paths, worker_flow
 from .runtime import redact
@@ -236,6 +237,20 @@ def parse_pr_args(args):
     return found
 
 
+def _owner_repo(text):
+    """(owner, repo) lowercased from owner/repo, [host/]owner/repo, a URL or scp-style remote; None if not parseable."""
+    text = text.strip()
+    if "://" in text:
+        text = urlsplit(text).path
+    elif ":" in text and "/" not in text.split(":", 1)[0]:
+        text = text.split(":", 1)[1]
+    parts = [p for p in text.strip("/").split("/") if p]
+    if len(parts) < 2 or not (len(parts) == 2 or "." in parts[-3]):
+        return None
+    repo = parts[-1][:-4] if parts[-1].endswith(".git") else parts[-1]
+    return (parts[-2].lower(), repo.lower()) if parts[-2] and repo else None
+
+
 def _problem(kind, message):
     return CheckError(f"gh pr create refused by orchd ({kind}): {message}")
 
@@ -271,9 +286,25 @@ def gate_pr(con, task, args, projects=None):
         head = _git(worktree, "rev-parse", "HEAD")
         if _git(worktree, "rev-parse", "--abbrev-ref", "HEAD") != branch:
             raise _problem("pr", f"the worktree is not on the task branch {branch}; the check would not see the PR head")
-        if inputs["head"] is not None and inputs["head"].rpartition(":")[2] != branch:
+        owner, _, name = (inputs["head"] or "").rpartition(":")
+        if inputs["head"] is not None and name != branch:
             raise _problem("pr", f"--head {inputs['head']} is not the task branch {branch}; only the checked branch "
                                  "can be used as the PR head (other head selections cannot be verified)")
+        selected = [r for r in (inputs["repo"], os.environ.get("GH_REPO")) if r]
+        if owner or selected:
+            remote = subprocess.run(["git", "-C", str(worktree), "remote", "get-url", "origin"],
+                                    capture_output=True, text=True)
+            origin = _owner_repo(remote.stdout) if remote.returncode == 0 else None
+            if origin is None:
+                raise _problem("pr", "--head owner:branch or --repo cannot be verified: origin is not a recognizable "
+                                     "GitHub remote; omit them")
+            if owner and owner.lower() != origin[0]:
+                raise _problem("pr", f"--head {inputs['head']} selects owner {owner}, not this repo's origin owner "
+                                     f"{origin[0]}; a fork's branch is not the checked head")
+            for repo in selected:
+                if _owner_repo(repo) != origin:
+                    raise _problem("pr", f"--repo {repo} is not the task repo {origin[0]}/{origin[1]}; PRs can only be "
+                                         "created on the repo the work was checked in")
         pushed = subprocess.run(["git", "-C", str(worktree), "rev-parse", "--verify", "-q",
                                  f"refs/remotes/origin/{branch}^{{commit}}"], capture_output=True, text=True)
         if pushed.returncode == 0 and pushed.stdout.strip() != head:

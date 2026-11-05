@@ -41,6 +41,7 @@ class ChecksBase(unittest.TestCase):
         self.script("preflight", 'echo "ns=$ORCHD_TEST_NAMESPACE db=$ORCHD_TEST_DB_NAME redis=$ORCHD_TEST_REDIS_PREFIX"\n'
                                  'echo "leak=${SECRET:-none}"')
         self.script("check-pr", 'echo "input=$ORCHD_PR_INPUT"; test -f "$ORCHD_PR_INPUT"')
+        git("-C", str(self.work), "remote", "add", "origin", "https://github.com/acme/product.git")
         self.commit(self.work, "README", "x")
         self.base = git("-C", str(self.work), "rev-parse", "HEAD")
         self.con = store.connect(self.root / "home" / "orchd.db")
@@ -219,6 +220,37 @@ class BaseAndHeadTest(ChecksBase):
         for head in (branch, f"me:{branch}"):
             with self.subTest(head=head):
                 self.assertIsNone(self.gate(["pr", "create", "--head", head]))
+
+    def test_head_owner_must_be_the_origin_owner(self):
+        self.prepare()
+        branch = self.task["branch"]
+        for head in (f"attacker:{branch}", "attacker:main", f"attacker:{branch}"):
+            with self.subTest(head=head), self.assertRaises(delivery_checks.CheckError) as raised:
+                self.gate(["pr", "create", "--head", head])
+            self.assertIn("--head", str(raised.exception))
+        self.assertIsNone(self.gate(["pr", "create", "--head", f"ACME:{branch}"]))
+        self.assertIsNone(self.gate(["pr", "create", "--head", f"acme:{branch}"]))
+
+    def test_repo_must_be_the_task_repo(self):
+        self.prepare()
+        for repo in ("other/product", "acme/other", "github.com/evil/product", "https://github.com/evil/product"):
+            with self.subTest(repo=repo), self.assertRaises(delivery_checks.CheckError) as raised:
+                self.gate(["pr", "create", "--repo", repo])
+            self.assertIn("--repo", str(raised.exception))
+        with patch.dict(os.environ, {"GH_REPO": "evil/product"}), self.assertRaises(delivery_checks.CheckError):
+            self.gate(["pr", "create"])
+        for repo in ("acme/product", "ACME/Product", "github.com/acme/product", "https://github.com/acme/product"):
+            with self.subTest(repo=repo):
+                self.assertIsNone(self.gate(["pr", "create", "--repo", repo, "-R" + repo]))
+
+    def test_unparseable_origin_refuses_owner_selection(self):
+        self.prepare()
+        git("-C", str(self.work), "remote", "set-url", "origin", str(self.root / "somewhere"))
+        with self.assertRaises(delivery_checks.CheckError):
+            self.gate(["pr", "create", "--head", f"acme:{self.task['branch']}"])
+        with self.assertRaises(delivery_checks.CheckError):
+            self.gate(["pr", "create", "--repo", "acme/product"])
+        self.assertIsNone(self.gate(["pr", "create"]))
 
     def test_pushed_branch_that_differs_from_the_checked_head_is_refused(self):
         self.prepare()
