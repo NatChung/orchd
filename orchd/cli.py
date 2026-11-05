@@ -572,9 +572,21 @@ def main(argv=None):
         from orchd import pr_watch
         import subprocess
         try:
-            print(json.dumps(pr_watch.watch(args.repos), ensure_ascii=False, indent=2))
+            try:
+                con = store.connect_readonly()
+            except store.DatabaseUnavailable:
+                if (store.home() / "orchd.db").exists():
+                    raise
+                con = None
+            try:
+                branches = {(r['remote_repo'].lower(), r['remote_branch']): r['id'] for r in
+                            con.execute("SELECT id, remote_repo, remote_branch FROM tasks WHERE remote_repo IS NOT NULL AND remote_branch IS NOT NULL")} if con else {}
+            finally:
+                if con:
+                    con.close()
+            print(json.dumps(pr_watch.watch(args.repos, branches), ensure_ascii=False, indent=2))
             return 0
-        except (ValueError, OSError, subprocess.SubprocessError) as error:
+        except (ValueError, OSError, subprocess.SubprocessError, store.DatabaseUnavailable) as error:
             print(f"orchd pr-watch: {error}", file=sys.stderr)
             return 1
     if args.cmd == "interface":

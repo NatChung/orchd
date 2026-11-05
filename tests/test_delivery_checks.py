@@ -190,6 +190,23 @@ class BaseAndHeadTest(ChecksBase):
     def gate(self, args):
         return delivery_checks.gate_pr(self.con, store.get_task(self.con, "abc12345"), args, self.root)
 
+    def test_readable_remote_head_must_be_pushed_and_is_used(self):
+        self.prepare()
+        self.con.execute("UPDATE tasks SET remote_branch='SF-1-cache' WHERE id='abc12345'")
+        with self.assertRaises(delivery_checks.CheckError):
+            self.gate(["pr", "create"])
+        git("-C", str(self.work), "push", "origin", "HEAD:refs/heads/SF-1-cache")
+        out = self.gate(["pr", "create"])
+        self.assertEqual(out[out.index("--head") + 1], "SF-1-cache")
+
+    def test_first_push_lease_refuses_existing_remote(self):
+        self.prepare()
+        self.push(self.base, "SF-1-cache")
+        result = subprocess.run(["git", "-C", str(self.work), "push", "--force-with-lease=refs/heads/SF-1-cache:",
+                                 "origin", "HEAD:refs/heads/SF-1-cache"], capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(git("--git-dir", str(self.remote), "rev-parse", "refs/heads/SF-1-cache"), self.base)
+
     def test_preflight_runs_the_base_not_a_script_committed_after_it(self):
         self.script_at_base("preflight", "echo base-version; exit 1")
         self.script("preflight", "echo tampered; exit 0")
@@ -716,6 +733,23 @@ class DispatchExplicitBaseBranchTest(unittest.TestCase):
         from orchd import core
         return core.dispatch(self.con, self.rt, orch_thread="o", repo="example", title="T", instructions="i",
                              done_when="d", model_reason="r", task_type="code", **extra)
+
+    def test_dispatch_records_readable_remote_and_keeps_local_branch(self):
+        from orchd import core
+        clone = self.root / "clone"
+        origin = "https://github.com/acme/product.git"
+        git("-C", str(clone), "remote", "set-url", "origin", origin)
+        git("-C", str(clone), "config", "url." + str(self.root / "o.git") + ".insteadOf", origin)
+        with patch("orchd.config.delivery_flows", return_value={"example": "hub"}), \
+             patch("orchd.delivery_checks.load", return_value={"checks": {}}):
+            task = core.dispatch(self.con, self.rt, orch_thread="o", repo="example", title="Clear cache",
+                                 issue_ref="jira:SF-1913", instructions="i", done_when="d", model_reason="r", task_type="code")
+            self.assertEqual(task["remote_branch"], "SF-1913-clear-cache")
+            self.assertEqual(task["remote_repo"], "acme/product")
+            self.assertEqual(task["branch"], "orchd/" + task["id"])
+            second = core.dispatch(self.con, self.rt, orch_thread="o", repo="example", title="Clear cache",
+                                   issue_ref="jira:SF-1913", instructions="i", done_when="d", model_reason="r", task_type="code")
+            self.assertEqual(second["remote_branch"], "SF-1913-clear-cache-" + second["id"])
 
     def test_release_branch_is_the_base(self):
         task = self.dispatch(base_branch="release-1.2.0")

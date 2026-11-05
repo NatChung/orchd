@@ -11,14 +11,17 @@ def _get(endpoint):
     return [item for page in pages for item in page] if pages and isinstance(pages[0], list) else pages[0]
 
 
-def watch(repos):
+def watch(repos, task_branches=None):
+    task_branches = task_branches or {}
     output = []
     for repo in repos:
         if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo):
             raise ValueError(f'invalid repository: {repo}')
         for pr in _get(f'repos/{repo}/pulls?state=open&per_page=100'):
             branch = pr['head']['ref']
-            if not (branch.startswith('orchd/') or any(label['name'] == 'ai-agent' for label in pr['labels'])):
+            head_repo = (pr['head'].get('repo') or {}).get('full_name', '').lower()
+            task_id = task_branches.get((repo.lower(), branch)) if head_repo == repo.lower() else None
+            if not (task_id or branch.startswith('orchd/') or any(label['name'] == 'ai-agent' for label in pr['labels'])):
                 continue
             number = pr['number']
             root = f'repos/{repo}'
@@ -70,7 +73,7 @@ def watch(repos):
                       'Check review and CI status')
             match = re.fullmatch(r'orchd/([0-9a-f]{8})', branch)
             output.append(dict(repo=repo, number=number, title=pr['title'], url=pr['html_url'], owner=owner,
-                               task_id=match.group(1) if match else None, head_sha=sha, head_commit_time=head_time, push_cutoff=cutoff, push_cutoff_uncertain=cutoff is None,
+                               task_id=task_id or (match.group(1) if match else None), head_sha=sha, head_commit_time=head_time, push_cutoff=cutoff, push_cutoff_uncertain=cutoff is None,
                                timestamp_note="The timeline cutoff is a lower bound, not necessarily the push time. Issue replies are inferred from later author comments; verify manually.",
                                reviews=latest, unanswered=new, suggested_action=action))
     return output

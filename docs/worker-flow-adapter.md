@@ -6,6 +6,8 @@ Use only the pstack how, why, tdd and blast-radius methods where applicable. Rea
 
 Do the work yourself: do not start subagents, conduct cross-vendor reviews, send outward messages, or merge. Where a skill asks for those actions, do the applicable investigation yourself or report the gap. Follow orchd's preview and approval rules for outward actions.
 
+- For tasks with a readable remote branch, the task brief gives the first push command. It uses an empty lease so an existing remote branch cannot be overwritten. Later pushes use the same explicit refspec without the empty lease. The PR wrapper supplies the recorded remote head.
+- A readable remote branch is fixed at dispatch for a non-NatChung GitHub repo with a configured Hub delivery pipeline. Other repos and existing tasks keep their previous names. Local branches remain `orchd/<task id>` so worktree and close handling stay unchanged. Close does not delete remote branches.
 - For how, ask who downstream uses each affected field and what happens to existing data.
 - For why, distinguish evidence from inference and report evidence gaps.
 - For tdd, use a failing behavior test first when practical.
