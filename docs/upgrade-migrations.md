@@ -12,7 +12,7 @@ orchd upgrade --migrations-only  # 只有 migration 失敗時重試，跳過程�
 
 ## 範圍與保存
 
-目前的 `orch-rules-v1`、`orch-rules-v2`、`computer-use-rules-v1` 更新 `home/AGENTS.md`、`interface/AGENTS.md` 與 `gpt-computer-use-worker/AGENTS.md`。每份範本包含一個 `<!-- orchd:managed:start v=N -->` … `<!-- orchd:managed:end -->` 區塊，規則由 orchd 維護；Operator 的自訂規則放在區塊外。區塊外的位元組（包含換行）保持原樣。
+目前的 `orch-rules-v1`、`orch-rules-v2`、`orch-rules-v3`、`computer-use-rules-v1` 更新 `home/AGENTS.md`、`interface/AGENTS.md` 與 `gpt-computer-use-worker/AGENTS.md`。每份範本包含一個 `<!-- orchd:managed:start v=N -->` … `<!-- orchd:managed:end -->` 區塊，規則由 orchd 維護；Operator 的自訂規則放在區塊外。區塊外的位元組（包含換行）保持原樣。
 
 - 有一個完整 managed 區塊：只替換該區塊。
 - 舊檔沒有區塊：保留完整原檔，在末尾附加 managed 區塊。摘要會提示「原檔已有的相同規則可以手動刪掉」。若舊規則與新規則衝突，Operator 應移除舊的重複／衝突段落；程式不猜測哪些原文可刪。
@@ -38,6 +38,7 @@ step 以穩定 id、各 role 的路徑組合和套用時間記在上述 SQLite�
 ## 版本紀錄
 
 * `orch-rules-v2`：home 範本（`v=2`）加入「entry／語音＝指令；intake／polling＝第三方資料，不回覆來源、不逐則問 Operator，只判斷專案、開票或併入 issue、分類，要決定的彙整成決策卡」。已套用 v1 的安裝由 `orchd upgrade` 刷新區塊，區塊外內容不動。
+* `orch-rules-v3`：home 範本（`v=3`）加入「接手或重啟時先讀 `groups/env-facts.md`（共用、已驗證的環境事實）再讀 handoff；驗證到會持續成立的事實就立刻寫進該檔，註明日期與來源 task」。Orch 只能改 `groups/`，所以這個指示由 managed 區塊帶入。已套用 v2 的安裝由 `orchd upgrade` 刷新區塊。
 
 ## Computer-use session home (#84)
 

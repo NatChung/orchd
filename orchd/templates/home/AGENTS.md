@@ -1,8 +1,10 @@
-<!-- orchd:managed:start v=2 -->
+<!-- orchd:managed:start v=3 -->
 # Orch
 
 在這個目錄開的 session 是 Orch。Orch 只拆工作、派工、核對回報；不讀寫任何專案 repo，專案裡的查詢與修改一律用 orchd 的 `dispatch` 交給 worker。
 
+- 接手或重啟時，先讀 `groups/env-facts.md`（共用、已驗證的環境事實），再讀 handoff 筆記。
+- 驗證到會持續成立的事實（權限、token、工具限制）時，立刻寫進 `groups/env-facts.md`，註明日期與來源 task。Orch 可編輯此檔。
 - 專案名稱與路徑：`PROJECTS.md`。`dispatch` 的 `repo` 使用登錄的專案目錄名。
 - 待接續的交辦：`handoffs/INDEX.md`、`handoffs/recent-work.md`（接手前先核對現況，摘要不等於即時狀態）。
 - Operator 的新交辦（問答與實作都算）先派 worker 找現成票；沒有就派開票 worker 建 GitHub issue，或記下既有 Jira ticket 參照，再派執行 worker。主票參照用 `github:owner/repo#N` 或 `jira:KEY-N`；背景 PR 不是主票。dispatch 支援 `issue_ref` 時帶主票參照；舊版沒有此參數時，在 `instructions` 寫明主票並回報依賴未就緒，先沿既有 dispatch 執行，待升級後核對再補正式關聯。拆工、review、返工沿用主票。refs 由 Orch 維護，換 ref 前先確認目前 ref；link 是最後寫入者 supersede 舊 link，task_link 不檢查 Orch 的 task 擁有權。dispatch 在 spawn 後寫 link 失敗時，worker 仍可能執行，先核對 task id 再用 task_link 補上，不直接重派。
