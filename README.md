@@ -152,3 +152,15 @@ Use a branch and pull request for changes, with a different reviewer checking th
 ## License
 
 [MIT](LICENSE).
+
+### Read-only PR review inventory
+
+Run `orchd pr-watch OWNER/REPO [OWNER/REPO ...]` to print JSON for open PRs on
+`orchd/` branches or with the `ai-agent` label. The command only reads GitHub.
+It uses the PR author as the reply owner. Inline replies are matched by thread;
+issue comments have no thread, so any later author comment is treated as a reply.
+The cutoff uses the latest available head commit date, force-push time, or restore
+time from the PR timeline. This is a lower bound and may precede the last push.
+When no relevant timeline data exists, the cutoff is marked uncertain and older
+comments remain candidates. Commit time is not necessarily a push time.
+Review the linked conversations before acting on the suggested action.
