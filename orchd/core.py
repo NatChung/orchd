@@ -170,7 +170,8 @@ def _choice(name, value, valid):
 
 def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, model=None,
              model_reason=None, task_type=None, rework_of=None, found_by=None, verify=None, manual_checks=None,
-             verifies=None, backend=None, goal_id=None, goal_critical=None, issue_ref=None, group_id=None):
+             verifies=None, backend=None, goal_id=None, goal_critical=None, issue_ref=None, group_id=None,
+             base_branch=None):
     from . import issue_links
     if issue_ref is not None:
         issue_links.validate_ref(issue_ref)
@@ -220,6 +221,8 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
     if kind == "claude" and not rt.claude_trusted(repo_path):
         raise ValueError(f"Claude has not trusted {repo_path}. Ask Operator to run `claude` there once and accept "
                          "the trust prompt, then dispatch again.")
+    if base_branch is not None:  # explicit PR target (#121 prerequisite); checked on origin before a task exists
+        rt.verify_base_branch(repo_path, base_branch)
     task_id = store.new_task_id()
     with store.immediate(con) if goal_id is not None else contextlib.nullcontext():
         task = store.create_task(con, id=task_id, repo=repo, repo_path=str(repo_path), title=title,
@@ -239,9 +242,10 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
              rework_of=rework_of, found_by=found_by, goal_id=goal_id, goal_critical=goal_critical,
              quota_shadow=quota_shadow, **spec), ensure_ascii=False))
     try:
-        base, branch, worktree = rt.create_worktree(repo_path, repo, task_id)
+        base, branch, worktree = rt.create_worktree(repo_path, repo, task_id,
+                                                    **({"base_branch": base_branch} if base_branch else {}))
         store.update_task(con, task_id, base=base, branch=branch, worktree=worktree)
-        base_branch = getattr(rt, "base_branch", lambda path: None)(repo_path)
+        base_branch = base_branch or getattr(rt, "base_branch", lambda path: None)(repo_path)
         if isinstance(base_branch, str):  # the branch PRs may target (#119); recorded beside the base commit
             store.update_task(con, task_id, base_branch=base_branch)
         if backend == "app-server":
