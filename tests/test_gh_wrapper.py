@@ -172,6 +172,32 @@ else:
         self.assertIn('Read-only gh commands need no account switch and no ask', worker_brief('orchd'))
         self.assertIn('Before any outward send', worker_brief('orchd'))
 
+    def test_claude_worker_runs_pr_delivery_gate(self):
+        orchd = self.root / 'orchd'
+        gate_calls = self.root / 'gate-calls'
+        orchd.write_text("#!/usr/bin/env python3\nimport json, sys\nfrom pathlib import Path\n"
+                         f"Path({str(gate_calls)!r}).write_text(json.dumps(sys.argv[1:]))\n"
+                         "print(json.dumps(['pr', 'create', '--title', 'example']))\n")
+        orchd.chmod(0o755)
+        rt = Runtime()
+        seen = {}
+        rt.run = lambda cmd, **kw: seen.update(cmd=cmd) or subprocess.CompletedProcess(cmd, 0, 'claude attach j1', '')
+        rt.agents = lambda: [{'id': 'j1', 'sessionId': 's1'}]
+        rt.exists = lambda path: True
+        parent_env = dict(self.env)
+        parent_env.pop('ORCHD_BIN', None)
+        with patch.dict(os.environ, parent_env, clear=True), patch('orchd.runtime.orchd_bin', return_value=str(orchd)):
+            rt.start_worker(str(self.repo), '/tmp/s', 'brief', 'claude-sonnet-5-5')
+        settings = json.loads(seen['cmd'][seen['cmd'].index('--settings') + 1])
+        env = dict(parent_env, **settings['env'])
+        self.assertEqual(env['ORCHD_BIN'], str(orchd))
+        self.assertEqual(env['PATH'].split(os.pathsep)[0], str(self.root / 'state' / 'worker-bin'))
+        result = self.run_gh('pr', 'create', '--title', 'example', env=env)
+        self.assertEqual(json.loads(gate_calls.read_text()),
+                         ['check', 'gate', '--worktree', str(self.repo.resolve()), '--',
+                          'pr', 'create', '--title', 'example'])
+        self.assertEqual(json.loads(result.stdout)['args'], ['pr', 'create', '--title', 'example'])
+
     def test_session_git_config_preserves_parent_entries(self):
         with patch.dict(os.environ, dict(self.env, GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='test.key',
                                         GIT_CONFIG_VALUE_0='parent'), clear=True):
