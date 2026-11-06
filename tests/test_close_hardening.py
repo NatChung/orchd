@@ -546,6 +546,14 @@ class AbsentWorktreeCloseTest(WorktreeCase):
         self.assertIn('worktree kept', task['note'])
         self.assertEqual(marker.read_text(), 'keep me')
 
+    def test_other_registered_worktree_is_never_removed(self):
+        unrelated = Path(self.tmp.name, 'other-worktree')
+        git('worktree', 'add', '-q', '-b', 'other-branch', str(unrelated), cwd=self.repo)
+        store.update_task(self.con, 'abcd1234', worktree=str(unrelated))
+        core.close(self.con, self.rt, 'abcd1234')
+        self.assertTrue(unrelated.is_dir())
+        self.assertIn('not a recognized orchd worktree', store.get_task(self.con, 'abcd1234')['note'])
+
     def test_missing_worktree_closes_with_note(self):
         store.update_task(self.con, 'abcd1234', worktree=str(Path(self.tmp.name, 'missing')))
         core.close(self.con, self.rt, 'abcd1234')
