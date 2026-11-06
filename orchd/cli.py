@@ -38,6 +38,7 @@ Orch actions require an explicit subcommand; see `orchd orch --help`.
 import argparse
 import getpass
 import json
+import re
 import os
 import sys
 import time
@@ -970,7 +971,8 @@ def main(argv=None):
         core.ack(con, args.task_id)
         print(f"acked {args.task_id}")
     elif args.cmd == "report":
-        if "skills read:" not in args.evidence.lower():
+        if not re.search(r"^[ \t]*(?:[-*][ \t]+)?Skills read:[ \t]*(?:/\S+|none[ \t]+\S.*)$",
+                         args.evidence, re.IGNORECASE | re.MULTILINE):
             print("warning: evidence has no 'Skills read:' line; list the absolute skill paths read, or 'none' with the reason.",
                   file=sys.stderr)
         woke = core.report(con, rt, args.task_id, args.status, args.summary, args.evidence)

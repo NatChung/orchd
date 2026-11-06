@@ -13,12 +13,15 @@ Read these before starting, by the task's `task_type` (the task message states i
 
 | task_type | Read |
 | --- | --- |
-| investigation | `pstack-how`; add `pstack-why` for root-cause questions |
-| design | `pstack-architect` |
-| code | `pstack-tdd` and `pstack-blast-radius`; add `pstack-how` when the code area is unfamiliar |
+| investigation | `pstack-how`; add `pstack-why` for root-cause questions; if the task asks for a design, plan, or choice between approaches, also read `pstack-architect` |
+| other | If the task asks for a design, plan, or choice between approaches, also read `pstack-architect` |
+| code | `pstack-tdd` and `pstack-blast-radius`; add `pstack-how` when the code area is unfamiliar; if the change adds new interfaces or spans modules, read `pstack-architect` before implementing |
 | review | `pstack-why`; add `pstack-blast-radius` |
+| docs | none unless the task names one |
+| outward | none unless the task names one |
+| ops | none unless the task names one |
 
-Other task types need no pstack skill unless the task names one. Examples: Claude code task reads `~/.claude/skills/pstack-tdd/SKILL.md` and `~/.claude/skills/pstack-blast-radius/SKILL.md`; Codex investigation task reads `~/.agents/skills/pstack-how/SKILL.md`. Report an unavailable skill as a gap.
+Examples: Claude code task reads `~/.claude/skills/pstack-tdd/SKILL.md` and `~/.claude/skills/pstack-blast-radius/SKILL.md`; Codex investigation task reads `~/.agents/skills/pstack-how/SKILL.md`. Report an unavailable skill as a gap.
 
 Every report must include a `Skills read:` line in its evidence, listing the absolute paths actually read, or `none` with the reason. List any skill step you adapted or skipped under gaps. This is not a hard failure; the Orch checks it.
 

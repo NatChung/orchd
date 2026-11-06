@@ -1,11 +1,13 @@
 import os
+import contextlib
+import io
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from orchd import config, core, worker_flow
+from orchd import cli, config, core, worker_flow
 
 
 class WorkerFlowTest(unittest.TestCase):
@@ -124,7 +126,7 @@ class SkillsReadTest(unittest.TestCase):
         text = (Path(__file__).resolve().parent.parent / worker_flow.ADAPTER).read_text()
         for needle in ('~/.claude/skills/pstack-X/SKILL.md', '~/.agents/skills/pstack-X/SKILL.md',
                        'Read/cat', 'Skill tool and slash commands are disabled', 'Skills read:',
-                       '| investigation |', '| design |', '| code |', '| review |',
+                       '| investigation |', '| other |', '| code |', '| review |',
                        'pstack-architect', 'pstack-tdd', 'pstack-blast-radius', 'pstack-why', 'pstack-how',
                        '~/.claude/skills/pstack-tdd/SKILL.md', '~/.agents/skills/pstack-how/SKILL.md'):
             self.assertIn(needle, text)
@@ -141,3 +143,43 @@ class SkillsReadTest(unittest.TestCase):
         self.assertIn('Task type: code', core.task_message(task))
         del task['task_type']
         self.assertIn('Task type: unspecified', core.task_message(task))
+
+    def test_task_type_mapping_for_both_runtimes(self):
+        text = (Path(__file__).resolve().parent.parent / worker_flow.ADAPTER).read_text()
+        rows = {line.split('|')[1].strip(): line for line in text.splitlines() if line.startswith('|')}
+        expected = {
+            'code': ('tdd', 'blast-radius', 'how', 'architect'),
+            'investigation': ('how', 'why', 'architect'),
+            'other': ('architect',), 'review': ('why', 'blast-radius'),
+            'docs': (), 'outward': (), 'ops': (),
+        }
+        for kind, root in (('claude', '~/.claude/skills'), ('codex', '~/.agents/skills')):
+            with patch('orchd.worker_flow.brief', return_value=text):
+                brief = core.worker_brief('orchd', kind, projects=Path('/nonexistent'))
+            self.assertIn(text, brief)
+            self.assertIn(root + '/pstack-X/SKILL.md', text)
+            for task_type, skills in expected.items():
+                with self.subTest(kind=kind, task_type=task_type):
+                    row = rows[task_type]
+                    for skill in skills:
+                        self.assertIn('pstack-' + skill, row)
+                    if not skills:
+                        self.assertIn('none', row)
+        self.assertNotIn('| design |', text)
+
+    def test_report_warning_requires_a_complete_line(self):
+        cases = (('Mention Skills read: /tmp/a in prose', True),
+                 ('Skills read: /tmp/a', False),
+                 ('  - Skills read: /tmp/a', False),
+                 ('* Skills read: none because no skills apply', False),
+                 ('Skills read: none', True),
+                 ('Skills read:', True))
+        for evidence, warns in cases:
+            with self.subTest(evidence=evidence):
+                out, err = io.StringIO(), io.StringIO()
+                with patch('orchd.cli.store.connect'), patch('orchd.cli.Runtime'), \
+                        patch('orchd.cli.core.report', return_value=True) as report, \
+                        contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    cli.main(['report', 'task', '--status', 'done', '--summary', 'done', '--evidence', evidence])
+                self.assertEqual('warning:' in err.getvalue(), warns)
+                self.assertEqual(report.call_args.args[-1], evidence)

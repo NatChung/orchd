@@ -123,7 +123,9 @@ Rules:
 - {long_runs} Never `pgrep -f` a pattern that your own command line contains.
 - Finish with exactly one `{cli} report <task-id> --status done|blocked --summary "<one line>" --evidence "<commits, PR URL, test commands and results, what is left undone>"`.
   The evidence must include a `Skills read:` line listing the absolute paths of the skill files you actually read,
-  or `none` with the reason; list adapted or skipped skill steps under gaps.
+  or `none` with the reason; list adapted or skipped skill steps under gaps. For investigation and other tasks,
+  if the task asks for a design, plan, or choice between approaches, also read pstack-architect. For code tasks,
+  if the change adds new interfaces or spans modules, read pstack-architect before implementing.
 - If you need a decision, use `{cli} ask` and {waiting}; do not report blocked for questions Operator can answer.
 - Report facts only; say what you did not verify.{codex_rules}
 
