@@ -45,6 +45,10 @@ Do the work yourself: do not start subagents, conduct cross-vendor reviews, send
 - Use PR title `type(TICKET-KEY): summary`, with a Conventional Commits type matching the runtime change.
 - For cross-service work, the ticket must name the backend contract source and owner; otherwise mark the work provisional and do not report it complete.
 
+## Review feedback
+
+Before claiming PR review status, run `orchd review-feedback OWNER/REPO PR`. Inspect every item and answer each unanswered item, following the outward-action approval rules. The flag uses later replies by the PR author or authenticated account; check context because it cannot establish whether a reply addresses the feedback.
+
 ## mobile-flutter-app PR gate
 
 When its Hub pipeline lists `mobile-flutter-app`, dispatch defaults to the highest numeric `release-X.Y.Z` branch on origin. An explicit `base_branch` overrides it; if no release branch exists, dispatch fails and reports the missing branch. The PR wrapper uses the recorded task base. Unlike web-next, APP compares Flutter analysis and test failures with the recorded base in the PR check, and does not add browser or device acceptance. Existing failures are tolerated; new diagnostics or failures block the PR. The comparison checks out the base in a temporary worktree and runs both commands on base and head; unrecognized diagnostics or incomplete test output fails closed. Each Flutter test has a 60-second timeout; the comparison has a 55-minute overall limit. Existing timeout failures are compared like other failures. An overall timeout fails closed because the comparison is incomplete. Optional test file arguments are for targeted validation; the proposed PR check runs the full suite.
