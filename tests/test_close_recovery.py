@@ -222,10 +222,10 @@ class CloseSubmoduleTest(unittest.TestCase):
         not_repo = Path(self.tmp.name, "plain")
         not_repo.mkdir()
         self.con.execute("UPDATE tasks SET worktree=? WHERE id='abcd1234'", (str(not_repo),))
-        with self.assertRaisesRegex(RuntimeError, "not a git repository"):
-            core.close(self.con, self.rt, "abcd1234")
-        self.assertEqual(store.get_task(self.con, "abcd1234")["status"], "done")
-        self.assertIn("not a git repository", store.get_task(self.con, "abcd1234")["note"])
+        core.close(self.con, self.rt, "abcd1234")
+        self.assertEqual(store.get_task(self.con, "abcd1234")["status"], "closed")
+        self.assertIn("not a recognized", store.get_task(self.con, "abcd1234")["note"])
+        self.assertTrue(not_repo.is_dir())
 
     def test_db_failure_while_finishing_leaves_no_close_event_and_retry_emits_one(self):
         real = store.update_task

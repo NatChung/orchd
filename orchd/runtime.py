@@ -434,6 +434,9 @@ class Runtime:
         """Return (removable, reason). Removable only when nothing local would be lost."""
         if not self.exists(worktree):
             return True, "worktree already gone"
+        top = self.run(["git", "-C", worktree, "rev-parse", "--show-toplevel"], check=False)
+        if top.returncode != 0 or os.path.realpath(top.stdout.strip()) != os.path.realpath(worktree):
+            return False, "not a recognized git worktree; directory left untouched"
         loss = self.local_loss(worktree)
         if loss:
             return False, loss

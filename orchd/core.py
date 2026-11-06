@@ -1252,7 +1252,7 @@ def _close_locked(con, rt, task_id, outcome, rating):
         return dict(task_id=task_id, closed=True, worktree="already closed")
     fields = {k: v for k, v in (("outcome", outcome), ("rating", rating)) if v is not None}
     kept, step = None, f"worker {task['job_id']} not confirmed stopped"
-    cleanup = None
+    cleanup, absent = None, None
     try:
         if app_worker.enabled(task):
             cleanup = app_worker.stop(con, task)
@@ -1263,6 +1263,10 @@ def _close_locked(con, rt, task_id, outcome, rating):
         if task["worktree"]:
             removable, reason = rt.worktree_state(task["worktree"], task["base"])
             kept = rt.remove_worktree(task["repo_path"], task["worktree"], task["base"]) if removable else reason
+            if removable and reason == "worktree already gone":
+                absent = reason
+        else:
+            absent = "no worktree was recorded"
     except Exception as e:  # not closed: status stays as it was, so close can simply be run again
         detail = error_detail(e)
         if cleanup:
@@ -1285,7 +1289,7 @@ def _close_locked(con, rt, task_id, outcome, rating):
             outcome=fields.get("outcome", task["outcome"]), rating=fields.get("rating", task["rating"]),
             **({"process_cleanup": cleanup} if cleanup else {}))))
         store.update_task(con, task_id, status="closed", **fields,
-                          note=(f"worktree kept: {kept}" if kept else None if stale else task["note"]))
+                          note=(f"worktree kept: {kept}" if kept else absent if absent else None if stale else task["note"]))
         affected_entries = entry.cancel_task_questions(con, task_id)
         con.execute("COMMIT")
     except BaseException:

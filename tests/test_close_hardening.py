@@ -517,5 +517,49 @@ class RunbookTest(unittest.TestCase):
             self.assertIn(needle, before_force, f"runbook lacks a check or backup for: {needle}")
 
 
+class AbsentWorktreeCloseTest(WorktreeCase):
+    def test_non_git_directory_is_kept_and_close_records_why(self):
+        unrelated = Path(self.tmp.name, 'unrelated')
+        unrelated.mkdir()
+        marker = unrelated / 'important.txt'
+        marker.write_text('keep me')
+        store.update_task(self.con, 'abcd1234', worktree=str(unrelated))
+        result = core.close(self.con, self.rt, 'abcd1234')
+        task = store.get_task(self.con, 'abcd1234')
+        self.assertEqual(task['status'], 'closed')
+        self.assertIn('not a recognized', task['note'])
+        self.assertIn('not a recognized', result['worktree'])
+        self.assertEqual(marker.read_text(), 'keep me')
+
+    def test_other_git_repository_is_never_removed(self):
+        unrelated = Path(self.tmp.name, 'other-repo')
+        unrelated.mkdir()
+        git('init', '-q', '-b', 'main', cwd=unrelated)
+        marker = unrelated / 'important.txt'
+        marker.write_text('keep me')
+        git('add', 'important.txt', cwd=unrelated)
+        git('commit', '-q', '-m', 'keep', cwd=unrelated)
+        store.update_task(self.con, 'abcd1234', worktree=str(unrelated))
+        core.close(self.con, self.rt, 'abcd1234')
+        task = store.get_task(self.con, 'abcd1234')
+        self.assertEqual(task['status'], 'closed')
+        self.assertIn('worktree kept', task['note'])
+        self.assertEqual(marker.read_text(), 'keep me')
+
+    def test_missing_worktree_closes_with_note(self):
+        store.update_task(self.con, 'abcd1234', worktree=str(Path(self.tmp.name, 'missing')))
+        core.close(self.con, self.rt, 'abcd1234')
+        task = store.get_task(self.con, 'abcd1234')
+        self.assertEqual(task['status'], 'closed')
+        self.assertIn('already gone', task['note'])
+
+    def test_app_worker_without_worktree_or_worker_closes_with_note(self):
+        store.update_task(self.con, 'abcd1234', worktree=None, job_id=None, backend='app-server')
+        core.close(self.con, self.rt, 'abcd1234')
+        task = store.get_task(self.con, 'abcd1234')
+        self.assertEqual(task['status'], 'closed')
+        self.assertIn('no worktree', task['note'])
+
+
 if __name__ == "__main__":
     unittest.main()
