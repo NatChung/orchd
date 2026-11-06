@@ -170,6 +170,11 @@ class SkillsReadTest(unittest.TestCase):
     def test_report_warning_requires_a_complete_line(self):
         cases = (('Mention Skills read: /tmp/a in prose', True),
                  ('Skills read: /tmp/a', False),
+                 ('Skills read: /a/SKILL.md, /b/SKILL.md', False),
+                 ('Skills read: /a /b', False),
+                 ('Skills read: /a, /b /c — used for this fix', False),
+                 ('Skills read: /a/SKILL.md\r\n', False),
+                 ('12. Skills read: /a/SKILL.md', False),
                  ('  - Skills read: /tmp/a', False),
                  ('* Skills read: none because no skills apply', False),
                  ('Skills read: none', True),
