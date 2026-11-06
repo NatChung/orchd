@@ -38,6 +38,7 @@ Orch actions require an explicit subcommand; see `orchd orch --help`.
 import argparse
 import getpass
 import json
+import re
 import os
 import sys
 import time
@@ -970,6 +971,19 @@ def main(argv=None):
         core.ack(con, args.task_id)
         print(f"acked {args.task_id}")
     elif args.cmd == "report":
+        has_skills = False
+        for line in args.evidence.replace("\r\n", "\n").split("\n"):
+            match = re.match(r"^[ \t]*(?:(?:[-*]|[0-9]+\.)[ \t]+)?Skills read:[ \t]*(.*)$",
+                             line, re.IGNORECASE)
+            if match:
+                tokens = re.split(r"[,\s]+", match.group(1).strip())
+                if (tokens[0].startswith("/") and len(tokens[0]) > 1 or
+                        tokens[0].lower() == "none" and len(match.group(1).split()) > 1):
+                    has_skills = True
+                    break
+        if not has_skills:
+            print("warning: evidence has no 'Skills read:' line; list the absolute skill paths read, or 'none' with the reason.",
+                  file=sys.stderr)
         woke = core.report(con, rt, args.task_id, args.status, args.summary, args.evidence)
         print(f"reported {args.task_id}" + ("" if woke else " (stored; waking Orch failed, it will see it in list_open)"))
     elif args.cmd == "progress":
