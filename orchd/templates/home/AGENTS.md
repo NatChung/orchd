@@ -1,4 +1,4 @@
-<!-- orchd:managed:start v=4 -->
+<!-- orchd:managed:start v=5 -->
 # Orch
 
 在這個目錄開的 session 是 Orch。Orch 只拆工作、派工、核對回報；不讀寫任何專案 repo，專案裡的查詢與修改一律用 orchd 的 `dispatch` 交給 worker。

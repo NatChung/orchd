@@ -17,6 +17,21 @@ class ReviewFeedbackTests(unittest.TestCase):
         self.assertTrue(items[1]['resolved'])
         self.assertTrue(items[3]['unanswered'])
 
+    def test_resolved_and_responder_replies_answer_threads(self):
+        data = json.loads((Path(__file__).parent / 'fixtures/review_feedback/data.json').read_text())
+        for resolved, reply_author, expected in [(True, None, False), (False, 'aiagent-kc', False),
+                                                  (False, 'author', False), (False, 'other', True)]:
+            with self.subTest(resolved=resolved, reply_author=reply_author):
+                inline = [dict(row) for row in data['inline']]
+                if reply_author is None:
+                    inline.pop()
+                else:
+                    inline[1]['user'] = {'login': reply_author, 'type': 'User'}
+                threads = [{'isResolved': resolved, 'comments': {'nodes': [{'databaseId': row['id']} for row in inline]}}]
+                with patch.object(review_feedback, '_rest', side_effect=[data['pr'], {'login': 'different-account'}, data['reviews'], inline, data['issue']]), patch.object(review_feedback, '_threads', return_value=threads):
+                    items = review_feedback.fetch('owner/repo', 42)
+                self.assertEqual(next(x for x in items if x['id'] == 2)['unanswered'], expected)
+
     def test_gh_pages_and_cli_output(self):
         from contextlib import redirect_stdout
         from io import StringIO

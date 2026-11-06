@@ -86,12 +86,12 @@ def fetch(repo, number, since=None, hide_bots=False):
         return item['id']
     owner = pr['user']['login'].lower()
     for item in items:
-        responder = (item['author'] or '').lower() in (owner, account)
+        responder = (item['author'] or '').lower() in (owner, account, 'aiagent-kc')
         replies = [x for x in items if x['time'] and item['time'] and x['time'] > item['time']
-                   and (x['author'] or '').lower() in (owner, account)
+                   and (x['author'] or '').lower() in (owner, account, 'aiagent-kc')
                    and ((item['kind'] == 'inline' and x['kind'] == 'inline' and thread(x) == thread(item))
                         or (item['kind'] != 'inline' and x['kind'] == 'issue'))]
-        item['unanswered'] = bool(not responder and item['body'] and not replies)
+        item['unanswered'] = bool(not responder and item['body'] and not item['resolved'] and not replies)
     items.sort(key=lambda x: x['time'] or '')
     return [x for x in items if (not hide_bots or not x['bot']) and
             (cutoff is None or (x['time'] and datetime.datetime.fromisoformat(x['time'].replace('Z', '+00:00')) >= cutoff))]
