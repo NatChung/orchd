@@ -430,10 +430,21 @@ class Runtime:
             return "uncommitted changes"
         return self.ignored_loss(worktree) or self.submodule_loss(worktree)
 
+    def not_a_worktree(self, worktree):
+        """Why this existing path is not the root of a git worktree (so orchd must neither inspect nor delete it),
+        else None. A plain directory, or a folder inside some other repo, is never an orchd worktree."""
+        top = self.run(["git", "-C", worktree, "rev-parse", "--show-toplevel"], check=False)
+        if top.returncode != 0 or os.path.realpath(top.stdout.strip()) != os.path.realpath(worktree):
+            return "not a git worktree; left in place"
+        return None
+
     def worktree_state(self, worktree, base):
         """Return (removable, reason). Removable only when nothing local would be lost."""
         if not self.exists(worktree):
             return True, "worktree already gone"
+        foreign = self.not_a_worktree(worktree)
+        if foreign:
+            return False, foreign
         loss = self.local_loss(worktree)
         if loss:
             return False, loss
@@ -460,6 +471,9 @@ class Runtime:
         git still refuses a dirty tree inside it. The branch ref survives removal, so late commits are not lost."""
         if not self.exists(worktree):
             return None
+        foreign = self.not_a_worktree(worktree)
+        if foreign:
+            return foreign
         try:
             if base is not None:
                 removable, reason = self.worktree_state(worktree, base)

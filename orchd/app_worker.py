@@ -123,7 +123,7 @@ def health(task):
 def stop(con, task):
     # Cleanup uses recorded process identities, never the vanished/untrusted IPC path.
     roots=[p for p in (process(task['supervisor_identity']), process(task['server_identity'])) if p]
-    captured = task_processes(task['worktree'], roots)
+    captured = task_processes(task['worktree'], roots) if task['worktree'] else {}
     viewers = con.execute('SELECT identity FROM worker_viewers WHERE task_id=? AND generation=?',
                           (task['id'], task['generation'])).fetchall()
     # Supervisor shutdown stops its server; independently verify stored server even if it crashed.
