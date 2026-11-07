@@ -21,6 +21,8 @@ def make_private(directory):
                     "*S-1-5-18", "*S-1-5-32-544", "*S-1-3-4"], check=True, capture_output=True)
     subprocess.run(["icacls", str(directory), "/grant:r",
                     f"*{sid}:(OI)(CI)F"], check=True, capture_output=True)
+    subprocess.run(["icacls", str(directory), "/setowner", f"*{sid}"],
+                   check=True, capture_output=True)
     validate_private(directory)
 
 
@@ -31,9 +33,11 @@ def validate_private(directory):
             raise ValueError("app-server directory is not private")
         return
     import ctypes
+    import stat
     from ctypes import wintypes
 
-    if directory.is_symlink() or directory.is_junction():
+    # lstat exposes reparse-point attributes on all supported Windows Pythons.
+    if directory.lstat().st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT:
         raise ValueError("app-server directory is not private")
     advapi = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)

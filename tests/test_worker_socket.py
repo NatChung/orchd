@@ -1,4 +1,6 @@
+import os
 import socket
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -9,6 +11,20 @@ from orchd.platform_process import make_private, validate_private
 
 
 class WorkerSocketTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows junctions")
+    def test_private_directory_rejects_junction(self):
+        with tempfile.TemporaryDirectory(prefix="oa-") as tmp:
+            root = Path(tmp)
+            target = root / "target"
+            target.mkdir()
+            make_private(target)
+            validate_private(target)
+            junction = root / "junction"
+            subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(target)],
+                           check=True, capture_output=True)
+            with self.assertRaises(ValueError):
+                validate_private(junction)
+
     def test_private_directory_and_socket_exchange(self):
         with tempfile.TemporaryDirectory(prefix="oa-") as tmp:
             directory = Path(tmp)
