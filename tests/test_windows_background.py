@@ -69,6 +69,7 @@ class BackgroundOptionsTests(unittest.TestCase):
         self.assertEqual(popen.call_args.args[0][-4:], ['viewer', 'db', 'task', 'gen'])
 
 
+@unittest.skipUnless(os.name == 'nt', 'Windows viewer')
 class WindowsForegroundViewerTests(unittest.TestCase):
     """Orch / Claude / Codex viewers must not shell out to macOS `open -na Ghostty.app` on Windows."""
 
