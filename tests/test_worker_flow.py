@@ -123,7 +123,7 @@ class WorkerFlowTest(unittest.TestCase):
 
 class SkillsReadTest(unittest.TestCase):
     def test_adapter_names_skill_paths_per_task_type_for_both_runtimes(self):
-        text = (Path(__file__).resolve().parent.parent / worker_flow.ADAPTER).read_text()
+        text = (Path(__file__).resolve().parent.parent / worker_flow.ADAPTER).read_text(encoding="utf-8")
         for needle in ('~/.claude/skills/pstack-X/SKILL.md', '~/.agents/skills/pstack-X/SKILL.md',
                        'Read/cat', 'Skill tool and slash commands are disabled', 'Skills read:',
                        '| investigation |', '| other |', '| code |', '| review |',
@@ -145,7 +145,7 @@ class SkillsReadTest(unittest.TestCase):
         self.assertIn('Task type: unspecified', core.task_message(task))
 
     def test_task_type_mapping_for_both_runtimes(self):
-        text = (Path(__file__).resolve().parent.parent / worker_flow.ADAPTER).read_text()
+        text = (Path(__file__).resolve().parent.parent / worker_flow.ADAPTER).read_text(encoding="utf-8")
         rows = {line.split('|')[1].strip(): line for line in text.splitlines() if line.startswith('|')}
         expected = {
             'code': ('tdd', 'blast-radius', 'how', 'architect'),
@@ -169,6 +169,7 @@ class SkillsReadTest(unittest.TestCase):
 
     def test_report_warning_requires_a_complete_line(self):
         cases = (('Mention Skills read: /tmp/a in prose', True),
+                 (r'Skills read: C:\Work Spaces\skills\SKILL.md', False),
                  ('Skills read: /tmp/a', False),
                  ('Skills read: /a/SKILL.md, /b/SKILL.md', False),
                  ('Skills read: /a /b', False),

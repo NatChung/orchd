@@ -16,6 +16,19 @@ orchd binding      # 沿用已綁定且在線的 Claude Orch；沒有就開一�
 且 `relay`／`status` 預先核准（`approval_policy = "never"` 下沒核准的 MCP 工具會被直接擋掉）。
 已存在且內容不同的檔案不會被覆蓋。
 
+原生 Windows 的入口仍使用同一份專案權限和模型設定。`orchd init` 會將 Windows 路徑正確轉義，
+選用 `[windows] sandbox = "elevated"`，並以 `project_doc_max_bytes = 0` 關閉啟動時的 AGENTS.md 探索。
+這是為了讓只需 MCP 的入口可以在拒絕受限讀取的 Windows sandbox backend 上啟動，保留 `:minimal`、家目錄 deny、
+唯讀入口與無網路限制。入口指示改由 TOML 中標示 `# orchd:interface-instructions` 的 `developer_instructions` 提供。
+`AGENTS.md` 仍是這段指示的來源。編輯入口的 `AGENTS.md` 後再跑 `orchd init`，會備份並只同步這個受管理欄位，
+保留 TOML 的模型、權限及其他自訂設定，再重開入口對話。升級的 managed-rules migration 也會同步這個欄位。
+若舊 TOML 沒有這個標記，先備份、移開該 TOML 再跑 init 重新產生，核對自己的設定後套回。
+請勿直接編輯受管理的 `developer_instructions`，以免下次同步被 AGENTS.md 的內容取代。
+
+Windows 的安全圖片複製尚未提供，附件會明確回報 `unsupported_platform`，文字入口仍可使用。
+部分 Codex Windows 版本拒絕執行受限讀取的子程序，會回報需要 `:root` read access。
+入口設定會維持受限權限，這類執行要求失敗時不會自動擴大到整台電腦可讀。
+
 新增 foreground 後，既有入口需要重新產生 `~/orch/interface/.codex/config.toml` 與 `~/orch/interface/AGENTS.md`：
 先將這兩個檔案移到備份位置，再用新版程式跑 `orchd init`，核對輸出為 created，必要時重新套用自己的修改，
 然後重開 Desktop 入口對話以載入新設定。自訂 interface 路徑時用相應路徑。

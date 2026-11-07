@@ -6,10 +6,10 @@ orchd 管理多個 AI coding agent 任務：Orch 拆解工作並派工，worker 
 
 ## 需求
 
-- macOS；Python 3.11+、Git、[uv](https://docs.astral.sh/uv/)。
+- macOS 或原生 Windows；Python 3.11+、Git、[uv](https://docs.astral.sh/uv/)。
 - [Claude Code](https://claude.com/claude-code)：已登入並支援背景 session；目前 transport 依賴 `--bg` 與實驗性的 messaging socket，CLI 更新可能影響相容性。
 - [Codex CLI](https://github.com/openai/codex)：使用 Codex worker 時需要登入；Codex Desktop 為選用的對話入口。
-- tmux：背景 session；Ghostty：選用的視窗 attach／viewer。GitHub CLI：選用的 tracker 與帳號路由。
+- tmux：POSIX exec 背景 session。原生 Windows 使用 Codex app-server worker。Ghostty：macOS 選用的視窗 attach／viewer。GitHub CLI：選用的 tracker 與帳號路由。
 - 安裝依賴包含 psutil 與 websocket-client。app-server worker 為選用功能，預設 worker 使用 exec。
 
 先完成各供應商登入，再對自己的專案與 Orch home 接受 trust 提示。憑證保留在各 CLI 的登入設定。
@@ -29,6 +29,49 @@ orchd upgrade
 ```
 
 upgrade 讀取 uv 安裝紀錄的來源，安裝該來源預設 branch 的最新 commit；branch pin 會移除。它保留任務資料與個人設定，再自動執行家目錄規則 migration 並備份；managed 區塊、預覽、重試與舊版第一次更新的操作見[家目錄更新](docs/upgrade-migrations.md)。既有 session／MCP process 仍持有原本程式，請在方便時開始新 session；更新不是重新啟動 daemon 的指令。Checkout 安裝請在自己的 checkout 更新程式。
+
+## 原生 Windows 與 PowerShell
+
+先安裝 uv、Git，以及上方列出的供應商 CLI，並完成 CLI 登入。在 PowerShell 執行：
+
+```powershell
+uv tool install "git+https://github.com/NatChung/orchd.git"
+uv tool update-shell
+# 更新 PATH 後重新開啟 PowerShell。
+orchd --help
+orchd init
+orchd config set projects-dir "$HOME\projects"
+orchd binding
+```
+
+Windows 支援合併至上游預設 branch 之前，請在已審閱的 checkout 執行 `uv tool install --force .`，
+或安裝已審閱的精確 Git revision。後續修正也從同一個已審閱來源重新安裝。
+`orchd upgrade` 會移除 branch pin 並追蹤來源的預設 branch，提早使用可能把 Windows 實作換回尚未包含這些修改的版本。
+
+每個專案是設定目錄下的一個 Git repo。綁定 Orch 後，可以從 PowerShell 派 Codex worker，再讀取回報：
+
+```powershell
+orchd dispatch --repo example-repo --model terra --backend app-server `
+  --title "Read the README" --instructions "Read README.md and report its first heading." `
+  --done-when "The first heading is included in the report." `
+  --model-reason "Read-only repository check" --task-type investigation
+orchd list
+orchd inbox
+```
+
+dispatch 會回傳 `task_id`。`inbox` 會讀取並確認所屬 Orch 的未讀 worker 訊息，請保存需要留存的回報。
+獨立 PowerShell 使用 Desktop 綁定的 Orch，也可以用 `--orch-id` 指定已登記的 Orch。
+沒有可選用的 owner 時會明確回報錯誤。
+
+使用 Codex Desktop 對話時，將實際的 `$HOME\orch\interface` 資料夾新增為專案，從該專案開啟聊天。
+專案的 `.codex\config.toml` 指定 `gpt-6.1-terra`、`interface` 權限、唯讀、停用 shell 工具及無網路。
+權限 profile 依專案情境解析，全域選單可能沒有列出 `interface`。確認已載入專案設定後，先查詢綁定的 Orch 狀態。
+不需要更改全域預設權限。設定變更後重開聊天。指示同步方式見[入口設定](docs/entry.md)。
+
+Windows 附件複製目前回報 `unsupported_platform`。Ghostty／macOS viewer 和 POSIX exec-worker transport 仍有平台限制。
+Claude 背景 session 依賴已安裝 CLI 的實驗性 messaging transport。
+部分 Codex Windows sandbox 版本對受限子程序讀取回報需要有效的 `:root` read access。
+只使用 MCP 的入口會保留受限權限，改由專案 TOML 提供入口指示，以便啟動時避開該文件讀取操作。
 
 ## 從私人 repo 遷移
 

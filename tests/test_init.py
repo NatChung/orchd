@@ -89,7 +89,7 @@ class InitTest(unittest.TestCase):
         rules.write_bytes(old)
         updated = self.init(trust=False)
         self.assertEqual(updated["files"][str(rules)], "updated")
-        template = (bootstrap.TEMPLATES / "gpt-computer-use-worker/AGENTS.md").read_bytes().rstrip(b"\n")
+        template = (bootstrap.TEMPLATES / "gpt-computer-use-worker/AGENTS.md").read_bytes().rstrip(b"\r\n")
         self.assertEqual(rules.read_bytes(), prefix + template + suffix)
         backups = home_migrations.state_dir(self.home, self.env) / "backups/gpt-computer-use-worker"
         self.assertEqual(next(backups.iterdir()).read_bytes(), old)

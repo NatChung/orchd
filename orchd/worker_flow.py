@@ -18,12 +18,17 @@ _fetches = {}
 _fetch_lock = threading.Lock()
 
 
+def powershell_literal(value):
+    return "'" + str(value).replace("'", "''") + "'"
+
+
 def _git(repo, deadline, *args):
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise subprocess.TimeoutExpired(args, BRIEF_BUDGET)
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="true")
     return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace",
                           check=True, timeout=min(FETCH_TIMEOUT, remaining), env=env).stdout.strip()
 
 
@@ -58,7 +63,11 @@ def _resolve(source, entry, deadline):
     _fetch(source, deadline)
     sha = _git(source, deadline, "rev-parse", "refs/remotes/origin/HEAD^{commit}")
     _git(source, deadline, "cat-file", "-e", f"{sha}:{entry}")
-    command = shlex.join(["git", "-C", str(source), "show", f"{sha}:{entry}"])
+    target = f"{sha}:{entry}"
+    if os.name == "nt":
+        command = f"git -C {powershell_literal(source)} show {powershell_literal(target)}"
+    else:
+        command = shlex.join(["git", "-C", str(source), "show", target])
     return sha, command
 
 

@@ -3,6 +3,7 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -120,6 +121,7 @@ class CoreTest(unittest.TestCase):
         self.rt = FakeRuntime()
 
     def tearDown(self):
+        self.con.close()
         self.tmp.cleanup()
 
     def dispatch(self, thread="thread-A", repo="demo", **kw):
@@ -143,8 +145,13 @@ class CoreTest(unittest.TestCase):
             t = self.dispatch()
         finally:
             os.environ.pop("ORCHD_HOME")
-        self.assertIn("ORCHD_HOME='/tmp/iso home' ", self.rt.brief)
-        self.assertIn(f"ORCHD_HOME='/tmp/iso home' {shlex.join(paths.orchd_command())} ack {t['id']}", self.rt.sent[0][2])
+        if os.name == "nt":
+            command = "& " + " ".join("'" + arg.replace("'", "''") + "'" for arg in paths.orchd_command())
+            prefix = "$env:ORCHD_HOME = '/tmp/iso home'; " + command
+        else:
+            prefix = "ORCHD_HOME='/tmp/iso home' " + shlex.join(paths.orchd_command())
+        self.assertIn(prefix, self.rt.brief)
+        self.assertIn(f"{prefix} ack {t['id']}", self.rt.sent[0][2])
 
     def test_dispatch_without_thread_is_refused(self):
         with self.assertRaises(ValueError):
@@ -345,6 +352,7 @@ class CodexWorkerTest(unittest.TestCase):
         self.rt = FakeRuntime()
 
     def tearDown(self):
+        self.con.close()
         self.tmp.cleanup()
 
     def dispatch(self, repo="demo"):
@@ -426,9 +434,11 @@ class CodexWorkerTest(unittest.TestCase):
 
     def test_finished_child_is_not_alive_without_another_subprocess(self):
         rt = Runtime()
-        pid = subprocess.Popen(["/bin/sleep", "0.1"]).pid  # dropped Popen, as spawn does
+        pid = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.1)"]).pid
         import time
-        time.sleep(0.5)
+        deadline = time.monotonic() + 5
+        while rt.pid_alive(pid) and time.monotonic() < deadline:
+            time.sleep(0.05)
         self.assertFalse(rt.pid_alive(pid))
 
     def test_resume_passes_the_task_model(self):
@@ -476,6 +486,7 @@ class OrchTest(unittest.TestCase):
 
     def tearDown(self):
         os.environ.pop("ORCHD_ORCH_HOME", None)
+        self.con.close()
         self.tmp.cleanup()
 
     def test_start_orch_registers_claude_row_with_socket_and_session(self):
@@ -531,6 +542,7 @@ class WatchTest(unittest.TestCase):
                 mid = store.add_message(con, tid, "report", "done: ok")
                 con.execute("UPDATE messages SET created_at=160 WHERE id=?", (mid,))
             (row,) = watch.summary(con)
+            con.close()
             self.assertEqual((row["workers"], row["worker_min"], row["wall_min"], row["parallel"], row["peak_workers"]),
                              (2, 2.0, 1.0, 2.0, 2))
 
@@ -579,7 +591,8 @@ class MigrationTest(unittest.TestCase):
             cols = {r["name"] for r in con.execute("PRAGMA table_info(tasks)")}
             self.assertTrue({"model", "model_reason", "task_type", "rework_of", "outcome", "rating"} <= cols)
             self.assertEqual(store.get_task(con, "abc")["status"], "acked")
-            store.connect(path)  # second connect is a no-op
+            con.close()
+            store.connect(path).close()  # second connect is a no-op
 
 
 class McpTest(unittest.TestCase):
@@ -587,6 +600,7 @@ class McpTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         con = store.connect(Path(tmp.name) / "t.db")
+        self.addCleanup(con.close)
         out = io.StringIO()
         mcp_server.serve(io.StringIO("".join(json.dumps(m) + "\n" for m in messages)), out, con, FakeRuntime())
         return [json.loads(line) for line in out.getvalue().splitlines()]
@@ -631,6 +645,7 @@ class McpTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         con = store.connect(Path(tmp.name) / "t.db")
+        self.addCleanup(con.close)
         mcp_server.serve(io.StringIO(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
             "name": "list_open", "_meta": {"threadId": "thread-C"}, "arguments": {}}}) + "\n"),
             io.StringIO(), con, FakeRuntime())

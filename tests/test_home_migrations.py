@@ -64,7 +64,7 @@ class HomeMigrationTest(unittest.TestCase):
         self.existing(prefix + b"<!-- orchd:managed:start v=0 -->\nold rules\n<!-- orchd:managed:end -->" + suffix)
         code, lines = self.run_migrations()
         self.assertEqual(code, 0, lines)
-        template = (bootstrap.TEMPLATES / "home/AGENTS.md").read_bytes().rstrip(b"\n")
+        template = (bootstrap.TEMPLATES / "home/AGENTS.md").read_bytes().rstrip(b"\r\n")
         self.assertEqual(self.file.read_bytes(), prefix + template + suffix)
         # A new release adds a new step; old steps stay recorded and are skipped.
         with patch.object(migrations, "STEPS", (("orch-rules-v1", migrations.update_rules), ("orch-rules-v2", migrations.update_rules))):
@@ -147,7 +147,7 @@ class HomeMigrationTest(unittest.TestCase):
                 con.execute("INSERT INTO applied VALUES(?, ?, 0)", (step, scope))
         con.close()
         self.assertEqual(self.run_migrations()[0], 0)
-        template = (bootstrap.TEMPLATES / "gpt-computer-use-worker/AGENTS.md").read_bytes().rstrip(b"\n")
+        template = (bootstrap.TEMPLATES / "gpt-computer-use-worker/AGENTS.md").read_bytes().rstrip(b"\r\n")
         self.assertEqual(worker.read_bytes(), b"before\r\n" + template + b"\r\nafter")
         self.assertEqual(next(self.backups("gpt-computer-use-worker").iterdir()).read_bytes(), old)
         self.assertEqual(self.run_migrations()[0], 0)

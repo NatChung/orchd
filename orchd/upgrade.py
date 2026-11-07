@@ -33,7 +33,9 @@ def legacy_source(url):
 
 def installed_commit(prefix):
     """The commit uv recorded for this install (PEP 610 direct_url.json), or None."""
-    for path in Path(prefix).glob("lib/python*/site-packages/orchd-*.dist-info/direct_url.json"):
+    prefix = Path(prefix)
+    for path in (*prefix.glob("lib/python*/site-packages/orchd-*.dist-info/direct_url.json"),
+                 *prefix.glob("Lib/site-packages/orchd-*.dist-info/direct_url.json")):
         try:
             return (json.loads(path.read_text()).get("vcs_info") or {}).get("commit_id")
         except (OSError, ValueError):
@@ -77,7 +79,9 @@ def default_run(cmd):
 def post_upgrade(prefix, run):
     """Use the newly installed code, not modules cached before uv replaced the package."""
     try:
-        out = run([str(prefix / "bin" / "orchd"), "upgrade", "--migrations-only"])
+        windows_cli = prefix / "Scripts" / "orchd.exe"
+        cli = windows_cli if windows_cli.is_file() else prefix / "bin" / "orchd"
+        out = run([str(cli), "upgrade", "--migrations-only"])
         lines = [text.strip() for text in (out.stdout, out.stderr) if text.strip()]
         if out.returncode:
             lines.append("Program upgrade succeeded; home migrations failed. Retry: orchd upgrade --migrations-only")

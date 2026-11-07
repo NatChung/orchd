@@ -1,6 +1,5 @@
 """Task operations shared by the Orch MCP tools and the worker CLI."""
 import contextlib
-import fcntl
 import json
 import os
 import shlex
@@ -136,6 +135,10 @@ Ask format (required for every worker question):
 def worker_cli():
     """Workers are spawned by the Claude daemon and do not inherit our env, so carry a non-default home."""
     home = os.environ.get("ORCHD_HOME")
+    if os.name == "nt":
+        from .worker_flow import powershell_literal
+        command = "& " + " ".join(powershell_literal(arg) for arg in paths.orchd_command())
+        return f"$env:ORCHD_HOME = {powershell_literal(home)}; {command}" if home else command
     orchd = shlex.join(paths.orchd_command())
     return f"ORCHD_HOME={shlex.quote(home)} {orchd}" if home else orchd
 
@@ -445,9 +448,9 @@ def _wake(con, rt, task, message_id, line):
 
 
 def ack(con, task_id):
-    task = store.get_task(con, task_id)
-    if task["status"] == "running":
-        store.update_task(con, task_id, status="acked")
+    store.get_task(con, task_id)
+    con.execute("UPDATE tasks SET status='acked',updated_at=? WHERE id=? AND status IN ('starting','running')",
+                (time.time(), task_id))
     store.add_message(con, task_id, "ack", "worker acknowledged the task")
 
 
