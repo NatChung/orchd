@@ -170,7 +170,8 @@ def stop(con, task):
             stop_identity(raw)
         if any(process(raw) is not None for raw in viewers):
             raise RuntimeError('worker viewer not confirmed stopped')
-        swept = cleanup_processes(task['worktree'], {}) if task['worktree'] else None
+        worktree = task['worktree'] if 'worktree' in task.keys() else None
+        swept = cleanup_processes(worktree, {}) if worktree else None
         if swept:
             receipt = {**(receipt or {}), 'escaped': swept}
         return receipt
