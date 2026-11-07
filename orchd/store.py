@@ -1,12 +1,13 @@
 """SQLite state: one row per task, plus the messages exchanged about it."""
 import os
-import fcntl
 import hashlib
 import sqlite3
 import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+
+from .file_lock import try_lock
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks(
@@ -441,7 +442,7 @@ def connect_readonly(path=None):
 def task_delivery(con, task_ids, timeout=65):
     """Cross-process task locks for ownership changes and transport, never a SQLite write lock.
 
-    Ordered batches cannot deadlock. The wait is bounded; process exit releases flock. Keep lock files
+    Ordered batches cannot deadlock. The wait is bounded; process exit releases the locks. Keep lock files
     (unlinking a file while another process waits on it would create two independent locks).
     """
     database = con.execute("PRAGMA database_list").fetchone()[2]
@@ -457,7 +458,7 @@ def task_delivery(con, task_ids, timeout=65):
             handles.append(handle)
             while True:
                 try:
-                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    try_lock(handle)
                     break
                 except BlockingIOError:
                     if time.monotonic() >= deadline:
