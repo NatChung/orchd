@@ -273,7 +273,8 @@ class Runtime:
             proc = psutil.Process(int(pid))
             if worktree is None:
                 worktree = (environ_of(proc) or {}).get("ORCHD_WORKTREE")
-            record = json.dumps(dict(pid=proc.pid, birth=proc.create_time(), pgid=os.getpgid(proc.pid),
+            record = json.dumps(dict(pid=proc.pid, birth=proc.create_time(),
+                                     pgid=proc.pid if os.name == "nt" else os.getpgid(proc.pid),
                                      worktree=str(Path(worktree).resolve()) if worktree else None))
             path = self._identity_file(pid)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -804,15 +805,18 @@ class Runtime:
 
         Ownership never comes from a command line. A turn orchd started has a record (pid, birth, pgid, worktree)
         written at spawn: a pid whose birth differs was reused; a foreign worktree cannot authorize this stop.
-        Without ownership in the record (an older turn) the process must carry this task's ORCHD_WORKTREE mark and lead its own group. Nothing is signalled through killpg, so a member of the
-        group that is not provably ours is never touched."""
+        On Windows only a matching spawn identity authorizes a direct stop; missing or unowned records
+        fall through to the account-and-mark-checked cleanup in stop_task_worker. On POSIX, without ownership
+        in the record (an older turn) the process must carry this task's ORCHD_WORKTREE mark and lead its own
+        group. Nothing is signalled through killpg, so a member that is not provably ours is never touched."""
         def unknown(why):
             return RuntimeError(f"codex worker {pid} not confirmed stopped: {why}")
         try:
             proc = psutil.Process(int(pid))
             if proc.status() == psutil.STATUS_ZOMBIE:
                 return []
-            birth, pgid = proc.create_time(), os.getpgid(proc.pid)
+            birth = proc.create_time()
+            pgid = proc.pid if os.name == "nt" else os.getpgid(proc.pid)
         except (psutil.NoSuchProcess, ProcessLookupError, ValueError):
             return []
         except (psutil.AccessDenied, OSError) as e:
@@ -820,13 +824,15 @@ class Runtime:
         mark = str(Path(marks[0]).resolve()) if marks and marks[0] else None
         record = self._read_identity(pid)
         try:
+            if os.name == "nt" and (proc.pid == os.getpid() or not record or not record.get("worktree")):
+                return []  # No Windows groups: only saved task identities authorize this direct stop.
             if record:
                 if abs(float(record.get("birth", 0)) - birth) > 0.01:
                     return []  # same pid, different process
                 owner = record.get("worktree")
                 if owner and (not mark or owner != mark):
                     return []  # a later task overwrote this pid's record; never borrow its identity
-                if owner and (pgid != proc.pid or record.get("pgid") != pgid):
+                if os.name != "nt" and owner and (pgid != proc.pid or record.get("pgid") != pgid):
                     raise unknown("not an owned process-group leader; stop refused")
             if not record or not record.get("worktree"):
                 # Legacy records prove birth, but not task ownership. Require the task's environment mark too.
