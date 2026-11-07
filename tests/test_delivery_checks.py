@@ -343,7 +343,9 @@ class BaseAndHeadTest(ChecksBase):
     def test_rewritten_remote_base_is_refused_even_though_the_local_ref_is_stale(self):
         self.prepare()
         git("-C", str(self.work), "fetch", "-q", "origin")  # local origin/main still contains the base
-        other = git("-C", str(self.work), "commit-tree", "-m", "x", git("-C", str(self.work), "rev-parse", "HEAD^{tree}"))
+        tree = git("-C", str(self.work), "rev-parse", "HEAD^{tree}")
+        other = git("-C", str(self.work), "-c", "user.name=T", "-c", "user.email=t@example.invalid",
+                    "commit-tree", tree, "-m", "x")
         self.push(other, "main")
         with self.assertRaises(delivery_checks.CheckError) as raised:
             self.gate(["pr", "create"])
