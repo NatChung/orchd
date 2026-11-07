@@ -14,13 +14,14 @@ class AppViewerTest(AppBase):
         for state in ('active','idle','alive'):
             with patch.object(app_worker,'health',return_value=state):
                 text=core.view(self.con,self.rt,self.id)
-            self.assertIn('Ghostty',text)
+            self.assertIn('terminal' if os.name == 'nt' else 'Ghostty',text)
             self.assertEqual(self.opened[1]['session_id'],'thread')
             self.assertEqual(self.opened[1]['generation'],self.gen)
         rt=Runtime()
-        with patch.object(rt,'run') as run,patch('orchd.runtime.worker_env',return_value={}):
+        with patch.object(rt,'run') as run,patch('orchd.runtime.worker_env',return_value={}), \
+             patch('orchd.runtime.subprocess.Popen') as popen:
             rt.open_app_viewer(str(self.db),self.task)
-        cmd=run.call_args.args[0]
+        cmd=(popen if os.name == 'nt' else run).call_args.args[0]
         self.assertNotIn(self.task['endpoint'],cmd)
         self.assertEqual(cmd[-2:],[self.id,self.gen])
 

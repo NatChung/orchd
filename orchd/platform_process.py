@@ -1,6 +1,17 @@
 """Platform-specific private worker directories and detached process options."""
 import os
 import subprocess
+import sys
+from pathlib import Path
+
+
+def background_python():
+    """Avoid the Windows venv console launcher creating a visible terminal."""
+    if os.name == "nt":
+        candidate = Path(sys.executable).with_name("pythonw.exe")
+        if candidate.is_file():
+            return str(candidate)
+    return sys.executable
 
 
 def detached_options():

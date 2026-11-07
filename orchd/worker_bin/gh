@@ -152,7 +152,7 @@ def main():
     # Auth inspection/management must retain gh semantics, including auth status.
     if "GH_TOKEN" in os.environ or (args[:1] == ["auth"] and not is_credential):
         if os.name == "nt":
-            return subprocess.call([real, *args], **background_flags())
+            return subprocess.call([real, *args], stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr, **background_flags())
         os.execv(real, [real, *args])
     credential = sys.stdin.buffer.read() if is_credential else None
     env = dict(os.environ)
@@ -185,11 +185,11 @@ def main():
             replay.write(credential)
             replay.seek(0)
             if os.name == "nt":
-                return subprocess.call([real, *args], stdin=replay, env=env, **background_flags())
+                return subprocess.call([real, *args], stdin=replay, stdout=sys.stdout, stderr=sys.stderr, env=env, **background_flags())
             os.dup2(replay.fileno(), 0)
             os.execve(real, [real, *args], env)
     if os.name == "nt":
-        return subprocess.call([real, *args], env=env, **background_flags())
+        return subprocess.call([real, *args], stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr, env=env, **background_flags())
     os.execve(real, [real, *args], env)
 
 
