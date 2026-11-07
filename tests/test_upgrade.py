@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from orchd import upgrade
 
@@ -135,6 +136,24 @@ class UpgradeTest(unittest.TestCase):
         code, lines = upgrade.upgrade(self.prefix, run=self.run_cmd, which=lambda n: "/opt/uv", checkout=bin_orchd, windows=False)
         self.assertEqual((code, self.calls), (1, []))
         self.assertIn("git pull", lines[0])
+
+    def test_windows_migration_retries_only_when_uv_could_not_start_python(self):
+        scripts = self.prefix / "Scripts"
+        scripts.mkdir()
+        (scripts / "orchd.exe").touch()
+        denied = subprocess.CompletedProcess([], 1, "", "error: uv trampoline failed to spawn Python child process\n"
+                                             "  Caused by: permission denied (os error 5)")
+        ok = subprocess.CompletedProcess([], 0, "migrations complete", "")
+        failed = subprocess.CompletedProcess([], 1, "", "migration failed: permission denied (os error 5)")
+        with patch.object(upgrade.time, "sleep"):
+            for results in ([denied, ok], [denied, denied, denied], [failed]):
+                run = Mock(side_effect=results)
+                lines = upgrade.post_upgrade(self.prefix, run)
+                self.assertEqual(run.call_count, len(results))
+                if results[-1] is ok:
+                    self.assertEqual(lines, ["migrations complete"])
+                else:
+                    self.assertIn("Retry: orchd upgrade --migrations-only", lines[-1])
 
 
 if __name__ == "__main__":

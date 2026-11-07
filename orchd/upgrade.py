@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -295,7 +296,19 @@ def post_upgrade(prefix, run):
     try:
         windows_cli = prefix / "Scripts" / "orchd.exe"
         cli = windows_cli if windows_cli.is_file() else prefix / "bin" / "orchd"
-        out = run([str(cli), "upgrade", "--migrations-only"])
+        command = [str(cli), "upgrade", "--migrations-only"]
+        out = run(command)
+        # A fresh Windows uv launcher can be denied before Python even starts.
+        # Retry that launch only. Migration failures must keep their original output.
+        if cli == windows_cli:
+            for delay in (0.25, 1.0):
+                diagnostic = out.stderr.strip().lower()
+                if (not out.returncode or out.stdout.strip()
+                        or not diagnostic.startswith("error: uv trampoline failed to spawn python child process")
+                        or "permission denied (os error 5)" not in diagnostic):
+                    break
+                time.sleep(delay)
+                out = run(command)
         lines = [text.strip() for text in (out.stdout, out.stderr) if text.strip()]
         if out.returncode:
             lines.append("Program upgrade succeeded; home migrations failed. Retry: orchd upgrade --migrations-only")
