@@ -24,7 +24,7 @@ class WindowsUpgradeTests(unittest.TestCase):
 
     def test_staging_failure_does_not_change_current_or_stable_launcher(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             anchor = self.make_prefix(root, "old")
             candidate = self.make_prefix(anchor.parent / ".orchd-versions", "new")
             stable_bin = root / "bin"
@@ -48,7 +48,7 @@ class WindowsUpgradeTests(unittest.TestCase):
 
     def test_stale_publication_cannot_replace_newer_generation(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             anchor = self.make_prefix(root, "old")
             versions = anchor.parent / ".orchd-versions"
             first = self.make_prefix(versions, "first")
@@ -65,7 +65,7 @@ class WindowsUpgradeTests(unittest.TestCase):
 
     def test_live_process_retains_old_lazy_import_after_new_install_is_published(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             anchor = self.make_prefix(root, "old")
             candidate = self.make_prefix(anchor.parent / ".orchd-versions", "new")
             stable_bin = root / "bin"
@@ -121,7 +121,7 @@ class WindowsPackagedUpgradeTests(unittest.TestCase):
             self.skipTest("uv is required for the packaged install smoke test")
         checkout = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(prefix="orch-upgrade-") as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             tool_dir = root / "tools"
             bin_dir = root / "bin"
             env = dict(os.environ, UV_TOOL_DIR=str(tool_dir), UV_TOOL_BIN_DIR=str(bin_dir),
@@ -156,17 +156,23 @@ print(windows_pipe._UPGRADE_TEST_GENERATION, flush=True)
                                          text=True, timeout=180, cwd=root)
                 self.assertEqual(updated.returncode, 0, updated.stdout + updated.stderr)
                 self.assertTrue(launcher.is_file())
+                pointer = json.loads((old_prefix / "orchd-current.json").read_text(encoding="utf-8"))
+                active = Path(pointer["prefix"])
+                self.assertNotEqual(active, old_prefix)
+                self.assertTrue((active / "Scripts" / "orchd.exe").is_file())
+                # Only the new generation contains this marker. Running the stable
+                # entry point must load its CLI rather than the anchor's old CLI.
+                active_cli = active / "Lib" / "site-packages" / "orchd" / "cli.py"
+                with active_cli.open("a", encoding="utf-8") as stream:
+                    stream.write("\nprint('UPGRADE-NEW-GENERATION')\n")
                 check = subprocess.run([str(launcher), "--help"], env=env, capture_output=True,
                                        text=True, timeout=30, cwd=root)
                 self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
-                self.assertIn("orchd", check.stdout.lower())
+                self.assertIn("UPGRADE-NEW-GENERATION", check.stdout)
                 process.stdin.write("continue\n")
                 process.stdin.flush()
                 self.assertEqual(process.stdout.readline().strip(), "old")
                 self.assertEqual(process.wait(timeout=10), 0, process.stderr.read())
-                pointer = json.loads((old_prefix / "orchd-current.json").read_text(encoding="utf-8"))
-                self.assertNotEqual(Path(pointer["prefix"]), old_prefix)
-                self.assertTrue((Path(pointer["prefix"]) / "Scripts" / "orchd.exe").is_file())
             finally:
                 if process.poll() is None:
                     process.kill()

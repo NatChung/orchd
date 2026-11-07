@@ -30,6 +30,8 @@ jobs:
         run: |
           python -m unittest discover -s tests -p test_file_lock.py
           python -m unittest discover -s tests -p test_worker_socket.py
+          python -m unittest discover -s tests -p test_upgrade_refs.py
+          python -m unittest discover -s tests -p test_upgrade.py
           python -m unittest discover -s tests -p test_dispatch_cli.py
           python -m unittest discover -s tests -p test_windows_setup.py
       - name: Clean packaged install

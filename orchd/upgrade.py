@@ -79,6 +79,28 @@ def remote_head(git_url, run):
     return out.stdout.split()[0]
 
 
+def selected_remote_commit(git_url, pin, run):
+    """Resolve only an unambiguous selected ref; uv resolves anything more complex."""
+    if not pin:
+        return remote_head(git_url, run)
+    ref = unquote(pin.partition("=")[2])
+    if re.fullmatch(r"[0-9a-fA-F]{40,64}", ref):
+        return ref
+    out = run(["git", "ls-remote", git_url, ref, "refs/heads/" + ref,
+               "refs/tags/" + ref, "refs/tags/" + ref + "^{}"])
+    if out.returncode:
+        return None
+    allowed = {ref, ref + "^{}"} if ref.startswith("refs/") else {
+        "refs/heads/" + ref, "refs/tags/" + ref, "refs/tags/" + ref + "^{}"}
+    if ref == "HEAD":
+        allowed.add("HEAD")
+    rows = [parts for line in out.stdout.splitlines()
+            if len(parts := line.split()) == 2 and parts[1] in allowed]
+    peeled = {name.removesuffix("^{}"): sha for sha, name in rows if name.endswith("^{}")}
+    commits = {peeled.get(name, sha) for sha, name in rows}
+    return commits.pop() if len(commits) == 1 else None
+
+
 def default_run(cmd, *, env=None):
     return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", timeout=600, env=env)
 
@@ -250,9 +272,13 @@ def windows_upgrade(prefix, spec, run=default_run, which=shutil.which, *, bin_di
             after = installed_commit(candidate)
             if before and after == before:
                 # This candidate has never been published or used by a worker.
-                if stage.resolve().is_relative_to((anchor.parent / ".orchd-versions").resolve()):
-                    shutil.rmtree(stage)
-                return 0, [f"orchd is already the newest selected commit ({before[:7]}).", *post_upgrade(prefix, run)]
+                lines = [f"orchd is already the newest selected commit ({before[:7]})."]
+                try:
+                    if stage.resolve().is_relative_to((anchor.parent / ".orchd-versions").resolve()):
+                        shutil.rmtree(stage)
+                except OSError:
+                    lines.append(f"Unused staged environment retained at {stage}.")
+                return 0, [*lines, *post_upgrade(prefix, run)]
             publish_windows_install(anchor, candidate, stable_bin, expected_current=prefix)
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             return 1, [f"Windows upgrade was not activated; the current environment remains active: {error}"]
@@ -315,8 +341,13 @@ def upgrade(prefix=None, run=default_run, which=shutil.which, checkout=None, *, 
         return 1, ["cannot upgrade: uv is not on PATH.", f"run by hand: uv tool install --force --refresh {spec}"]
     if windows:
         before = installed_commit(prefix)
-        if pin and re.fullmatch(r"[0-9a-fA-F]{40,64}", unquote(pin.partition("=")[2])) and before == unquote(pin.partition("=")[2]):
-            return 0, [f"orchd is already at the selected immutable revision ({before[:7]}).", *post_upgrade(prefix, run)]
+        if git_url and before:
+            try:
+                selected = selected_remote_commit(git_url, pin, run)
+            except (OSError, subprocess.SubprocessError):
+                selected = None
+            if selected and selected.lower() == before.lower():
+                return 0, [f"orchd is already at the newest selected commit ({before[:7]}).", *post_upgrade(prefix, run)]
         try:
             code, lines = windows_upgrade(prefix, spec, run, which)
         except (OSError, ValueError) as error:
