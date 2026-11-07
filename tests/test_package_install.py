@@ -66,5 +66,14 @@ class PackageInstallTests(unittest.TestCase):
                 self.assertEqual(cfg["windows"]["sandbox"], "elevated")
                 self.assertEqual(cfg["project_doc_max_bytes"], 0)
                 self.assertIn("ALL_TOOLS", cfg["developer_instructions"])
+            requests = "\n".join(json.dumps({"jsonrpc": "2.0", "id": i, "method": method, "params": {}})
+                                 for i, method in ((1, "initialize"), (2, "tools/list"))) + "\n"
+            mcp = subprocess.run([server["command"], *server["args"]], input=requests,
+                                 env=dict(env, **server.get("env", {})), cwd=root,
+                                 capture_output=True, text=True, encoding="utf-8", timeout=30)
+            self.assertEqual(mcp.returncode, 0, mcp.stdout + mcp.stderr)
+            responses = [json.loads(line) for line in mcp.stdout.splitlines() if line.strip()]
+            inventory = next(item["result"]["tools"] for item in responses if item.get("id") == 2)
+            self.assertEqual({tool["name"] for tool in inventory}, {"status", "relay", "foreground"})
             self.assertFalse((home / ".codex" / "config.toml").exists())
             self.assertEqual(set(json.loads(command("init", "--no-trust"))["files"].values()), {"unchanged"})

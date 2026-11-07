@@ -626,7 +626,9 @@ class Runtime:
         else:
             mcp_dir = Path(sock).parent
         mcp = mcp_dir / "mcp.json"
-        executable, args = paths.mcp_launch(paths.orchd_executable())
+        entrypoint = paths.orchd_executable()
+        executable, args = (paths.mcp_launch(entrypoint) if os.name == "nt"
+                            else (sys.executable, [entrypoint]))
         mcp.write_text(json.dumps({"mcpServers": {"orchd": {
             "command": executable, "args": [*args, "mcp"], "env": mcp_env(orch_id)}}}), encoding="utf-8")
         try:
