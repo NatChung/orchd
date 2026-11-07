@@ -126,18 +126,48 @@ def _descendants(proc, mark, found):
             continue
 
 
+_WINDOWS_USER = None
+
+
+def _owned_by_us(proc):
+    """POSIX compares real uids. Windows has no uids: compare account names; a process whose owner cannot be read
+    belongs to SYSTEM or another account, so it cannot hold this user's task mark."""
+    if os.name != "nt":
+        return proc.uids().real == os.getuid()
+    global _WINDOWS_USER
+    if _WINDOWS_USER is None:
+        _WINDOWS_USER = psutil.Process().username()
+    try:
+        return proc.username() == _WINDOWS_USER
+    except psutil.AccessDenied:
+        return False
+
+
+def _predates_worktree(mark):
+    """Windows shell/IME helpers of this user (ctfmon, taskhostw, ...) run at a higher integrity level and refuse
+    environment reads. The mark is set only on processes started after the worktree was created, so a process
+    born before that cannot carry it. When the worktree is already gone there is nothing left to protect from
+    removal, and this user could not signal a higher-integrity process anyway, so unreadable ones are skipped."""
+    try:
+        born = os.stat(mark).st_ctime  # creation time on Windows
+    except OSError:
+        return lambda proc: True
+    return lambda proc: proc.create_time() < born
+
+
 def task_processes(worktree, captured=()):
     """Snapshot marked processes and their descendants before the worker exits."""
     mark = str(Path(worktree).resolve())
     found = {}
+    exclude = _predates_worktree(mark) if os.name == "nt" else _systemd_user_infrastructure
     for proc in captured:
         if _alive(proc):
             _descendants(proc, mark, found)
     for proc in psutil.process_iter():
         try:
-            if proc.pid == os.getpid() or proc.uids().real != os.getuid():
+            if proc.pid == os.getpid() or not _owned_by_us(proc):
                 continue
-            if environ_of(proc, exclude_unreadable=_systemd_user_infrastructure).get("ORCHD_WORKTREE") != mark:
+            if environ_of(proc, exclude_unreadable=exclude).get("ORCHD_WORKTREE") != mark:
                 continue
             # Force identity acquisition now, before a PID can disappear/reappear.
             proc.create_time()
