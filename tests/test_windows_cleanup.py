@@ -105,13 +105,22 @@ class WindowsTaskProcessesTests(unittest.TestCase):
         child = FakeProc(31, {"ORCHD_WORKTREE": self.worktree},
                          user="someone-else", born=self.born + 1)
         root.children = lambda: [child]
-        self.assertEqual(list(self.scan([root])), [30])
+        for proc in (root, child):
+            proc.is_running = MagicMock(return_value=True)
+            proc.terminate = MagicMock(side_effect=lambda p=proc: setattr(p.is_running, "return_value", False))
+            proc.kill = MagicMock()
+        with patch.object(processes.psutil, "process_iter", return_value=[root, child]):
+            receipt = processes.cleanup_processes(self.worktree, {})
+        self.assertEqual(receipt["terminated"], [30])
+        child.terminate.assert_not_called()
+        child.kill.assert_not_called()
 
     def test_marked_descendant_with_unknown_owner_blocks_cleanup_without_signalling(self):
         root = FakeProc(30, {"ORCHD_WORKTREE": self.worktree}, born=self.born + 1)
         child = FakeProc(31, {"ORCHD_WORKTREE": self.worktree},
                          user=None, born=self.born + 1)
         root.children = lambda: [child]
+        child.username = MagicMock(wraps=child.username)
         for proc in (root, child):
             proc.terminate = MagicMock()
             proc.kill = MagicMock()
@@ -121,6 +130,28 @@ class WindowsTaskProcessesTests(unittest.TestCase):
         for proc in (root, child):
             proc.terminate.assert_not_called()
             proc.kill.assert_not_called()
+        child.username.assert_called_once()
+
+    def test_same_user_marked_descendant_missing_from_snapshot_is_cleaned(self):
+        root = FakeProc(30, {"ORCHD_WORKTREE": self.worktree}, born=self.born + 1)
+        child = FakeProc(31, {"ORCHD_WORKTREE": self.worktree}, born=self.born + 1)
+        root.children = lambda: [child]
+        for proc in (root, child):
+            proc.is_running = MagicMock(return_value=True)
+            proc.terminate = MagicMock(side_effect=lambda p=proc: setattr(p.is_running, "return_value", False))
+            proc.kill = MagicMock()
+        with patch.object(processes.psutil, "process_iter", return_value=[root]):
+            receipt = processes.cleanup_processes(self.worktree, {})
+        self.assertEqual(receipt, {"terminated": [30, 31], "killed": [], "exited": [30, 31]})
+        child.terminate.assert_called_once()
+
+    def test_unknown_descendant_owner_uses_independent_exclusions(self):
+        root = FakeProc(30, {"ORCHD_WORKTREE": self.worktree}, born=self.born + 1)
+        for child in (FakeProc(31, user=None, born=self.born - 1, denied=True),
+                      FakeProc(32, {"ORCHD_WORKTREE": "another"}, user=None, born=self.born + 1)):
+            with self.subTest(pid=child.pid):
+                root.children = lambda: [child]
+                self.assertEqual(list(self.scan([root])), [30])
 
     def test_worktree_stat_permission_error_is_not_missing(self):
         with patch.object(processes.os, "stat", side_effect=PermissionError("denied")):

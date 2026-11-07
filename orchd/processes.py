@@ -107,7 +107,7 @@ def _systemd_user_infrastructure(proc):
         return False
 
 
-def _descendants(proc, mark, found):
+def _descendants(proc, mark, found, exclude):
     """Do not cross into another task, even if a worker dispatched that task."""
     try:
         children = proc.children()
@@ -117,15 +117,12 @@ def _descendants(proc, mark, found):
         try:
             # Lineage and an inherited mark do not authorize signalling another
             # account. Apply the same owner check as the process-wide scan.
-            if not _owned_by_us(child):
-                continue
-            owner = environ_of(child).get("ORCHD_WORKTREE")
-            if owner != mark:
+            if not _marked_task_process(child, mark, exclude):
                 continue
             child.create_time()
             if child.pid != os.getpid():
                 found[child.pid] = child
-                _descendants(child, mark, found)
+                _descendants(child, mark, found, exclude)
         except psutil.NoSuchProcess:
             continue
         except psutil.AccessDenied:
@@ -157,6 +154,19 @@ def _predates_worktree(mark):
     return lambda proc: proc.create_time() < born
 
 
+def _marked_task_process(proc, mark, exclude):
+    """Apply one ownership gate to enumerated processes and newly found children."""
+    try:
+        owned = _owned_by_us(proc)
+    except psutil.AccessDenied:
+        # Unknown owners are never signalled. Exclude only with independent evidence.
+        if os.name == "nt" and (exclude(proc) or
+                environ_of(proc).get("ORCHD_WORKTREE") != mark):
+            return False
+        raise
+    return owned and environ_of(proc, exclude_unreadable=exclude).get("ORCHD_WORKTREE") == mark
+
+
 def task_processes(worktree, captured=()):
     """Snapshot marked processes and their descendants before the worker exits."""
     mark = str(Path(worktree).resolve())
@@ -164,27 +174,17 @@ def task_processes(worktree, captured=()):
     exclude = _predates_worktree(mark) if os.name == "nt" else _systemd_user_infrastructure
     for proc in captured:
         if _alive(proc):
-            _descendants(proc, mark, found)
+            _descendants(proc, mark, found, exclude)
     for proc in psutil.process_iter():
         try:
             if proc.pid == os.getpid():
                 continue
-            try:
-                owned = _owned_by_us(proc)
-            except psutil.AccessDenied:
-                # Unknown owners are never signalled. Exclude only with independent evidence.
-                if os.name == "nt" and (exclude(proc) or
-                        environ_of(proc).get("ORCHD_WORKTREE") != mark):
-                    continue
-                raise
-            if not owned:
-                continue
-            if environ_of(proc, exclude_unreadable=exclude).get("ORCHD_WORKTREE") != mark:
+            if not _marked_task_process(proc, mark, exclude):
                 continue
             # Force identity acquisition now, before a PID can disappear/reappear.
             proc.create_time()
             found[proc.pid] = proc
-            _descendants(proc, mark, found)
+            _descendants(proc, mark, found, exclude)
         except (psutil.NoSuchProcess, psutil.ZombieProcess):
             continue
         except SystemError:  # psutil's C code lost a race with the process exiting
