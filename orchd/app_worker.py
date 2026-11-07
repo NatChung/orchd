@@ -23,7 +23,7 @@ import psutil
 from . import store, unix_socket
 from .app_transport import RPC, RPCError
 from .processes import cleanup_processes, task_processes
-from .platform_process import detached_options, make_private, validate_private
+from .platform_process import background_python, detached_options, make_private, validate_private
 from .runtime import CODEX_MEMORIES_OFF
 
 BACKEND = 'app-server'
@@ -196,7 +196,7 @@ def start(con, rt, task, prompt, model, pending=(), brief=None):
     # Use the launching package; -P excludes the worktree while honoring PYTHONPATH.
     env['PYTHONPATH'] = str(Path(__file__).resolve().parents[1]) + os.pathsep + env.get('PYTHONPATH','')
     with open(directory/'supervisor.log', 'a') as out:
-        child = subprocess.Popen([sys.executable, '-P', '-m', 'orchd.app_worker', 'supervise', database,
+        child = subprocess.Popen([background_python(), '-P', '-m', 'orchd.app_worker', 'supervise', database,
                                   task['id'], generation], cwd=task['worktree'], env=env,
                                  stdin=subprocess.DEVNULL, stdout=out, stderr=out, **detached_options())
     # Windows venv launchers can start a second Python process. Never overwrite a

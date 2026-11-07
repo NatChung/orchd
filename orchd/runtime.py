@@ -21,7 +21,7 @@ from pathlib import Path
 import psutil
 
 from . import paths
-from .platform_process import detached_options
+from .platform_process import background_python, detached_options
 from .models import WorkerModels
 from .processes import environ_of, cleanup_processes, task_processes
 
@@ -311,7 +311,7 @@ class Runtime:
         directory.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ, ORCHD_WORKTREE=str(directory.resolve()))
         with (directory / f'{task_id}-{event_id}.log').open('a') as out:
-            return subprocess.Popen([sys.executable, paths.orchd_executable(), '_auto-retry', task_id,
+            return subprocess.Popen([background_python(), paths.orchd_executable(), '_auto-retry', task_id,
                                      str(event_id), '--database', str(database)],
                                     cwd=directory, env=env, stdin=subprocess.DEVNULL,
                                     stdout=out, stderr=subprocess.STDOUT, **detached_options()).pid

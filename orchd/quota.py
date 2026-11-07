@@ -308,15 +308,16 @@ def _reap(process, grace=3):
         try:
             root = psutil.Process(process.pid)
             children = root.children(recursive=True)
-            for child in reversed(children):
+        except psutil.Error:
+            return
+        for child in [*reversed(children), root]:
+            with contextlib.suppress(psutil.Error, OSError):
                 child.terminate()
-            root.terminate()
-            _, alive = psutil.wait_procs([root, *children], timeout=grace)
-            for child in alive:
+        _, alive = psutil.wait_procs([root, *children], timeout=grace)
+        for child in alive:
+            with contextlib.suppress(psutil.Error, OSError):
                 child.kill()
-            psutil.wait_procs(alive, timeout=grace)
-        except psutil.NoSuchProcess:
-            pass
+        psutil.wait_procs(alive, timeout=grace)
         return
     for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, grace)):
         try:
