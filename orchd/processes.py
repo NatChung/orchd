@@ -5,7 +5,6 @@ not lose ownership. Never infer ownership from a process name or cwd alone.
 psutil's Process objects retain (pid, create_time) and check reuse on signals.
 """
 import os
-import logging
 import subprocess
 import sys
 import time
@@ -137,11 +136,7 @@ def _owned_by_us(proc):
     global _WINDOWS_USER
     if _WINDOWS_USER is None:
         _WINDOWS_USER = psutil.Process().username()
-    try:
-        return proc.username() == _WINDOWS_USER
-    except psutil.AccessDenied:
-        logging.getLogger(__name__).warning("cannot inspect owner of process %s; skipping", proc.pid)
-        return False
+    return proc.username() == _WINDOWS_USER
 
 
 def _predates_worktree(mark):
@@ -166,7 +161,17 @@ def task_processes(worktree, captured=()):
             _descendants(proc, mark, found)
     for proc in psutil.process_iter():
         try:
-            if proc.pid == os.getpid() or not _owned_by_us(proc):
+            if proc.pid == os.getpid():
+                continue
+            try:
+                owned = _owned_by_us(proc)
+            except psutil.AccessDenied:
+                # Unknown owners are never signalled. Exclude only with independent evidence.
+                if os.name == "nt" and (exclude(proc) or
+                        environ_of(proc).get("ORCHD_WORKTREE") != mark):
+                    continue
+                raise
+            if not owned:
                 continue
             if environ_of(proc, exclude_unreadable=exclude).get("ORCHD_WORKTREE") != mark:
                 continue

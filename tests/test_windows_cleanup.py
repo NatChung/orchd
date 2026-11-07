@@ -58,10 +58,27 @@ class WindowsTaskProcessesTests(unittest.TestCase):
     def test_marked_process_of_this_user_is_found_without_uids(self):
         mine = FakeProc(10, {"ORCHD_WORKTREE": self.worktree}, born=self.born + 1)
         other = FakeProc(11, {"ORCHD_WORKTREE": self.worktree}, user="someone-else", born=self.born + 1)
-        system = FakeProc(12, user=None)
-        with self.assertLogs("orchd.processes", level="WARNING") as logs:
-            self.assertEqual(list(self.scan([mine, other, system])), [10])
-        self.assertIn("12", logs.output[0])
+        self.assertEqual(list(self.scan([mine, other])), [10])
+
+    def test_unknown_owner_with_matching_or_unreadable_mark_blocks_without_signalling(self):
+        for denied in (False, True):
+            with self.subTest(denied=denied):
+                proc = FakeProc(12, {"ORCHD_WORKTREE": self.worktree}, user=None,
+                                born=self.born + 1, denied=denied)
+                proc.terminate = MagicMock()
+                proc.kill = MagicMock()
+                with self.assertRaisesRegex(RuntimeError, "cannot inspect process 12"):
+                    self.scan([proc])
+                proc.terminate.assert_not_called()
+                proc.kill.assert_not_called()
+
+    def test_unknown_owner_predating_worktree_is_skipped(self):
+        proc = FakeProc(13, user=None, born=self.born - 1, denied=True)
+        self.assertEqual(self.scan([proc]), {})
+
+    def test_unknown_owner_with_readable_unrelated_mark_is_skipped(self):
+        proc = FakeProc(14, {"ORCHD_WORKTREE": "another"}, user=None, born=self.born + 1)
+        self.assertEqual(self.scan([proc]), {})
 
     def test_unreadable_helper_older_than_the_worktree_is_skipped(self):
         ctfmon = FakeProc(20, born=self.born - 60, denied=True)
