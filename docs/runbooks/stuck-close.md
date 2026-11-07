@@ -12,8 +12,9 @@ Each row has the task, its worktree, the last error and the next step. Closing a
 
 ## What close does now
 
-- A worker pid that no longer exists counts as stopped. Only "no such process" counts as gone: a pid orchd may not
-  inspect (permission denied, unreadable environment) is *unknown*, and unknown blocks the close (`close pending`).
+- A missing worker PID or a zombie has already stopped. On Linux, the systemd user manager and its PAM helper can
+  also have unreadable environments. When orchd verifies their identities, the scan leaves them running and continues.
+  An unreadable process whose ownership remains unknown still blocks close (`close pending`).
 - A Codex turn is signalled only when orchd can prove it is this task's: the pid, birth time, group and worktree
   recorded when orchd started the turn must match, or (older turns) the process must carry this task's `ORCHD_WORKTREE` mark and
   lead its own group. A command line that merely mentions `codex` and a path proves nothing. Only the verified turn
