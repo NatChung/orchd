@@ -67,3 +67,44 @@ class BackgroundOptionsTests(unittest.TestCase):
             Runtime().open_app_viewer('db', task)
         self.assertEqual(popen.call_args.kwargs['creationflags'], subprocess.CREATE_NEW_CONSOLE)
         self.assertEqual(popen.call_args.args[0][-4:], ['viewer', 'db', 'task', 'gen'])
+
+
+class WindowsForegroundViewerTests(unittest.TestCase):
+    """Orch / Claude / Codex viewers must not shell out to macOS `open -na Ghostty.app` on Windows."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.exe = str(Path(self.tmp.name) / 'claude.exe')
+        Path(self.exe).write_text('')
+        self.rt = Runtime.__new__(Runtime)
+        self.rt.claude = self.rt.codex = self.exe
+        self.rt.run = MagicMock(side_effect=AssertionError('posix viewer path used on Windows'))
+
+    def _open(self, call, wt):
+        with patch('orchd.runtime.os.name', 'nt'), \
+             patch('orchd.runtime.shutil.which', side_effect=lambda name: wt if name == 'wt.exe' else None), \
+             patch('orchd.runtime.subprocess.Popen') as popen, \
+             patch('orchd.runtime.subprocess.CREATE_NEW_CONSOLE', 0x10, create=True):
+            call()
+        return popen
+
+    def test_claude_attach_viewer_opens_windows_terminal(self):
+        popen = self._open(lambda: self.rt.open_viewer('job-1'), 'wt.exe')
+        self.assertEqual(popen.call_args.args[0], ['wt.exe', '-w', 'new', self.exe, 'attach', 'job-1'])
+
+    def test_claude_attach_viewer_falls_back_to_new_console(self):
+        popen = self._open(lambda: self.rt.open_viewer('job-1'), None)
+        self.assertEqual(popen.call_args.args[0], [self.exe, 'attach', 'job-1'])
+        self.assertEqual(popen.call_args.kwargs['creationflags'], 0x10)
+
+    def test_codex_resume_viewer_opens_in_worktree(self):
+        popen = self._open(lambda: self.rt.open_codex_viewer(self.tmp.name, 'thread-1'), 'wt.exe')
+        self.assertEqual(popen.call_args.args[0],
+                         ['wt.exe', '-w', 'new', '-d', self.tmp.name, self.exe, 'resume', 'thread-1'])
+        self.assertEqual(popen.call_args.kwargs['cwd'], self.tmp.name)
+
+    def test_missing_viewer_program_names_the_binary(self):
+        self.rt.claude = str(Path(self.tmp.name) / 'missing' / 'claude.exe')
+        with self.assertRaisesRegex(FileNotFoundError, 'claude.exe'):
+            self._open(lambda: self.rt.open_viewer('job-1'), 'wt.exe')

@@ -191,6 +191,19 @@ def _bin(name, env_var, *, home=None, env=None, which=None):
     return str(fallback)
 
 
+def open_windows_terminal(command, *, cwd=None, env=None):
+    """Open `command` in a new visible window: Windows Terminal when installed, else a new console.
+    Closing the window ends only this viewer process, never the worker it attaches to."""
+    if not Path(command[0]).is_file() and not shutil.which(command[0]):
+        raise FileNotFoundError(f"viewer program not found: {command[0]}")
+    terminal = shutil.which("wt.exe")
+    if terminal:
+        args = [terminal, "-w", "new"] + (["-d", str(cwd)] if cwd else [])
+        subprocess.Popen([*args, *command], cwd=cwd, env=env)
+    else:
+        subprocess.Popen(command, cwd=cwd, env=env, creationflags=subprocess.CREATE_NEW_CONSOLE)
+
+
 class UDSWriteUncertain(OSError):
     """A frame write failed; the peer may have received some or all of it."""
 
@@ -1010,12 +1023,7 @@ class Runtime:
             env["PYTHONPATH"] = package_root + os.pathsep + env.get("PYTHONPATH", "")
             command = [sys.executable, "-P", "-m", "orchd.app_worker", "viewer",
                        database, task["id"], task["generation"]]
-            terminal = shutil.which("wt.exe")
-            if terminal:
-                subprocess.Popen([terminal, "-w", "new", *command], cwd=task["worktree"], env=env)
-            else:
-                subprocess.Popen(command, cwd=task["worktree"], env=env,
-                                 creationflags=subprocess.CREATE_NEW_CONSOLE)
+            open_windows_terminal(command, cwd=task["worktree"], env=env)
             return
         self.run(["open", "-na", "Ghostty.app", "--args", f"--working-directory={task['worktree']}", "-e",
                   "/usr/bin/env", f"PYTHONPATH={package_root}", sys.executable, "-P", "-m", "orchd.app_worker",
@@ -1023,6 +1031,9 @@ class Runtime:
                  timeout=30, env=worker_env(task["worktree"]))
 
     def open_codex_viewer(self, worktree, thread):
+        if os.name == "nt":
+            open_windows_terminal([self.codex, "resume", thread], cwd=worktree)
+            return
         self.run(["open", "-na", "Ghostty.app", "--args", f"--working-directory={worktree}", "-e",
                   self.codex, "resume", thread], timeout=30)
 
@@ -1031,4 +1042,7 @@ class Runtime:
         self.run([codex_bin, "queue", "--thread", thread, "--message", text], timeout=60)
 
     def open_viewer(self, job):
+        if os.name == "nt":
+            open_windows_terminal([self.claude, "attach", job])
+            return
         self.run(["open", "-na", "Ghostty.app", "--args", "-e", self.claude, "attach", job], timeout=30)
