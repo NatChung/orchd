@@ -21,6 +21,7 @@ from pathlib import Path
 import psutil
 
 from . import paths
+from .platform_process import detached_options
 from .models import WorkerModels
 from .processes import environ_of, cleanup_processes, task_processes
 
@@ -196,7 +197,8 @@ class Runtime:
     # -- process plumbing (tests override these) --------------------------------
     def run(self, cmd, cwd=None, timeout=60, check=True, env=None):
         return subprocess.run(cmd, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
-                              text=True, encoding='utf-8', errors='replace', timeout=timeout, check=check, env=env)
+                              text=True, encoding='utf-8', errors='replace', timeout=timeout, check=check, env=env,
+                              **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))
 
     def send_uds(self, path, session_id, text):
         frame = {"type": "user", "session_id": session_id, "uuid": str(uuid.uuid4()),
@@ -235,7 +237,7 @@ class Runtime:
         """Start a detached process that outlives us, stdout+stderr appended to `log`; return its pid."""
         with open(log, "a") as out:
             pid = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
-                                   env=worker_env(cwd), start_new_session=True).pid
+                                   env=worker_env(cwd), **detached_options()).pid
         self._record_identity(pid, worktree=cwd)
         return pid
 
@@ -305,7 +307,7 @@ class Runtime:
             return subprocess.Popen([sys.executable, paths.orchd_executable(), '_auto-retry', task_id,
                                      str(event_id), '--database', str(database)],
                                     cwd=directory, env=env, stdin=subprocess.DEVNULL,
-                                    stdout=out, stderr=subprocess.STDOUT, start_new_session=True).pid
+                                    stdout=out, stderr=subprocess.STDOUT, **detached_options()).pid
 
     # -- repos and worktrees ----------------------------------------------------
     def repo_path(self, repo):
@@ -996,6 +998,18 @@ class Runtime:
     def open_app_viewer(self, database, task):
         # Ghostty does not inherit PYTHONPATH; -P excludes the worktree package.
         package_root = str(Path(__file__).resolve().parents[1])
+        if os.name == "nt":
+            env = worker_env(task["worktree"])
+            env["PYTHONPATH"] = package_root + os.pathsep + env.get("PYTHONPATH", "")
+            command = [sys.executable, "-P", "-m", "orchd.app_worker", "viewer",
+                       database, task["id"], task["generation"]]
+            terminal = shutil.which("wt.exe")
+            if terminal:
+                subprocess.Popen([terminal, "-w", "new", *command], cwd=task["worktree"], env=env)
+            else:
+                subprocess.Popen(command, cwd=task["worktree"], env=env,
+                                 creationflags=subprocess.CREATE_NEW_CONSOLE)
+            return
         self.run(["open", "-na", "Ghostty.app", "--args", f"--working-directory={task['worktree']}", "-e",
                   "/usr/bin/env", f"PYTHONPATH={package_root}", sys.executable, "-P", "-m", "orchd.app_worker",
                   "viewer", database, task["id"], task["generation"]],

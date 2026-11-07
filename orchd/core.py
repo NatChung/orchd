@@ -1312,7 +1312,7 @@ def view(con, rt, task_id):
             raise ValueError("app-server worker unavailable; inspect health before viewing")
         database = con.execute("PRAGMA database_list").fetchone()[2]
         rt.open_app_viewer(database, task)
-        return f"opened Ghostty: remote Codex thread {task['session_id']} (new window)"
+        return f"opened {'terminal' if os.name == 'nt' else 'Ghostty'}: remote Codex thread {task['session_id']} (new window)"
     if not task["job_id"]:
         raise ValueError(f"task {task_id} has no worker")
     if worker_kind(task["model"]) == "codex":
