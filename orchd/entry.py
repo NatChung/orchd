@@ -1021,7 +1021,7 @@ def codex_trusted(home):
         return None
     cfg = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "config.toml"
     try:
-        projects = tomllib.loads(cfg.read_text()).get("projects") or {}
+        projects = tomllib.loads(cfg.read_text(encoding="utf-8")).get("projects") or {}
     except FileNotFoundError:
         return False
     except (OSError, ValueError):

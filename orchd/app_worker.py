@@ -185,7 +185,7 @@ def start(con, rt, task, prompt, model, pending=(), brief=None):
     make_private(directory)
     database = con.execute('PRAGMA database_list').fetchone()[2]
     spec = dict(prompt=prompt, model=model, brief=brief, pending=[r['id'] for r in pending])
-    (directory/'start.json').write_text(json.dumps(spec))
+    (directory/'start.json').write_text(json.dumps(spec), encoding='utf-8')
     (directory/'start.json').chmod(0o600)
     store.update_task(con, task['id'], backend=BACKEND, generation=generation,
                       endpoint=str(directory/'app.sock'), control_endpoint=str(directory/'control.sock'),
@@ -215,7 +215,7 @@ def start(con, rt, task, prompt, model, pending=(), brief=None):
             if child.poll() is not None:
                 break
             time.sleep(.05)
-        reason = (directory/'supervisor.log').read_text()[-1200:].strip()
+        reason = (directory/'supervisor.log').read_text(encoding='utf-8', errors='replace')[-1200:].strip()
         if not reason:
             reason = (f'supervisor exited with code {child.returncode}' if child.poll() is not None
                       else 'supervisor did not become ready within 35 seconds')
@@ -540,7 +540,7 @@ class Supervisor:
         task = self.task()
         validate(task)
         directory=Path(task['endpoint']).parent
-        spec=json.loads((directory/'start.json').read_text())
+        spec=json.loads((directory/'start.json').read_text(encoding='utf-8'))
         (directory/'start.json').unlink()
         signal.signal(signal.SIGTERM,lambda *_:setattr(self,'stopping',True))
         signal.signal(signal.SIGINT,lambda *_:setattr(self,'stopping',True))

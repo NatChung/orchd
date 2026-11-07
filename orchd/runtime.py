@@ -277,7 +277,7 @@ class Runtime:
                                      worktree=str(Path(worktree).resolve()) if worktree else None))
             path = self._identity_file(pid)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(record)
+            path.write_text(record, encoding="utf-8")
             cutoff = time.time() - 14 * 86400
             for old in path.parent.glob("*.json"):
                 if (old != path and re.fullmatch(r"[0-9]+\.json", old.name)
@@ -654,7 +654,7 @@ class Runtime:
         mcp.write_text(json.dumps({"mcpServers": {"orchd": {
             "command": executable, "args": [*args, "mcp"], "env": mcp_env(orch_id)}}}), encoding="utf-8")
         try:
-            agents = (orch_home / "AGENTS.md").read_text()
+            agents = (orch_home / "AGENTS.md").read_text(encoding="utf-8")
         except OSError:
             agents = ""
         prompt = (f"You are an orchd Orch. Your orch id is {orch_id}. "
@@ -731,7 +731,7 @@ class Runtime:
         if not files:
             return None
         seen = {}
-        for line in files[0].read_text(errors="replace").splitlines():
+        for line in files[0].read_text(encoding="utf-8", errors="replace").splitlines():
             try:
                 entry = json.loads(line)
             except ValueError:
@@ -791,7 +791,7 @@ class Runtime:
 
     def _read_identity(self, pid):
         try:
-            record = json.loads(self._identity_file(pid).read_text())
+            record = json.loads(self._identity_file(pid).read_text(encoding="utf-8"))
             return record if isinstance(record, dict) and record.get("pid") == int(pid) else None
         except (OSError, ValueError, TypeError):
             return None
@@ -903,7 +903,7 @@ class Runtime:
         pid = self.spawn(self.codex_turn([self.codex, "exec", *CODEX_FLAGS, "-m", model, "-C", worktree, prompt], log),
                          worktree, log)
         for _ in range(150):
-            for line in Path(log).read_text(errors="replace").splitlines() if self.exists(log) else []:
+            for line in Path(log).read_text(encoding="utf-8", errors="replace").splitlines() if self.exists(log) else []:
                 try:
                     event = json.loads(line)
                 except ValueError:
@@ -917,7 +917,7 @@ class Runtime:
             self.stop_codex(pid, (worktree,))
         finally:
             cleanup_processes(worktree, task_processes(worktree))
-        raise RuntimeError("codex exec started no thread: " + Path(log).read_text(errors="replace")[-500:]
+        raise RuntimeError("codex exec started no thread: " + Path(log).read_text(encoding="utf-8", errors="replace")[-500:]
                            if self.exists(log) else "codex exec wrote no log")
 
     def resume_codex_worker(self, worktree, log, thread, text, model):
@@ -940,7 +940,7 @@ class Runtime:
         if not files:
             return None
         total, turns = None, 0
-        for line in files[0].read_text(errors="replace").splitlines():
+        for line in files[0].read_text(encoding="utf-8", errors="replace").splitlines():
             try:
                 payload = json.loads(line).get("payload") or {}
             except (ValueError, AttributeError):
