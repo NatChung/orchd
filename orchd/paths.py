@@ -92,6 +92,11 @@ def orchd_executable(env=None):
     checkout = Path(__file__).resolve().parents[1] / "bin" / "orchd"
     if checkout.is_file():
         return str(checkout)
+    if os.name == "nt":
+        from .upgrade import stable_executable
+        stable = stable_executable()
+        if stable is not None:
+            return str(stable)
     for name in (("orchd.exe", "orchd") if os.name == "nt" else ("orchd",)):
         sibling = Path(sys.executable).parent / name
         if sibling.is_file():
