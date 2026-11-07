@@ -9,6 +9,8 @@ import socket
 import threading
 import time
 
+from . import unix_socket
+
 
 class RPCError(RuntimeError):
     def __init__(self, error):
@@ -20,10 +22,9 @@ class RPC:
     def __init__(self, endpoint):
         import websocket
         self.websocket = websocket
-        peer = socket.socket(socket.AF_UNIX)
-        peer.settimeout(10)
+        peer = unix_socket.create()
         try:
-            peer.connect(endpoint)
+            unix_socket.connect(peer, endpoint, timeout=10)
             self.ws = websocket.create_connection('ws://localhost/', socket=peer, timeout=1,
                                                    enable_multithread=True)
         except Exception:

@@ -11,12 +11,11 @@ multi_agent = false
 
 [permissions.orch.filesystem]
 ":minimal" = "read"
-"$HOME" = "deny"
-"$HOME/.local/bin" = "read"
-"$HOME/.codex/packages/standalone" = "read"
-"/opt/homebrew" = "read"
-$EXTRA_READ"$ORCH_HOME" = "write"
-"$ORCH_HOME/.codex" = "read"
+$HOME_PATH = "deny"
+$LOCAL_BIN_PATH = "read"
+$CODEX_STANDALONE_PATH = "read"
+$PLATFORM_READS$EXTRA_READ$ORCH_HOME_PATH = "write"
+$ORCH_CONFIG_PATH = "read"
 
 [permissions.orch.network]
 enabled = false
@@ -26,3 +25,4 @@ command = $ORCHD_COMMAND
 args = [${ORCHD_LEAD}"mcp"]
 startup_timeout_sec = 30
 tool_timeout_sec = 180
+$WINDOWS_SANDBOX

@@ -6,10 +6,10 @@ orchd manages tasks across AI coding agents. An **Orch** breaks down work and di
 
 ## Requirements
 
-- macOS, Python 3.11+, Git, and [uv](https://docs.astral.sh/uv/).
+- macOS or native Windows, Python 3.11+, Git, and [uv](https://docs.astral.sh/uv/).
 - [Claude Code](https://claude.com/claude-code), signed in and able to run background sessions. The current transport uses `--bg` and an experimental messaging socket; CLI updates can affect compatibility.
 - [Codex CLI](https://github.com/openai/codex), signed in when using Codex workers. Codex Desktop is an optional conversation entry point.
-- tmux for background sessions. Ghostty is optional for attach/viewer windows. GitHub CLI is optional for issue tracking and account routing.
+- tmux for POSIX exec background sessions. Native Windows uses the Codex app-server worker backend. Ghostty is optional for macOS attach/viewer windows. GitHub CLI is optional for issue tracking and account routing.
 - Python dependencies include psutil and websocket-client. New sol workers default to app-server for native TUI attach while busy or idle. Explicit `backend=exec` remains available; sonnet and existing workers are unchanged.
 
 Sign in through each provider's CLI and accept the trust prompts for your projects and Orch home. Credentials stay in the providers' local login settings.
@@ -30,7 +30,43 @@ On the first terminal run, if no projects directory is configured or detected, `
 orchd upgrade
 ```
 
-Upgrade reads the source recorded by uv and installs the latest commit on that source's default branch. It drops branch pins, preserves task data and personal settings, then runs versioned home-rule migrations with backups. See [home migration behavior](docs/upgrade-migrations.md) for managed blocks, previews, retries, and the first upgrade from a legacy version. Existing sessions and MCP processes can keep the old code; start new sessions when convenient. Upgrade does not restart the daemon. Update checkout installations in their own checkout.
+Upgrade reads the source recorded by uv. On POSIX it follows that source's default branch and drops branch pins. On Windows it retains the recorded source and revision. It preserves task data and personal settings, then runs versioned home-rule migrations with backups. See [home migration behavior](docs/upgrade-migrations.md) for managed blocks, previews, retries, and the first upgrade from a legacy version. Existing sessions and MCP processes can keep the old code; start new sessions when convenient. Upgrade does not restart the daemon. Update checkout installations in their own checkout.
+
+## Native Windows and PowerShell
+
+Install uv and Git, then install and sign in to the provider CLIs listed above. Use a PowerShell terminal for these commands:
+
+```powershell
+# From a checkout containing the Windows upgrade fix:
+.\scripts\install-windows.ps1 -Source (Get-Location).Path
+uv tool update-shell
+# Open a new PowerShell terminal after updating PATH.
+orchd --help
+orchd init
+orchd config set projects-dir "$HOME\projects"
+orchd binding
+```
+
+The script also migrates an older uv installation: it installs into a **new** directory and exposes the launcher at the usual uv bin path. Keep the old directories; a running Desktop chat can still import modules from them. Do not run an in-place `uv tool install --force` or `uv tool upgrade orchd` against an installation used by a live chat.
+
+For subsequent updates, run `orchd upgrade`. If you installed from a checkout, update that checkout first; for a Git install, pass a reviewed `git+https://…/orchd.git@branch` as `-Source` to track the branch. An exact Git commit stays pinned. New commands use the updated installation; an already running MCP process can finish on its original version. No Desktop restart or new chat is required.
+
+Each project is a Git repository under the configured projects directory. After binding an Orch, dispatch a Codex worker and read its reports directly from PowerShell:
+
+```powershell
+orchd dispatch --repo example-repo --model terra --backend app-server `
+  --title "Read the README" --instructions "Read README.md and report its first heading." `
+  --done-when "The first heading is included in the report." `
+  --model-reason "Read-only repository check" --task-type investigation
+orchd list
+orchd inbox
+```
+
+Dispatch returns a `task_id`. `inbox` reads and acknowledges the owning Orch's unread worker messages, so save any report you need. A standalone terminal uses the Desktop binding, or accepts `--orch-id` for an explicitly selected registered Orch. It reports an error if no owner can be selected.
+
+For a Codex Desktop conversation, open the actual `$HOME\orch\interface` folder as a project and start the chat from that project. Its `.codex\config.toml` specifies `gpt-6.1-terra`, the `interface` permission profile, read-only access, disabled shell tools, and no network. Permission profiles are resolved in project context, so the host-wide picker may omit `interface`. Verify that the project configuration is loaded and request the bound Orch's status. Changing the global default permission profile is unnecessary. Reopen the chat after configuration changes. See [the entry setup](docs/entry.md) for managed instruction updates.
+
+Windows attachment copying currently reports `unsupported_platform`. Ghostty/macOS viewer integration and the POSIX exec-worker transport remain platform-specific. Claude background sessions still depend on the installed CLI's experimental messaging transport. Some Codex Windows sandbox versions reject restricted child-process reads with an effective `:root` read-access error. The MCP-only interface keeps its restricted policy and supplies its instructions through project TOML so it can start without that document-read operation.
 
 ## Migrating from the private repository
 

@@ -16,6 +16,19 @@ orchd binding      # 沿用已綁定且在線的 Claude Orch；沒有就開一�
 且 `relay`／`status` 預先核准（`approval_policy = "never"` 下沒核准的 MCP 工具會被直接擋掉）。
 已存在且內容不同的檔案不會被覆蓋。
 
+原生 Windows 的入口仍使用同一份專案權限和模型設定。`orchd init` 會將 Windows 路徑正確轉義，
+選用 `[windows] sandbox = "elevated"`，並以 `project_doc_max_bytes = 0` 關閉啟動時的 AGENTS.md 探索。
+這是為了讓只需 MCP 的入口可以在拒絕受限讀取的 Windows sandbox backend 上啟動，保留 `:minimal`、家目錄 deny、
+唯讀入口與無網路限制。入口指示改由 TOML 中標示 `# orchd:interface-instructions` 的 `developer_instructions` 提供。
+`AGENTS.md` 仍是這段指示的來源。編輯入口的 `AGENTS.md` 後再跑 `orchd init`，會備份並只同步這個受管理欄位，
+保留 TOML 的模型、權限及其他自訂設定，再重開入口對話。升級的 managed-rules migration 也會同步這個欄位。
+若舊 TOML 沒有這個標記，先備份、移開該 TOML 再跑 init 重新產生，核對自己的設定後套回。
+請勿直接編輯受管理的 `developer_instructions`，以免下次同步被 AGENTS.md 的內容取代。
+
+Windows 的安全圖片複製尚未提供，附件會明確回報 `unsupported_platform`，文字入口仍可使用。
+部分 Codex Windows 版本拒絕執行受限讀取的子程序，會回報需要 `:root` read access。
+入口設定會維持受限權限，這類執行要求失敗時不會自動擴大到整台電腦可讀。
+
 新增 foreground 後，既有入口需要重新產生 `~/orch/interface/.codex/config.toml` 與 `~/orch/interface/AGENTS.md`：
 先將這兩個檔案移到備份位置，再用新版程式跑 `orchd init`，核對輸出為 created，必要時重新套用自己的修改，
 然後重開 Desktop 入口對話以載入新設定。自訂 interface 路徑時用相應路徑。
@@ -23,6 +36,16 @@ orchd binding      # 沿用已綁定且在線的 Claude Orch；沒有就開一�
 單獨再跑 init 也會保留舊的不同內容。此變更未升級、重啟或改動任何 live 入口。
 
 1. 在 Desktop 打開 `~/orch/interface`，權限選 **`interface`**（init 寫好的權限設定），不要用完整存取權。
+
+   Windows 的選單若沒有專案層級的 `interface`，可以從 PowerShell 建立一個使用專案權限的聊天，再在桌面續聊：
+
+   ```powershell
+   $turn = codex exec --json --skip-git-repo-check -C "$HOME\orch\interface" "查詢綁定的 Orch 狀態。" |
+     ForEach-Object { $_ | ConvertFrom-Json } | Where-Object type -eq 'thread.started'
+   if ($LASTEXITCODE -eq 0 -and $turn.thread_id) { Start-Process ("codex://threads/" + $turn.thread_id) }
+   ```
+
+   保留專案內的 `default_permissions = "interface"`。將這個 profile 單獨複製進使用者設定，可能使一般聊天因缺少全域 `default_permissions` 而無法啟動。
 2. 綁定的 Orch 閒置被 Claude 收掉時，送訊息或跑 `orchd binding` 會原地接回同一個 Orch（#72）。
    用 `orchd orch stop` 停掉、或接回失敗時不會自己替換；確定要換用 `orchd binding --new`（舊 Orch 的未答問題留在舊 Orch）。
    綁到指定的 Orch 用 `orchd binding --to <orch_id>`，`orchd binding --status` 唯讀查看。

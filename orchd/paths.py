@@ -32,6 +32,8 @@ def computer_use_home(home=None, env=None):
 
 def orch_images(home=None):
     """Claude's already-readable image tree for this Orch cwd (not a new permission)."""
+    if os.name == "nt":
+        raise ValueError("secure attachment copying is not supported on Windows")
     cwd = Path(home or orch_home()).resolve()
     key = re.sub(r"[^a-zA-Z0-9]", "-", str(cwd))
     if len(key) > 200:
@@ -90,9 +92,15 @@ def orchd_executable(env=None):
     checkout = Path(__file__).resolve().parents[1] / "bin" / "orchd"
     if checkout.is_file():
         return str(checkout)
-    sibling = Path(sys.executable).parent / "orchd"
-    if sibling.is_file():
-        return str(sibling)
+    if os.name == "nt":
+        from .upgrade import stable_executable
+        stable = stable_executable()
+        if stable is not None:
+            return str(stable)
+    for name in (("orchd.exe", "orchd") if os.name == "nt" else ("orchd",)):
+        sibling = Path(sys.executable).parent / name
+        if sibling.is_file():
+            return str(sibling)
     found = shutil.which("orchd")
     if found:
         return found

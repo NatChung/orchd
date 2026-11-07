@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from . import store
+from .file_lock import try_lock
 
 # Observations are refreshed in the background every BACKGROUND_PERIOD seconds, so TTL must outlast a
 # period plus probe latency (3x margin); the 7-day windows move slowly, so this stays accurate enough.
@@ -170,12 +171,11 @@ def refresh(cache, *, rpc=None, sessions=None, now=None, force=False, thread=Non
     rpc must be an already initialized, authorized app-server connection. A
     bounded tail of the 20 most recently modified sessions is the fallback.
     """
-    import fcntl
     now = time.time() if now is None else now
     cache.path.parent.mkdir(parents=True, exist_ok=True)
     with open(cache.path.with_suffix('.lock'), 'a+') as lock:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try_lock(lock)
         except BlockingIOError:
             return
         lock.seek(0)
@@ -446,13 +446,12 @@ def refresh_background(cache, *, now=None, binary=None, claude=None):
     app-server only if that leaves it unknown; sonnet uses the bounded /usage
     probe. Failures are tolerated, never raised.
     """
-    import fcntl
     now = time.time() if now is None else now
     try:
         cache.path.parent.mkdir(parents=True, exist_ok=True)
         with open(cache.path.with_suffix('.periodic.lock'), 'a+') as lock:
             try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                try_lock(lock)
             except BlockingIOError:
                 return False
             lock.seek(0)

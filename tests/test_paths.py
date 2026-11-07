@@ -30,9 +30,10 @@ class ProjectPathsTest(unittest.TestCase):
                          self.home / 'GitProjects')
 
     def test_config_root_override_and_absolute_projects(self):
-        self.config.write_text('projects_dir = "/somewhere/Git Projects"\n')
+        root = self.home / 'Git Projects'
+        self.config.write_text(f'projects_dir = "{root.as_posix()}"\n')
         self.assertEqual(paths.projects_dir(self.home, {'ORCHD_CONFIG_DIR': str(self.config.parent)}),
-                         Path('/somewhere/Git Projects'))
+                         root)
 
     def test_bad_config_fails_doctor_without_crashing_or_silent_fallback(self):
         for value in ('projects_dir = [', 'projects_dir = 7', 'projects_dir = ""',
@@ -48,7 +49,7 @@ class ProjectPathsTest(unittest.TestCase):
     def test_doctor_dispatch_and_claude_mcp_use_same_config_from_any_cwd(self):
         root = self.home / 'Git Projects'
         (root / 'demo' / '.git').mkdir(parents=True)
-        self.config.write_text(f'projects_dir = "{root}"\n')
+        self.config.write_text(f'projects_dir = "{root.as_posix()}"\n')
         with mock.patch.dict(os.environ, {}, clear=True), mock.patch.object(Path, 'home', return_value=self.home):
             d = doctor.Doctor()
             rt = runtime.Runtime()
@@ -86,7 +87,9 @@ class OrchdCommandTest(unittest.TestCase):
     def test_worker_cli_hook_and_codex_turn_use_the_interpreter(self):
         exe = self.script('#!/usr/bin/env python3')
         with mock.patch.dict(os.environ, {'ORCHD_EXECUTABLE': exe}):
-            self.assertTrue(core.worker_cli().startswith(shlex.join([sys.executable, exe])))
+            expected = ("& " + " ".join("'" + arg.replace("'", "''") + "'" for arg in (sys.executable, exe))
+                        if os.name == "nt" else shlex.join([sys.executable, exe]))
+            self.assertIn(expected, core.worker_cli())
             turn = runtime.Runtime().codex_turn(['codex'], '/l/orchd-abc123/codex.jsonl')
             self.assertIn(shlex.join([sys.executable, exe]) + ' flush', turn[2])
             self.assertIn(shlex.join([sys.executable, exe]) + ' quota', turn[2])

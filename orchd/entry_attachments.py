@@ -6,7 +6,6 @@ All filesystem operations below use directory descriptors rather than following
 user-controlled source/destination symlinks. No scheduler or permission is added.
 """
 import contextlib
-import fcntl
 import functools
 import hashlib
 import json
@@ -22,13 +21,16 @@ from pathlib import Path
 
 from . import paths
 
+if os.name != "nt":
+    import fcntl
+
 MAX_BYTES = 20 * 1024 * 1024
 MAX_IMAGES = 10
 TTL = 7 * 24 * 60 * 60
 CLEAN_INTERVAL = 60 * 60
 MANIFEST_LIMIT = 64 * 1024
-DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-FILE_FLAGS = os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW
+DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+FILE_FLAGS = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
 SLOT = re.compile(r"[0-9]{2}\.[a-z0-9]{1,10}")
 COMPONENT = re.compile(r"[A-Za-z0-9_-]{1,64}")
 SOURCE_ERRORS = {"unsafe_source", "too_large", "source_outside_allowlist", "source_path_changed",
@@ -162,6 +164,10 @@ def _private_file(parent, name, flags):
 
 @contextlib.contextmanager
 def _cache(create=False):
+    if os.name == "nt":
+        # The POSIX cache relies on descriptor-relative opens, uid checks and
+        # O_NOFOLLOW. Do not silently replace those with path-based Windows I/O.
+        raise ValueError("unsupported_platform")
     image_root = paths.orch_images()
     fd = _walk(image_root.parent.parent)
     try:
@@ -343,6 +349,8 @@ def cleanup():
 
 def capture(entry_id, message_id, sources):
     """Called under relay's SQLite write transaction, before any notification."""
+    if os.name == "nt":
+        return "unsupported_platform" if sources else None
     try:
         with _cache(create=True) as (root, _):
             _cleanup(root, time.time())
@@ -375,6 +383,9 @@ def capture(entry_id, message_id, sources):
 
 def describe(entry_id, message_id, sources):
     """No source copying here: missing/expired cache requires Operator to reattach."""
+    if os.name == "nt":
+        return ([dict(source_path=source, status="unavailable", error="unsupported_platform")
+                 for source in sources[:MAX_IMAGES]], max(0, len(sources) - MAX_IMAGES))
     items, omitted = [], max(0, len(sources) - MAX_IMAGES)
     try:
         with _cache() as (root, base), _message(root, entry_id, message_id) as fd:

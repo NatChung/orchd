@@ -80,7 +80,7 @@ def updated(original, template):
     if end < starts[0].end():
         raise ValueError("managed end precedes start; repair the markers before retrying")
     # The newline after the closing marker belongs to the user's outside content.
-    block = template.rstrip(b"\n")
+    block = template.rstrip(b"\r\n")
     return original[:start] + block + original[end + len(END):], False
 
 
@@ -118,6 +118,8 @@ def update_rules(folders, dry_run, lines, backup_root):
         content, appended = updated(original, template)
         if original == content:
             lines.append(f"unchanged: {file}")
+            if role == "interface" and bootstrap.sync_interface_instructions(folder, backup_root / "interface-config", dry_run=dry_run):
+                lines.append(f"{'would update' if dry_run else 'updated'}: managed Windows interface instructions")
             continue
         if appended:
             lines.append(f"{file}: appended managed rules; 原檔已有的相同規則可以手動刪掉。")
@@ -128,6 +130,8 @@ def update_rules(folders, dry_run, lines, backup_root):
             backup = write_file(file, content, backup_root / role)
             lines.append(f"updated: {file}; backup: {backup or 'none (new file)'}")
             lines.append(f"restore: copy {backup} over {file}" if backup else f"restore: remove newly created {file}")
+            if role == "interface" and bootstrap.sync_interface_instructions(folder, backup_root / "interface-config"):
+                lines.append("updated: managed Windows interface instructions")
 
 
 # Append ordered (stable id, idempotent callable) steps for future releases.

@@ -582,6 +582,7 @@ def call(name, args, thread, con, rt, sent=None, *, reply_id=None):
                           goal_critical=args.get("goal_critical"), issue_ref=args.get("issue_ref"),
                           base_branch=args.get("base_branch"))
         return {"task_id": t["id"], "status": t["status"], "branch": t["branch"], "worktree": t["worktree"],
+                "worker_thread_id": t["session_id"], "worker_turn_id": t["active_turn"] or t["last_completed_turn"],
                 "orch_id": thread, "model": t["model"], "model_reason": t['model_reason'],
                 "quota_shadow": json.loads(con.execute(
                     "SELECT body FROM messages WHERE task_id=? AND kind='dispatch' ORDER BY id DESC LIMIT 1",
