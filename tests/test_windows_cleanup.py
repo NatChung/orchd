@@ -100,6 +100,28 @@ class WindowsTaskProcessesTests(unittest.TestCase):
         root.children = lambda: [child]
         self.assertEqual(list(self.scan([root])), [30])
 
+    def test_marked_descendant_of_another_account_is_not_selected(self):
+        root = FakeProc(30, {"ORCHD_WORKTREE": self.worktree}, born=self.born + 1)
+        child = FakeProc(31, {"ORCHD_WORKTREE": self.worktree},
+                         user="someone-else", born=self.born + 1)
+        root.children = lambda: [child]
+        self.assertEqual(list(self.scan([root])), [30])
+
+    def test_marked_descendant_with_unknown_owner_blocks_cleanup_without_signalling(self):
+        root = FakeProc(30, {"ORCHD_WORKTREE": self.worktree}, born=self.born + 1)
+        child = FakeProc(31, {"ORCHD_WORKTREE": self.worktree},
+                         user=None, born=self.born + 1)
+        root.children = lambda: [child]
+        for proc in (root, child):
+            proc.terminate = MagicMock()
+            proc.kill = MagicMock()
+        with patch.object(processes.psutil, "process_iter", return_value=[root]):
+            with self.assertRaisesRegex(RuntimeError, "cannot inspect process 31"):
+                processes.cleanup_processes(self.worktree, {})
+        for proc in (root, child):
+            proc.terminate.assert_not_called()
+            proc.kill.assert_not_called()
+
     def test_worktree_stat_permission_error_is_not_missing(self):
         with patch.object(processes.os, "stat", side_effect=PermissionError("denied")):
             with self.assertRaises(PermissionError):

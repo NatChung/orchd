@@ -115,6 +115,10 @@ def _descendants(proc, mark, found):
         return
     for child in children:
         try:
+            # Lineage and an inherited mark do not authorize signalling another
+            # account. Apply the same owner check as the process-wide scan.
+            if not _owned_by_us(child):
+                continue
             owner = environ_of(child).get("ORCHD_WORKTREE")
             if owner != mark:
                 continue
@@ -124,6 +128,8 @@ def _descendants(proc, mark, found):
                 _descendants(child, mark, found)
         except psutil.NoSuchProcess:
             continue
+        except psutil.AccessDenied:
+            raise RuntimeError(f"cannot inspect process {child.pid}; worktree kept") from None
 
 
 _WINDOWS_USER = None
