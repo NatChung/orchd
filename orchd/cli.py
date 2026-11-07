@@ -12,6 +12,8 @@
                                               bind ~/orch/interface to a live Claude Orch (starts one if none);
                                               --new starts a new one, --to binds a given one, --status only reads
   orchd ack ID                                worker: acknowledge a task
+  orchd dispatch --help                       dispatch a worker from the caller's Orch or the Desktop binding
+  orchd inbox [--orch-id ID]                  read that Orch's worker reports and questions as JSON
   orchd report ID --status done|blocked --summary S [--evidence E]
   orchd progress ID "text"                    worker: interim update to the Orch; the task keeps running
   orchd flush ID [--after-pid PID]            run by a Codex turn's shell when codex exits: send answers queued meanwhile
@@ -42,7 +44,7 @@ import re
 import os
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from orchd import core, store
 from orchd.runtime import DEFAULT_ORCH_MODEL, ORCH_MODELS, Runtime
@@ -78,6 +80,21 @@ def build_parser():
     mcp = sub.add_parser("mcp")
     mcp.add_argument("--role", choices=["orch", "entry"], default="orch")
     mcp.add_argument("--entry", default="desktop", help="entry name (with --role entry)")
+    dispatch = sub.add_parser("dispatch", help="start a worker in a fresh task worktree")
+    for field in ("repo", "title", "instructions", "done-when", "model-reason"):
+        dispatch.add_argument("--" + field, required=True)
+    dispatch.add_argument("--task-type", choices=core.TASK_TYPES, required=True)
+    dispatch.add_argument("--model", help="worker model alias, or auto")
+    dispatch.add_argument("--backend", choices=("exec", "app-server"))
+    dispatch.add_argument("--base-branch")
+    inbox = sub.add_parser("inbox", help="read and acknowledge unread worker messages")
+    inbox.add_argument("--limit", type=int)
+    inbox.add_argument("--message-id", type=int, help="read a full field from a previously listed message")
+    inbox.add_argument("--field", choices=core.INBOX_FIELDS)
+    inbox.add_argument("--offset", type=int)
+    inbox.add_argument("--length", type=int)
+    for command in (dispatch, inbox):
+        command.add_argument("--orch-id", help="registered Orch that owns the task (defaults to caller or Desktop binding)")
     interface = sub.add_parser("interface", help="Shared-Orch adapter CLI; JSON stdin/stdout")
     interface_actions = interface.add_subparsers(dest="interface_action", required=True)
     for action in ("register", "submit", "fetch", "ack", "deregister"):
@@ -520,6 +537,7 @@ HOME_POLICY = {
     **{("intake", a): "warn" for a in ("show", "decisions", "backlog", "pending", "draft-show")},
     **{("check", a): "skip" for a in ("preflight", "pr", "show", "gate")},
     ("task", "link"): "write", ("task", "unlink"): "write",
+    ("dispatch",): "write", ("inbox",): "write",
     ("ack",): "write", ("report",): "write", ("progress",): "write", ("flush",): "write",
     ("watch",): "warn", ("summary",): "warn", ("_auto-retry",): "write", ("ask",): "write", ("verify",): "write", ("close",): "write", ("adopt",): "write",
     ("list",): "warn", ("stuck-close",): "warn", ("stats",): "warn", ("snapshot",): "warn", ("board",): "warn",
@@ -566,6 +584,29 @@ def _check_main(args):
         return 1
     finally:
         con.close()
+
+
+def _caller_orch(con, explicit):
+    owner = explicit or os.environ.get("ORCHD_ORCH_ID")
+    if not owner:
+        owner = os.environ.get("CODEX_THREAD_ID")
+        if owner:
+            store.register_orch(con, owner, "codex")
+        else:
+            row = con.execute("SELECT orch_id FROM entries WHERE id='desktop'").fetchone()
+            if row:
+                owner = row["orch_id"]
+            else:
+                candidates = con.execute("SELECT id FROM orchs WHERE kind='codex' AND stopped_at IS NULL "
+                                         "AND archived_at IS NULL LIMIT 2").fetchall()
+                if len(candidates) == 1:
+                    owner = candidates[0]["id"]
+    if not owner:
+        raise ValueError("select a registered Orch with --orch-id, bind Desktop, or run from a Codex session")
+    row = store.get_orch(con, owner)
+    if row is None:
+        raise ValueError(f"unknown Orch {owner}")
+    return owner
 
 
 def main(argv=None):
@@ -801,8 +842,30 @@ def main(argv=None):
         return 0
     if args.cmd == "mcp":
         from orchd import mcp_server
+        for stream in (sys.stdin, sys.stdout):
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(encoding="utf-8")
         mcp_server.serve(role=args.role, entry_id=args.entry)
         return 0
+    if args.cmd in ("dispatch", "inbox"):
+        import sqlite3
+        import subprocess
+        from orchd import mcp_server
+        con = store.connect()
+        try:
+            owner = _caller_orch(con, args.orch_id)
+            options = {k: v for k, v in vars(args).items() if k not in ("cmd", "orch_id") and v is not None}
+            sent = []
+            result = mcp_server.call(args.cmd, options, owner, con, Runtime(), sent)
+            print(json.dumps(result, indent=2), flush=True)
+            for ids in sent:
+                store.mark_read(con, ids)
+            return 0
+        except (ValueError, RuntimeError, OSError, sqlite3.Error, subprocess.SubprocessError) as error:
+            print(f"orchd {args.cmd}: {error}", file=sys.stderr)
+            return 1
+        finally:
+            con.close()
     if args.cmd == "stats":  # reads a temp copy of the DB: never opens, migrates or creates anything next to the real one
         from orchd import stats
         path = store.home() / "orchd.db"
@@ -994,6 +1057,7 @@ def main(argv=None):
             if match:
                 tokens = re.split(r"[,\s]+", match.group(1).strip())
                 if (tokens[0].startswith("/") and len(tokens[0]) > 1 or
+                        PureWindowsPath(match.group(1).strip()).is_absolute() or
                         tokens[0].lower() == "none" and len(match.group(1).split()) > 1):
                     has_skills = True
                     break
