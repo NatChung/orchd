@@ -58,7 +58,8 @@ class PackageInstallTests(unittest.TestCase):
                 self.assertFalse(cfg["features"][name], name)
             server = cfg["mcp_servers"]["orchd_entry"]
             self.assertEqual(set(server["tools"]), {"status", "relay", "foreground"})
-            self.assertTrue(Path(server["command"]).is_relative_to(root / "tools"))
+            self.assertTrue(Path(server["command"]).resolve().is_relative_to((root / "tools").resolve()),
+                            f"unexpected MCP command {server['command']} for tool root {root}")
             self.assertNotIn(str(source), server["command"])
             if os.name == "nt":
                 self.assertEqual(Path(server["command"]).name, "orchd.exe")

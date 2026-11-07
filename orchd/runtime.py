@@ -319,7 +319,7 @@ class Runtime:
         try:
             config = (Path(os.environ["CLAUDE_CONFIG_DIR"]) / ".claude.json"
                       if os.environ.get("CLAUDE_CONFIG_DIR") else Path.home() / ".claude.json")
-            data = json.loads(config.read_text())
+            data = json.loads(config.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return False
         projects = data.get("projects") or {}
