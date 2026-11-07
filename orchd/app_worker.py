@@ -62,18 +62,12 @@ def stop_identity(raw, grace=2):
         return
     data = json.loads(raw)
     if os.name == 'nt':
-        # Capture descendants before terminating the root; psutil verifies PID birth time.
-        descendants = proc.children(recursive=True)
-        for child in reversed(descendants):
-            try:
-                child.terminate()
-            except psutil.NoSuchProcess:
-                pass
+        # Only the recorded identity is authorized; sweep marked children separately.
         try:
             proc.terminate()
         except psutil.NoSuchProcess:
             pass
-        _, alive = psutil.wait_procs([proc, *descendants], timeout=grace)
+        _, alive = psutil.wait_procs([proc], timeout=grace)
         for child in alive:
             try:
                 child.kill()
@@ -206,9 +200,10 @@ def start(con, rt, task, prompt, model, pending=(), brief=None):
                       turn_state='starting', last_completed_turn=None, session_id=None, socket=None,
                       model=model, job_id=None)
     env = worker_env(task['worktree'])
+    env['PYTHONIOENCODING'] = 'utf-8'
     # Use the launching package; -P excludes the worktree while honoring PYTHONPATH.
     env['PYTHONPATH'] = str(Path(__file__).resolve().parents[1]) + os.pathsep + env.get('PYTHONPATH','')
-    with open(directory/'supervisor.log', 'a') as out:
+    with open(directory/'supervisor.log', 'a', encoding='utf-8') as out:
         child = subprocess.Popen([background_python(), '-P', '-m', 'orchd.app_worker', 'supervise', database,
                                   task['id'], generation], cwd=task['worktree'], env=env,
                                  stdin=subprocess.DEVNULL, stdout=out, stderr=out, **detached_options())

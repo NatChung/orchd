@@ -17,8 +17,7 @@ class TextEncodingTests(unittest.TestCase):
             for node in ast.walk(tree):
                 if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
                         and node.func.attr in ("read_text", "write_text")
-                        and not any(k.arg == "encoding" for k in node.keywords)
-                        and "/proc/" not in ast.unparse(node.func.value)):  # Linux-only kernel files
+                        and not any(k.arg == "encoding" for k in node.keywords)):
                     missing.append(f"{path.relative_to(PACKAGE.parent)}:{node.lineno}")
         self.assertEqual(missing, [])
 

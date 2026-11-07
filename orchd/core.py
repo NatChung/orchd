@@ -1260,6 +1260,10 @@ def _close_locked(con, rt, task_id, outcome, rating):
         if app_worker.enabled(task):
             cleanup = app_worker.stop(con, task)
         elif task["job_id"] or task["worktree"]:
+            if os.name == "nt":
+                for row in con.execute("SELECT identity FROM worker_viewers WHERE task_id=? AND generation=?",
+                                       (task_id, "legacy")):
+                    app_worker.stop_identity(row["identity"])
             cleanup = rt.stop_task_worker(worker_kind(task["model"]), task["job_id"],
                                           (task["worktree"], task["session_id"]))
         step = "worktree check or removal failed"
@@ -1318,9 +1322,15 @@ def view(con, rt, task_id):
     if worker_kind(task["model"]) == "codex":
         if rt.pid_alive(task["job_id"]):
             raise ValueError(f"task {task_id}'s codex worker is in a turn; `orchd watch` shows its progress")
-        rt.open_codex_viewer(task["worktree"], task["session_id"])
+        pid = rt.open_codex_viewer(task["worktree"], task["session_id"])
+        if os.name == "nt" and pid:
+            con.execute("INSERT OR IGNORE INTO worker_viewers VALUES(?,?,?)",
+                        (task_id, "legacy", app_worker.identity(pid)))
         return f"opened Ghostty: codex resume {shlex.quote(task['session_id'])}"
-    rt.open_viewer(task["job_id"], worktree=task["worktree"])
+    pid = rt.open_viewer(task["job_id"], worktree=task["worktree"])
+    if os.name == "nt" and pid:
+        con.execute("INSERT OR IGNORE INTO worker_viewers VALUES(?,?,?)",
+                    (task_id, "legacy", app_worker.identity(pid)))
     return f"opened Ghostty: claude attach {shlex.quote(task['job_id'])}"
 
 

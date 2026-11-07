@@ -191,17 +191,17 @@ def _bin(name, env_var, *, home=None, env=None, which=None):
     return str(fallback)
 
 
-def open_windows_terminal(command, *, cwd=None, env=None):
+def open_windows_terminal(command, *, cwd=None, env=None, tracked=False):
     """Open `command` in a new visible window: Windows Terminal when installed, else a new console.
     Closing the window ends only this viewer process, never the worker it attaches to."""
     if not Path(command[0]).is_file() and not shutil.which(command[0]):
         raise FileNotFoundError(f"viewer program not found: {command[0]}")
     terminal = shutil.which("wt.exe")
-    if terminal:
+    if terminal and not tracked:
         args = [terminal, "-w", "new"] + (["-d", str(cwd)] if cwd else [])
-        subprocess.Popen([*args, *command], cwd=cwd, env=env)
+        return subprocess.Popen([*args, *command], cwd=cwd, env=env).pid
     else:
-        subprocess.Popen(command, cwd=cwd, env=env, creationflags=subprocess.CREATE_NEW_CONSOLE)
+        return subprocess.Popen(command, cwd=cwd, env=env, creationflags=subprocess.CREATE_NEW_CONSOLE).pid
 
 
 class UDSWriteUncertain(OSError):
@@ -1033,8 +1033,7 @@ class Runtime:
     def open_codex_viewer(self, worktree, thread):
         if os.name == "nt":
             # The task mark lets close find this viewer: Windows has no process group to stop it by.
-            open_windows_terminal([self.codex, "resume", thread], cwd=worktree, env=worker_env(worktree))
-            return
+            return open_windows_terminal([self.codex, "resume", thread], cwd=worktree, env=worker_env(worktree), tracked=True)
         self.run(["open", "-na", "Ghostty.app", "--args", f"--working-directory={worktree}", "-e",
                   self.codex, "resume", thread], timeout=30)
 
@@ -1046,7 +1045,6 @@ class Runtime:
         """`worktree` is given for a task's worker (not the Orch): on Windows it marks the viewer so close can
         stop it, as there is no process group to stop it by."""
         if os.name == "nt":
-            open_windows_terminal([self.claude, "attach", job], cwd=worktree,
-                                  env=worker_env(worktree) if worktree else None)
-            return
+            return open_windows_terminal([self.claude, "attach", job], cwd=worktree,
+                                         env=worker_env(worktree) if worktree else None, tracked=bool(worktree))
         self.run(["open", "-na", "Ghostty.app", "--args", "-e", self.claude, "attach", job], timeout=30)

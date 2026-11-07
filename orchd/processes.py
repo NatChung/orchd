@@ -5,6 +5,7 @@ not lose ownership. Never infer ownership from a process name or cwd alone.
 psutil's Process objects retain (pid, create_time) and check reuse on signals.
 """
 import os
+import logging
 import subprocess
 import sys
 import time
@@ -38,7 +39,7 @@ def environ_of(proc, attempts=4, *, exclude_unreadable=None):
 
 def _linux_process_stat(pid):
     # comm may contain spaces and parentheses. Remaining fields begin at state.
-    raw = Path(f"/proc/{pid}/stat").read_text()
+    raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     fields = raw.rsplit(")", 1)[1].split()
     return dict(ppid=int(fields[1]), group=int(fields[2]), session=int(fields[3]),
                 flags=int(fields[6]), start=int(fields[19]))
@@ -93,7 +94,7 @@ def _systemd_user_infrastructure(proc):
         if scope != f"/user.slice/user-{uid}.slice/user@{uid}.service/init.scope":
             return False
         for pid in {proc.pid, manager.pid}:
-            groups = Path(f"/proc/{pid}/cgroup").read_text().splitlines()
+            groups = Path(f"/proc/{pid}/cgroup").read_text(encoding="utf-8").splitlines()
             if not any(line.split(":", 2)[-1] == scope for line in groups):
                 return False
         if proc.pid == manager.pid:
@@ -116,7 +117,7 @@ def _descendants(proc, mark, found):
     for child in children:
         try:
             owner = environ_of(child).get("ORCHD_WORKTREE")
-            if owner and owner != mark:
+            if owner != mark:
                 continue
             child.create_time()
             if child.pid != os.getpid():
@@ -130,8 +131,7 @@ _WINDOWS_USER = None
 
 
 def _owned_by_us(proc):
-    """POSIX compares real uids. Windows has no uids: compare account names; a process whose owner cannot be read
-    belongs to SYSTEM or another account, so it cannot hold this user's task mark."""
+    """Compare real uids or Windows account names; report unknown owners without signalling them."""
     if os.name != "nt":
         return proc.uids().real == os.getuid()
     global _WINDOWS_USER
@@ -140,6 +140,7 @@ def _owned_by_us(proc):
     try:
         return proc.username() == _WINDOWS_USER
     except psutil.AccessDenied:
+        logging.getLogger(__name__).warning("cannot inspect owner of process %s; skipping", proc.pid)
         return False
 
 
@@ -150,7 +151,7 @@ def _predates_worktree(mark):
     removal, and this user could not signal a higher-integrity process anyway, so unreadable ones are skipped."""
     try:
         born = os.stat(mark).st_ctime  # creation time on Windows
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
         return lambda proc: True
     return lambda proc: proc.create_time() < born
 
