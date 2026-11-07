@@ -1032,7 +1032,8 @@ class Runtime:
 
     def open_codex_viewer(self, worktree, thread):
         if os.name == "nt":
-            open_windows_terminal([self.codex, "resume", thread], cwd=worktree)
+            # The task mark lets close find this viewer: Windows has no process group to stop it by.
+            open_windows_terminal([self.codex, "resume", thread], cwd=worktree, env=worker_env(worktree))
             return
         self.run(["open", "-na", "Ghostty.app", "--args", f"--working-directory={worktree}", "-e",
                   self.codex, "resume", thread], timeout=30)
@@ -1041,8 +1042,11 @@ class Runtime:
     def wake_orch(self, codex_bin, thread, text):
         self.run([codex_bin, "queue", "--thread", thread, "--message", text], timeout=60)
 
-    def open_viewer(self, job):
+    def open_viewer(self, job, worktree=None):
+        """`worktree` is given for a task's worker (not the Orch): on Windows it marks the viewer so close can
+        stop it, as there is no process group to stop it by."""
         if os.name == "nt":
-            open_windows_terminal([self.claude, "attach", job])
+            open_windows_terminal([self.claude, "attach", job], cwd=worktree,
+                                  env=worker_env(worktree) if worktree else None)
             return
         self.run(["open", "-na", "Ghostty.app", "--args", "-e", self.claude, "attach", job], timeout=30)

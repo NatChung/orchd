@@ -83,7 +83,8 @@ class WindowsForegroundViewerTests(unittest.TestCase):
         self.rt.run = MagicMock(side_effect=AssertionError('posix viewer path used on Windows'))
 
     def _open(self, call, wt):
-        with patch('orchd.runtime.os.name', 'nt'), \
+        with patch('orchd.runtime.worker_env', side_effect=lambda w: {'ORCHD_WORKTREE': str(Path(w).resolve())}), \
+             patch('orchd.runtime.os.name', 'nt'), \
              patch('orchd.runtime.shutil.which', side_effect=lambda name: wt if name == 'wt.exe' else None), \
              patch('orchd.runtime.subprocess.Popen') as popen, \
              patch('orchd.runtime.subprocess.CREATE_NEW_CONSOLE', 0x10, create=True):
@@ -104,6 +105,18 @@ class WindowsForegroundViewerTests(unittest.TestCase):
         self.assertEqual(popen.call_args.args[0],
                          ['wt.exe', '-w', 'new', '-d', self.tmp.name, self.exe, 'resume', 'thread-1'])
         self.assertEqual(popen.call_args.kwargs['cwd'], self.tmp.name)
+        # close finds Windows viewers only through the task mark
+        self.assertEqual(popen.call_args.kwargs['env']['ORCHD_WORKTREE'], str(Path(self.tmp.name).resolve()))
+
+    def test_claude_task_viewer_carries_the_task_mark(self):
+        popen = self._open(lambda: self.rt.open_viewer('job-1', worktree=self.tmp.name), 'wt.exe')
+        self.assertEqual(popen.call_args.args[0],
+                         ['wt.exe', '-w', 'new', '-d', self.tmp.name, self.exe, 'attach', 'job-1'])
+        self.assertEqual(popen.call_args.kwargs['env']['ORCHD_WORKTREE'], str(Path(self.tmp.name).resolve()))
+
+    def test_orch_viewer_has_no_task_mark(self):
+        popen = self._open(lambda: self.rt.open_viewer('job-1'), 'wt.exe')
+        self.assertIsNone(popen.call_args.kwargs['env'])
 
     def test_missing_viewer_program_names_the_binary(self):
         self.rt.claude = str(Path(self.tmp.name) / 'missing' / 'claude.exe')

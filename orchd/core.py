@@ -1320,7 +1320,7 @@ def view(con, rt, task_id):
             raise ValueError(f"task {task_id}'s codex worker is in a turn; `orchd watch` shows its progress")
         rt.open_codex_viewer(task["worktree"], task["session_id"])
         return f"opened Ghostty: codex resume {shlex.quote(task['session_id'])}"
-    rt.open_viewer(task["job_id"])
+    rt.open_viewer(task["job_id"], worktree=task["worktree"])
     return f"opened Ghostty: claude attach {shlex.quote(task['job_id'])}"
 
 
