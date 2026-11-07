@@ -6,7 +6,7 @@ Every check reports pass / fail / warn / unknown and carries a severity:
   profile   optional example layout; environment overrides select your accounts, SSH aliases and connectors
 
 The Doctor checks never install, log in, trust, or edit config. The CLI may offer
-a separate first-run project setup in a terminal (disabled by --json / --no-input). The only write is a throwaway 0700 temp dir for the
+a separate first-run project setup in a terminal (disabled by --json / --no-input). The only write is a throwaway private temp dir for the
 socket probe, removed in `finally`. Secrets are never read or printed: auth is judged from exit codes and
 status flags, token files only by existence.
 """
@@ -14,14 +14,15 @@ import json
 import os
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import paths
+from . import paths, unix_socket
+from .platform_process import make_private, validate_private
+from .runtime import _bin
 
 try:  # Python 3.11+. Without it TOML cannot be judged: reported unknown, never guessed with regex
     import tomllib
@@ -59,19 +60,16 @@ class Check:
 def default_runner(cmd, timeout=15):
     """Return (returncode, stdout+stderr). Raises FileNotFoundError / PermissionError / OSError /
     subprocess.TimeoutExpired; checks map those to fail or unknown, never to pass."""
-    done = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
+    done = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=timeout)
     return done.returncode, (done.stdout or "") + (done.stderr or "")
-
-
-def _bin(name, env_var, home):
-    return os.environ.get(env_var) or shutil.which(name) or str(Path(home) / ".local/bin" / name)
 
 
 class Doctor:
     """`runner`, `home`, `env`, `projects`, `orch_home`, `data_dir`, `tmp_root` are injectable for tests."""
 
     def __init__(self, runner=default_runner, home=None, env=None, projects=None, orch_home=None,
-                 data_dir=None, tmp_root="/tmp", which=shutil.which, profile=None):
+                 data_dir=None, tmp_root=None, which=shutil.which, profile=None):
         self.runner = runner
         self.home = Path(home) if home else Path.home()
         self.env = os.environ if env is None else env
@@ -83,15 +81,17 @@ class Doctor:
             self._projects_problem = str(exc)
         self.orch_home = Path(orch_home or paths.orch_home(self.home, self.env))
         self.data_dir = Path(data_dir or self.env.get("ORCHD_HOME") or self.home / ".local/share/orchd")
-        self.tmp_root = tmp_root
+        self.tmp_root = tmp_root or (tempfile.gettempdir() if os.name == "nt" else "/tmp")
+        self.claude_severity = OPTIONAL if os.name == "nt" else REQUIRED
+        self.codex_severity = REQUIRED if os.name == "nt" else OPTIONAL
         self.which = which
         self.profile = profile
         self.profile_accounts = tuple(x.strip() for x in self.env.get("ORCHD_PROFILE_GH_ACCOUNTS", ",".join(EXAMPLE_GH_ACCOUNTS)).split(",") if x.strip())
         self.profile_aliases = tuple(x.strip() for x in self.env.get("ORCHD_PROFILE_SSH_ALIASES", ",".join(EXAMPLE_SSH_ALIASES)).split(",") if x.strip())
         self.profile_config = Path(self.env.get("ORCHD_PROFILE_CREDENTIAL_DIR") or self.home / ".config" / "ExampleOrg-ops")
         self.profile_connectors = Path(self.env.get("ORCHD_PROFILE_CONNECTOR_ROOT") or self.projects / "example-assistant" / "connectors")
-        self.claude = self.env.get("ORCHD_CLAUDE") or which("claude") or str(self.home / ".local/bin/claude")
-        self.codex = self.env.get("ORCHD_CODEX") or which("codex") or str(self.home / ".local/bin/codex")
+        self.claude = _bin("claude", "ORCHD_CLAUDE", home=self.home, env=self.env, which=which)
+        self.codex = _bin("codex", "ORCHD_CODEX", home=self.home, env=self.env, which=which)
         self.checks = []
 
     # -- helpers ---------------------------------------------------------------
@@ -134,55 +134,61 @@ class Doctor:
 
     # -- checks ----------------------------------------------------------------
     def check_cli_and_flags(self):
-        self._cli("git", "git", REQUIRED, "Install git (Xcode command line tools).")
-        if self._cli("claude", self.claude, REQUIRED, SETUP_HINTS["claude"]):
+        self._cli("git", "git", REQUIRED, "Install Git and make git available on PATH.")
+        if self._cli("claude", self.claude, self.claude_severity, SETUP_HINTS["claude"]):
             rc, out, err = self._run([self.claude, "--help"])
             if err or rc != 0:
-                self.add("claude --bg", REQUIRED, UNKNOWN, f"`claude --help` {err or f'exited {rc}'}")
-                self.add("claude --messaging-socket-path", REQUIRED, UNKNOWN, "help unavailable")
+                self.add("claude --bg", self.claude_severity, UNKNOWN, f"`claude --help` {err or f'exited {rc}'}")
+                self.add("claude --messaging-socket-path", self.claude_severity, UNKNOWN, "help unavailable")
             else:
-                self.add("claude --bg", REQUIRED, PASS if "--bg" in out else FAIL,
+                self.add("claude --bg", self.claude_severity, PASS if "--bg" in out else FAIL,
                          "listed in --help" if "--bg" in out else "not in `claude --help`: upgrade Claude Code",
                          "" if "--bg" in out else "Upgrade Claude Code.")
                 if "--messaging-socket-path" in out:
-                    self.add("claude --messaging-socket-path", REQUIRED, PASS, "listed in --help")
+                    self.add("claude --messaging-socket-path", self.claude_severity, PASS, "listed in --help")
                 else:  # hidden flag, and the CLI silently accepts unknown flags: cannot be confirmed offline.
                     # Optional so a healthy machine is not reported as unknown forever; `orchd orch start` proves it.
                     self.add("claude --messaging-socket-path", OPTIONAL, UNKNOWN,
                              "hidden flag; not verifiable without starting a session. "
                              "Confirmed only by the pilot task (`orchd orch start`).")
-        self._cli("codex", self.codex, OPTIONAL, "Only needed for Codex workers / Astra: install Codex CLI.")
+        codex = self._cli("codex", self.codex, self.codex_severity, "Install Codex CLI for Codex workers.")
+        if codex and self.codex_severity == REQUIRED:
+            rc, out, err = self._run([self.codex, "app-server", "--help"])
+            status = UNKNOWN if err else PASS if rc == 0 and "--listen" in out else FAIL
+            self.add("Codex app-server listener", REQUIRED, status,
+                     "app-server --help lists --listen" if status == PASS else f"cannot verify --listen ({err or rc})",
+                     "" if status == PASS else "Install a Codex CLI with app-server --listen support.")
 
     def check_auth(self):
         rc, out, err = self._run([self.claude, "auth", "status"])
         if err == "not found":
-            self.add("claude login", REQUIRED, UNKNOWN, "claude CLI missing")
+            self.add("claude login", self.claude_severity, UNKNOWN, "claude CLI missing")
         elif err:
-            self.add("claude login", REQUIRED, UNKNOWN, f"`claude auth status` {err}")
+            self.add("claude login", self.claude_severity, UNKNOWN, f"`claude auth status` {err}")
         else:
             try:
                 logged_in = json.loads(out).get("loggedIn")
             except (ValueError, AttributeError):
                 logged_in = None
             if logged_in is True:
-                self.add("claude login", REQUIRED, PASS, "logged in")
+                self.add("claude login", self.claude_severity, PASS, "logged in")
             elif logged_in is False or (rc not in (0, None) and logged_in is None and "not logged" in out.lower()):
-                self.add("claude login", REQUIRED, FAIL, "not logged in", SETUP_HINTS["claude-login"])
+                self.add("claude login", self.claude_severity, FAIL, "not logged in", SETUP_HINTS["claude-login"])
             else:
-                self.add("claude login", REQUIRED, UNKNOWN, f"unrecognised `claude auth status` output (exit {rc})")
+                self.add("claude login", self.claude_severity, UNKNOWN, f"unrecognised `claude auth status` output (exit {rc})")
         rc, out, err = self._run([self.codex, "login", "status"])
         if err == "not found":
-            self.add("codex login", OPTIONAL, WARN, "codex CLI missing")
+            self.add("codex login", self.codex_severity, FAIL, "codex CLI missing")
         elif err:
-            self.add("codex login", OPTIONAL, UNKNOWN, f"`codex login status` {err}")
+            self.add("codex login", self.codex_severity, UNKNOWN, f"`codex login status` {err}")
         elif rc == 0:
-            self.add("codex login", OPTIONAL, PASS, "logged in")
+            self.add("codex login", self.codex_severity, PASS, "logged in")
         else:
-            self.add("codex login", OPTIONAL, FAIL, f"not logged in (exit {rc})", SETUP_HINTS["codex-login"])
+            self.add("codex login", self.codex_severity, FAIL, f"not logged in (exit {rc})", SETUP_HINTS["codex-login"])
 
     def _claude_json(self):
         """(data, problem). problem is why ~/.claude.json cannot be judged; None when data is a usable dict."""
-        cfg = self.home / ".claude.json"
+        cfg = Path(self.env["CLAUDE_CONFIG_DIR"]) / ".claude.json" if self.env.get("CLAUDE_CONFIG_DIR") else self.home / ".claude.json"
         try:
             data = json.loads(cfg.read_text(encoding="utf-8"))
         except FileNotFoundError:
@@ -201,13 +207,21 @@ class Doctor:
             return None, f"{cfg} has a malformed `projects` entry"
         return data, None
 
+    @staticmethod
+    def _project_entry(projects, path):
+        if os.name != "nt" or str(path) in projects:
+            return projects.get(str(path))
+        target = os.path.normcase(os.path.normpath(str(path)))
+        return next((value for key, value in projects.items()
+                     if os.path.normcase(os.path.normpath(key)) == target), None)
+
     def _claude_trusted(self, path):
         """True / False when ~/.claude.json answers for this path; None (with self._claude_problem) when it cannot."""
         data, problem = self._claude_json()
         self._claude_problem = problem
         if problem:
             return None
-        entry = (data.get("projects") or {}).get(str(path))
+        entry = self._project_entry(data.get("projects") or {}, path)
         if entry is None:
             return False
         if not isinstance(entry, dict):
@@ -241,18 +255,20 @@ class Doctor:
             self.add("orch home", REQUIRED, UNKNOWN, f"{home}/AGENTS.md is not UTF-8 text")
         trusted = self._claude_trusted(home)
         if trusted is None:
-            self.add("orch home trusted in Claude", REQUIRED, UNKNOWN, f"not verified: {self._claude_problem}")
+            self.add("orch home trusted in Claude", self.claude_severity, UNKNOWN, f"not verified: {self._claude_problem}")
         else:
-            self.add("orch home trusted in Claude", REQUIRED, PASS if trusted else FAIL,
+            self.add("orch home trusted in Claude", self.claude_severity, PASS if trusted else FAIL,
                      "trusted" if trusted else f"{home} not trusted", "" if trusted else SETUP_HINTS["orch-trust"])
         self.check_codex_config(home)
 
-    HOME_PREFIX = re.compile(r"(?<![\w.~/-])/(?:Users|home)/[^/\s\"']+")
+    HOME_PREFIX = re.compile(r"(?<![\w.~/-])(?:[A-Za-z]:)?/(?:Users|home)/[^/\s\"']+",
+                             re.IGNORECASE if os.name == "nt" else 0)
 
     def _foreign_homes(self, text):
         """Home-dir prefixes found in `text` that are not this machine's home. Only the prefix is returned."""
-        own = str(self.home)
-        text = re.sub(re.escape(own) + r"(?=/|$|[\s\"'])", "<home>", text)  # this machine's own home is fine
+        text = text.replace("\\", "/")
+        own = self.home.as_posix()
+        text = re.sub(re.escape(own) + r"(?=/|$|[\s\"'])", "<home>", text, flags=re.IGNORECASE if os.name == "nt" else 0)  # this machine's own home is fine
         return {m.group(0) for m in self.HOME_PREFIX.finditer(text)}
 
     def _mcp_foreign_homes(self, servers, label):
@@ -293,7 +309,7 @@ class Doctor:
         return found, problems
 
     def check_codex_config(self, home):
-        cfg = self.home / ".codex" / "config.toml"
+        cfg = Path(self.env.get("CODEX_HOME") or self.home / ".codex") / "config.toml"
         try:
             text = cfg.read_text(encoding="utf-8")
         except FileNotFoundError:
@@ -312,7 +328,7 @@ class Doctor:
             else:
                 projects = codex.get("projects")
                 projects = projects if isinstance(projects, dict) else {}
-                entry = projects.get(str(home))
+                entry = self._project_entry(projects, home)
                 ok = isinstance(entry, dict) and entry.get("trust_level") == "trusted"
                 self.add("orch home trusted in Codex", OPTIONAL, PASS if ok else WARN,
                          "trusted" if ok else f"{home} not trusted in {cfg}",
@@ -376,13 +392,14 @@ class Doctor:
                      "not verified: " + ("; ".join(problems) if problems else "no readable config source"))
         else:
             self.add("config paths match this home", OPTIONAL, PASS,
-                     f"trusted paths and MCP command/args/cwd checked in {', '.join(sources)}: all under {self.home}")
+                     f"no other user home found in trusted paths or MCP command/args/cwd in {', '.join(sources)}")
 
     def check_mcp_launch(self):
         """`orchd init` keeps config.toml files that differ from its version, so installs made before #89 still start
         the MCP through bin/orchd's shebang (system python3, maybe without psutil). What counts is the program the
         config really starts: wrappers and native binaries launch directly; Python must match this interpreter."""
         stale, fixes = [], []
+        inspected = 0
         for folder in (self.orch_home, paths.interface_home(self.home, self.env)):
             cfg = folder / ".codex" / "config.toml"
             try:
@@ -395,6 +412,7 @@ class Doctor:
                 command, args = spec.get("command"), spec.get("args")
                 if not isinstance(command, str) or not isinstance(args, list) or "mcp" not in args:
                     continue
+                inspected += 1
                 resolved = self.which(command) if not os.path.dirname(command) else command
                 resolved = resolved or command
                 if paths.is_python_script(resolved):
@@ -418,8 +436,10 @@ class Doctor:
                      "does not use the orchd interpreter (other Python may lack psutil): " + "; ".join(stale),
                      "Edit only that one table and leave every other setting as it is (`orchd init` keeps edited "
                      "files, so it will not rewrite it): " + "; ".join(fixes) + ".")
+        elif inspected:
+            self.add("Codex MCP launch", OPTIONAL, PASS, f"inspected {inspected} managed MCP launch entries for Python interpreter mismatches")
         else:
-            self.add("Codex MCP launch", OPTIONAL, PASS, "orchd MCP servers run under the orchd interpreter")
+            self.add("Codex MCP launch", OPTIONAL, UNKNOWN, "no readable managed MCP launch entries")
 
     def check_repos_trust(self):
         if self._projects_problem:
@@ -465,22 +485,17 @@ class Doctor:
             self.add("orchd data dir", REQUIRED, FAIL, f"no write permission on {target}")
 
     def check_socket_dir(self):
-        tmp = None
+        name = "Windows private worker socket" if os.name == "nt" else "socket dir (0700)"
         try:
-            tmp = tempfile.mkdtemp(prefix="orchd-doctor-", dir=self.tmp_root)
-            os.chmod(tmp, 0o700)
-            mode = os.stat(tmp).st_mode & 0o777
-            with socket.socket(socket.AF_UNIX) as s:
-                s.bind(os.path.join(tmp, "p.sock"))
-            if mode == 0o700:
-                self.add("socket dir (0700)", REQUIRED, PASS, f"created, bound a unix socket under {self.tmp_root}")
-            else:
-                self.add("socket dir (0700)", REQUIRED, FAIL, f"mode is {oct(mode)}, not 0700")
-        except OSError as exc:
-            self.add("socket dir (0700)", REQUIRED, FAIL, f"{type(exc).__name__} under {self.tmp_root}: {exc.strerror}")
-        finally:
-            if tmp:
-                shutil.rmtree(tmp, ignore_errors=True)
+            with tempfile.TemporaryDirectory(prefix="oa-", dir=self.tmp_root) as tmp:
+                directory = Path(tmp)
+                make_private(directory)
+                validate_private(directory)
+                with unix_socket.create() as listener:
+                    unix_socket.bind(listener, str(directory / "control.sock"))
+            self.add(name, REQUIRED, PASS, f"verified private directory and local socket bind under {self.tmp_root}")
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            self.add(name, REQUIRED, FAIL, f"{type(exc).__name__} under {self.tmp_root}: {exc}")
 
     def gh_accounts(self):
         """(usable, broken, error): account names parsed from `gh auth status`; tokens are never shown."""

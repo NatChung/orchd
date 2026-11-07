@@ -5,7 +5,9 @@ template) is kept and reported, except computer-use AGENTS.md uses managed-block
 Codex trust is appended to ~/.codex/config.toml after a timestamped backup; Claude trust is only checked, never written: several Claude processes rewrite ~/.claude.json and would
 clobber an outside edit (docs/decisions.md), so Operator accepts it once in `claude`.
 """
+import json
 import os
+import re
 import shutil
 import string
 import time
@@ -34,7 +36,7 @@ def personal(home, env):
         return [], []
     if tomllib is None:
         raise ValueError(f"{path} needs Python 3.11+ (tomllib) to read")
-    section = tomllib.loads(path.read_text()).get("home") or {}
+    section = tomllib.loads(path.read_text(encoding="utf-8")).get("home") or {}
     reads, apps = section.get("read") or [], section.get("disabled_apps") or []
     if not all(isinstance(x, str) and x for x in [*reads, *apps]):
         raise ValueError(f"{path}: [home] read and disabled_apps must be lists of non-empty strings")
@@ -43,11 +45,46 @@ def personal(home, env):
 
 
 def _toml_string(text):
-    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return json.dumps(str(text), ensure_ascii=False)
 
 
 def render(relative, values):
-    return string.Template((TEMPLATES / relative).read_text()).substitute(values)
+    return string.Template((TEMPLATES / relative).read_text(encoding="utf-8")).substitute(values)
+
+
+def interface_instructions(interface):
+    source = Path(interface) / "AGENTS.md"
+    if not source.exists():
+        source = TEMPLATES / "interface" / "AGENTS.md"
+    return (source.read_text(encoding="utf-8")
+            + "\nIf orchd_entry tools are deferred, use functions.exec to find their names "
+              "in ALL_TOOLS and call them through the tools object. Check ALL_TOOLS "
+              "before reporting that status or relay is unavailable.\n")
+
+
+def sync_interface_instructions(interface, backup_dir, *, dry_run=False):
+    """Refresh the marked Windows instruction snapshot without changing any policy or model."""
+    if os.name != "nt":
+        return False
+    file = Path(interface) / ".codex" / "config.toml"
+    if not file.is_file():
+        return False
+    text = file.read_bytes().decode("utf-8")
+    marker = "# orchd:interface-instructions"
+    if marker not in text:
+        return False  # existing, user-managed config must be explicitly regenerated
+    rules = interface_instructions(interface)
+    old = tomllib.loads(text)
+    if old.get("developer_instructions") == rules:
+        return False
+    pattern = re.compile(r"(?m)^" + re.escape(marker) + r"(\r?\n)developer_instructions = [^\r\n]*(\r?\n|$)")
+    new, count = pattern.subn(lambda m: marker + m[1] + "developer_instructions = " + _toml_string(rules) + m[2], text)
+    if count != 1 or tomllib.loads(new) != dict(old, developer_instructions=rules):
+        raise ValueError(f"{file}: cannot safely update managed interface instructions; regenerate this config")
+    if not dry_run:
+        from . import home_migrations
+        home_migrations.write_file(file, new.encode("utf-8"), Path(backup_dir))
+    return True
 
 
 def planned_files(home, env, orchd_bin=None):
@@ -58,7 +95,24 @@ def planned_files(home, env, orchd_bin=None):
     from . import config
     interface_model, interface_effort = config.interface_settings(env, home)
     command, lead = paths.mcp_launch(str(orchd_bin or paths.orchd_executable(env)))
+    interface_bootstrap = ""
+    if os.name == "nt":
+        # Restricted Windows profiles cannot bootstrap sandboxed AGENTS.md reads
+        # on every Codex backend. Keep the policy intact and supply the Entry's
+        # instructions through the trusted project config instead.
+        rules = interface_instructions(interface)
+        interface_bootstrap = ("project_doc_max_bytes = 0\n"
+                               "# orchd:interface-instructions\n"
+                               f"developer_instructions = {_toml_string(rules)}\n")
     values = dict(HOME=str(Path(home)), ORCH_HOME=str(orch), INTERFACE_HOME=str(interface),
+                  HOME_PATH=_toml_string(home), ORCH_HOME_PATH=_toml_string(orch),
+                  INTERFACE_HOME_PATH=_toml_string(interface),
+                  LOCAL_BIN_PATH=_toml_string(Path(home) / ".local" / "bin"),
+                  CODEX_STANDALONE_PATH=_toml_string(Path(home) / ".codex" / "packages" / "standalone"),
+                  ORCH_CONFIG_PATH=_toml_string(orch / ".codex"),
+                  PLATFORM_READS='' if os.name == "nt" else '"/opt/homebrew" = "read"\n',
+                  WINDOWS_SANDBOX='\n[windows]\nsandbox = "elevated"\n' if os.name == "nt" else '',
+                  INTERFACE_BOOTSTRAP=interface_bootstrap,
                   ORCHD_COMMAND=_toml_string(command),
                   ORCHD_LEAD="".join(_toml_string(a) + ", " for a in lead),
                   INTERFACE_MODEL=_toml_string(interface_model), INTERFACE_EFFORT=_toml_string(interface_effort),
@@ -71,7 +125,7 @@ def planned_files(home, env, orchd_bin=None):
         for source in sorted((TEMPLATES / base).rglob("*")):
             if source.is_file():
                 relative = source.relative_to(TEMPLATES)
-                text = render(relative, values) if source.name == "config.toml" else source.read_text()
+                text = render(relative, values) if source.name == "config.toml" else source.read_text(encoding="utf-8")
                 files[target / source.relative_to(TEMPLATES / base)] = text
     files[orch / ".codex" / "config.toml"] += _approvals("orchd", [t["name"] for t in mcp_server.TOOLS])
     # Desktop MCP servers do not inherit the shell that ran init.
@@ -88,9 +142,9 @@ def planned_files(home, env, orchd_bin=None):
 
 def write_managed(path, text):
     if path.exists():
-        return "unchanged" if path.read_text() == text else "kept (differs from orchd's version; delete it to regenerate)"
+        return "unchanged" if path.read_text(encoding="utf-8") == text else "kept (differs from orchd's version; delete it to regenerate)"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text)
+    path.write_text(text, encoding="utf-8")
     return "created"
 
 
@@ -103,7 +157,7 @@ def codex_trust(config, folders):
     if tomllib is None:
         return {str(f): "unknown (Python without tomllib)" for f in folders}
     try:
-        text = config.read_text()
+        text = config.read_text(encoding="utf-8")
     except FileNotFoundError:
         text = ""
     try:
@@ -127,13 +181,13 @@ def codex_trust(config, folders):
     if config.exists():
         backup = config.with_name(f"{config.name}.orchd-init-{time.strftime('%Y%m%d-%H%M%S')}")
         shutil.copy2(config, backup)
-    addition = "".join(f'\n[projects."{key}"]\ntrust_level = "trusted"\n' for key in missing)
+    addition = "".join(f'\n[projects.{_toml_string(key)}]\ntrust_level = "trusted"\n' for key in missing)
     new = text + ("" if text.endswith("\n") or not text else "\n") + addition
     try:
         tomllib.loads(new)
     except ValueError as error:
         return dict(result, **{k: f"skipped (result would not parse: {error})" for k in missing})
-    config.write_text(new)
+    config.write_text(new, encoding="utf-8")
     for key in missing:
         result[key] = "written" + (f" (backup {backup})" if backup else "")
     return result
@@ -157,7 +211,7 @@ def migrate(source, target, stubs=None):
         if destination.exists():
             if destination.read_bytes() == path.read_bytes():
                 continue
-            if stubs.get(destination) is not None and destination.read_text() == stubs[destination]:
+            if stubs.get(destination) is not None and destination.read_text(encoding="utf-8") == stubs[destination]:
                 shutil.copy2(path, destination)
                 replaced.append(str(relative))
             else:
@@ -184,6 +238,8 @@ def init(rt, home=None, env=None, trust=True, source=None, orchd_bin=None):
                                  home_migrations.state_dir(home, env) / "backups")
     files[str(worker_rules)] = ("unchanged" if lines[0].startswith("unchanged:") else
                                 "updated" if existed else "created")
+    if sync_interface_instructions(interface, home_migrations.state_dir(home, env) / "backups" / "interface-config"):
+        files[str(interface / ".codex" / "config.toml")] = "updated (managed interface instructions)"
     (worker / "reports").mkdir(parents=True, exist_ok=True)
     (orch / "groups").mkdir(parents=True, exist_ok=True)
     result = dict(orch_home=str(orch), interface=str(interface), computer_use_worker=str(worker),

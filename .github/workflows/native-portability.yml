@@ -1,0 +1,51 @@
+name: Native portability
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.11', '3.13']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - name: Install test dependencies
+        run: python -m pip install .
+      - name: Portable locking, sockets, CLI ownership, and Windows setup
+        shell: bash
+        run: |
+          set -e
+          python -m unittest discover -s tests -p test_file_lock.py
+          python -m unittest discover -s tests -p test_process_infrastructure.py
+          python -m unittest discover -s tests -p test_worker_socket.py
+          python -m unittest discover -s tests -p test_upgrade_refs.py
+          python -m unittest discover -s tests -p test_upgrade.py
+          python -m unittest discover -s tests -p test_dispatch_cli.py
+          python -m unittest discover -s tests -p test_windows_setup.py
+          python -m unittest discover -s tests -p test_windows_claude.py
+          python -m unittest discover -s tests -p test_windows_job.py
+          python -m unittest discover -s tests -p test_windows_gh_wrapper.py
+      - name: Clean packaged install
+        env:
+          ORCHD_RUN_INSTALL_SMOKE: '1'
+        run: python -m unittest discover -s tests -p test_package_install.py
+      - name: Upgrade with an old Windows session still running
+        if: runner.os == 'Windows'
+        env:
+          ORCHD_RUN_INSTALL_SMOKE: '1'
+        run: python -m unittest discover -s tests -p test_windows_upgrade.py

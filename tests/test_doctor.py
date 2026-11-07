@@ -23,6 +23,7 @@ def make_runner(overrides=None):
         ("claude", "--version"): (0, "2.1.287 (Claude Code)"),
         ("claude", "--help"): (0, HELP_FULL),
         ("claude", "auth", "status"): (0, json.dumps({"loggedIn": True, "token": SECRET})),
+        ("codex", "app-server", "--help"): (0, "app-server --listen <address>"),
         ("codex", "--version"): (0, "codex-cli 0.159"),
         ("codex", "login", "status"): (0, "Logged in using ChatGPT"),
         ("gh", "auth", "status"): (0, "  ✓ Logged in to github.com account ExampleOwner (keyring)\n"),
@@ -53,7 +54,7 @@ class DoctorCase(unittest.TestCase):
         self.write_claude_json({str(self.orch): True, str(self.home / "projects" / "repoA"): True})
         (self.home / ".codex").mkdir()
         (self.home / ".codex" / "config.toml").write_text(
-            f'[projects."{self.orch}"]\ntrust_level = "trusted"\n')
+            f'[projects.{json.dumps(str(self.orch))}]\ntrust_level = "trusted"\n')
         self.sock_root = Path(self.tmp.name) / "tmp"
         self.sock_root.mkdir()
 
@@ -61,10 +62,13 @@ class DoctorCase(unittest.TestCase):
         (self.home / ".claude.json").write_text(json.dumps(
             {"projects": {p: {"hasTrustDialogAccepted": v} for p, v in trust.items()}}))
 
-    def run_doctor(self, overrides=None, which=None, profile=None):
+    def run_doctor(self, overrides=None, which=None, profile=None, *, native_codex=False):
         d = doctor.Doctor(runner=make_runner(overrides), home=self.home, env={},
                           tmp_root=str(self.sock_root), data_dir=self.home / "data",
                           which=which or (lambda n: n), profile=profile)
+        # Exercise the traditional Claude deployment on any test host unless testing native Codex.
+        d.claude_severity = doctor.OPTIONAL if native_codex else doctor.REQUIRED
+        d.codex_severity = doctor.REQUIRED if native_codex else doctor.OPTIONAL
         d.run_all()
         return d, {c.name: c for c in d.checks}
 
@@ -73,7 +77,7 @@ class McpLaunchCheck(DoctorCase):
     def write_cfg(self, folder, server, command, args, extra=""):
         (folder / ".codex").mkdir(parents=True, exist_ok=True)
         (folder / ".codex" / "config.toml").write_text(
-            f'{extra}[mcp_servers.{server}]\ncommand = {json.dumps(command, ensure_ascii=False)}\nargs = {json.dumps(args, ensure_ascii=False)}\n')
+            f'{extra}[mcp_servers.{server}]\ncommand = {json.dumps(command, ensure_ascii=False)}\nargs = {json.dumps(args, ensure_ascii=False)}\n', encoding="utf-8")
 
     def script(self, name, first_line):
         path = Path(self.tmp.name) / name
@@ -111,18 +115,18 @@ class McpLaunchCheck(DoctorCase):
                 extra = 'model = "mine"\n\n[custom]\nkeep = 1\n\n'
                 self.write_cfg(self.orch, "orchd", legacy, ["mcp"], extra=extra)
                 cfg = self.orch / ".codex" / "config.toml"
-                cfg.write_text(cfg.read_text() + 'tools = ["one"]\ntimeout = 42\n'
-                               '[mcp_servers.orchd.env]\nKEEP = "yes"\n')
-                before = doctor.tomllib.loads(cfg.read_text())
+                cfg.write_text(cfg.read_text(encoding="utf-8") + 'tools = ["one"]\ntimeout = 42\n'
+                               '[mcp_servers.orchd.env]\nKEEP = "yes"\n', encoding="utf-8")
+                before = doctor.tomllib.loads(cfg.read_text(encoding="utf-8"))
                 _, by = self.run_doctor()
                 check = by["Codex MCP launch"]
                 self.assertEqual(check.status, doctor.WARN)
                 # Apply the literal values doctor printed, rather than recreating its fix.
                 command, args = re.search(r"set command = (.+) and args = (\[.*\])", check.fix).groups()
                 updated = re.sub(r"^command = .*", lambda m: "command = " + command,
-                                 cfg.read_text(), flags=re.M)
+                                 cfg.read_text(encoding="utf-8"), flags=re.M)
                 updated = re.sub(r"^args = .*", lambda m: "args = " + args, updated, flags=re.M)
-                cfg.write_text(updated)
+                cfg.write_text(updated, encoding="utf-8")
                 data = doctor.tomllib.loads(updated)
                 expected = before["mcp_servers"]["orchd"]
                 expected.update(command=sys.executable, args=[legacy, "mcp"])
@@ -164,7 +168,12 @@ class McpLaunchCheck(DoctorCase):
         (other / "bin").mkdir(parents=True)
         (other / "pyvenv.cfg").write_text("include-system-site-packages = false\n")
         executable = other / "bin" / "python3"
-        executable.symlink_to(Path(sys.executable).resolve())
+        try:
+            executable.symlink_to(Path(sys.executable).resolve())
+        except OSError as error:
+            if getattr(error, "winerror", None) == 1314:
+                self.skipTest("creating symlinks requires Windows Developer Mode or elevation")
+            raise
         self.write_cfg(self.orch, "orchd", str(executable), ["/x/bin/orchd", "mcp"])
         _, by = self.run_doctor()
         self.assertEqual(by["Codex MCP launch"].status, doctor.WARN)
@@ -209,6 +218,27 @@ class OrchdCommandCheck(DoctorCase):
 
 
 class RequiredChecks(DoctorCase):
+    def test_native_codex_requires_listener_and_auth_without_claude(self):
+        d, by = self.run_doctor({("claude", "--version"): FileNotFoundError()}, native_codex=True)
+        self.assertEqual(by["claude CLI"].severity, doctor.OPTIONAL)
+        self.assertEqual(by["Codex app-server listener"].status, doctor.PASS)
+        self.assertEqual(doctor.exit_code(d.checks), 0)
+        d, by = self.run_doctor({("codex", "app-server", "--help"): (0, "other help"),
+                                 ("codex", "login", "status"): (1, "")}, native_codex=True)
+        self.assertEqual(by["Codex app-server listener"].status, doctor.FAIL)
+        self.assertEqual(by["codex login"].status, doctor.FAIL)
+        self.assertEqual(doctor.exit_code(d.checks), 1)
+
+    @unittest.skipUnless(os.name == "nt", "Windows path comparison")
+    def test_windows_trust_and_foreign_home_paths(self):
+        self.write_claude_json({self.orch.as_posix().lower(): True})
+        (self.home / ".codex" / "config.toml").write_text(
+            f'[projects.{json.dumps(self.orch.as_posix().lower())}]\ntrust_level = "trusted"\n')
+        d, by = self.run_doctor(native_codex=True)
+        self.assertEqual(by["orch home trusted in Claude"].status, doctor.PASS)
+        self.assertEqual(by["orch home trusted in Codex"].status, doctor.PASS)
+        self.assertEqual(d._foreign_homes(r"D:\Users\other\bin\tool.exe"), {"D:/Users/other"})
+
     def test_healthy_machine_has_no_required_failure(self):
         d, by = self.run_doctor()
         bad = [c.name for c in d.checks if c.severity == doctor.REQUIRED and c.status != doctor.PASS]
@@ -381,13 +411,13 @@ class Boundaries(DoctorCase):
     @needs_toml
     def test_codex_comment_does_not_count_as_trust(self):
         (self.home / ".codex" / "config.toml").write_text(
-            f'[projects."{self.orch}"]\n# trust_level = "trusted"\ntrust_level = "untrusted"\n')
+            f'[projects.{json.dumps(str(self.orch))}]\n# trust_level = "trusted"\ntrust_level = "untrusted"\n')
         _, by = self.run_doctor()
         self.assertEqual(by["orch home trusted in Codex"].status, doctor.WARN)
 
     def test_invalid_toml_is_unknown_not_pass(self):
         (self.home / ".codex" / "config.toml").write_text(
-            f'[projects."{self.orch}"\ntrust_level = "trusted"\n')
+            f'[projects.{json.dumps(str(self.orch))}\ntrust_level = "trusted"\n')
         _, by = self.run_doctor()
         self.assertEqual(by["orch home trusted in Codex"].status, doctor.UNKNOWN)
         self.assertEqual(by["config paths match this home"].status, doctor.UNKNOWN)
@@ -404,7 +434,7 @@ class Boundaries(DoctorCase):
     @needs_toml
     def test_codex_mcp_command_with_old_home_is_flagged_without_secrets(self):
         (self.home / ".codex" / "config.toml").write_text(
-            f'[projects."{self.orch}"]\ntrust_level = "trusted"\n\n'
+            f'[projects.{json.dumps(str(self.orch))}]\ntrust_level = "trusted"\n\n'
             '[mcp_servers.cg]\ncommand = "/home/example/.local/bin/codegraph"\n'
             f'args = ["--token", "{SECRET}"]\nenv = {{ KEY = "{SECRET}" }}\n')
         d, by = self.run_doctor()
@@ -429,8 +459,8 @@ class Boundaries(DoctorCase):
     @needs_toml
     def test_mcp_under_this_home_passes_and_names_what_was_checked(self):
         (self.home / ".codex" / "config.toml").write_text(
-            f'[projects."{self.orch}"]\ntrust_level = "trusted"\n\n'
-            f'[mcp_servers.cg]\ncommand = "{self.home}/.local/bin/codegraph"\n')
+            f'[projects.{json.dumps(str(self.orch))}]\ntrust_level = "trusted"\n\n'
+            f'[mcp_servers.cg]\ncommand = "{self.home.as_posix()}/.local/bin/codegraph"\n')
         _, by = self.run_doctor()
         c = by["config paths match this home"]
         self.assertEqual(c.status, doctor.PASS)
@@ -444,7 +474,7 @@ class Boundaries(DoctorCase):
         d.run_all()
         by = {c.name: c for c in d.checks}
         self.assertEqual(by["projects dir"].status, doctor.FAIL)
-        self.assertIn("socket dir (0700)", by)
+        self.assertIn("Windows private worker socket" if os.name == "nt" else "socket dir (0700)", by)
         self.assertIn("orchd data dir", by)
         self.assertEqual(doctor.exit_code(d.checks), 1)
 
@@ -513,7 +543,7 @@ class OptionalChecks(DoctorCase):
     @needs_toml
     def test_codex_config_with_other_machines_home_warns(self):
         (self.home / ".codex" / "config.toml").write_text(
-            f'[projects."{self.orch}"]\ntrust_level = "trusted"\n\n'
+            f'[projects.{json.dumps(str(self.orch))}]\ntrust_level = "trusted"\n\n'
             '[projects."/home/example/projects/x"]\ntrust_level = "trusted"\n')
         _, by = self.run_doctor()
         self.assertEqual(by["config paths match this home"].status, doctor.WARN)
@@ -640,7 +670,7 @@ class EncodingAndSchema(DoctorCase):
             "url": {"type": "http", "url": "https://example.com/mcp", "headers": {"Authorization": SECRET}},
             "sse": {"type": "sse", "url": "https://example.com/sse"},
             "bare": {"command": "npx"},
-            "full": {"command": f"{self.home}/.local/bin/x", "args": ["-y", f"{self.home}/s.js"],
+            "full": {"command": f"{self.home.as_posix()}/.local/bin/x", "args": ["-y", f"{self.home.as_posix()}/s.js"],
                      "cwd": str(self.home), "env": {"TOKEN": SECRET}},
             "empty args": {"command": "node", "args": []},
         }
@@ -661,7 +691,7 @@ class EncodingAndSchema(DoctorCase):
 
     @needs_toml
     def test_wrong_typed_codex_mcp_is_unknown(self):
-        trust = f'[projects."{self.orch}"]\ntrust_level = "trusted"\n\n'
+        trust = f'[projects.{json.dumps(str(self.orch))}]\ntrust_level = "trusted"\n\n'
         cases = {
             "container str": f'mcp_servers = "{SECRET}"\n' + trust,
             "container list": 'mcp_servers = [1]\n' + trust,
@@ -682,12 +712,12 @@ class EncodingAndSchema(DoctorCase):
     @needs_toml
     def test_valid_codex_mcp_shapes_stay_pass(self):
         (self.home / ".codex" / "config.toml").write_text(
-            f'[projects."{self.orch}"]\ntrust_level = "trusted"\n\n'
+            f'[projects.{json.dumps(str(self.orch))}]\ntrust_level = "trusted"\n\n'
             '[mcp_servers.url]\nurl = "https://example.com/mcp"\n'
             f'bearer_token_env_var = "TOKEN"\n\n'
             '[mcp_servers.bare]\ncommand = "npx"\n\n'
-            f'[mcp_servers.full]\ncommand = "{self.home}/x"\nargs = ["-y", "{self.home}/s.js"]\n'
-            f'cwd = "{self.home}"\nenv = {{ TOKEN = "{SECRET}" }}\n')
+            f'[mcp_servers.full]\ncommand = "{self.home.as_posix()}/x"\nargs = ["-y", "{self.home.as_posix()}/s.js"]\n'
+            f'cwd = "{self.home.as_posix()}"\nenv = {{ TOKEN = "{SECRET}" }}\n')
         d, by = self.run_doctor()
         self.assertEqual(by["orch home trusted in Codex"].status, doctor.PASS)
         self.assertEqual(self.paths(by).status, doctor.PASS)

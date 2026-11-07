@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -113,7 +114,10 @@ else:
         env = dict(self.env, PATH=f'{WRAPPER}:{alias}:' + self.env['PATH'])
         self.assertEqual(json.loads(self.run_gh('repo', 'view', env=env).stdout)['token'], 'token-ExampleOwner')
         self.assertEqual(len((self.root / 'calls').read_text().splitlines()), 2)
-        result = subprocess.run([str(WRAPPER / 'gh')], env=dict(self.env, PATH=f'{WRAPPER}:{alias}:/usr/bin'),
+        python_bin = self.root / 'python-bin'
+        python_bin.mkdir()
+        (python_bin / 'python3').symlink_to(sys.executable)
+        result = subprocess.run([str(WRAPPER / 'gh')], env=dict(self.env, PATH=f'{WRAPPER}:{alias}:{python_bin}'),
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 127)
         self.assertIn('no real gh', result.stderr)

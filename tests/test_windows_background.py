@@ -1,0 +1,69 @@
+import os
+import subprocess
+import tempfile
+from pathlib import Path
+import unittest
+from unittest.mock import MagicMock, patch
+
+from orchd import platform_process, quota
+from orchd.runtime import Runtime
+
+
+class BackgroundOptionsTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows creation flags")
+    def test_background_and_detached_windows_flags(self):
+        with patch.object(platform_process.os, 'name', 'nt'):
+            self.assertEqual(platform_process.background_options(), {
+                'creationflags': subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP})
+            self.assertEqual(platform_process.detached_options(), {
+                'creationflags': subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP})
+
+    def test_posix_options_unchanged(self):
+        with patch.object(platform_process.os, 'name', 'posix'):
+            self.assertEqual(platform_process.background_options(), {'start_new_session': True})
+            self.assertEqual(platform_process.detached_options(), {'start_new_session': True})
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows launches')
+    def test_retry_and_exec_are_detached_and_use_windowless_python(self):
+        with tempfile.TemporaryDirectory() as tmp, patch('orchd.runtime.worker_env', return_value={}), \
+             patch('orchd.runtime.subprocess.Popen') as popen, \
+             patch.object(Runtime, '_record_identity'), patch('orchd.store.home', return_value=Path(tmp)):
+            popen.return_value.pid = 123
+            rt = Runtime()
+            rt.spawn(['codex', 'exec'], tmp, str(Path(tmp) / 'worker.log'))
+            self.assertEqual(popen.call_args.kwargs['creationflags'],
+                             subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS)
+            rt.start_auto_retry('db', 'task', 1)
+            self.assertTrue(popen.call_args.args[0][0].lower().endswith('pythonw.exe'))
+            self.assertEqual(popen.call_args.kwargs['creationflags'],
+                             subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows launches')
+    def test_quota_probe_has_no_window_and_keeps_redirected_output(self):
+        child = MagicMock(returncode=0)
+        child.communicate.return_value = ('output', 'error')
+        with patch('orchd.quota.subprocess.Popen', return_value=child) as popen:
+            result = quota._run(['probe'], timeout=1, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(result.stdout, 'output')
+        self.assertEqual(popen.call_args.kwargs['creationflags'],
+                         subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW)
+        self.assertEqual(popen.call_args.kwargs['stdout'], subprocess.PIPE)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows viewer')
+    def test_windows_viewer_requests_new_terminal_window(self):
+        task = {'worktree': os.getcwd(), 'id': 'task', 'generation': 'gen'}
+        with patch('orchd.runtime.worker_env', return_value={}), \
+             patch('orchd.runtime.shutil.which', return_value='wt.exe'), \
+             patch('orchd.runtime.subprocess.Popen') as popen:
+            Runtime().open_app_viewer('db', task)
+        self.assertEqual(popen.call_args.args[0][:3], ['wt.exe', '-w', 'new'])
+        self.assertEqual(popen.call_args.args[0][-4:], ['viewer', 'db', 'task', 'gen'])
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows viewer')
+    def test_windows_viewer_opens_new_console_when_terminal_unavailable(self):
+        task = {'worktree': os.getcwd(), 'id': 'task', 'generation': 'gen'}
+        with patch('orchd.runtime.worker_env', return_value={}), patch('orchd.runtime.shutil.which', return_value=None), \
+             patch('orchd.runtime.subprocess.Popen') as popen:
+            Runtime().open_app_viewer('db', task)
+        self.assertEqual(popen.call_args.kwargs['creationflags'], subprocess.CREATE_NEW_CONSOLE)
+        self.assertEqual(popen.call_args.args[0][-4:], ['viewer', 'db', 'task', 'gen'])

@@ -14,6 +14,10 @@ import sys
 from urllib.parse import urlsplit
 
 
+def background_flags():
+    return {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+
+
 def warn(message):
     print(f"orchd gh: {message}; using original authentication", file=sys.stderr)
 
@@ -28,6 +32,8 @@ def real_gh():
         if not candidate:
             continue
         path = Path(candidate).resolve()
+        if os.environ.get("ORCHD_GH_WRAPPER_DIR") and path.parent == Path(os.environ["ORCHD_GH_WRAPPER_DIR"]).resolve():
+            continue
         try:
             if path == me or path.read_bytes() == own:
                 continue
@@ -67,7 +73,7 @@ def target_owner(args, credential):
                 return owner(arg[2:])
         if os.environ.get("GH_REPO"):
             return owner(os.environ["GH_REPO"])
-    result = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True, text=True)
+    result = subprocess.run(["git", "remote", "get-url", "origin"], capture_output=True, text=True, **background_flags())
     return owner(result.stdout.strip()) if result.returncode == 0 else None
 
 
@@ -120,7 +126,7 @@ def gate_pr_create(args):
         return 1, args
     # orchd decides whether this repo has a pipeline at all: if not, gh gets the original command unchanged.
     command = [orchd, "check", "gate", "--worktree", worktree] + (["--refuse", error] if error else [])
-    result = subprocess.run([*command, "--", *(args if error else normalized)], stdout=subprocess.PIPE, text=True)
+    result = subprocess.run([*command, "--", *(args if error else normalized)], stdout=subprocess.PIPE, text=True, **background_flags())
     if result.returncode:
         return result.returncode, args
     try:
@@ -145,6 +151,8 @@ def main():
     is_credential = args[:2] == ["auth", "git-credential"]
     # Auth inspection/management must retain gh semantics, including auth status.
     if "GH_TOKEN" in os.environ or (args[:1] == ["auth"] and not is_credential):
+        if os.name == "nt":
+            return subprocess.call([real, *args], stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr, **background_flags())
         os.execv(real, [real, *args])
     credential = sys.stdin.buffer.read() if is_credential else None
     env = dict(os.environ)
@@ -163,7 +171,7 @@ def main():
                 warn(f"no account mapping for owner {target}")
             elif account:
                 token = subprocess.run([real, "auth", "token", "--hostname", "github.com", "-u", account],
-                                       capture_output=True, text=True)
+                                       capture_output=True, text=True, **background_flags())
                 if token.returncode == 0 and token.stdout.strip():
                     env["GH_TOKEN"] = token.stdout.strip()
                 else:
@@ -176,8 +184,12 @@ def main():
         with tempfile.TemporaryFile() as replay:
             replay.write(credential)
             replay.seek(0)
+            if os.name == "nt":
+                return subprocess.call([real, *args], stdin=replay, stdout=sys.stdout, stderr=sys.stderr, env=env, **background_flags())
             os.dup2(replay.fileno(), 0)
             os.execve(real, [real, *args], env)
+    if os.name == "nt":
+        return subprocess.call([real, *args], stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr, env=env, **background_flags())
     os.execve(real, [real, *args], env)
 
 

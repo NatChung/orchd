@@ -12,8 +12,8 @@ requires-python = ">=3.11"
 dependencies = ["psutil>=6.0,<8", "websocket-client>=1.8,<2"]
 
 [project.scripts]
-orchd = "orchd.cli:main"
-orchd-flutter-gate = "orchd.flutter_gate:cli"
+orchd = "orchd.upgrade:cli"
+orchd-flutter-gate = "orchd.upgrade:flutter_cli"
 
 [tool.setuptools]
 packages = ["orchd"]

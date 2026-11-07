@@ -20,9 +20,10 @@ from pathlib import Path
 
 import psutil
 
-from . import store
+from . import store, unix_socket
 from .app_transport import RPC, RPCError
 from .processes import cleanup_processes, task_processes
+from .platform_process import background_python, detached_options, make_private, validate_private
 from .runtime import CODEX_MEMORIES_OFF
 
 BACKEND = 'app-server'
@@ -35,7 +36,8 @@ def enabled(task):
 
 def identity(pid):
     proc = psutil.Process(int(pid))
-    return json.dumps({'pid': proc.pid, 'birth': proc.create_time(), 'pgid': os.getpgid(proc.pid)})
+    return json.dumps({'pid': proc.pid, 'birth': proc.create_time(),
+                       'pgid': os.getpgid(proc.pid) if os.name != 'nt' else proc.pid})
 
 
 def process(raw):
@@ -47,7 +49,7 @@ def process(raw):
         proc = psutil.Process(data['pid'])
         if proc.create_time() != data['birth'] or proc.status() == psutil.STATUS_ZOMBIE:
             return None
-        if os.getpgid(proc.pid) != data['pgid']:
+        if os.name != 'nt' and os.getpgid(proc.pid) != data['pgid']:
             raise RuntimeError('process group changed; stop refused')
         return proc
     except (psutil.NoSuchProcess, ProcessLookupError):
@@ -59,6 +61,28 @@ def stop_identity(raw, grace=2):
     if proc is None:
         return
     data = json.loads(raw)
+    if os.name == 'nt':
+        # Capture descendants before terminating the root; psutil verifies PID birth time.
+        descendants = proc.children(recursive=True)
+        for child in reversed(descendants):
+            try:
+                child.terminate()
+            except psutil.NoSuchProcess:
+                pass
+        try:
+            proc.terminate()
+        except psutil.NoSuchProcess:
+            pass
+        _, alive = psutil.wait_procs([proc, *descendants], timeout=grace)
+        for child in alive:
+            try:
+                child.kill()
+            except psutil.NoSuchProcess:
+                pass
+        _, alive = psutil.wait_procs(alive, timeout=grace)
+        if alive:
+            raise RuntimeError(f'processes not confirmed stopped: {[p.pid for p in alive]}')
+        return
     # Every owned root starts a new session. Never signal a caller's/shared group.
     if data['pgid'] != proc.pid or proc.pid == os.getpid():
         raise RuntimeError('not an owned process-group leader')
@@ -85,18 +109,15 @@ def validate(task):
     if not enabled(task) or not re.fullmatch(r'[0-9a-f]{32}', task['generation'] or ''):
         raise ValueError('not an app-server attempt')
     parent = Path(task['endpoint']).parent
-    stat = parent.lstat()
-    if parent.is_symlink() or stat.st_uid != os.getuid() or stat.st_mode & 0o777 != 0o700:
-        raise ValueError('app-server directory is not private')
+    validate_private(parent)
     if Path(task['endpoint']).name != 'app.sock' or task['control_endpoint'] != str(parent / 'control.sock'):
         raise ValueError('invalid stored app-server endpoints')
 
 
 def control(task, command, timeout=25, **fields):
     validate(task)
-    with socket.socket(socket.AF_UNIX) as peer:
-        peer.settimeout(timeout)
-        peer.connect(task['control_endpoint'])
+    with unix_socket.create() as peer:
+        unix_socket.connect(peer, task['control_endpoint'], timeout=timeout)
         peer.sendall((json.dumps(dict(command=command, generation=task['generation'], **fields))+'\n').encode())
         with peer.makefile('r') as stream:
             raw = stream.readline(1024 * 1024)
@@ -122,6 +143,25 @@ def health(task):
 
 def stop(con, task):
     # Cleanup uses recorded process identities, never the vanished/untrusted IPC path.
+    if os.name == 'nt':
+        from . import windows_job
+        # Verify the supervisor identity before opening the generation-specific job.
+        supervisor = process(task['supervisor_identity'])
+        if supervisor is None:
+            if process(task['server_identity']) is not None:
+                raise RuntimeError('server survives without its owning job; stop refused')
+            return None
+        if not windows_job.terminate(task['generation'], supervisor):
+            if process(task['supervisor_identity']) is None and process(task['server_identity']) is None:
+                return None
+            raise RuntimeError('worker job unavailable; stop refused')
+        for raw in (task['supervisor_identity'], task['server_identity']):
+            deadline = time.monotonic() + 5
+            while process(raw) is not None and time.monotonic() < deadline:
+                time.sleep(.05)
+            if process(raw) is not None:
+                raise RuntimeError('worker job not confirmed stopped')
+        return {'terminated_job': task['generation']}
     roots=[p for p in (process(task['supervisor_identity']), process(task['server_identity'])) if p]
     captured = task_processes(task['worktree'], roots) if task['worktree'] else {}
     viewers = con.execute('SELECT identity FROM worker_viewers WHERE task_id=? AND generation=?',
@@ -141,8 +181,8 @@ def stop(con, task):
 def start(con, rt, task, prompt, model, pending=(), brief=None):
     from .runtime import worker_env
     generation = uuid.uuid4().hex
-    directory = Path(tempfile.mkdtemp(prefix='oa-', dir='/tmp'))
-    directory.chmod(0o700)
+    directory = Path(tempfile.mkdtemp(prefix='oa-', dir=None if os.name == 'nt' else '/tmp'))
+    make_private(directory)
     database = con.execute('PRAGMA database_list').fetchone()[2]
     spec = dict(prompt=prompt, model=model, brief=brief, pending=[r['id'] for r in pending])
     (directory/'start.json').write_text(json.dumps(spec))
@@ -156,10 +196,14 @@ def start(con, rt, task, prompt, model, pending=(), brief=None):
     # Use the launching package; -P excludes the worktree while honoring PYTHONPATH.
     env['PYTHONPATH'] = str(Path(__file__).resolve().parents[1]) + os.pathsep + env.get('PYTHONPATH','')
     with open(directory/'supervisor.log', 'a') as out:
-        child = subprocess.Popen([sys.executable, '-P', '-m', 'orchd.app_worker', 'supervise', database,
+        child = subprocess.Popen([background_python(), '-P', '-m', 'orchd.app_worker', 'supervise', database,
                                   task['id'], generation], cwd=task['worktree'], env=env,
-                                 stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True)
-    store.update_task(con, task['id'], supervisor_identity=identity(child.pid), job_id=str(child.pid))
+                                 stdin=subprocess.DEVNULL, stdout=out, stderr=out, **detached_options())
+    # Windows venv launchers can start a second Python process. Never overwrite a
+    # supervisor that already published its actual in-job identity.
+    con.execute("UPDATE tasks SET supervisor_identity=?,job_id=?,updated_at=? "
+                "WHERE id=? AND generation=? AND supervisor_identity IS NULL",
+                (identity(child.pid), str(child.pid), time.time(), task['id'], generation))
     deadline = time.monotonic()+35
     try:
         while time.monotonic() < deadline:
@@ -472,7 +516,7 @@ class Supervisor:
             # Peer may register only its own wrapper identity; private IPC is trusted to this OS user.
             raw = request['identity']
             proc = process(raw)
-            if proc is None or os.getpgid(proc.pid)!=proc.pid:
+            if proc is None or (os.name != 'nt' and os.getpgid(proc.pid)!=proc.pid):
                 raise ValueError('viewer must be a live private process group')
             args=proc.cmdline()
             if 'orchd.app_worker' not in args or 'viewer' not in args or self.task_id not in args or self.generation not in args:
@@ -482,6 +526,13 @@ class Supervisor:
         raise ValueError('unknown control command')
 
     def run(self):
+        # Windows automatically puts descendants in this job, even if they detach.
+        # Keep the handle alive until this supervisor exits.
+        job = None
+        if os.name == 'nt':
+            from . import windows_job
+            job = windows_job.join_new(self.generation)
+            self.update(supervisor_identity=identity(os.getpid()), job_id=str(os.getpid()))
         try:
             preload()
         except Exception as exc:
@@ -496,13 +547,14 @@ class Supervisor:
         try:
             with open(directory/'server.log','a') as out:
                 self.server=subprocess.Popen(app_server_command(task),
-                    cwd=task['worktree'],stdout=out,stderr=out,stdin=subprocess.DEVNULL,start_new_session=True)
+                    cwd=task['worktree'],stdout=out,stderr=out,stdin=subprocess.DEVNULL,**detached_options())
             self.server_identity=identity(self.server.pid)
             self.update(server_identity=self.server_identity)
             deadline=time.monotonic()+15
             while not Path(task['endpoint']).exists() and time.monotonic()<deadline and self.server.poll() is None:
                 time.sleep(.05)
-            os.chmod(task['endpoint'],0o600)
+            if os.name != 'nt':
+                os.chmod(task['endpoint'],0o600)
             self.rpc=RPC(task['endpoint'])
             from .quota import Cache, refresh
             try:
@@ -513,8 +565,10 @@ class Supervisor:
                               'approvalPolicy':'never','sandbox':'danger-full-access',
                               'developerInstructions':spec.get('brief')})['thread']
             self.update(session_id=thread['id'])
-            with socket.socket(socket.AF_UNIX) as listener:
-                listener.bind(task['control_endpoint']);os.chmod(task['control_endpoint'],0o600)
+            with unix_socket.create() as listener:
+                unix_socket.bind(listener, task['control_endpoint'])
+                if os.name != 'nt':
+                    os.chmod(task['control_endpoint'],0o600)
                 listener.listen(8);listener.settimeout(.2)
                 result=self.send(spec['prompt'],spec['pending'])
                 if result['status']!='delivered':
@@ -546,7 +600,7 @@ class Supervisor:
                             self.deferred_flush = (self.generation,self.task()['session_id'],
                                                    self.task()['last_completed_turn'])
                         try:
-                            peer,_=listener.accept()
+                            peer,_=unix_socket.accept(listener)
                         except socket.timeout:
                             continue
                         with peer:
@@ -580,7 +634,7 @@ def viewer(database, task_id, generation):
         raise ValueError('superseded/closed viewer')
     validate(task)
     # Ghostty's shell is not a group leader. A wrapper owns a new group for targeted cleanup.
-    if os.getpgrp()!=os.getpid():
+    if os.name != 'nt' and os.getpgrp()!=os.getpid():
         os.setsid()
     control(task,'viewer',identity=identity(os.getpid()))
     con.close()
@@ -588,8 +642,11 @@ def viewer(database, task_id, generation):
     # exec keeps the registered PID/birth/group across the native TUI's lifetime.
     # Mark its descendants even if closing the terminal reparents them.
     os.chdir(task['worktree'])
-    os.execvpe(task['codex_bin'], [task['codex_bin'],'--remote','unix://'+task['endpoint'],
-                                '--no-alt-screen','resume',task['session_id']], worker_env(task['worktree']))
+    command = [task['codex_bin'], '--remote', 'unix://'+task['endpoint'],
+               '--no-alt-screen', 'resume', task['session_id']]
+    if os.name == 'nt':
+        return subprocess.call(command, env=worker_env(task['worktree']))
+    os.execvpe(task['codex_bin'], command, worker_env(task['worktree']))
 
 
 def main():

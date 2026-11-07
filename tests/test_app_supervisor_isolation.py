@@ -60,6 +60,20 @@ class IsolationBase(AppBase):
 
 
 class SupervisorIsolationTest(IsolationBase):
+    def flush_and_assert_delivered_once(self, text):
+        store.add_message(self.con, self.id, store.QUEUED, text)
+        result = app_worker.control(store.get_task(self.con, self.id), 'flush', timeout=10)
+        # Automatic flushing may already have started the next turn.
+        self.assertIn(result['status'], ('delivered', 'queued'))
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            texts = [e['text'] for e in self.logged() if e['event'] == 'turn/start']
+            if any(text in item for item in texts) and not store.pending_answers(self.con, self.id):
+                break
+            time.sleep(.05)
+        self.assertEqual(sum(text in item for item in texts), 1)
+        self.assertEqual(store.pending_answers(self.con, self.id), [])
+
     def test_supervisor_ignores_worktree_orchd_and_still_delivers_answers(self):
         task = app_worker.start(self.con, self.rt, store.get_task(self.con, self.id), 'first prompt', 'gpt-6.1-sol')
         self.assertEqual(self.logged()[0]['cwd'], os.path.realpath(self.worktree))  # Codex still runs in the worktree
@@ -67,9 +81,7 @@ class SupervisorIsolationTest(IsolationBase):
         while store.get_task(self.con, self.id)['turn_state'] != 'completed' and time.monotonic() < deadline:
             time.sleep(.05)
         self.assertEqual(store.get_task(self.con, self.id)['turn_state'], 'completed')
-        store.add_message(self.con, self.id, store.QUEUED, 'the answer')
-        result = app_worker.control(store.get_task(self.con, self.id), 'flush', timeout=10)
-        self.assertEqual(result['status'], 'delivered')
+        self.flush_and_assert_delivered_once('the answer')
         texts = [e['text'] for e in self.logged() if e['event'] == 'turn/start']
         self.assertEqual(len(texts), 2)
         self.assertIn('the answer', texts[1])
@@ -89,10 +101,8 @@ class SupervisorIsolationTest(IsolationBase):
         deadline = time.monotonic() + 5
         while store.get_task(self.con, self.id)['turn_state'] != 'completed' and time.monotonic() < deadline:
             time.sleep(.05)
-        store.add_message(self.con, self.id, store.QUEUED, 'after disk edit')
-        result = app_worker.control(store.get_task(self.con, self.id), 'flush', timeout=10)
-        self.assertEqual(result['status'], 'delivered')
-        self.assertIn('after disk edit', [e['text'] for e in self.logged() if e['event'] == 'turn/start'][-1])
+        self.assertEqual(store.get_task(self.con, self.id)['turn_state'], 'completed')
+        self.flush_and_assert_delivered_once('after disk edit')
 
     def test_preload_failure_reports_module_and_cause(self):
         package = self.isolated_package()
@@ -110,16 +120,23 @@ class SupervisorIsolationTest(IsolationBase):
 
     def test_viewer_command_ignores_worktree_orchd(self):
         rt = Runtime()
-        with patch.object(rt, 'run') as run, patch('orchd.runtime.worker_env', return_value={}):
+        with patch.object(rt, 'run') as run, patch('orchd.runtime.worker_env', return_value={}), \
+             patch('orchd.runtime.subprocess.Popen') as popen, patch('orchd.runtime.shutil.which', return_value=None):
             rt.open_app_viewer(str(self.db), store.get_task(self.con, self.id))
-        cmd = run.call_args.args[0]
-        tail = cmd[cmd.index('-e') + 1:]
+        if os.name == 'nt':
+            tail = popen.call_args.args[0]
+            self.assertEqual(popen.call_args.kwargs['cwd'], str(self.worktree))
+            env = popen.call_args.kwargs['env']
+        else:
+            cmd = run.call_args.args[0]
+            tail = cmd[cmd.index('-e') + 1:]
+            self.assertIn(f"--working-directory={self.worktree}", cmd)
+            env = None
         self.assertIn('-P', tail)
         self.assertLess(tail.index('-P'), tail.index('-m'))
-        self.assertIn(f"--working-directory={self.worktree}", cmd)
         # Run exactly what the terminal would, in the poisoned worktree: it must reach orchd's own code.
         proc = subprocess.run([*tail[:tail.index('viewer') + 1], '/nonexistent', 'x', 'y'], cwd=self.worktree,
-                              capture_output=True, text=True, timeout=30)
+                              capture_output=True, text=True, timeout=30, env=env)
         self.assertNotIn('SHADOWED-ORCHD-LOADED', proc.stderr)
         self.assertNotIn(str(self.worktree), proc.stderr)  # failed inside orchd's own store, not the shadow
 

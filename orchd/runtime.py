@@ -14,12 +14,14 @@ import stat
 import subprocess
 import sys
 import time
+import tempfile
 import uuid
 from pathlib import Path
 
 import psutil
 
 from . import paths
+from .platform_process import background_python, detached_options
 from .models import WorkerModels
 from .processes import environ_of, cleanup_processes, task_processes
 
@@ -120,12 +122,20 @@ def worker_bin_dir():
         os.replace(staged, target)  # atomic: a worker running gh right now never sees a half-written file
     elif not os.access(target, os.X_OK):
         target.chmod(0o755)
+    if os.name == "nt":
+        # Windows shells resolve gh.cmd before gh.exe in later PATH directories.
+        launcher = directory / "gh.cmd"
+        contents = f'@echo off\r\n"{sys.executable}" "{target}" %*\r\n'
+        if not launcher.is_file() or launcher.read_bytes() != contents.encode():
+            staged = directory / f".gh-cmd.{os.getpid()}"
+            staged.write_bytes(contents.encode())
+            os.replace(staged, launcher)
     return str(directory)
 
 
 def orchd_bin():
     """The orchd executable the gh wrapper calls for delivery checks: the one installed beside this interpreter."""
-    beside = Path(sys.executable).parent / "orchd"
+    beside = Path(sys.executable).parent / ("orchd.exe" if os.name == "nt" else "orchd")
     return str(beside) if beside.is_file() else shutil.which("orchd") or str(beside)
 
 
@@ -134,7 +144,10 @@ def worker_env(worktree=None):
     env = launch_env()
     if worktree:
         env["ORCHD_WORKTREE"] = str(Path(worktree).resolve())
-    env["PATH"] = worker_bin_dir() + os.pathsep + env.get("PATH", os.defpath)
+    wrapper_dir = worker_bin_dir()
+    env["PATH"] = wrapper_dir + os.pathsep + env.get("PATH", os.defpath)
+    if os.name == "nt":
+        env["ORCHD_GH_WRAPPER_DIR"] = wrapper_dir
     env["ORCHD_BIN"] = orchd_bin()
     # Replace even absolute gh credential helpers for GitHub, without writing git config.
     count = int(env.get("GIT_CONFIG_COUNT", "0"))
@@ -157,11 +170,17 @@ def mcp_env(orch_id):
     return env
 
 
-def _bin(name, env_var):
-    found = os.environ.get(env_var) or shutil.which(name)
+def _bin(name, env_var, *, home=None, env=None, which=None):
+    env = os.environ if env is None else env
+    found = env.get(env_var) or (which or shutil.which)(name)
     if found:
         return found
-    fallback = Path.home() / ".local/bin" / name
+    if os.name == "nt" and name == "claude" and env.get("LOCALAPPDATA"):
+        packages = Path(env["LOCALAPPDATA"]) / "Microsoft" / "WinGet" / "Packages"
+        matches = sorted(packages.glob("Anthropic.ClaudeCode_*/claude.exe"))
+        if len(matches) == 1:
+            return str(matches[0])
+    fallback = (home or Path.home()) / ".local/bin" / (name + ".exe" if os.name == "nt" else name)
     return str(fallback)
 
 
@@ -178,15 +197,25 @@ class Runtime:
     # -- process plumbing (tests override these) --------------------------------
     def run(self, cmd, cwd=None, timeout=60, check=True, env=None):
         return subprocess.run(cmd, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
-                              text=True, timeout=timeout, check=check, env=env)
+                              text=True, encoding='utf-8', errors='replace', timeout=timeout, check=check, env=env,
+                              **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))
 
     def send_uds(self, path, session_id, text):
         frame = {"type": "user", "session_id": session_id, "uuid": str(uuid.uuid4()),
                  "from": "orchd", "priority": "next", "message": {"role": "user", "content": text}}
+        data = (json.dumps(frame, ensure_ascii=False) + "\n").encode()
+        if os.name == "nt":
+            from .windows_pipe import send, wait_for_receipt
+            try:
+                send(path, self.claude, data)
+            except OSError as error:
+                raise UDSWriteUncertain(f"{type(error).__name__}: {error}") from error
+            if not wait_for_receipt(session_id, frame["uuid"]):
+                raise UDSWriteUncertain("Claude pipe write completed, but transcript receipt was not confirmed")
+            return
         with socket.socket(socket.AF_UNIX) as peer:
             peer.settimeout(5)
             peer.connect(path)
-            data = (json.dumps(frame, ensure_ascii=False) + "\n").encode()
             try:
                 peer.sendall(data)
             except OSError as error:
@@ -200,13 +229,15 @@ class Runtime:
         time.sleep(seconds)
 
     def exists(self, path):
+        if os.name == "nt" and str(path).startswith("\\\\.\\pipe\\"):
+            return self.socket_listening(path)
         return os.path.exists(path)
 
     def spawn(self, cmd, cwd, log):
         """Start a detached process that outlives us, stdout+stderr appended to `log`; return its pid."""
         with open(log, "a") as out:
             pid = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
-                                   env=worker_env(cwd), start_new_session=True).pid
+                                   env=worker_env(cwd), **detached_options()).pid
         self._record_identity(pid, worktree=cwd)
         return pid
 
@@ -245,6 +276,12 @@ class Runtime:
             pass
 
     def pid_alive(self, pid):
+        if os.name == "nt":
+            try:
+                value = int(pid)
+                return value > 0 and psutil.pid_exists(value)
+            except (TypeError, ValueError, OverflowError):
+                return False
         try:  # a finished child of this long-lived process stays a zombie, and kill(0) finds it, until reaped
             if os.waitpid(int(pid), os.WNOHANG)[0]:
                 return False
@@ -267,10 +304,10 @@ class Runtime:
         directory.mkdir(parents=True, exist_ok=True)
         env = dict(os.environ, ORCHD_WORKTREE=str(directory.resolve()))
         with (directory / f'{task_id}-{event_id}.log').open('a') as out:
-            return subprocess.Popen([sys.executable, paths.orchd_executable(), '_auto-retry', task_id,
+            return subprocess.Popen([background_python(), paths.orchd_executable(), '_auto-retry', task_id,
                                      str(event_id), '--database', str(database)],
                                     cwd=directory, env=env, stdin=subprocess.DEVNULL,
-                                    stdout=out, stderr=subprocess.STDOUT, start_new_session=True).pid
+                                    stdout=out, stderr=subprocess.STDOUT, **detached_options()).pid
 
     # -- repos and worktrees ----------------------------------------------------
     def repo_path(self, repo):
@@ -284,10 +321,15 @@ class Runtime:
         try:
             config = (Path(os.environ["CLAUDE_CONFIG_DIR"]) / ".claude.json"
                       if os.environ.get("CLAUDE_CONFIG_DIR") else Path.home() / ".claude.json")
-            data = json.loads(config.read_text())
+            data = json.loads(config.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return False
-        return bool((data.get("projects") or {}).get(str(repo_path), {}).get("hasTrustDialogAccepted"))
+        projects = data.get("projects") or {}
+        if os.name == "nt":
+            target = os.path.normcase(os.path.normpath(str(repo_path)))
+            return any(os.path.normcase(os.path.normpath(key)) == target and value.get("hasTrustDialogAccepted")
+                       for key, value in projects.items() if isinstance(value, dict))
+        return bool(projects.get(str(repo_path), {}).get("hasTrustDialogAccepted"))
 
     def verify_base_branch(self, repo_path, branch):
         """ValueError unless `branch` is a well-formed branch name that exists on origin (fetched fresh)."""
@@ -487,8 +529,17 @@ class Runtime:
     # -- claude workers ---------------------------------------------------------
     def socket_path(self, task_id):
         # macOS limits UDS paths to ~104 bytes, so keep them short and private.
-        directory = Path("/tmp") / f"orchd-{task_id}"
-        directory.mkdir(mode=0o700, exist_ok=True)
+        directory = Path(tempfile.gettempdir() if os.name == "nt" else "/tmp") / f"orchd-{task_id}"
+        if os.name == "nt":
+            from .platform_process import make_private, validate_private
+            try:
+                directory.mkdir(mode=0o700)
+            except FileExistsError:
+                validate_private(directory)
+            else:
+                make_private(directory)
+        else:
+            directory.mkdir(mode=0o700, exist_ok=True)
         return str(directory / "w.sock")
 
     def agents(self, timeout=15):
@@ -552,6 +603,8 @@ class Runtime:
             "--append-system-prompt", brief])
 
     def orch_socket_path(self, orch_id):
+        if os.name == "nt":
+            return "\\\\.\\pipe\\orchd-o-" + orch_id + "-" + uuid.uuid4().hex
         directory = Path("/tmp") / f"orchd-o-{orch_id}"
         directory.mkdir(mode=0o700, exist_ok=True)
         directory.chmod(0o700)  # the session crashes before init on any other mode
@@ -562,22 +615,32 @@ class Runtime:
         orch_home = Path(orch_home).resolve()
         # Claude Code 2.1.288 stores pasted/dragged images in this per-session
         # temp tree, not ~/.claude/image-cache. Expose only this home's cwd key.
-        images = paths.orch_images(orch_home)
-        images.mkdir(mode=0o700, parents=True, exist_ok=True)
-        images.chmod(0o700)
-        images = images.resolve()
+        images = None if os.name == "nt" else paths.orch_images(orch_home)
+        if images:
+            images.mkdir(mode=0o700, parents=True, exist_ok=True)
+            images.chmod(0o700)
+            images = images.resolve()
         sock = self.orch_socket_path(orch_id)
-        mcp = Path(sock).parent / "mcp.json"
+        if os.name == "nt":
+            from .platform_process import make_private
+            mcp_dir = Path(tempfile.mkdtemp(prefix="orchd-o-"))
+            make_private(mcp_dir)
+        else:
+            mcp_dir = Path(sock).parent
+        mcp = mcp_dir / "mcp.json"
+        entrypoint = paths.orchd_executable()
+        executable, args = (paths.mcp_launch(entrypoint) if os.name == "nt"
+                            else (sys.executable, [entrypoint]))
         mcp.write_text(json.dumps({"mcpServers": {"orchd": {
-            # Run under this interpreter: bin/orchd's shebang is the system python3, which may lack psutil.
-            "command": sys.executable, "args": [paths.orchd_executable(), "mcp"], "env": mcp_env(orch_id)}}}))
+            "command": executable, "args": [*args, "mcp"], "env": mcp_env(orch_id)}}}), encoding="utf-8")
         try:
             agents = (orch_home / "AGENTS.md").read_text()
         except OSError:
             agents = ""
         prompt = (f"You are an orchd Orch. Your orch id is {orch_id}. "
-                  f"Orch home sessions' cached input images are readable under {images}/<session-id>/images/. "
-                  "Only files under groups/ in your Orch home may be edited. "
+                  + (f"Orch home sessions' cached input images are readable under {images}/<session-id>/images/. "
+                     if images else "")
+                  +                  "Only files under groups/ in your Orch home may be edited. "
                   f"Instructions from AGENTS.md follow:\n{agents}")
         settings = {"env": {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"},
                     "crossSessionInbound": "accept",
@@ -595,6 +658,9 @@ class Runtime:
                                                 "settings.local.json", "mcp.json")]],
                                     "blockReadsOutsideWorkingDirectories": True,
                                     "disableBypassPermissionsMode": "disable"}}
+        if not images:
+            settings["permissions"]["additionalDirectories"] = []
+            settings["permissions"]["allow"].remove(f"Read(/{images}/**)")
         if resume and self.exists(sock):
             self.clear_dead_socket(sock)  # else start_claude's wait for the socket passes on the old file
         job, session = self.start_claude(orch_home, sock, model, [
@@ -605,6 +671,9 @@ class Runtime:
         return sock, job, session
 
     def socket_listening(self, path):
+        if os.name == "nt":
+            from .windows_pipe import listening
+            return listening(path, self.claude)
         with socket.socket(socket.AF_UNIX) as peer:
             peer.settimeout(5)
             try:
@@ -615,6 +684,10 @@ class Runtime:
 
     def clear_dead_socket(self, path):
         """Remove a socket file nobody listens on; refuse when something still accepts on it."""
+        if os.name == "nt":
+            if self.socket_listening(path):
+                raise RuntimeError(f"{path} still accepts connections; its Orch is running")
+            return
         with socket.socket(socket.AF_UNIX) as peer:
             peer.settimeout(5)
             try:
@@ -925,6 +998,18 @@ class Runtime:
     def open_app_viewer(self, database, task):
         # Ghostty does not inherit PYTHONPATH; -P excludes the worktree package.
         package_root = str(Path(__file__).resolve().parents[1])
+        if os.name == "nt":
+            env = worker_env(task["worktree"])
+            env["PYTHONPATH"] = package_root + os.pathsep + env.get("PYTHONPATH", "")
+            command = [sys.executable, "-P", "-m", "orchd.app_worker", "viewer",
+                       database, task["id"], task["generation"]]
+            terminal = shutil.which("wt.exe")
+            if terminal:
+                subprocess.Popen([terminal, "-w", "new", *command], cwd=task["worktree"], env=env)
+            else:
+                subprocess.Popen(command, cwd=task["worktree"], env=env,
+                                 creationflags=subprocess.CREATE_NEW_CONSOLE)
+            return
         self.run(["open", "-na", "Ghostty.app", "--args", f"--working-directory={task['worktree']}", "-e",
                   "/usr/bin/env", f"PYTHONPATH={package_root}", sys.executable, "-P", "-m", "orchd.app_worker",
                   "viewer", database, task["id"], task["generation"]],

@@ -5,6 +5,8 @@ not lose ownership. Never infer ownership from a process name or cwd alone.
 psutil's Process objects retain (pid, create_time) and check reuse on signals.
 """
 import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -15,19 +17,94 @@ TERM_GRACE = 2.0
 KILL_GRACE = 2.0
 
 
-def environ_of(proc, attempts=4):
+def environ_of(proc, attempts=4, *, exclude_unreadable=None):
     """A process mid-exec briefly refuses its environment, and one that exits mid-read makes psutil's C code raise
     SystemError ("returned a result with an exception set"). Retry; a failure that persists is NoSuchProcess when
-    the process is gone and AccessDenied (unknown, blocks) when it is still there."""
+    the process is gone and AccessDenied (unknown, blocks) when it is still there. Ownership scans may exclude
+    independently proven service infrastructure after the first AccessDenied, before sleeping or retrying."""
     for attempt in range(attempts):
         try:
             return proc.environ()
-        except (psutil.AccessDenied, SystemError):
+        except (psutil.AccessDenied, SystemError) as error:
+            if (attempt == 0 and isinstance(error, psutil.AccessDenied)
+                    and exclude_unreadable is not None and exclude_unreadable(proc)):
+                return {}
             if attempt < attempts - 1:
                 time.sleep(.05)
-    if not proc.is_running():
+    if not _alive(proc):
         raise psutil.NoSuchProcess(proc.pid)
     raise psutil.AccessDenied(proc.pid)
+
+
+def _linux_process_stat(pid):
+    # comm may contain spaces and parentheses. Remaining fields begin at state.
+    raw = Path(f"/proc/{pid}/stat").read_text()
+    fields = raw.rsplit(")", 1)[1].split()
+    return dict(ppid=int(fields[1]), group=int(fields[2]), session=int(fields[3]),
+                flags=int(fields[6]), start=int(fields[19]))
+
+
+def _user_manager_unit(uid):
+    command = Path("/usr/bin/systemctl")
+    info = command.stat()
+    if info.st_uid != 0 or info.st_mode & 0o022:
+        raise ValueError("systemctl is not a trusted system executable")
+    properties = ("MainPID", "Type", "PAMName", "ActiveState", "ControlGroup", "ActiveEnterTimestampMonotonic")
+    result = subprocess.run([str(command), "--system", "show", f"user@{uid}.service",
+                             *["--property=" + name for name in properties]], capture_output=True,
+                            text=True, check=True, timeout=2,
+                            env={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "SYSTEMD_PAGER": ""})
+    return dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+
+
+def _systemd_user_infrastructure(proc):
+    """Exclude only a root-managed user manager and its pre-READY, never-execed PAM helper.
+
+    Their environments can be unreadable despite matching UIDs. Names and writable
+    user cgroups alone cannot establish this exemption. The system manager supplies
+    the authoritative MainPID and service-ready time; procfs supplies kernel lineage
+    and PF_FORKNOEXEC. Missing evidence leaves the ordinary fail-closed scan intact.
+    """
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        name = proc.name()
+        if name not in ("systemd", "(sd-pam)"):
+            return False
+        uid = os.getuid()
+        unit = _user_manager_unit(uid)
+        if (unit.get("Type") not in ("notify", "notify-reload") or unit.get("PAMName") != "systemd-user"
+                or unit.get("ActiveState") not in ("active", "reloading")):
+            return False
+        manager = psutil.Process(int(unit["MainPID"]))
+        manager_stat = _linux_process_stat(manager.pid)
+        current = _linux_process_stat(proc.pid)
+        ready = int(unit["ActiveEnterTimestampMonotonic"]) / 1_000_000
+        ticks = os.sysconf("SC_CLK_TCK")
+        # A tick is a rounded-down birth timestamp. Require its upper bound to
+        # precede READY so a later process cannot pass through timestamp rounding.
+        if ready <= 0 or (current["start"] + 1) / ticks > ready:
+            return False
+        if manager_stat["ppid"] != 1 or manager.name() != "systemd" or "--user" not in manager.cmdline():
+            return False
+        if any(value != uid for value in manager.uids()):
+            return False
+        scope = unit["ControlGroup"].rstrip("/") + "/init.scope"
+        if scope != f"/user.slice/user-{uid}.slice/user@{uid}.service/init.scope":
+            return False
+        for pid in {proc.pid, manager.pid}:
+            groups = Path(f"/proc/{pid}/cgroup").read_text().splitlines()
+            if not any(line.split(":", 2)[-1] == scope for line in groups):
+                return False
+        if proc.pid == manager.pid:
+            return name == "systemd" and proc.is_running()
+        return (name == "(sd-pam)" and current["ppid"] == manager.pid
+                and current["flags"] & 0x40 != 0  # Linux PF_FORKNOEXEC: forked but never execed
+                and current["group"] == manager_stat["group"]
+                and current["session"] == manager_stat["session"]
+                and proc.is_running() and manager.is_running())
+    except (OSError, ValueError, KeyError, IndexError, psutil.Error, subprocess.SubprocessError):
+        return False
 
 
 def _descendants(proc, mark, found):
@@ -60,7 +137,7 @@ def task_processes(worktree, captured=()):
         try:
             if proc.pid == os.getpid() or proc.uids().real != os.getuid():
                 continue
-            if environ_of(proc).get("ORCHD_WORKTREE") != mark:
+            if environ_of(proc, exclude_unreadable=_systemd_user_infrastructure).get("ORCHD_WORKTREE") != mark:
                 continue
             # Force identity acquisition now, before a PID can disappear/reappear.
             proc.create_time()

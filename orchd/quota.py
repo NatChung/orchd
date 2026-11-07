@@ -21,6 +21,8 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from . import store
+from .file_lock import try_lock
+from .platform_process import background_options
 
 # Observations are refreshed in the background every BACKGROUND_PERIOD seconds, so TTL must outlast a
 # period plus probe latency (3x margin); the 7-day windows move slowly, so this stays accurate enough.
@@ -170,12 +172,11 @@ def refresh(cache, *, rpc=None, sessions=None, now=None, force=False, thread=Non
     rpc must be an already initialized, authorized app-server connection. A
     bounded tail of the 20 most recently modified sessions is the fallback.
     """
-    import fcntl
     now = time.time() if now is None else now
     cache.path.parent.mkdir(parents=True, exist_ok=True)
     with open(cache.path.with_suffix('.lock'), 'a+') as lock:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try_lock(lock)
         except BlockingIOError:
             return
         lock.seek(0)
@@ -302,6 +303,22 @@ def _reap(process, grace=3):
     """Terminate a probe process group, escalating to kill; never raises."""
     if process.poll() is not None:
         return
+    if os.name == 'nt':
+        import psutil
+        try:
+            root = psutil.Process(process.pid)
+            children = root.children(recursive=True)
+        except psutil.Error:
+            return
+        for child in [*reversed(children), root]:
+            with contextlib.suppress(psutil.Error, OSError):
+                child.terminate()
+        _, alive = psutil.wait_procs([root, *children], timeout=grace)
+        for child in alive:
+            with contextlib.suppress(psutil.Error, OSError):
+                child.kill()
+        psutil.wait_procs(alive, timeout=grace)
+        return
     for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, grace)):
         try:
             os.killpg(process.pid, sig)
@@ -317,7 +334,7 @@ def _reap(process, grace=3):
 
 def _run(cmd, timeout, **kwargs):
     """subprocess.run replacement whose child is registered so stop_background can reap it."""
-    process = subprocess.Popen(cmd, start_new_session=True, **kwargs)
+    process = subprocess.Popen(cmd, **background_options(), **kwargs)
     with _children_lock:
         _children.add(process)
     try:
@@ -402,7 +419,7 @@ def _probe(cache, provider, binary=None):
         try:
             process = subprocess.Popen([binary or 'codex', 'app-server', '--listen', 'unix://' + endpoint],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                start_new_session=True)
+                **background_options())
             with _children_lock:
                 _children.add(process)
             deadline = time.monotonic() + 10
@@ -446,13 +463,12 @@ def refresh_background(cache, *, now=None, binary=None, claude=None):
     app-server only if that leaves it unknown; sonnet uses the bounded /usage
     probe. Failures are tolerated, never raised.
     """
-    import fcntl
     now = time.time() if now is None else now
     try:
         cache.path.parent.mkdir(parents=True, exist_ok=True)
         with open(cache.path.with_suffix('.periodic.lock'), 'a+') as lock:
             try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                try_lock(lock)
             except BlockingIOError:
                 return False
             lock.seek(0)
