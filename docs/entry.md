@@ -36,6 +36,16 @@ Windows 的安全圖片複製尚未提供，附件會明確回報 `unsupported_p
 單獨再跑 init 也會保留舊的不同內容。此變更未升級、重啟或改動任何 live 入口。
 
 1. 在 Desktop 打開 `~/orch/interface`，權限選 **`interface`**（init 寫好的權限設定），不要用完整存取權。
+
+   Windows 的選單若沒有專案層級的 `interface`，可以從 PowerShell 建立一個使用專案權限的聊天，再在桌面續聊：
+
+   ```powershell
+   $turn = codex exec --json --skip-git-repo-check -C "$HOME\orch\interface" "查詢綁定的 Orch 狀態。" |
+     ForEach-Object { $_ | ConvertFrom-Json } | Where-Object type -eq 'thread.started'
+   if ($LASTEXITCODE -eq 0 -and $turn.thread_id) { Start-Process ("codex://threads/" + $turn.thread_id) }
+   ```
+
+   保留專案內的 `default_permissions = "interface"`。將這個 profile 單獨複製進使用者設定，可能使一般聊天因缺少全域 `default_permissions` 而無法啟動。
 2. 綁定的 Orch 閒置被 Claude 收掉時，送訊息或跑 `orchd binding` 會原地接回同一個 Orch（#72）。
    用 `orchd orch stop` 停掉、或接回失敗時不會自己替換；確定要換用 `orchd binding --new`（舊 Orch 的未答問題留在舊 Orch）。
    綁到指定的 Orch 用 `orchd binding --to <orch_id>`，`orchd binding --status` 唯讀查看。
