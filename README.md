@@ -30,14 +30,15 @@ On the first terminal run, if no projects directory is configured or detected, `
 orchd upgrade
 ```
 
-Upgrade reads the source recorded by uv and installs the latest commit on that source's default branch. It drops branch pins, preserves task data and personal settings, then runs versioned home-rule migrations with backups. See [home migration behavior](docs/upgrade-migrations.md) for managed blocks, previews, retries, and the first upgrade from a legacy version. Existing sessions and MCP processes can keep the old code; start new sessions when convenient. Upgrade does not restart the daemon. Update checkout installations in their own checkout.
+Upgrade reads the source recorded by uv. On POSIX it follows that source's default branch and drops branch pins. On Windows it retains the recorded source and revision. It preserves task data and personal settings, then runs versioned home-rule migrations with backups. See [home migration behavior](docs/upgrade-migrations.md) for managed blocks, previews, retries, and the first upgrade from a legacy version. Existing sessions and MCP processes can keep the old code; start new sessions when convenient. Upgrade does not restart the daemon. Update checkout installations in their own checkout.
 
 ## Native Windows and PowerShell
 
 Install uv and Git, then install and sign in to the provider CLIs listed above. Use a PowerShell terminal for these commands:
 
 ```powershell
-uv tool install "git+https://github.com/NatChung/orchd.git"
+# From a checkout containing the Windows upgrade fix:
+.\scripts\install-windows.ps1 -Source (Get-Location).Path
 uv tool update-shell
 # Open a new PowerShell terminal after updating PATH.
 orchd --help
@@ -46,7 +47,9 @@ orchd config set projects-dir "$HOME\projects"
 orchd binding
 ```
 
-Before Windows support is merged into upstream's default branch, install the reviewed checkout with `uv tool install --force .`, or use its exact reviewed Git revision. Reinstall from that same reviewed source for subsequent fixes. `orchd upgrade` drops branch pins and follows the source's default branch, so using it before the Windows changes merge can replace the Windows implementation.
+The script also migrates an older uv installation: it installs into a **new** directory and exposes the launcher at the usual uv bin path. Keep the old directories; a running Desktop chat can still import modules from them. Do not run an in-place `uv tool install --force` or `uv tool upgrade orchd` against an installation used by a live chat.
+
+For subsequent updates, run `orchd upgrade`. If you installed from a checkout, update that checkout first; for a Git install, pass a reviewed `git+https://…/orchd.git@branch` as `-Source` to track the branch. An exact Git commit stays pinned. New commands use the updated installation; an already running MCP process can finish on its original version. No Desktop restart or new chat is required.
 
 Each project is a Git repository under the configured projects directory. After binding an Orch, dispatch a Codex worker and read its reports directly from PowerShell:
 

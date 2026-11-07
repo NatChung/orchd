@@ -36,3 +36,8 @@ jobs:
         env:
           ORCHD_RUN_INSTALL_SMOKE: '1'
         run: python -m unittest discover -s tests -p test_package_install.py
+      - name: Upgrade with an old Windows session still running
+        if: runner.os == 'Windows'
+        env:
+          ORCHD_RUN_INSTALL_SMOKE: '1'
+        run: python -m unittest discover -s tests -p test_windows_upgrade.py

@@ -28,14 +28,15 @@ orchd doctor
 orchd upgrade
 ```
 
-upgrade 讀取 uv 安裝紀錄的來源，安裝該來源預設 branch 的最新 commit；branch pin 會移除。它保留任務資料與個人設定，再自動執行家目錄規則 migration 並備份；managed 區塊、預覽、重試與舊版第一次更新的操作見[家目錄更新](docs/upgrade-migrations.md)。既有 session／MCP process 仍持有原本程式，請在方便時開始新 session；更新不是重新啟動 daemon 的指令。Checkout 安裝請在自己的 checkout 更新程式。
+upgrade 讀取 uv 安裝紀錄的來源，POSIX 安裝該來源預設 branch 的最新 commit；Windows 則保留原先選定的來源與 revision。它保留任務資料與個人設定，再自動執行家目錄規則 migration 並備份；managed 區塊、預覽、重試與舊版第一次更新的操作見[家目錄更新](docs/upgrade-migrations.md)。既有 session／MCP process 仍持有原本程式，請在方便時開始新 session；更新不是重新啟動 daemon 的指令。Checkout 安裝請在自己的 checkout 更新程式。
 
 ## 原生 Windows 與 PowerShell
 
 先安裝 uv、Git，以及上方列出的供應商 CLI，並完成 CLI 登入。在 PowerShell 執行：
 
 ```powershell
-uv tool install "git+https://github.com/NatChung/orchd.git"
+# 在包含 Windows 更新修正的 checkout 裡執行：
+.\scripts\install-windows.ps1 -Source (Get-Location).Path
 uv tool update-shell
 # 更新 PATH 後重新開啟 PowerShell。
 orchd --help
@@ -44,9 +45,9 @@ orchd config set projects-dir "$HOME\projects"
 orchd binding
 ```
 
-Windows 支援合併至上游預設 branch 之前，請在已審閱的 checkout 執行 `uv tool install --force .`，
-或安裝已審閱的精確 Git revision。後續修正也從同一個已審閱來源重新安裝。
-`orchd upgrade` 會移除 branch pin 並追蹤來源的預設 branch，提早使用可能把 Windows 實作換回尚未包含這些修改的版本。
+舊版 uv 安裝也用上面的腳本遷移一次：它在**新目錄**安裝，PowerShell 仍從原來的 uv bin 路徑啟動。請保留舊目錄，使用中的桌面聊天可能還會從裡面載入模組。聊天開著時，請勿在原目錄執行 `uv tool install --force` 或 `uv tool upgrade orchd`。
+
+以後更新只需執行 `orchd upgrade`。若是從本機 checkout 安裝，請先更新該 checkout；要追蹤 Git branch，可將已審閱的 `git+https://…/orchd.git@branch` 傳給 `-Source`。若指定確切 commit，更新時仍會固定在該 commit。新指令使用新版，已啟動的 MCP 程序可繼續使用舊版，不必重開桌面 App 或換聊天。
 
 每個專案是設定目錄下的一個 Git repo。綁定 Orch 後，可以從 PowerShell 派 Codex worker，再讀取回報：
 
