@@ -9,6 +9,13 @@ def detached_options():
     return {"start_new_session": True}
 
 
+def background_options():
+    """Suppress a Windows console while preserving redirected standard handles."""
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
 def make_private(directory):
     if os.name != "nt":
         directory.chmod(0o700)

@@ -22,6 +22,7 @@ from pathlib import Path
 
 from . import store
 from .file_lock import try_lock
+from .platform_process import background_options
 
 # Observations are refreshed in the background every BACKGROUND_PERIOD seconds, so TTL must outlast a
 # period plus probe latency (3x margin); the 7-day windows move slowly, so this stays accurate enough.
@@ -302,6 +303,21 @@ def _reap(process, grace=3):
     """Terminate a probe process group, escalating to kill; never raises."""
     if process.poll() is not None:
         return
+    if os.name == 'nt':
+        import psutil
+        try:
+            root = psutil.Process(process.pid)
+            children = root.children(recursive=True)
+            for child in reversed(children):
+                child.terminate()
+            root.terminate()
+            _, alive = psutil.wait_procs([root, *children], timeout=grace)
+            for child in alive:
+                child.kill()
+            psutil.wait_procs(alive, timeout=grace)
+        except psutil.NoSuchProcess:
+            pass
+        return
     for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, grace)):
         try:
             os.killpg(process.pid, sig)
@@ -317,7 +333,7 @@ def _reap(process, grace=3):
 
 def _run(cmd, timeout, **kwargs):
     """subprocess.run replacement whose child is registered so stop_background can reap it."""
-    process = subprocess.Popen(cmd, start_new_session=True, **kwargs)
+    process = subprocess.Popen(cmd, **background_options(), **kwargs)
     with _children_lock:
         _children.add(process)
     try:
@@ -402,7 +418,7 @@ def _probe(cache, provider, binary=None):
         try:
             process = subprocess.Popen([binary or 'codex', 'app-server', '--listen', 'unix://' + endpoint],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                start_new_session=True)
+                **background_options())
             with _children_lock:
                 _children.add(process)
             deadline = time.monotonic() + 10

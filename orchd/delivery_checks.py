@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 
 from . import config, paths, store, worker_flow
 from .runtime import redact
+from .platform_process import background_options
 
 DEFINITION = "docs/development/delivery.pipeline.json"
 KINDS = ("preflight", "pr")
@@ -197,12 +198,16 @@ def run(con, task, kind, projects=None, env=None):
         exit_code, output = None, ""
         try:
             proc = subprocess.Popen(check["argv"], cwd=cwd, env=child, stdin=subprocess.DEVNULL, text=True,
-                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **background_options())
             try:
                 output, _ = proc.communicate(timeout=check["timeout_seconds"])
                 exit_code = proc.returncode
             except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
+                if os.name == "nt":
+                    from .quota import _reap
+                    _reap(proc)
+                else:
+                    os.killpg(proc.pid, signal.SIGKILL)
                 output = (proc.communicate()[0] or "") + f"\ntimed out after {check['timeout_seconds']}s"
         except OSError as error:
             output = f"could not start {check['argv'][0]}: {error.strerror or error}"
