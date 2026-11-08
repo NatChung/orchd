@@ -467,7 +467,7 @@ def gate_pr(con, task, args, projects=None):
             raise _problem("pr", "forbidden artifact paths in PR diff:\n" + "\n".join(repr(p) for p in offenders))
     if inputs["body_file"]:
         try:
-            inputs["body"] = Path(inputs["body_file"]).read_text()
+            inputs["body"] = Path(inputs["body_file"]).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as error:
             raise _problem("pr", f"cannot read the body file: {error}") from error
     inputs.update(head=remote_branch, repo=f"{origin[0]}/{origin[1]}", base=base_branch)
@@ -476,7 +476,7 @@ def gate_pr(con, task, args, projects=None):
     directory = Path(os.environ.get("ORCHD_HOME", Path.home() / ".local/share/orchd")) / "pr-inputs"
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / f"{task_id}-{head[:12]}.json"
-    target.write_text(json.dumps(inputs, ensure_ascii=False, indent=1))
+    target.write_text(json.dumps(inputs, ensure_ascii=False, indent=1), encoding="utf-8")
     if "pr" in checks:
         row = run(con, task, "pr", projects, env={"ORCHD_PR_INPUT": str(target)})
         if not row["passed"]:

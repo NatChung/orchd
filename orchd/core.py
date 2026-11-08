@@ -291,7 +291,7 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
                                                  WORKER_MODELS[model])
             store.update_task(con, task_id, job_id=job, session_id=session, status="running")
         else:
-            sock = rt.socket_path(task_id)
+            sock = rt.worker_socket(task_id)
             job, session = rt.start_worker(worktree, sock, worker_brief(worker_cli(), worktree=worktree, repo=task["repo"], projects=paths.projects_dir()), WORKER_MODELS[model])
             store.update_task(con, task_id, socket=sock, job_id=job, session_id=session, status="running")
             task = store.get_task(con, task_id)
@@ -1260,6 +1260,10 @@ def _close_locked(con, rt, task_id, outcome, rating):
         if app_worker.enabled(task):
             cleanup = app_worker.stop(con, task)
         elif task["job_id"] or task["worktree"]:
+            if os.name == "nt":
+                for row in con.execute("SELECT identity FROM worker_viewers WHERE task_id=? AND generation=?",
+                                       (task_id, "legacy")):
+                    app_worker.stop_identity(row["identity"])
             cleanup = rt.stop_task_worker(worker_kind(task["model"]), task["job_id"],
                                           (task["worktree"], task["session_id"]))
         step = "worktree check or removal failed"
@@ -1318,9 +1322,15 @@ def view(con, rt, task_id):
     if worker_kind(task["model"]) == "codex":
         if rt.pid_alive(task["job_id"]):
             raise ValueError(f"task {task_id}'s codex worker is in a turn; `orchd watch` shows its progress")
-        rt.open_codex_viewer(task["worktree"], task["session_id"])
+        pid = rt.open_codex_viewer(task["worktree"], task["session_id"])
+        if os.name == "nt" and pid:
+            con.execute("INSERT OR IGNORE INTO worker_viewers VALUES(?,?,?)",
+                        (task_id, "legacy", app_worker.identity(pid)))
         return f"opened Ghostty: codex resume {shlex.quote(task['session_id'])}"
-    rt.open_viewer(task["job_id"], worktree=task["worktree"])
+    pid = rt.open_viewer(task["job_id"], worktree=task["worktree"])
+    if os.name == "nt" and pid:
+        con.execute("INSERT OR IGNORE INTO worker_viewers VALUES(?,?,?)",
+                    (task_id, "legacy", app_worker.identity(pid)))
     return f"opened Ghostty: claude attach {shlex.quote(task['job_id'])}"
 
 
@@ -1532,7 +1542,7 @@ def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT, backend=No
                     worktree, str(directory / f"codex-{tag}.jsonl"),
                     worker_brief(worker_cli(), kind, worktree, task["repo"], paths.projects_dir()) + "\n\n" + prompt, to_model)
             else:
-                new["socket"] = str(directory / f"w-{tag}.sock")
+                new["socket"] = rt.worker_socket(task_id, tag)
                 new["job_id"], new["session_id"] = rt.start_worker(worktree, new["socket"], worker_brief(worker_cli(), worktree=worktree, repo=task["repo"], projects=paths.projects_dir()),
                                                                    to_model)
                 stage = "send"

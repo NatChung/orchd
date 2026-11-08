@@ -42,6 +42,10 @@ jobs:
           python -m unittest discover -s tests -p test_windows_gh_wrapper.py
           python -m unittest discover -s tests -p test_windows_background.py
           python -m unittest discover -s tests -p test_windows_cleanup.py
+          python -m unittest discover -s tests -p test_legacy_worker_windows.py
+          python -m unittest discover -s tests -p test_text_encoding.py
+          python -m unittest discover -s tests -p test_windows_process_lineage.py
+          python -m unittest discover -s tests -p test_claude_worker_pipe.py
       - name: Clean packaged install
         env:
           ORCHD_RUN_INSTALL_SMOKE: '1'

@@ -42,7 +42,7 @@ def installed_commit(prefix):
     for path in (*prefix.glob("lib/python*/site-packages/orchd-*.dist-info/direct_url.json"),
                  *prefix.glob("Lib/site-packages/orchd-*.dist-info/direct_url.json")):
         try:
-            return (json.loads(path.read_text()).get("vcs_info") or {}).get("commit_id")
+            return (json.loads(path.read_text(encoding="utf-8")).get("vcs_info") or {}).get("commit_id")
         except (OSError, ValueError):
             return None
     return None

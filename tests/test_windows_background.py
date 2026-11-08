@@ -104,7 +104,7 @@ class WindowsForegroundViewerTests(unittest.TestCase):
     def test_codex_resume_viewer_opens_in_worktree(self):
         popen = self._open(lambda: self.rt.open_codex_viewer(self.tmp.name, 'thread-1'), 'wt.exe')
         self.assertEqual(popen.call_args.args[0],
-                         ['wt.exe', '-w', 'new', '-d', self.tmp.name, self.exe, 'resume', 'thread-1'])
+                         [self.exe, 'resume', 'thread-1'])
         self.assertEqual(popen.call_args.kwargs['cwd'], self.tmp.name)
         # close finds Windows viewers only through the task mark
         self.assertEqual(popen.call_args.kwargs['env']['ORCHD_WORKTREE'], str(Path(self.tmp.name).resolve()))
@@ -112,7 +112,7 @@ class WindowsForegroundViewerTests(unittest.TestCase):
     def test_claude_task_viewer_carries_the_task_mark(self):
         popen = self._open(lambda: self.rt.open_viewer('job-1', worktree=self.tmp.name), 'wt.exe')
         self.assertEqual(popen.call_args.args[0],
-                         ['wt.exe', '-w', 'new', '-d', self.tmp.name, self.exe, 'attach', 'job-1'])
+                         [self.exe, 'attach', 'job-1'])
         self.assertEqual(popen.call_args.kwargs['env']['ORCHD_WORKTREE'], str(Path(self.tmp.name).resolve()))
 
     def test_orch_viewer_has_no_task_mark(self):
