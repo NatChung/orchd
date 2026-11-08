@@ -209,6 +209,8 @@ def _attempt(con, task_id):
 
 
 def _output(task, output_file, expected):
+    if isinstance(output_file, os.PathLike):
+        output_file = os.fspath(output_file)
     if not isinstance(output_file, str):
         raise ValueError('Workflow report done requires output_file')
     relative = workflows.relative(output_file)

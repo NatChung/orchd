@@ -1,5 +1,7 @@
 """Synthetic offline run engine tests; fake workers never start a model or service."""
 import copy
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -8,7 +10,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from orchd import core, interface, store, verify, workflow_runs as runs, workflows
+from orchd import cli, core, home_migrations, interface, store, verify, workflow_runs as runs, workflows
 from tests.test_orchd import FakeRuntime
 
 
@@ -775,6 +777,36 @@ class WorkflowRunTests(unittest.TestCase):
         self.assertEqual(store.get_task(self.con, task_id)['status'], 'closed')
         self.assertEqual(runs.show(self.con, run_id)['state'], 'cancelled')
         self.assertEqual(self.con.execute("SELECT COUNT(*) FROM messages WHERE task_id=? AND kind='report'", (task_id,)).fetchone()[0], 0)
+
+    def test_parsed_report_cli_captures_pathlike_output_with_real_core_and_database(self):
+        run_id = self.start()
+        task_id = self.tick(run_id)['attempts'][0]['task_id']
+        task = store.get_task(self.con, task_id)
+        relative = '.gstack/parsed-cli/workflow-output.json'
+        artifact = Path(task['worktree']) / relative
+        artifact.parent.mkdir(parents=True)
+        original = json.dumps({'schema_version': runs.OUTPUT_SCHEMA, 'values': {'implementation_instructions': 'Exact CLI handoff 原文\n'}}, ensure_ascii=False).encode()
+        artifact.write_bytes(original)
+        real_connect = store.connect
+        connections = []
+        def connect(database=None):
+            connection = real_connect(self.db)
+            connections.append(connection)
+            return connection
+        try:
+            with patch.object(cli.store, 'connect', side_effect=connect), patch.object(cli, 'Runtime', return_value=self.rt), patch.object(home_migrations, 'ensure_current', return_value=[]), contextlib.redirect_stdout(io.StringIO()):
+                code = cli.main(['report', task_id, '--status', 'done', '--summary', 'Native CLI result', '--evidence', 'Synthetic exact artifact', '--output-file', relative])
+        finally:
+            for connection in connections:
+                connection.close()
+        self.assertEqual(code, 0)
+        captured = self.con.execute('SELECT output,output_digest FROM workflow_run_attempts WHERE task_id=?', (task_id,)).fetchone()
+        self.assertEqual(captured['output'], original)
+        self.assertEqual(captured['output_digest'], runs._hash(original))
+        self.assertEqual(store.get_task(self.con, task_id)['status'], 'done')
+        second = self.tick(run_id, 2)['attempts'][1]['task_id']
+        dispatch = json.loads(self.con.execute("SELECT body FROM messages WHERE task_id=? AND kind='dispatch'", (second,)).fetchone()[0])
+        self.assertEqual(dispatch['workflow']['inputs']['instructions'], 'Exact CLI handoff 原文\n')
 
     def test_memory_database_never_starts_a_process(self):
         con = store.connect(':memory:')
