@@ -213,6 +213,22 @@ class EntryTest(unittest.TestCase):
         self.assertEqual(self.relay()["status"], "delivered")
         self.assertEqual([m["body"] for m in entry.inbox(self.con, self.orch)["messages"]], ["one", "two", "three"])
 
+    def test_message_read_while_send_waits_is_not_marked_failed(self):
+        def read_then_fail(path, session_id, text):
+            entry.inbox(self.con, self.orch)  # the busy Orch reads before the receipt wait gives up
+            raise OSError("receipt was not confirmed")
+        self.rt.nat_says("desk-1", "mid-turn")
+        with patch.object(self.rt, "send_uds", side_effect=read_then_fail):
+            self.assertEqual(self.relay()["status"], "delivered")
+        row = self.con.execute("SELECT delivery, read_at, attempts FROM entry_messages "
+                               "WHERE direction='in' ORDER BY id DESC").fetchone()
+        self.assertEqual(row["delivery"], "delivered")
+        self.assertIsNotNone(row["read_at"])
+        self.assertEqual(row["attempts"], 1)
+        self.rt.nat_says("desk-1", "next")
+        self.assertEqual(self.relay()["status"], "delivered")  # not blocked behind it, nor resent
+        self.assertEqual([m["body"] for m in entry.inbox(self.con, self.orch)["messages"]], ["next"])
+
     def test_receipt_failure_is_uncertain_and_not_resent(self):
         self.rt.nat_says("desk-1", "once")
         real = self.con.execute
