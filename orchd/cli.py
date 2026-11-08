@@ -200,12 +200,18 @@ def build_parser():
     how.add_argument("--status", action="store_true", help="read-only: binding, Orch health, questions, delivery")
     entry_parser = sub.add_parser("entry", help="entry messages and local-only issue threads")
     entry_actions = entry_parser.add_subparsers(dest="entry_action", required=True)
-    thread = entry_actions.add_parser("thread", help="read summaries from a private DB/WAL copy")
+    thread = entry_actions.add_parser("thread", help="read threads from a private DB/WAL copy")
     refs = thread.add_mutually_exclusive_group(required=True)
     refs.add_argument("--issue-refs", help="comma-separated refs")
     refs.add_argument("--issue-ref", help="single ref")
+    refs.add_argument("--question-id", type=int, help="one question's full thread, including its revisions")
+    refs.add_argument("--task-id", help="every question thread of this task")
     thread.add_argument("--entry", default="desktop")
-    thread.add_argument("--limit", type=int, default=3)
+    thread.add_argument("--limit", type=int, default=None,
+                        help="messages per ref (default 3), messages for --question-id (default 3), "
+                             "or threads per page for --task-id (default 20); 1-100")
+    thread.add_argument("--per-question-limit", type=int, help="with --task-id: messages per thread (default 3)")
+    thread.add_argument("--cursor", help="opaque next_cursor from a previous --question-id/--task-id page")
     thread.add_argument("--json", action="store_true", help="JSON output (also the default)")
     reconcile = entry_actions.add_parser("reconcile", help="move open questions stranded on a previous owner to the "
                                                        "entry's owner (dry run unless --apply; backs up the DB first)")
@@ -768,9 +774,22 @@ def main(argv=None):
         from orchd import entry, entry_threads, stats
         con = None
         try:
+            if args.entry_action == "thread" and (args.question_id is not None or args.task_id is not None):
+                result, code = entry_threads.read_questions(
+                    store.home() / "orchd.db", question_id=args.question_id, task_id=args.task_id,
+                    entry_id=args.entry, limit=args.limit, per_question_limit=args.per_question_limit,
+                    cursor=args.cursor)
+                print(json.dumps(result, ensure_ascii=False, indent=1))
+                if code:
+                    print(f"orchd entry: {result['status']}: {result.get('error', 'incomplete history')}",
+                          file=sys.stderr)
+                return code
             if args.entry_action == "thread":
+                if args.per_question_limit is not None or args.cursor is not None:
+                    raise ValueError("--per-question-limit and --cursor need --question-id or --task-id")
                 refs = (args.issue_refs if args.issue_refs is not None else args.issue_ref).split(",")
-                result = entry_threads.read(store.home() / "orchd.db", refs, entry_id=args.entry, limit=args.limit)
+                result = entry_threads.read(store.home() / "orchd.db", refs, entry_id=args.entry,
+                                            limit=3 if args.limit is None else args.limit)
             elif args.entry_action == "reconcile":
                 result = entry.reconcile_path(store.home() / "orchd.db", apply=args.apply,
                                               backup_dir=store.home() / "backups")

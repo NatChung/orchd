@@ -253,3 +253,78 @@ without migrating it; ordinary store startup later adds the nullable column.
 Bodies stay in the local DB and local CLI output. Do not publish this output
 or put it into tracker comments or public caches. The snapshot command's body
 policy is unchanged; thread summaries use this separate reader.
+
+### Question and task threads
+
+Full question/answer history for one question, or for every question of a task,
+including questions without an issue ref:
+
+```sh
+orchd entry thread --question-id 101 --limit 3 --json
+orchd entry thread --task-id TASK_ID --per-question-limit 3 --json
+# Next page (cursor values are opaque):
+orchd entry thread --question-id 101 --limit 3 --cursor NEXT_CURSOR --json
+orchd entry thread --task-id TASK_ID --limit 20 --cursor THREAD_PAGE_CURSOR --json
+```
+
+`--question-id`, `--task-id`, `--issue-ref` and `--issue-refs` are mutually
+exclusive. The reader is the same private DB/WAL copy with `query_only=ON`:
+no delivery, inbox consumption, read marks, binding change, log, cache or
+migration. It reads the full stored history of the named entry (default
+`desktop`), so it is not limited by the snapshot's `--answered-limit`.
+
+A thread is one question identity: every version linked by
+`supersedes`/`superseded_by` (in both directions) plus every message whose
+`reply_to` names one of those versions, whether or not the reply carries a
+task ID. Questions of the same task are separate threads. `--question-id` may
+name any version; the thread is reported under its newest version
+(`question_id`), with `requested_question_id` echoing the argument.
+
+```json
+{
+  "schema_version": 1, "status": "ok", "complete": true,
+  "read_at": "2026-01-01T00:00:00.000000Z", "entry_id": "desktop",
+  "selector": {"type": "question", "question_id": 101, "limit": 3, "cursor": null},
+  "threads": [{
+    "question_id": 102, "requested_question_id": 101, "task_id": "TASK_ID",
+    "issue_ref": null, "question_state": "answered", "revisit_at": null,
+    "version": 2, "versions": [101, 102], "status": "waiting_orch",
+    "root_question": {"id": 102, "body": "Revised question?", "at": "2026-01-01T00:00:00.000000Z"},
+    "messages": [
+      {"id": 103, "question_id": 102, "task_id": "TASK_ID", "reply_to": 102, "supersedes": null,
+       "superseded_by": null, "direction": "nat→orch", "kind": "reply", "who": "nat",
+       "at": "2026-01-01T00:00:00.000000Z", "text": "Full answer text"}
+    ],
+    "complete": true, "history_issues": [], "has_more": true, "next_cursor": "opaque"
+  }]
+}
+```
+
+- `root_question` is the thread's newest version in full, present on every page.
+- `messages` are newest first (`created_at DESC, id DESC`), both speakers, full
+  text without truncation; `question_id` is the version a message belongs to.
+  `supersedes`/`superseded_by` are set on question rows only.
+- `task_id` of a thread is the newest version's, else the most recent version
+  that has one (revisions do not inherit task links); each message keeps its own.
+- `status` is the latest speaker of the whole thread: Orch → `waiting_nat`,
+  Operator → `waiting_orch`. `question_state` is the lifecycle state.
+- All times are UTC ISO-8601 strings (`...Z`).
+- `has_more` means older messages exist; pass `next_cursor` back with
+  `--question-id` (a thread cursor from a task read works there too).
+- `--task-id` returns threads ordered by latest activity, paged by `--limit`
+  (default 20) with `thread_page` = `limit`, `returned`, `total`, `has_more`,
+  `next_cursor`. `--per-question-limit` (default 3) caps messages per thread.
+  All limits accept 1–100.
+
+Outcomes never use an empty list to mean "no history":
+
+| `status` | Exit | Meaning |
+| --- | --- | --- |
+| `ok` | 0 | Read completed. A known task with no questions returns `threads: []`. |
+| `invalid_request` | 2 | Bad/conflicting arguments or a cursor from another selector (argparse conflicts also exit 2). |
+| `not_found` | 3 | No such question on this entry, or unknown task with no questions. |
+| `incomplete` | 4 | Threads returned, but a link is broken (`history_issues`: missing/inconsistent supersede link, answered question without its reply). |
+| `read_error` | 5 | The DB could not be read (missing, corrupt, permission). |
+
+JSON is printed for every outcome; non-zero outcomes also print one line to
+stderr. Top-level `complete` is true only for `ok`.
