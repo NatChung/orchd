@@ -11,6 +11,8 @@ import psutil
 
 from orchd import app_worker, core, processes, store
 
+REAL_WINDOWS_SESSIONS = processes._windows_sessions
+
 
 class FakeProc:
     def __init__(self, pid, env=None, user="me", born=0.0, denied=False, parent=None):
@@ -52,6 +54,11 @@ class WindowsTaskProcessesTests(unittest.TestCase):
         self.worktree = str(Path(self.tmp.name).resolve())
         self.born = os.stat(self.worktree).st_ctime
         patcher = patch.object(processes, "_WINDOWS_USER", "me")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # Fake PIDs must not be judged by whatever real process holds them; orchd runs in session 1.
+        self.sessions = {os.getpid(): 1}
+        patcher = patch.object(processes, "_windows_sessions", side_effect=lambda: dict(self.sessions))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -157,6 +164,47 @@ class WindowsTaskProcessesTests(unittest.TestCase):
             with self.subTest(pid=child.pid):
                 root.children = lambda: [child]
                 self.assertEqual(list(self.scan([root])), [30])
+
+    def test_unreadable_service_session_process_newer_than_the_worktree_is_skipped(self):
+        # After a reboot every service (csrss, SearchFilterHost, ...) is newer than older worktrees.
+        for user in (None, "me"):
+            with self.subTest(user=user):
+                service = FakeProc(40, user=user, born=self.born + 1, denied=True)
+                service.terminate = MagicMock()
+                self.sessions[40] = 0
+                self.assertEqual(self.scan([service]), {})
+                service.terminate.assert_not_called()
+
+    def test_unreadable_process_in_our_session_still_blocks(self):
+        # An elevated child of a worker stays in the interactive session.
+        elevated = FakeProc(41, user=None, born=self.born + 1, denied=True)
+        self.sessions[41] = 1
+        with self.assertRaisesRegex(RuntimeError, "cannot inspect process 41"):
+            self.scan([elevated])
+
+    def test_unknown_session_is_no_evidence(self):
+        for sessions in (None, {}, {42: 0}):  # snapshot failed, missing, or our own session unknown
+            with self.subTest(sessions=sessions):
+                with patch.object(processes, "_windows_sessions", return_value=sessions):
+                    with self.assertRaisesRegex(RuntimeError, "cannot inspect process 42"):
+                        self.scan([FakeProc(42, user=None, born=self.born + 1, denied=True)])
+
+    def test_service_session_is_no_evidence_when_orchd_runs_in_session_zero(self):
+        self.sessions.update({os.getpid(): 0, 43: 0})
+        with self.assertRaisesRegex(RuntimeError, "cannot inspect process 43"):
+            self.scan([FakeProc(43, user=None, born=self.born + 1, denied=True)])
+
+    def test_pid_reused_after_snapshot_is_not_excluded(self):
+        proc = FakeProc(44, user=None, born=self.born + 1, denied=True)
+        self.sessions[44] = 0
+        proc.is_running = MagicMock(return_value=False)  # psutil: that PID now belongs to another process
+        self.assertFalse(processes._service_session(proc))
+
+    def test_real_snapshot_reads_this_process_and_a_service(self):
+        sessions = REAL_WINDOWS_SESSIONS()  # setUp patches the module attribute; this is the unpatched one
+        self.assertIsNotNone(sessions)
+        self.assertIsNotNone(sessions.get(os.getpid()))
+        self.assertIn(0, sessions.values())  # services always run in session 0
 
     def test_worktree_stat_permission_error_is_not_missing(self):
         with patch.object(processes.os, "stat", side_effect=PermissionError("denied")):
