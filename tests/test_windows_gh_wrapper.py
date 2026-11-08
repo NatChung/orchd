@@ -10,7 +10,7 @@ from orchd.runtime import worker_env
 
 @unittest.skipUnless(os.name == "nt", "Windows command launcher")
 class WindowsGhWrapperTests(unittest.TestCase):
-    def test_powershell_uses_wrapper_and_refuses_unchecked_pr(self):
+    def test_powershell_uses_wrapper_for_pr(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp)
             real_bin = directory / "real"
@@ -29,6 +29,5 @@ class WindowsGhWrapperTests(unittest.TestCase):
                 refused = subprocess.run(["powershell.exe", "-NoProfile", "-Command",
                                           "gh pr create; exit $LASTEXITCODE"],
                                          capture_output=True, text=True, env=env)
-                self.assertNotEqual(refused.returncode, 0)
-                self.assertIn("refusing gh pr create", refused.stderr)
-                self.assertNotIn("real-gh pr create", refused.stdout)
+                self.assertEqual(refused.returncode, 0)
+                self.assertIn("real-gh pr create", refused.stdout)

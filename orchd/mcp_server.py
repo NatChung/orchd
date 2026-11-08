@@ -253,11 +253,6 @@ TOOLS += [
      "description": "Clear a task's parent ref, preserving link history. No task or tracker status change.",
      "inputSchema": {"type": "object", "required": ["task_id"], "properties": {
          "task_id": {"type": "string"}, "idempotency_key": {"type": "string"}}}},
-    {"name": "check_runs", "annotations": {"readOnlyHint": True},
-     "description": "Read-only: the recorded delivery check runs (preflight and pre-PR) for one task: command, "
-                    "base/head SHA, test namespace, exit status, pass/fail and bounded output. Workers run them with "
-                    "`orchd check preflight|pr TASK`; `gh pr create` is refused until they pass (#119).",
-     "inputSchema": {"type": "object", "required": ["task_id"], "properties": {"task_id": {"type": "string"}}}},
     {"name": "entry_inbox",
      "description": "Read Operator's unread messages from the Desktop entry. Original text is preserved; local images "
                     "have private temporary copy paths appended to body (or an unavailable warning). "
@@ -587,10 +582,6 @@ def call(name, args, thread, con, rt, sent=None, *, reply_id=None):
         options = dict(actor="orch", idempotency_key=args.get("idempotency_key"))
         return (issue_links.link(con, args["task_id"], args["ref"], **options) if name == "task_link"
                 else issue_links.unlink(con, args["task_id"], **options))
-    if name == "check_runs":
-        from . import delivery_checks
-        store.get_task(con, args["task_id"])
-        return [dict(row) for row in delivery_checks.records(con, args["task_id"])]
     if name.startswith("intake_"):
         return intake_call(name, args, thread, con, rt)
     if name == "goal_list":

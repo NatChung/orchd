@@ -11,6 +11,19 @@ from pathlib import Path
 from orchd import upgrade
 
 
+class StagedInstallTests(unittest.TestCase):
+    def test_candidate_needs_only_current_launchers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            anchor = root / "anchor"
+            scripts = anchor / "Scripts"
+            scripts.mkdir(parents=True)
+            for name in ("python.exe", "orchd.exe"):
+                (scripts / name).touch()
+            upgrade.publish_windows_install(anchor, anchor, root / "bin")
+            self.assertIsNotNone(upgrade.current_install(anchor))
+
+
 @unittest.skipUnless(os.name == "nt", "Windows tool installations")
 class WindowsUpgradeTests(unittest.TestCase):
     def make_prefix(self, root, label):
@@ -19,7 +32,6 @@ class WindowsUpgradeTests(unittest.TestCase):
         scripts.mkdir(parents=True)
         (scripts / "python.exe").touch()
         (scripts / "orchd.exe").touch()
-        (scripts / "orchd-flutter-gate.exe").touch()
         return prefix
 
     def test_staging_failure_does_not_change_current_or_stable_launcher(self):
