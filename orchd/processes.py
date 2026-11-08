@@ -175,13 +175,14 @@ def _started_by_another_account(proc):
 def _windows_sessions():
     """{pid: session id} from one WTSEnumerateProcessesW snapshot, or None. It needs no handle to each process,
     so it also reads services and protected processes (csrss, search hosts) this user cannot open."""
-    import ctypes
-    from ctypes import wintypes
-
-    class Info(ctypes.Structure):
-        _fields_ = [("SessionId", wintypes.DWORD), ("ProcessId", wintypes.DWORD),
-                    ("pProcessName", wintypes.LPWSTR), ("pUserSid", ctypes.c_void_p)]
     try:
+        import ctypes
+        from ctypes import wintypes  # Windows only; tests that fake os.name on POSIX get None
+
+        class Info(ctypes.Structure):
+            _fields_ = [("SessionId", wintypes.DWORD), ("ProcessId", wintypes.DWORD),
+                        ("pProcessName", wintypes.LPWSTR), ("pUserSid", ctypes.c_void_p)]
+
         wts = ctypes.WinDLL("wtsapi32", use_last_error=True)
         wts.WTSEnumerateProcessesW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
                                                ctypes.POINTER(ctypes.POINTER(Info)), ctypes.POINTER(wintypes.DWORD)]
@@ -194,7 +195,7 @@ def _windows_sessions():
             return {info[i].ProcessId: info[i].SessionId for i in range(count.value)}
         finally:
             wts.WTSFreeMemory(info)
-    except (OSError, AttributeError):
+    except (ImportError, OSError, AttributeError, ValueError):
         return None
 
 

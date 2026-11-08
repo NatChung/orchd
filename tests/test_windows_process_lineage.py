@@ -49,7 +49,9 @@ class WindowsLineageTest(unittest.TestCase):
                         mock.patch.object(processes, "_WINDOWS_USER", ME),
                         # With os.name patched, Path() would pick WindowsPath on POSIX and fail to instantiate.
                         mock.patch.object(processes, "Path", type(self.worktree)),
-                        mock.patch.object(processes.time, "sleep")):
+                        mock.patch.object(processes.time, "sleep"),
+                        # Mock PIDs must not be judged by the real process (if any) holding them: no session data.
+                        mock.patch.object(processes, "_windows_sessions", return_value=None)):
             patcher.start()
             self.addCleanup(patcher.stop)
 
