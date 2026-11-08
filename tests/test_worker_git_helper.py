@@ -16,7 +16,6 @@ class WorkerGitHelperTest(unittest.TestCase):
             with patch.dict(os.environ, {"PATH": "original", "GH_REPO": "Owner/repo",
                                          "ORCHD_GH_ACCOUNTS": "accounts.json"}, clear=True), \
                     patch.object(runtime, "worker_bin_dir", return_value=root), \
-                patch.object(runtime, "orchd_bin", return_value="orchd"), \
                     patch.object(runtime.os, "name", "nt"):
                 env = runtime.worker_env()
             self.assertEqual(env["GIT_CONFIG_VALUE_0"], "")
@@ -30,7 +29,6 @@ class WorkerGitHelperTest(unittest.TestCase):
     def test_windows_missing_launcher_falls_back(self):
         with tempfile.TemporaryDirectory() as root, \
                 patch.object(runtime, "worker_bin_dir", return_value=root), \
-                patch.object(runtime, "orchd_bin", return_value="orchd"), \
                 patch.object(runtime.os, "name", "nt"):
             env = runtime.worker_env()
         count = int(env["GIT_CONFIG_COUNT"])
@@ -40,7 +38,6 @@ class WorkerGitHelperTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root, \
                 patch.dict(os.environ, {"PATH": "original"}, clear=True), \
                 patch.object(runtime, "worker_bin_dir", return_value=root), \
-                patch.object(runtime, "orchd_bin", return_value="orchd"), \
                 patch.object(runtime.os, "name", "posix"):
             env = runtime.worker_env()
         self.assertEqual(env["GIT_CONFIG_VALUE_0"], "")

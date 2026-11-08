@@ -77,8 +77,6 @@ def worker_brief(cli, kind="claude", worktree=None, repo=None, projects=None):
                        ". Before opening or editing a PR, read the PR-related ones (skills/commands named pr*, "
                        "PR templates) and follow them; read CLAUDE.md if your runtime didn't auto-load it."
                        if conventions else "")
-    from . import worker_flow
-    flow_text = worker_flow.brief(repo, projects)
     return f"""You are an orchd worker: a {session} started for exactly one task.
 Tasks arrive as messages from orchd on behalf of Operator (the user). A task message states its scope; work
 inside that scope is authorized by Operator even though the message comes through {channel}.
@@ -99,10 +97,6 @@ Rules:
   The map is the JSON file named by ORCHD_GH_ACCOUNTS, else ~/.config/orchd/gh-accounts.json
   (case-insensitive owners, "*" default); with neither, gh runs unchanged. Missing mappings/tokens warn and
   keep gh's original behavior. Writes and outward actions still require the existing preview/approval.
-- If the repo has a Hub delivery pipeline, run `{cli} check preflight <task-id>` before you start and keep your
-  work committed: `gh pr create` is refused until the preflight and the pipeline's PR check pass
-  (`{cli} check show <task-id>` lists the recorded runs). Tests that share a DB or Redis must use the
-  ORCHD_TEST_NAMESPACE, ORCHD_TEST_DB_NAME and ORCHD_TEST_REDIS_PREFIX values the checks receive.
 - Reviewing a PR: every worker pushes as the same GitHub account, and GitHub does not let you approve
   your own account's PR, so never use `gh pr review --approve`, `--request-changes`, `--admin`, or any
   bypass of branch protection. Check the PR's current head SHA, the latest main, the task's done_when
@@ -121,22 +115,21 @@ Rules:
   your Orch, and whatever you send them is lost to it.
 - {long_runs} Never `pgrep -f` a pattern that your own command line contains.
 - Finish with exactly one `{cli} report <task-id> --status done|blocked --summary "<one line>" --evidence "<commits, PR URL, test commands and results, what is left undone>"`.
-  The evidence must include a `Skills read:` line listing the absolute paths of the skill files you actually read,
-  or `none` with the reason; list adapted or skipped skill steps under gaps. For investigation and other tasks,
-  if the task asks for a design, plan, or choice between approaches, also read pstack-architect. For code tasks,
-  if the change adds new interfaces or spans modules, read pstack-architect before implementing.
 - If you need a decision, use `{cli} ask` and {waiting}; do not report blocked for questions Operator can answer.
+- Do not guess missing source material. Verify user-facing changes against the real interface when practical,
+  and report evidence and limits. Distinguish expected not-found responses from server and network errors.
+  For cross-service changes, identify the contract source and owner, and report gaps.
 - Report facts only; say what you did not verify.{codex_rules}
 
 Ask format (required for every worker question):
-{question_summary.GUIDANCE}{convention_text}{flow_text}"""
+{question_summary.GUIDANCE}{convention_text}"""
 
 
 def worker_cli():
     """Workers are spawned by the Claude daemon and do not inherit our env, so carry a non-default home."""
     home = os.environ.get("ORCHD_HOME")
     if os.name == "nt":
-        from .worker_flow import powershell_literal
+        from .runtime import powershell_literal
         command = "& " + " ".join(powershell_literal(arg) for arg in paths.orchd_command())
         return f"$env:ORCHD_HOME = {powershell_literal(home)}; {command}" if home else command
     orchd = shlex.join(paths.orchd_command())
@@ -232,29 +225,10 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
     if kind == "claude" and not rt.claude_trusted(repo_path):
         raise ValueError(f"Claude has not trusted {repo_path}. Ask Operator to run `claude` there once and accept "
                          "the trust prompt, then dispatch again.")
-    if base_branch is None and repo == "mobile-flutter-app":
-        from . import delivery_checks
-        if delivery_checks.load(repo) is not None:
-            base_branch = rt.latest_release_branch(repo_path)
     if base_branch is not None:  # explicit PR target (#121 prerequisite); checked on origin before a task exists
         rt.verify_base_branch(repo_path, base_branch)
     task_id = store.new_task_id()
     remote_branch = remote_repo = None
-    if repo in config.delivery_flows():
-        from . import branch_names, delivery_checks
-        enabled = delivery_checks.load(repo) is not None
-    else:
-        enabled = False
-    if enabled:
-        import subprocess
-        origin = subprocess.run(["git", "-C", str(repo_path), "config", "--get", "remote.origin.url"],
-                                capture_output=True, text=True, check=True)
-        owner_repo = delivery_checks._owner_repo(origin.stdout)
-        if branch_names.github_origin(origin.stdout) and owner_repo and owner_repo[0] != 'natchung':
-            remote_repo = '/'.join(owner_repo)
-            occupied = branch_names.remote_refs(repo_path)
-            occupied.update(r[0] for r in con.execute("SELECT remote_branch FROM tasks WHERE remote_repo=? AND remote_branch IS NOT NULL", (remote_repo,)))
-            remote_branch = branch_names.choose(title, issue_ref, task_type, task_id, occupied)
     with store.immediate(con) if goal_id is not None else contextlib.nullcontext():
         task = store.create_task(con, id=task_id, repo=repo, repo_path=str(repo_path), title=title,
                                  instructions=instructions, done_when=done_when,

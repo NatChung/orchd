@@ -133,12 +133,6 @@ def worker_bin_dir():
     return str(directory)
 
 
-def orchd_bin():
-    """The orchd executable the gh wrapper calls for delivery checks: the one installed beside this interpreter."""
-    beside = Path(sys.executable).parent / ("orchd.exe" if os.name == "nt" else "orchd")
-    return str(beside) if beside.is_file() else shutil.which("orchd") or str(beside)
-
-
 def worker_env(worktree=None):
     """Session-only gh routing; Claude also receives this via settings (daemon launch)."""
     env = launch_env()
@@ -148,7 +142,6 @@ def worker_env(worktree=None):
     env["PATH"] = wrapper_dir + os.pathsep + env.get("PATH", os.defpath)
     if os.name == "nt":
         env["ORCHD_GH_WRAPPER_DIR"] = wrapper_dir
-    env["ORCHD_BIN"] = orchd_bin()
     # Replace even absolute gh credential helpers for GitHub, without writing git config.
     count = int(env.get("GIT_CONFIG_COUNT", "0"))
     helper = "!gh auth git-credential"
@@ -361,21 +354,6 @@ class Runtime:
                           f"+refs/heads/{branch}:refs/remotes/origin/{branch}"], timeout=60, check=False)
         if found.returncode != 0:
             raise ValueError(f"base_branch {branch!r} does not exist on origin of {repo_path}")
-
-    def latest_release_branch(self, repo_path):
-        """Resolve the highest numeric release-X.Y.Z from the live origin."""
-        result = self.run(["git", "-C", str(repo_path), "ls-remote", "--heads", "origin", "release-*"], timeout=60)
-        branches = []
-        for line in result.stdout.splitlines():
-            ref = line.split()[-1]
-            match = re.fullmatch(r"refs/heads/release-(\d+)\.(\d+)\.(\d+)", ref)
-            if match:
-                branches.append((tuple(map(int, match.groups())), ref.removeprefix("refs/heads/")))
-        if not branches:
-            raise ValueError("no release-X.Y.Z branch found on origin; specify base_branch explicitly")
-        branch = max(branches)[1]
-        self.verify_base_branch(repo_path, branch)
-        return branch
 
     def base_ref(self, repo_path):
         self.run(["git", "-C", str(repo_path), "fetch", "--quiet", "origin"], timeout=60, check=False)
@@ -630,7 +608,7 @@ class Runtime:
                 "hooks": hooks,
                 "env": {k: v for k, v in worker_env(worktree).items()
                         if k == "PATH" or k == "GH_TOKEN" or k == "ORCHD_GH_ACCOUNTS"
-                        or k in ("ORCHD_WORKTREE", "ORCHD_BIN")
+                        or k == "ORCHD_WORKTREE"
                         or k.startswith("GIT_CONFIG_")}}),
             "--append-system-prompt", brief])
 
@@ -1065,3 +1043,7 @@ class Runtime:
             return open_windows_terminal([self.claude, "attach", job], cwd=worktree,
                                          env=worker_env(worktree) if worktree else None, tracked=bool(worktree))
         self.run(["open", "-na", "Ghostty.app", "--args", "-e", self.claude, "attach", job], timeout=30)
+
+
+def powershell_literal(value):
+    return "'" + str(value).replace("'", "''") + "'"

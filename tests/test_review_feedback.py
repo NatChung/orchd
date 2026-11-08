@@ -19,7 +19,7 @@ class ReviewFeedbackTests(unittest.TestCase):
 
     def test_resolved_and_responder_replies_answer_threads(self):
         data = json.loads((Path(__file__).parent / 'fixtures/review_feedback/data.json').read_text())
-        for resolved, reply_author, expected in [(True, None, False), (False, 'aiagent-kc', False),
+        for resolved, reply_author, expected in [(True, None, False), (False, 'other-account', True),
                                                   (False, 'author', False), (False, 'other', True)]:
             with self.subTest(resolved=resolved, reply_author=reply_author):
                 inline = [dict(row) for row in data['inline']]
@@ -62,6 +62,6 @@ class ReviewFeedbackTests(unittest.TestCase):
         from subprocess import CompletedProcess
         recorded = (Path(__file__).parent / 'fixtures/review_feedback/issue-comments-gh.json').read_text()
         with patch('subprocess.run', return_value=CompletedProcess([], 0, recorded, '')):
-            comments = review_feedback._rest('repos/NatChung/orchd/issues/146/comments?per_page=100', 'NatChung/orchd')
+            comments = review_feedback._rest('repos/example/project/issues/42/comments?per_page=100', 'example/project')
         self.assertTrue(comments)
         self.assertTrue(all('body' in item and 'created_at' in item for item in comments))

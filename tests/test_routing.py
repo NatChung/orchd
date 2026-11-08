@@ -436,7 +436,7 @@ class RoutingTest(unittest.TestCase):
     def test_dispatch_never_probes_when_cache_is_empty_or_expired(self):
         # Empty cache, then expired cache: dispatch reads only, treats both providers as unknown.
         for expired in (False, True):
-            with self.subTest(expired=expired), patch('orchd.worker_flow.brief', return_value=''), \
+            with self.subTest(expired=expired), \
                     patch('orchd.quota._run') as run, patch('orchd.quota.probe') as probe, \
                     patch('orchd.quota.subprocess.Popen') as popen:
                 if expired:

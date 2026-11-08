@@ -141,7 +141,7 @@ def stable_executable(prefix=None, name="orchd"):
     data = current_install(prefix)
     if data is None:
         return None
-    if name not in ("orchd", "orchd-flutter-gate"):
+    if name not in ("orchd",):
         raise ValueError("unknown orchd entry point")
     executable = Path(data["anchor"]) / "Scripts" / (name + ".exe")
     if not executable.is_file():
@@ -174,7 +174,7 @@ def forward_current(argv=None, *, prefix=None, name="orchd", run=subprocess.call
     data = current_install(prefix)
     if data is None:
         return None
-    if name not in ("orchd", "orchd-flutter-gate"):
+    if name not in ("orchd",):
         raise ValueError("unknown orchd entry point")
     target = _active_prefix(Path(data["anchor"]))
     if target.resolve() == prefix.resolve():
@@ -193,14 +193,6 @@ def cli():
     return main()
 
 
-def flutter_cli():
-    result = forward_current(name="orchd-flutter-gate")
-    if result is not None:
-        return result
-    from .flutter_gate import cli as main
-    return main()
-
-
 def publish_windows_install(anchor, candidate_prefix, stable_bin_dir, *, expected_current=None):
     """Activate a complete staged install without replacing launchers or any previous environment."""
     anchor, candidate_prefix, stable_bin_dir = (Path(value).resolve()
@@ -209,7 +201,7 @@ def publish_windows_install(anchor, candidate_prefix, stable_bin_dir, *, expecte
         raise ValueError("staged Windows install must be inside the anchor's .orchd-versions directory")
     if expected_current is not None and _active_prefix(anchor).resolve() != Path(expected_current).resolve():
         raise ValueError("the active Windows environment changed while this update was staged; retry through the stable launcher")
-    for name in ("python.exe", "orchd.exe", "orchd-flutter-gate.exe"):
+    for name in ("python.exe", "orchd.exe"):
         if not (candidate_prefix / "Scripts" / name).is_file():
             raise ValueError(f"incomplete staged Windows install: missing Scripts/{name}")
     metadata = {"schema": 1, "anchor": str(anchor), "bin_dir": str(stable_bin_dir)}
