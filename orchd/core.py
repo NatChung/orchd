@@ -315,24 +315,27 @@ def dispatch_batch(con, rt, *, orch_thread, tasks):
     return dict(group_id=group_id, tasks=results)
 
 
-def rate_limit_notice(con, rt, task_id, error, attempt, *, job_id=None, generation=None, allow_auto=True):
-    """Record the limit and schedule a guarded helper; never stop our own turn/supervisor."""
+def rate_limit_notice(con, rt, task_id, error, attempt, *, job_id=None, generation=None, session_id=None, allow_auto=True):
+    """Record the limit and schedule a guarded helper; never stop our own turn/supervisor.
+    Claude workers are recorded and notified only: the automatic switch is Codex-only (#112)."""
     from .routing import limited
     if not limited(error):
         return False
     with store.immediate(con):
         task = store.get_task(con, task_id)
-        if task['status'] == 'closed' or worker_kind(task['model']) != 'codex':
+        if task['status'] == 'closed':
             return False
         if (job_id is not None and task['job_id'] != job_id or
-                generation is not None and task['generation'] != generation):
+                generation is not None and task['generation'] != generation or
+                session_id is not None and task['session_id'] != session_id):
             return False
+        claude = worker_kind(task['model']) != 'codex'
         for row in con.execute("SELECT body FROM messages WHERE task_id=? AND kind='rate_limit'", (task_id,)):
             if json.loads(row['body']).get('attempt') == attempt:
                 return False
         store.add_message(con, task_id, 'rate_limit', json.dumps(dict(provider=models.quota_provider_for(task['model']), attempt=attempt)))
         already_requested = con.execute("SELECT 1 FROM messages WHERE task_id=? AND kind='auto_retry_requested' LIMIT 1", (task_id,)).fetchone()
-        automatic = allow_auto and models.capacity_fallback(task['model']) is not None and task['auto_model'] and task['auto_retry_count'] == 0 and not already_requested
+        automatic = allow_auto and not claude and models.capacity_fallback(task['model']) is not None and task['auto_model'] and task['auto_retry_count'] == 0 and not already_requested
         event_id = None
         if automatic:
             event_id = store.add_message(con, task_id, 'auto_retry_requested', json.dumps(dict(
@@ -340,7 +343,8 @@ def rate_limit_notice(con, rt, task_id, error, attempt, *, job_id=None, generati
                 active_turn=task['active_turn'], last_completed_turn=task['last_completed_turn'])))
         here = models.alias_for(task['model']) or task['model']
         text = (f'[rate limit] {here} turn failed; automatic {models.capacity_fallback(task["model"])} retry scheduled on the same worktree (one attempt per task).'
-                if automatic else f'[rate limit] {here} turn failed; automatic retry disabled (explicit model, startup failure, or limit already used). Inspect existing work and use retry if needed.')
+                if automatic else f'[rate limit] {here} turn failed; no automatic retry for Claude workers. Inspect existing work and use retry if needed.'
+                if claude else f'[rate limit] {here} turn failed; automatic retry disabled (explicit model, startup failure, or limit already used). Inspect existing work and use retry if needed.')
         mid = store.add_message(con, task_id, 'progress', text)
     _wake(con, rt, task, mid, text)
     if event_id is not None:
@@ -350,6 +354,20 @@ def rate_limit_notice(con, rt, task_id, error, attempt, *, job_id=None, generati
         except Exception as exc:
             progress(con, rt, task_id, f'[auto retry failed] helper launch: {type(exc).__name__}: {exc}')
     return True
+
+
+def claude_stop_failure(con, rt, hook):
+    """`orchd _claude-limit`: a Claude worker's StopFailure hook input. `error` is Claude Code's API error type
+    (https://code.claude.com/docs/en/hooks#stopfailure-input); only `rate_limit` counts. The session finds the task
+    and guards it: a retry starts a new session, so a late hook of the replaced worker matches nothing current.
+    One record per prompt (turn) of that session."""
+    session = hook.get('session_id') if isinstance(hook, dict) else None
+    row = session and con.execute("SELECT id FROM tasks WHERE session_id=? ORDER BY rowid DESC LIMIT 1",
+                                  (session,)).fetchone()
+    if not row:
+        return False
+    return rate_limit_notice(con, rt, row['id'], {'type': hook.get('error')}, f"{session}:{hook.get('prompt_id')}",
+                             session_id=session, allow_auto=False)
 
 
 def auto_retry(con, rt, task_id, event_id):

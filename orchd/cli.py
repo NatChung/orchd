@@ -363,6 +363,7 @@ def build_parser():
     ar.add_argument('task_id')
     ar.add_argument('event_id', type=int)
     ar.add_argument('--database', required=True)
+    sub.add_parser('_claude-limit', help=argparse.SUPPRESS)  # Claude worker StopFailure hook; JSON on stdin
     from . import question_summary
     ask = sub.add_parser("ask", help="ask with an Operator summary and full evidence",
                          description=question_summary.GUIDANCE, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -622,7 +623,7 @@ HOME_POLICY = {
     ("task", "link"): "write", ("task", "unlink"): "write",
     ("dispatch",): "write", ("inbox",): "write",
     ("ack",): "write", ("report",): "write", ("progress",): "write", ("flush",): "write",
-    ("watch",): "warn", ("summary",): "warn", ("_auto-retry",): "write", ("ask",): "write", ("verify",): "write", ("close",): "write", ("adopt",): "write",
+    ("watch",): "warn", ("summary",): "warn", ("_auto-retry",): "write", ("_claude-limit",): "write", ("ask",): "write", ("verify",): "write", ("close",): "write", ("adopt",): "write",
     ("list",): "warn", ("stuck-close",): "warn", ("stats",): "warn", ("snapshot",): "warn", ("board",): "warn",
     ("goal", "add"): "write", ("goal", "set"): "write",
     ("goal", "show"): "warn", ("goal", "list"): "warn", ("goal", "export"): "warn",
@@ -1154,6 +1155,12 @@ def main(argv=None):
         result = core.auto_retry(con, rt, args.task_id, args.event_id)
         print(json.dumps(result, ensure_ascii=False))
         return 1 if result['status'] == 'failed' else 0
+    elif args.cmd == '_claude-limit':
+        try:
+            hook = json.load(sys.stdin)
+        except ValueError:
+            return 1
+        print(json.dumps(dict(recorded=core.claude_stop_failure(con, rt, hook))))
     elif args.cmd == "ask":
         woke = core.ask(con, rt, args.task_id, args.question)
         print(f"asked on {args.task_id}; wait for an [orchd answer {args.task_id}] message"
