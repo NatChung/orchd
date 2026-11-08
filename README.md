@@ -196,7 +196,10 @@ Use a branch and pull request for changes, with a different reviewer checking th
 
 Run `orchd pr-watch OWNER/REPO [OWNER/REPO ...]` to print JSON for open PRs on
 `orchd/` branches or with the `ai-agent` label. The command only reads GitHub.
-It uses the PR author as the reply owner. Inline replies are matched by thread;
+It uses the PR author as the reply owner; pass `--account LOGIN` (repeatable)
+to also count replies from other accounts you operate. A later comment-only review
+does not replace a reviewer's approval or change request, and a reviewer's later
+approval hides that reviewer's earlier review bodies. Inline replies are matched by thread;
 issue comments have no thread, so any later author comment is treated as a reply.
 The cutoff uses the latest available head commit date, force-push time, or restore
 time from the PR timeline. This is a lower bound and may precede the last push.

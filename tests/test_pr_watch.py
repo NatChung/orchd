@@ -80,3 +80,38 @@ class WatchTest(unittest.TestCase):
         self.assertEqual(result['push_cutoff'], '2026-01-04T00:00:00Z')
         self.assertFalse(result['push_cutoff_uncertain'])
         self.assertEqual([c['id'] for c in result['unanswered']], [2])
+
+    def test_later_comment_keeps_changes_requested(self):
+        pr = dict(number=1, title='AI', html_url='pr', user={'login': 'author'},
+                  head={'ref': 'orchd/1234abcd', 'sha': 'abc'}, labels=[])
+        reviews = [dict(user={'login': 'reviewer'}, state=state, submitted_at=f'2026-01-0{i}T00:00:00Z', html_url='review')
+                   for i, state in enumerate(['CHANGES_REQUESTED', 'COMMENTED'], 2)]
+        data = [[pr], {'commit': {'committer': {'date': '2026-01-01T00:00:00Z'}}}, [], reviews, [], []]
+        with patch.object(pr_watch, '_get', side_effect=data):
+            result = pr_watch.watch(['owner/repo'])[0]
+        self.assertEqual(result['reviews']['reviewer']['state'], 'CHANGES_REQUESTED')
+        self.assertIn('requested changes', result['suggested_action'])
+
+    def test_configured_accounts_count_as_replies(self):
+        pr = dict(number=2, title='AI', html_url='pr', user={'login': 'author'},
+                  head={'ref': 'orchd/1234abcd', 'sha': 'abc'}, labels=[])
+        def comment(id, who, date):
+            return dict(id=id, user={'login': who}, created_at=date, body='text', html_url='comment')
+        issue = [comment(1, 'reviewer', '2026-01-02T00:00:00Z'), comment(2, 'helper-bot', '2026-01-03T00:00:00Z')]
+        data = [[pr], {'commit': {'committer': {'date': '2026-01-01T00:00:00Z'}}}, [], [], [], issue]
+        with patch.object(pr_watch, '_get', side_effect=data):
+            self.assertEqual([c['id'] for c in pr_watch.watch(['owner/repo'])[0]['unanswered']], [1, 2])
+        with patch.object(pr_watch, '_get', side_effect=data):
+            self.assertEqual(pr_watch.watch(['owner/repo'], accounts=['Helper-Bot'])[0]['unanswered'], [])
+
+    def test_later_approval_hides_older_review_bodies(self):
+        pr = dict(number=1, title='AI', html_url='pr', user={'login': 'author'},
+                  head={'ref': 'orchd/1234abcd', 'sha': 'abc'}, labels=[])
+        reviews = [dict(user={'login': name}, state=state, body=body, submitted_at=date, html_url='review')
+                   for name, state, body, date in [('alice', 'CHANGES_REQUESTED', 'old', '2026-01-02T00:00:00Z'),
+                                                   ('alice', 'APPROVED', 'lgtm', '2026-01-03T00:00:00Z'),
+                                                   ('bob', 'COMMENTED', 'still open', '2026-01-02T00:00:00Z')]]
+        data = [[pr], {'commit': {'committer': {'date': '2026-01-01T00:00:00Z'}}}, [], reviews, [], []]
+        with patch.object(pr_watch, '_get', side_effect=data):
+            result = pr_watch.watch(['owner/repo'])[0]
+        self.assertEqual(sorted(c['body'] for c in result['unanswered']), ['lgtm', 'still open'])
