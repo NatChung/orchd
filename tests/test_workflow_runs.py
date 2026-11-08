@@ -617,6 +617,56 @@ class WorkflowRunTests(unittest.TestCase):
         self.assertIsNone(attempt['output'])
         self.assertFalse(self.con.in_transaction)
 
+    def pending_recovery(self, *, parent_output_binding=False, limits=None):
+        plan = copy.deepcopy(self.plan)
+        repair = copy.deepcopy(plan['steps'][1])
+        repair.update(id='repair', verification=self.verification())
+        if not parent_output_binding:
+            repair['inputs'] = {'instructions': {'context': 'failure'}}
+        plan['failure_steps'] = [repair]
+        if limits:
+            plan['limits'] = limits
+        parent = self.start(plan)
+        author = self.tick(parent)['attempts'][0]['task_id']
+        core.report(self.con, self.rt, author, 'blocked', 'Prepare could not produce a trusted output', 'Real source message')
+        return parent, runs.show(self.con, parent)['repair_run_id']
+
+    def assert_recovery_stopped_at_original_origin(self, parent, child):
+        self.assertEqual(runs.show(self.con, child)['state'], 'blocked')
+        self.assertEqual(runs.show(self.con, parent)['state'], 'blocked')
+        self.assertEqual(self.con.execute('SELECT COUNT(*) FROM workflow_runs').fetchone()[0], 2)
+        reply = self.con.execute('SELECT conversation,reply FROM interface_requests WHERE id=?', (self.request_id,)).fetchone()
+        self.assertEqual(reply['conversation'], 'example-chat')
+        self.assertIn('not completed', reply['reply'])
+        self.assertIn('Bounded recovery failed', reply['reply'])
+        self.assertEqual(len(self.rt.created), 1)
+        self.assertTrue(any(e['kind'] == 'recovery_failed' for e in runs.events(self.con, parent)))
+
+    def test_missing_parent_output_blocks_recovery_and_parent_without_inventing_basis(self):
+        parent, child = self.pending_recovery(parent_output_binding=True)
+        self.tick(child)
+        self.assert_recovery_stopped_at_original_origin(parent, child)
+        self.assertEqual(runs.show(self.con, child)['attempts'], [])
+        failure = json.loads(json.loads(runs._get(self.con, child)['plan'])['context']['failure'])
+        self.assertEqual(failure['validated_outputs'], {})
+
+    def test_recovery_deadline_blocks_parent_and_publishes_original_origin_final(self):
+        parent, child = self.pending_recovery(limits={'deadline_seconds': 60, 'max_attempts': 1})
+        self.con.execute('UPDATE workflow_runs SET created_at=created_at-120 WHERE id=?', (child,))
+        self.tick(child)
+        self.assert_recovery_stopped_at_original_origin(parent, child)
+        self.assertIn('deadline', runs.show(self.con, parent)['note'])
+
+    def test_other_recovery_reconcile_error_cannot_leave_parent_repairing(self):
+        parent, child = self.pending_recovery()
+        original = self.rt.repo_path
+        replacement = self.folder / 'new-registry-root' / 'reminder-service'
+        replacement.mkdir(parents=True)
+        self.rt.repo_path = lambda name: replacement if name == 'reminder-service' else original(name)
+        self.tick(child)
+        self.assert_recovery_stopped_at_original_origin(parent, child)
+        self.assertIn('Reconcile refused', runs.show(self.con, parent)['note'])
+
     def test_memory_database_never_starts_a_process(self):
         con = store.connect(':memory:')
         self.addCleanup(con.close)

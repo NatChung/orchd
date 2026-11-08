@@ -268,6 +268,15 @@ def observe_report(con, *, task_id, message_id, status, output):
         _fail(con, _get(con, attempt['run_id']), 'Worker reported blocked', task_id=task_id, message_id=message_id)
 
 
+def _blocked(con, run, reason):
+    """Every terminal recovery failure reaches the operation that owns its origin."""
+    with contextlib.nullcontext() if con.in_transaction else store.immediate(con):
+        _state(con, run['id'], 'blocked', reason)
+        if run['parent_run_id']:
+            _state(con, run['parent_run_id'], 'blocked', 'Bounded recovery failed; no further automatic attempt. ' + reason)
+            _event(con, run['parent_run_id'], 'recovery_failed', dict(repair_run_id=run['id'], reason=reason))
+
+
 def _fail(con, run, reason, *, task_id=None, message_id=None, verification=None):
     """At most one fixed recovery run; a recovery failure never recursively starts another."""
     plan = _json(run['plan'])
@@ -290,9 +299,7 @@ def _fail(con, run, reason, *, task_id=None, message_id=None, verification=None)
                        basis='Schema-validated captured task reports, not independent acceptance; absent outputs must not be invented')
         _event(con, run['id'], 'failure', finding, task_id, message_id)
         if run['parent_run_id'] or not plan.get('failure_steps'):
-            _state(con, run['id'], 'blocked', reason)
-            if run['parent_run_id']:
-                _state(con, run['parent_run_id'], 'blocked', 'Bounded recovery failed; no further automatic attempt')
+            _blocked(con, run, reason)
             return
         existing = con.execute('SELECT id FROM workflow_runs WHERE parent_run_id=?', (run['id'],)).fetchone()
         if not existing:
@@ -378,6 +385,7 @@ def _notify_attention(con, run):
         return
     if run['parent_run_id']:
         # Parent failure owns the single external final; children never reroute it.
+        _notify_attention(con, _get(con, run['parent_run_id']))
         return
     if run['state'] == 'repairing':
         text = 'Workflow run ' + run['id'] + ' is repairing a recorded failure using its fixed bounded plan. No completion or adoption has been accepted.'
@@ -559,7 +567,7 @@ def _step(con, rt, run):
     # A verified author moving after acceptance invalidates later transitions too.
     for previous in con.execute("SELECT * FROM workflow_run_attempts WHERE run_id=? AND role='author' AND state='succeeded'", (run['id'],)):
         if _json(previous['spec']).get('verification') and verify.status(con, previous['task_id'])['state'] != 'pass':
-            _state(con, run['id'], 'blocked', 'Previously accepted verification is stale or failed')
+            _blocked(con, run, 'Previously accepted verification is stale or failed')
             return
     if run['step_index'] == len(plan['steps']):
         from . import core, interface
@@ -661,12 +669,13 @@ def reconcile(con, rt, run_id=None, *, limit=100):
                     continue
                 deadline = _json(run['plan']).get('limits', {}).get('deadline_seconds')
                 if deadline and time.time() > run['created_at'] + deadline:
-                    _state(con, run['id'], 'blocked', 'Workflow deadline exceeded')
+                    _blocked(con, run, 'Workflow deadline exceeded')
+                    _notify_attention(con, _get(con, run['id']))
                     continue
                 try:
                     _step(con, rt, run)
                 except Exception as error:
-                    _state(con, run['id'], 'blocked', 'Reconcile refused: ' + type(error).__name__)
+                    _blocked(con, run, 'Reconcile refused: ' + type(error).__name__)
                     _event(con, run['id'], 'reconcile_error', dict(error_type=type(error).__name__))
                 _notify_attention(con, _get(con, run['id']))
             return dict(runs=[show(con, r['id']) for r in runs])
