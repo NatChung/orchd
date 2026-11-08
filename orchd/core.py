@@ -175,7 +175,7 @@ def _choice(name, value, valid):
 def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, model=None,
              model_reason=None, task_type=None, rework_of=None, found_by=None, verify=None, manual_checks=None,
              verifies=None, backend=None, goal_id=None, goal_critical=None, issue_ref=None, group_id=None,
-             base_branch=None, workflow=None, workflow_stage=None, workflow_inputs=None):
+             base_branch=None, workflow=None, workflow_stage=None, workflow_inputs=None, _run_attempt=None):
     from . import issue_links
     if issue_ref is not None:
         issue_links.validate_ref(issue_ref)
@@ -185,8 +185,15 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
     if Path(repo_path).name != repo:
         raise ValueError('Dispatch requires the registered repo directory name, not a path alias')
     from . import workflows
-    instructions, done_when, workflow_record = workflows.dispatch_stage(
-        repo, workflow, workflow_stage, workflow_inputs, task_type, instructions, done_when)
+    run_task_id = None
+    if _run_attempt is not None:
+        from . import workflow_runs
+        run_task_id, instructions, done_when, workflow_record = workflow_runs.dispatch_binding(
+            con, _run_attempt, repo=repo, instructions=instructions, done_when=done_when,
+            workflow=workflow, workflow_stage=workflow_stage, workflow_inputs=workflow_inputs, task_type=task_type)
+    else:
+        instructions, done_when, workflow_record = workflows.dispatch_stage(
+            repo, workflow, workflow_stage, workflow_inputs, task_type, instructions, done_when)
     from . import config
     if not isinstance(model_reason, str) or not model_reason.strip():
         raise ValueError("dispatch needs a non-empty model_reason")
@@ -232,7 +239,7 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
                          "the trust prompt, then dispatch again.")
     if base_branch is not None:  # explicit PR target (#121 prerequisite); checked on origin before a task exists
         rt.verify_base_branch(repo_path, base_branch)
-    task_id = store.new_task_id()
+    task_id = run_task_id or store.new_task_id()
     remote_branch = remote_repo = None
     with store.immediate(con) if goal_id is not None else contextlib.nullcontext():
         task = store.create_task(con, id=task_id, repo=repo, repo_path=str(repo_path), title=title,
@@ -270,11 +277,13 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
             job, session = rt.start_codex_worker(worktree, rt.codex_log(task_id),
                                                  worker_brief(worker_cli(), kind, worktree, task["repo"], paths.projects_dir()) + "\n\n" + task_message(task),
                                                  WORKER_MODELS[model])
-            store.update_task(con, task_id, job_id=job, session_id=session, status="running")
+            store.update_task(con, task_id, job_id=job, session_id=session)
+            con.execute("UPDATE tasks SET status='running' WHERE id=? AND status='starting'", (task_id,))
         else:
             sock = rt.worker_socket(task_id)
             job, session = rt.start_worker(worktree, sock, worker_brief(worker_cli(), worktree=worktree, repo=task["repo"], projects=paths.projects_dir()), WORKER_MODELS[model])
-            store.update_task(con, task_id, socket=sock, job_id=job, session_id=session, status="running")
+            store.update_task(con, task_id, socket=sock, job_id=job, session_id=session)
+            con.execute("UPDATE tasks SET status='running' WHERE id=? AND status='starting'", (task_id,))
             task = store.get_task(con, task_id)
             rt.send_uds(sock, session, task_message(task))
     except Exception as error:
@@ -435,12 +444,16 @@ def ack(con, task_id):
     store.add_message(con, task_id, "ack", "worker acknowledged the task")
 
 
-def report(con, rt, task_id, status, summary, evidence):
+def report(con, rt, task_id, status, summary, evidence, output_file=None):
     if status not in ("done", "blocked"):
         raise ValueError("status must be done or blocked")
     task = store.get_task(con, task_id)
-    mid = store.add_message(con, task_id, "report", f"{status}: {summary}", evidence)
-    store.update_task(con, task_id, status=status)
+    from . import workflow_runs
+    output = workflow_runs.prepare_report(con, task_id, status, output_file)
+    with store.immediate(con):
+        mid = store.add_message(con, task_id, "report", f"{status}: {summary}", evidence)
+        store.update_task(con, task_id, status=status)
+        workflow_runs.observe_report(con, task_id=task_id, message_id=mid, status=status, output=output)
     return _wake(con, rt, task, mid, f"{status}: {_short(summary)}")
 
 
@@ -456,6 +469,8 @@ def ask(con, rt, task_id, question):
     question_summary.warn(question)
     mid = store.add_message(con, task_id, "question", question)
     store.update_task(con, task_id, status="question")
+    from . import workflow_runs
+    workflow_runs.observe_question(con, task_id=task_id, message_id=mid)
     return _wake(con, rt, task, mid, f"question: {_short(question_summary.wake_note(question))}")
 
 
@@ -1198,6 +1213,8 @@ def close(con, rt, task_id, outcome=None, rating=None, lock_wait=CLOSE_LOCK_WAIT
     Concurrent closes of one task run one at a time and write a single close event."""
     if store.get_task(con, task_id)["status"] == "closed":
         return dict(task_id=task_id, closed=True, worktree="already closed")
+    from . import workflow_runs
+    workflow_runs.guard_close(con, task_id, outcome)
     if outcome is not None:
         _choice("outcome", outcome, OUTCOMES)
     if rating is not None and (isinstance(rating, bool) or not isinstance(rating, int) or not 1 <= rating <= 3):
@@ -1232,6 +1249,8 @@ def _close_locked(con, rt, task_id, outcome, rating):
     """close's work under the task's delivery lock. The lock is not re-entrant: nothing here may take it again
     (no _wake, no adopt)."""
     task = store.get_task(con, task_id)
+    from . import workflow_runs
+    workflow_runs.guard_close(con, task_id, outcome)
     if task["status"] == "closed":  # another close finished while we waited for the lock
         return dict(task_id=task_id, closed=True, worktree="already closed")
     fields = {k: v for k, v in (("outcome", outcome), ("rating", rating)) if v is not None}

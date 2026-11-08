@@ -171,9 +171,11 @@ def run(con, verifier_id, timeout=None):
         else:
             record["restore_error"] = "not attempted: cleanup of the command's processes not confirmed"
         record["passed"] = _passed(record, locked)
-        store.add_message(con, author_id, RESULT,
+        message_id = store.add_message(con, author_id, RESULT,
                           f"{'pass' if record['passed'] else 'fail'} by {verifier_id} at "
                           f"{(record['sha'] or '?')[:12]} (exit {record['exit']})", json.dumps(record))
+        from . import workflow_runs
+        workflow_runs.observe_verification(con, task_id=author_id, message_id=message_id)
     return record
 
 

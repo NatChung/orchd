@@ -10,6 +10,29 @@ from pathlib import Path
 from .file_lock import try_lock
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS workflow_runs(
+    id TEXT PRIMARY KEY, request_id INTEGER NOT NULL, parent_run_id TEXT UNIQUE,
+    orch_thread TEXT NOT NULL, idempotency_key TEXT NOT NULL,
+    plan BLOB NOT NULL, plan_digest TEXT NOT NULL, origin TEXT NOT NULL,
+    state TEXT NOT NULL, step_index INTEGER NOT NULL DEFAULT 0,
+    version INTEGER NOT NULL DEFAULT 1, note TEXT,
+    created_at REAL NOT NULL, updated_at REAL NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS workflow_run_root_request ON workflow_runs(request_id) WHERE parent_run_id IS NULL;
+CREATE TABLE IF NOT EXISTS workflow_run_attempts(
+    id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES workflow_runs(id),
+    step_index INTEGER NOT NULL, role TEXT NOT NULL,
+    task_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL,
+    spec BLOB NOT NULL, output BLOB, output_digest TEXT,
+    report_id INTEGER, lock_id INTEGER, note TEXT,
+    UNIQUE(run_id, step_index, role)
+);
+CREATE TABLE IF NOT EXISTS workflow_run_events(
+    id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
+    kind TEXT NOT NULL, task_id TEXT, source_message_id INTEGER,
+    body TEXT NOT NULL, created_at REAL NOT NULL,
+    UNIQUE(run_id, kind, source_message_id)
+);
 CREATE TABLE IF NOT EXISTS tasks(
     id TEXT PRIMARY KEY,
     repo TEXT NOT NULL,

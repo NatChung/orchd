@@ -1,0 +1,465 @@
+"""Synthetic offline run engine tests; fake workers never start a model or service."""
+import copy
+import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from orchd import core, interface, store, verify, workflow_runs as runs, workflows
+from tests.test_orchd import FakeRuntime
+
+
+class RunRuntime(FakeRuntime):
+    def __init__(self, folder):
+        super().__init__()
+        self.folder = folder
+        self.created = []
+        self.start_error = False
+
+    def repo_path(self, repo):
+        return self.folder / repo
+
+    def create_worktree(self, repo_path, repo, task_id):
+        path = self.folder / 'worktrees' / (repo + '-' + task_id)
+        path.parent.mkdir(exist_ok=True)
+        subprocess.run(['git', '-C', str(repo_path), 'worktree', 'add', '-qb', 'orchd/' + task_id, str(path)], check=True, capture_output=True)
+        self.created.append(task_id)
+        head = subprocess.check_output(['git', '-C', str(path), 'rev-parse', 'HEAD'], text=True).strip()
+        return head, 'orchd/' + task_id, str(path)
+
+    def start_worker(self, worktree, sock, brief, model):
+        if self.start_error:
+            raise RuntimeError('synthetic uncertain start')
+        self.brief = brief
+        return 'job-' + Path(worktree).name, 'session-' + Path(worktree).name
+
+
+class WorkflowRunTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.folder = Path(self.temp.name).resolve()
+        self.env = patch.dict(os.environ, {'ORCHD_CONFIG_DIR': str(self.folder / 'config'), 'ORCHD_HOME': str(self.folder / 'state')})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.rt = RunRuntime(self.folder)
+        self.db = self.folder / 'tasks.db'
+        self.con = store.connect(self.db)
+        self.addCleanup(self.con.close)
+        store.register_orch(self.con, 'example-orch', 'claude')
+        registration = interface.register(self.con, name='example-interface', orch_id='example-orch', token='synthetic-adapter-token')
+        request = interface.submit(self.con, self.rt, name='example-interface', token=registration['token'], conversation='example-chat', request_key='request1', text='Run the scoped synthetic example')
+        self.request_id = request['request_id']
+        for name in ('delivery-service', 'reminder-service'):
+            root = self.folder / name
+            root.mkdir()
+            self.git(root, 'init', '-q')
+            (root / '.gitignore').write_text('.gstack/\n')
+            (root / 'src').mkdir()
+            (root / 'src/example.txt').write_text('synthetic source\n')
+            self.git(root, 'add', '-A')
+            self.git(root, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qm', 'Synthetic fixture')
+        source = self.folder / 'example-workflow'
+        self.plugin_source = source
+        source.mkdir()
+        self.git(source, 'init', '-q')
+        stages = {}
+        for stage, task_type, inputs in [('prepare', 'ops', ['request']), ('implement', 'code', ['instructions']), ('review', 'review', [])]:
+            stages[stage] = dict(task_type=task_type, inputs=inputs, instructions_file=stage + '.md', done_when_file=stage + '-done.md')
+            (source / (stage + '.md')).write_text('Declared task. ' + ' '.join('{{' + i + '}}' for i in inputs))
+            (source / (stage + '-done.md')).write_text('Report the declared scoped output.')
+        manifest = dict(schema_version='orchd-workflow/v1', name='example-workflow', description='Synthetic workflow', stages=stages)
+        (source / 'orchd-workflow.json').write_bytes(workflows.canonical(manifest))
+        self.git(source, 'add', '-A')
+        self.git(source, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qm', 'Synthetic plugin')
+        pin = workflows.install(source, self.git(source, 'rev-parse', 'HEAD'))
+        self.plan = dict(schema_version='orchd-run-plan/v1', workflow={k: pin[k] for k in ('name', 'commit', 'digest')}, context={'request': 'exact request\n'}, steps=[
+            dict(id='prepare', repo='delivery-service', stage='prepare', task_type='ops', model='sonnet', model_reason='Scoped fixture', instructions='Prepare only', done_when='Output retained', inputs={'request': {'context': 'request'}}, outputs=['implementation_instructions']),
+            dict(id='implement', repo='reminder-service', stage='implement', task_type='code', model='sonnet', model_reason='Scoped fixture', instructions='Implement only', done_when='Output retained', inputs={'instructions': {'output': {'step': 'prepare', 'field': 'implementation_instructions'}}}, outputs=[])
+        ])
+
+    def git(self, root, *args):
+        return subprocess.check_output(['git', '-C', str(root), *args], text=True, stderr=subprocess.PIPE).strip()
+
+    def start(self, plan=None):
+        return runs.start(self.con, self.rt, plan=plan or self.plan, request_id=self.request_id, orch_thread='example-orch', idempotency_key='same-request')['run_id']
+
+    def tick(self, run_id, count=1):
+        for _ in range(count):
+            runs.reconcile(self.con, self.rt, run_id)
+        return runs.show(self.con, run_id)
+
+    def output(self, task_id, values):
+        task = store.get_task(self.con, task_id)
+        path = Path(task['worktree']) / '.gstack/output.json'
+        path.parent.mkdir(exist_ok=True)
+        raw = json.dumps(dict(schema_version=runs.OUTPUT_SCHEMA, values=values), ensure_ascii=False).encode()
+        path.write_bytes(raw)
+        core.report(self.con, self.rt, task_id, 'done', 'Self-reported result', 'Synthetic evidence', output_file='.gstack/output.json')
+        return path, raw
+
+    def test_exact_output_bytes_bind_next_task_and_final_origin(self):
+        run_id = self.start()
+        first = self.tick(run_id)['attempts'][0]['task_id']
+        value = 'long original instructions\n保留最後換行\n'
+        path, raw = self.output(first, {'implementation_instructions': value})
+        path.write_text('changed after capture')
+        state = self.tick(run_id, 2)
+        second = state['attempts'][1]['task_id']
+        task = store.get_task(self.con, second)
+        record = json.loads(self.con.execute("SELECT body FROM messages WHERE task_id=? AND kind='dispatch'", (second,)).fetchone()[0])
+        self.assertEqual(record['workflow']['inputs']['instructions'], value)
+        self.assertEqual(task['repo'], 'reminder-service')
+        self.assertEqual(store.get_task(self.con, first)['status'], 'done')
+        with self.assertRaisesRegex(ValueError, 'retained'):
+            core.close(self.con, self.rt, first)
+        self.assertEqual(self.con.execute('SELECT output FROM workflow_run_attempts WHERE task_id=?', (first,)).fetchone()[0], raw)
+        self.output(second, {})
+        self.assertEqual(self.tick(run_id, 2)['state'], 'done')
+        reply = self.con.execute('SELECT interface_id,conversation,reply FROM interface_requests WHERE id=?', (self.request_id,)).fetchone()
+        self.assertEqual(reply['conversation'], 'example-chat')
+        self.assertIn(run_id, reply['reply'])
+        self.assertEqual(self.start(), run_id)
+        self.assertEqual(len(self.rt.created), 2)
+
+    def test_missing_output_and_symlink_do_not_record_done(self):
+        run_id = self.start()
+        task_id = self.tick(run_id)['attempts'][0]['task_id']
+        with self.assertRaisesRegex(ValueError, 'requires output_file'):
+            core.report(self.con, self.rt, task_id, 'done', 'summary', 'evidence')
+        task = store.get_task(self.con, task_id)
+        link = Path(task['worktree']) / '.gstack'
+        outside = self.folder / 'outside'
+        outside.mkdir()
+        link.symlink_to(outside, target_is_directory=True)
+        (outside / 'output.json').write_text('{}')
+        with self.assertRaisesRegex(ValueError, 'symlink'):
+            core.report(self.con, self.rt, task_id, 'done', 'summary', 'evidence', output_file='.gstack/output.json')
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM messages WHERE task_id=? AND kind='report'", (task_id,)).fetchone()[0], 0)
+
+    def test_idempotency_and_wrong_origin_fail_before_tasks(self):
+        run_id = self.start()
+        self.assertEqual(self.start(), run_id)
+        altered = copy.deepcopy(self.plan)
+        altered['context']['request'] += '\n'
+        with self.assertRaisesRegex(ValueError, 'conflict'):
+            self.start(altered)
+        with self.assertRaisesRegex(ValueError, 'owned'):
+            runs.start(self.con, self.rt, plan=self.plan, request_id=self.request_id, orch_thread='different-orch', idempotency_key='same-request')
+        self.assertEqual(self.con.execute('SELECT COUNT(*) FROM tasks').fetchone()[0], 0)
+
+    def test_wrong_pin_repo_alias_and_missing_input_rejected_before_tasks(self):
+        for mutate in ('pin', 'repo', 'inputs'):
+            plan = copy.deepcopy(self.plan)
+            if mutate == 'pin':
+                plan['workflow']['digest'] = 'sha256:' + 'a' * 64
+            elif mutate == 'repo':
+                plan['steps'][0]['repo'] = '/absolute/alias'
+            else:
+                plan['steps'][0]['inputs'] = {}
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                self.start(plan)
+        self.assertEqual(self.con.execute('SELECT COUNT(*) FROM tasks').fetchone()[0], 0)
+
+    def test_uncertain_spawn_never_creates_second_task(self):
+        self.rt.start_error = True
+        run_id = self.start()
+        self.assertEqual(self.tick(run_id)['state'], 'needs_recovery')
+        count = self.con.execute('SELECT COUNT(*) FROM tasks').fetchone()[0]
+        self.tick(run_id, 3)
+        self.assertEqual(self.con.execute('SELECT COUNT(*) FROM tasks').fetchone()[0], count)
+        self.assertEqual(len(self.rt.created), 1)
+
+    def test_crash_after_launch_claim_is_not_blindly_replayed(self):
+        run_id = self.start()
+        run = runs._get(self.con, run_id)
+        with store.immediate(self.con):
+            attempt = runs._reserve(self.con, run, self.plan['steps'][0], 'author')
+            self.con.execute("UPDATE workflow_run_attempts SET state='launching' WHERE id=?", (attempt['id'],))
+        self.assertEqual(self.tick(run_id)['state'], 'needs_recovery')
+        self.assertEqual(self.rt.created, [])
+
+    def test_restart_reconciles_report_without_duplicate_dispatch(self):
+        run_id = self.start()
+        author = self.tick(run_id)['attempts'][0]['task_id']
+        self.output(author, {'implementation_instructions': 'exact bytes'})
+        other = store.connect(self.db)
+        self.addCleanup(other.close)
+        runs.reconcile(other, self.rt, run_id)
+        runs.reconcile(other, self.rt, run_id)
+        self.assertEqual(len(self.rt.created), 2)
+        self.tick(run_id, 2)
+        self.assertEqual(len(self.rt.created), 2)
+
+    def test_native_verify_sidecar_runs_before_author_close(self):
+        plan = copy.deepcopy(self.plan)
+        plan['steps'] = [plan['steps'][1]]
+        node = plan['steps'][0]
+        node['inputs'] = {'instructions': {'context': 'request'}}
+        node['verification'] = dict(repo='reminder-service', stage='review', task_type='review', model='sonnet', model_reason='Independent native check', instructions='Verify the locked head', done_when='Native check passed', inputs={}, outputs=[], paths=['src'], command='python3 -c "print(123)"')
+        run_id = self.start(plan)
+        author = self.tick(run_id)['attempts'][0]['task_id']
+        self.output(author, {})
+        with self.assertRaisesRegex(ValueError, 'before independent'):
+            core.close(self.con, self.rt, author)
+        state = self.tick(run_id)
+        self.assertEqual(len(state['attempts']), 2)
+        reviewer = next(a['task_id'] for a in state['attempts'] if a['role'] == 'reviewer')
+        self.assertEqual(store.get_task(self.con, reviewer)['verifies'], author)
+        self.assertNotEqual(store.get_task(self.con, author)['status'], 'closed')
+        result = verify.run(self.con, reviewer)
+        self.assertTrue(result['passed'])
+        self.output(reviewer, {})
+        self.assertEqual(self.tick(run_id, 2)['state'], 'done')
+
+    def verification(self, command='python3 -c "print(123)"'):
+        return dict(repo='reminder-service', stage='review', task_type='review', model='sonnet', model_reason='Independent verification', instructions='Check locked head', done_when='Native verify and output reported', inputs={}, outputs=[], paths=['src'], command=command)
+
+    def test_blocked_automatically_starts_one_bounded_recovery_and_needs_adoption(self):
+        recovery = copy.deepcopy(self.plan['steps'][1])
+        recovery.update(id='repair', inputs={'instructions': {'context': 'failure'}}, verification=self.verification())
+        plan = copy.deepcopy(self.plan)
+        plan['failure_steps'] = [recovery]
+        parent = self.start(plan)
+        failed_task = self.tick(parent)['attempts'][0]['task_id']
+        core.report(self.con, self.rt, failed_task, 'blocked', 'A real check found a problem', 'Synthetic negative case')
+        parent_state = runs.show(self.con, parent)
+        self.assertEqual(parent_state['state'], 'repairing')
+        repair = parent_state['repair_run_id']
+        runs.reconcile(self.con, self.rt)
+        repair_task = runs.show(self.con, repair)['attempts'][0]['task_id']
+        metadata = json.loads(self.con.execute("SELECT body FROM messages WHERE task_id=? AND kind='dispatch'", (repair_task,)).fetchone()[0])
+        finding = json.loads(metadata['workflow']['inputs']['instructions'])
+        self.assertEqual(finding['source_task'], failed_task)
+        self.assertEqual(finding['validated_outputs'], {})
+        self.assertEqual(finding['task_refs'][0]['task_id'], failed_task)
+        self.assertIn('not independent acceptance', finding['basis'])
+        self.assertIsInstance(finding['source_message_id'], int)
+        self.output(repair_task, {})
+        state = self.tick(repair)
+        reviewer = next(a['task_id'] for a in state['attempts'] if a['role'] == 'reviewer')
+        self.assertTrue(verify.run(self.con, reviewer)['passed'])
+        self.output(reviewer, {})
+        self.assertEqual(self.tick(repair, 2)['state'], 'needs_adoption')
+        self.assertEqual(runs.show(self.con, parent)['state'], 'needs_adoption')
+        self.assertEqual(self.con.execute('SELECT COUNT(*) FROM workflow_runs WHERE parent_run_id=?', (parent,)).fetchone()[0], 1)
+        reply = self.con.execute('SELECT reply FROM interface_requests WHERE id=?', (self.request_id,)).fetchone()[0]
+        self.assertIn('needs adoption', reply)
+        self.assertNotIn('finished its declared steps', reply)
+
+    def test_recovery_failure_is_bounded_not_recursive(self):
+        repair_node = copy.deepcopy(self.plan['steps'][1])
+        repair_node.update(id='repair', inputs={'instructions': {'context': 'failure'}}, verification=self.verification())
+        plan = copy.deepcopy(self.plan)
+        plan['failure_steps'] = [repair_node]
+        parent = self.start(plan)
+        author = self.tick(parent)['attempts'][0]['task_id']
+        core.report(self.con, self.rt, author, 'blocked', 'Failed', 'Negative case')
+        child = runs.show(self.con, parent)['repair_run_id']
+        task = self.tick(child)['attempts'][0]['task_id']
+        core.report(self.con, self.rt, task, 'blocked', 'Repair failed', 'Negative case')
+        runs.reconcile(self.con, self.rt)
+        self.assertEqual(runs.show(self.con, parent)['state'], 'blocked')
+        self.assertEqual(runs.show(self.con, child)['state'], 'blocked')
+        self.assertEqual(self.con.execute('SELECT COUNT(*) FROM workflow_runs').fetchone()[0], 2)
+
+    def test_native_failure_creates_recovery_without_manual_start(self):
+        plan = copy.deepcopy(self.plan)
+        node = plan['steps'][1]
+        node['inputs'] = {'instructions': {'context': 'request'}}
+        node['verification'] = self.verification('exit 1')
+        plan['steps'] = [node]
+        repair = copy.deepcopy(node)
+        repair.update(id='repair', inputs={'instructions': {'context': 'failure'}}, verification=self.verification())
+        plan['failure_steps'] = [repair]
+        parent = self.start(plan)
+        author = self.tick(parent)['attempts'][0]['task_id']
+        self.output(author, {})
+        reviewer = next(a['task_id'] for a in self.tick(parent)['attempts'] if a['role'] == 'reviewer')
+        self.assertFalse(verify.run(self.con, reviewer)['passed'])
+        state = self.tick(parent)
+        self.assertEqual(state['state'], 'repairing')
+        self.assertIsNotNone(state['repair_run_id'])
+
+    def test_task_metadata_is_core_owned_not_copied_from_worker_output(self):
+        plan = copy.deepcopy(self.plan)
+        plan['steps'][1]['inputs']['instructions'] = {'task': {'step': 'prepare', 'field': 'task_id'}}
+        run_id = self.start(plan)
+        first = self.tick(run_id)['attempts'][0]['task_id']
+        self.output(first, {'implementation_instructions': 'untrusted pretend task ID'})
+        second = self.tick(run_id, 2)['attempts'][1]['task_id']
+        data = json.loads(self.con.execute("SELECT body FROM messages WHERE task_id=? AND kind='dispatch'", (second,)).fetchone()[0])
+        self.assertEqual(data['workflow']['inputs']['instructions'], first)
+
+    def test_restart_migrates_processing_owner_without_changing_reply_origin(self):
+        run_id = self.start()
+        task = self.tick(run_id)['attempts'][0]['task_id']
+        store.register_orch(self.con, 'replacement-orch', 'claude')
+        with store.immediate(self.con):
+            interface.migrate_owner(self.con, 'example-orch', 'replacement-orch')
+            runs.migrate_owner(self.con, 'example-orch', 'replacement-orch')
+        self.assertEqual(store.get_task(self.con, task)['orch_thread'], 'replacement-orch')
+        self.output(task, {'implementation_instructions': 'same original input'})
+        next_task = self.tick(run_id, 2)['attempts'][1]['task_id']
+        self.assertEqual(store.get_task(self.con, next_task)['orch_thread'], 'replacement-orch')
+        self.output(next_task, {})
+        self.assertEqual(self.tick(run_id, 2)['state'], 'done')
+        row = self.con.execute('SELECT conversation,orch_id FROM interface_requests WHERE id=?', (self.request_id,)).fetchone()
+        self.assertEqual(tuple(row), ('example-chat', 'replacement-orch'))
+
+    def test_registry_upgrade_does_not_change_frozen_run_pin_or_text(self):
+        run_id = self.start()
+        source = self.plugin_source
+        (source / 'prepare.md').write_text('Newer plugin instructions must not replace the frozen pin.')
+        self.git(source, 'add', '-A')
+        self.git(source, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qm', 'New synthetic version')
+        workflows.install(source, self.git(source, 'rev-parse', 'HEAD'))
+        task_id = self.tick(run_id)['attempts'][0]['task_id']
+        task = store.get_task(self.con, task_id)
+        self.assertNotIn('Newer plugin instructions', task['instructions'])
+        record = json.loads(self.con.execute("SELECT body FROM messages WHERE task_id=? AND kind='dispatch'", (task_id,)).fetchone()[0])
+        self.assertEqual(record['workflow']['commit'], self.plan['workflow']['commit'])
+
+    def test_internal_reservation_cannot_be_injected_through_json_dispatch(self):
+        with self.assertRaisesRegex(ValueError, 'internal'):
+            core.dispatch(self.con, self.rt, orch_thread='example-orch', repo='reminder-service', title='Fake', instructions='Fake', done_when='Fake', model='sonnet', model_reason='Synthetic attempt', task_type='code', _run_attempt='guessed-json-reservation')
+        self.assertEqual(self.con.execute('SELECT COUNT(*) FROM tasks').fetchone()[0], 0)
+
+    def test_attention_is_delivered_to_original_origin_not_only_event_log(self):
+        self.rt.start_error = True
+        run_id = self.start()
+        self.assertEqual(self.tick(run_id)['state'], 'needs_recovery')
+        row = self.con.execute('SELECT conversation,reply FROM interface_requests WHERE id=?', (self.request_id,)).fetchone()
+        self.assertEqual(row['conversation'], 'example-chat')
+        self.assertIn('needs_recovery', row['reply'])
+        self.assertIn('not completed', row['reply'])
+        self.tick(run_id)
+        self.assertEqual(self.con.execute('SELECT reply FROM interface_requests WHERE id=?', (self.request_id,)).fetchone()[0], row['reply'])
+
+    def test_question_routes_to_original_interim_and_desktop_guard_is_structural(self):
+        run_id = self.start()
+        task = self.tick(run_id)['attempts'][0]['task_id']
+        core.ask(self.con, self.rt, task, 'Which declared input should be used?')
+        self.assertEqual(self.tick(run_id)['state'], 'awaiting_input')
+        row = self.con.execute('SELECT interim,reply FROM interface_requests WHERE id=?', (self.request_id,)).fetchone()
+        self.assertIn('Which declared input', row['interim'])
+        self.assertIsNone(row['reply'])
+        with self.assertRaisesRegex(ValueError, 'origin'):
+            runs.guard_desktop_route(self.con, 'example-orch', task)
+        with self.assertRaisesRegex(ValueError, 'unscoped'):
+            runs.guard_desktop_route(self.con, 'example-orch')
+        unrelated = core.dispatch(self.con, self.rt, orch_thread='example-orch', repo='reminder-service', title='Unrelated scoped task', instructions='Only this unrelated task', done_when='Report result', model='sonnet', model_reason='Synthetic non-run case', task_type='code')
+        runs.guard_desktop_route(self.con, 'example-orch', unrelated['id'])
+
+    def test_prior_native_pass_becomes_stale_before_next_step(self):
+        plan = copy.deepcopy(self.plan)
+        node = plan['steps'][1]
+        node['inputs'] = {'instructions': {'context': 'request'}}
+        node['verification'] = self.verification()
+        plan['steps'] = [node]
+        run_id = self.start(plan)
+        author = self.tick(run_id)['attempts'][0]['task_id']
+        self.output(author, {})
+        reviewer = next(a['task_id'] for a in self.tick(run_id)['attempts'] if a['role'] == 'reviewer')
+        self.assertTrue(verify.run(self.con, reviewer)['passed'])
+        worktree = Path(store.get_task(self.con, author)['worktree'])
+        (worktree / 'src/example.txt').write_text('Changed after native verification')
+        self.git(worktree, 'add', '-A')
+        self.git(worktree, '-c', 'user.name=Example', '-c', 'user.email=example@example.invalid', 'commit', '-qm', 'Move synthetic head')
+        self.output(reviewer, {})
+        self.assertEqual(self.tick(run_id)['state'], 'blocked')
+        self.assertEqual(runs.show(self.con, run_id)['step_index'], 0)
+
+    def test_runner_launch_uses_core_package_and_preserves_profile_environment(self):
+        self.start()
+        with patch('subprocess.Popen') as spawn:
+            spawn.return_value.pid = 1234
+            result = runs.ensure_runner(self.con, self.rt)
+        self.assertEqual(result['state'], 'starting')
+        argv = spawn.call_args.args[0]
+        self.assertEqual(argv[1:5], ['-P', '-m', 'orchd', 'workflow'])
+        self.assertEqual(spawn.call_args.kwargs['env']['ORCHD_CONFIG_DIR'], str(self.folder / 'config'))
+        self.assertIn(str(self.db), argv)
+
+    def test_failure_steps_bind_available_parent_output_without_model_copy(self):
+        plan = copy.deepcopy(self.plan)
+        repair = copy.deepcopy(plan['steps'][1])
+        repair.update(id='repair', verification=self.verification())
+        plan['failure_steps'] = [repair]
+        parent = self.start(plan)
+        prepare = self.tick(parent)['attempts'][0]['task_id']
+        exact = 'retained parent tool path\n'
+        self.output(prepare, {'implementation_instructions': exact})
+        author = self.tick(parent, 2)['attempts'][1]['task_id']
+        core.report(self.con, self.rt, author, 'blocked', 'Negative check', 'Retained evidence')
+        child = runs.show(self.con, parent)['repair_run_id']
+        repair_task = self.tick(child)['attempts'][0]['task_id']
+        record = json.loads(self.con.execute("SELECT body FROM messages WHERE task_id=? AND kind='dispatch'", (repair_task,)).fetchone()[0])
+        self.assertEqual(record['workflow']['inputs']['instructions'], exact)
+        failure = json.loads(json.loads(runs._get(self.con, child)['plan'])['context']['failure'])
+        self.assertEqual(failure['validated_outputs']['prepare']['implementation_instructions'], exact)
+        self.assertEqual(failure['output_provenance']['prepare']['task_id'], prepare)
+
+    def test_serve_loop_automatically_advances_fast_reported_tasks(self):
+        run_id = self.start()
+        original = self.rt.start_worker
+        def report_before_spawn_returns(worktree, socket, brief, model):
+            task_id = self.rt.created[-1]
+            attempt = self.con.execute('SELECT spec FROM workflow_run_attempts WHERE task_id=?', (task_id,)).fetchone()
+            outputs = json.loads(attempt['spec'])['outputs']
+            self.output(task_id, {key: 'Original next-step instructions\n' for key in outputs})
+            return original(worktree, socket, brief, model)
+        self.rt.start_worker = report_before_spawn_returns
+        with patch('orchd.workflow_runs.time.sleep', side_effect=[None] * 6 + [StopIteration]):
+            with self.assertRaises(StopIteration):
+                runs.serve(self.db, self.rt, interval=0.05)
+        self.assertEqual(runs.show(self.con, run_id)['state'], 'done')
+        self.assertEqual(len(self.rt.created), 2)
+        for task_id in self.rt.created:
+            self.assertEqual(store.get_task(self.con, task_id)['status'], 'closed')
+        self.assertIsNotNone(self.con.execute('SELECT reply FROM interface_requests WHERE id=?', (self.request_id,)).fetchone()[0])
+
+    def test_second_question_is_retained_as_delivery_pending_not_silently_lost(self):
+        run_id = self.start()
+        task = self.tick(run_id)['attempts'][0]['task_id']
+        core.ask(self.con, self.rt, task, 'First scoped question?')
+        self.tick(run_id)
+        core.ask(self.con, self.rt, task, 'Second scoped question?')
+        self.tick(run_id)
+        events = runs.events(self.con, run_id)
+        self.assertTrue(any(e['kind'] == 'origin_delivery_pending' for e in events))
+        row = self.con.execute('SELECT interim,reply FROM interface_requests WHERE id=?', (self.request_id,)).fetchone()
+        self.assertIn('First scoped question', row['interim'])
+        self.assertIsNone(row['reply'])
+
+    def test_no_declared_outputs_needs_no_worker_generated_noop_artifact(self):
+        plan = copy.deepcopy(self.plan)
+        node = plan['steps'][1]
+        node['inputs'] = {'instructions': {'context': 'request'}}
+        plan['steps'] = [node]
+        run_id = self.start(plan)
+        task_id = self.tick(run_id)['attempts'][0]['task_id']
+        core.report(self.con, self.rt, task_id, 'done', 'Self report', 'No output fields')
+        row = self.con.execute('SELECT output FROM workflow_run_attempts WHERE task_id=?', (task_id,)).fetchone()
+        self.assertEqual(json.loads(row['output']), {'schema_version': runs.OUTPUT_SCHEMA, 'values': {}})
+        event = next(e for e in runs.events(self.con, run_id) if e['kind'] == 'report')
+        self.assertEqual(json.loads(event['body'])['output_basis'], 'no_declared_outputs_task_self_report')
+        self.assertEqual(self.tick(run_id, 2)['state'], 'done')
+
+    def test_memory_database_never_starts_a_process(self):
+        con = store.connect(':memory:')
+        self.addCleanup(con.close)
+        with patch('subprocess.Popen') as spawn:
+            self.assertEqual(runs.ensure_runner(con, self.rt)['state'], 'skipped')
+            spawn.assert_not_called()
+
+    def test_serve_once_and_effect_lock_do_not_duplicate_worker(self):
+        run_id = self.start()
+        runs.serve(self.db, self.rt, once=True)
+        self.assertEqual(len(self.rt.created), 1)
+        with runs._locked(self.con):
+            self.assertTrue(runs.reconcile(self.con, self.rt)['busy'])
+        self.assertEqual(len(self.rt.created), 1)
