@@ -154,7 +154,8 @@ class InitTest(unittest.TestCase):
         self.assertEqual(iface["mcp_servers"]["orchd_entry"]["args"], [self.orchd_bin, "mcp", "--role", "entry"])
         self.assertNotIn("/usr/bin/python3", (interface / ".codex" / "config.toml").read_text())
         self.assertEqual({k: v["approval_mode"] for k, v in iface["mcp_servers"]["orchd_entry"]["tools"].items()},
-                         {name: "approve" for name in ("relay", "status", "foreground", "orch_restart", "orch_upgrade", "orch_op_status")})
+                         {name: "approve" for name in ("relay", "status", "foreground", "orch_restart", "orch_upgrade",
+                                                      "orch_op_status", "instance_check", "instance_apply")})
 
     def test_generic_template_has_no_personal_values(self):
         self.init(trust=False)

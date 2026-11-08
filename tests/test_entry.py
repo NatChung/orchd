@@ -593,7 +593,9 @@ class EntryTest(unittest.TestCase):
 
     def test_entry_role_lists_and_runs_only_entry_tools_and_never_registers(self):
         listed = mcp_server.handle({"id": 1, "method": "tools/list"}, self.con, self.rt, role="entry")
-        self.assertEqual({t["name"] for t in listed["result"]["tools"]}, {"status", "relay", "foreground", "orch_restart", "orch_upgrade", "orch_op_status"})
+        self.assertEqual({t["name"] for t in listed["result"]["tools"]},
+                         {"status", "relay", "foreground", "orch_restart", "orch_upgrade", "orch_op_status",
+                          "instance_check", "instance_apply"})
         init = mcp_server.handle({"id": 1, "method": "initialize", "params": {}}, self.con, self.rt, role="entry")
         self.assertIn("never retype", init["result"]["instructions"])
         before = self.con.execute("SELECT COUNT(*) FROM orchs").fetchone()[0]
