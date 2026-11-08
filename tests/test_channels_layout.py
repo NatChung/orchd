@@ -78,6 +78,44 @@ class ChannelLayoutTest(unittest.TestCase):
             platform_process.validate_private(directory)
         channel_layout._validate_file(self.home / "custom/channel/email/config.toml")
 
+    @unittest.skipUnless(__import__("os").name == "nt", "Windows ACL API only")
+    def test_windows_administrators_owner_with_private_dacl_is_accepted(self):
+        import ctypes
+        from unittest.mock import MagicMock, patch
+        directory = self.home / "private"
+        directory.mkdir()
+        channel_layout._make_private(directory)
+        file = directory / "file"
+        file.write_text("synthetic")
+        real = ctypes.WinDLL
+        adv = real("advapi32", use_last_error=True)
+        equal_sid = adv.EqualSid
+        equal_sid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        calls = []
+        def compare(left, right):
+            calls.append((left, right))
+            return False if len(calls) == 1 else equal_sid(left, right)
+        adv.EqualSid = MagicMock(side_effect=compare)
+        adv.IsWellKnownSid = MagicMock(return_value=True)
+        with patch.object(ctypes, "WinDLL", side_effect=lambda name, **kw: adv if name == "advapi32" else real(name, **kw)):
+            channel_layout._validate_file(file)
+
+    @unittest.skipUnless(__import__("os").name == "nt", "Windows ACL API only")
+    def test_windows_other_user_ace_is_rejected(self):
+        import ctypes
+        from unittest.mock import MagicMock, patch
+        directory = self.home / "private"
+        directory.mkdir()
+        channel_layout._make_private(directory)
+        file = directory / "file"
+        file.write_text("synthetic")
+        real = ctypes.WinDLL
+        adv = real("advapi32", use_last_error=True)
+        adv.EqualSid = MagicMock(side_effect=[True, False])
+        with patch.object(ctypes, "WinDLL", side_effect=lambda name, **kw: adv if name == "advapi32" else real(name, **kw)):
+            with self.assertRaisesRegex(ValueError, "not private"):
+                channel_layout._validate_file(file)
+
     def test_repeat_does_not_change_journal_bytes(self):
         channel_layout.apply(home=self.home, env=self.env)
         state = self.home / "state/migrations/channels/layout.sqlite3"

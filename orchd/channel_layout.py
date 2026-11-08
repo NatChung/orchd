@@ -69,6 +69,7 @@ def _validate_file(file):
     adv.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
     adv.GetTokenInformation.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
     adv.EqualSid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    adv.IsWellKnownSid.argtypes = [ctypes.c_void_p, wintypes.DWORD]
     adv.GetAce.argtypes = [ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)]
     kernel.GetCurrentProcess.restype = wintypes.HANDLE
     error = adv.GetNamedSecurityInfoW(str(file), 1, 0x5, ctypes.byref(owner), None, ctypes.byref(dacl), None, ctypes.byref(descriptor))
@@ -83,7 +84,9 @@ def _validate_file(file):
         if not adv.GetTokenInformation(token, 1, buffer, needed, ctypes.byref(needed)):
             raise ctypes.WinError(ctypes.get_last_error())
         current = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p))[0]
-        if not owner or not dacl or not adv.EqualSid(owner, current):
+        # An elevated creator may assign the Administrators group as owner.
+        # The DACL must still grant access only to the current user.
+        if not owner or not dacl or not (adv.EqualSid(owner, current) or adv.IsWellKnownSid(owner, 26)):
             raise ValueError("channel file is not private")
         count = ctypes.c_ushort.from_address(dacl.value + 4).value
         if not count:
