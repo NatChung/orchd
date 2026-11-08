@@ -129,13 +129,26 @@ class SlackAdapter:
             self.service.record_adapter_health(self.source_id,holder,generation,'healthy',caller=self.caller)
             return {'status':'succeeded'}
         except Exception as error:
-            if job: self.service.finish_sync_job(self.source_id,job,holder,generation,caller=self.caller,error='sync_failed')
+            if job:
+                try:
+                    self.service.finish_sync_job(self.source_id,job,holder,generation,caller=self.caller,error='sync_failed')
+                except (PermissionError, ValueError):
+                    pass
             self.health.update(status='degraded',retention_gap=isinstance(error,HistoryGap),credential_error=getattr(error,'code',None)=='missing_scope')
-            self.service.record_adapter_health(self.source_id,holder,generation,'degraded',caller=self.caller)
+            try:
+                self.service.record_adapter_health(self.source_id,holder,generation,'degraded',caller=self.caller)
+            except PermissionError:
+                pass
             raise
         finally:
             if not self._connection_lease:
-                self.service.release_source_lease(self.source_id,holder,generation,caller=self.caller)
+                import sys
+                failed = sys.exc_info()[0] is not None
+                try:
+                    self.service.release_source_lease(self.source_id,holder,generation,caller=self.caller)
+                except PermissionError:
+                    if not failed:
+                        raise
     def _history(self,source,conversation,thread,holder,generation):
         scope='thread:'+conversation+':'+thread if thread else 'history:'+conversation
         previous=self.service.checkpoint(self.source_id,scope,caller=self.caller)

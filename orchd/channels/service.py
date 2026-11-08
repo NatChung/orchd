@@ -330,13 +330,25 @@ class ChannelService:
         return repository.queued_attachments(self.con, source_id)
 
     def store_attachment(self, attachment_id, data, holder, generation, *, caller):
-        import hashlib, os, tempfile
+        import hashlib, mimetypes, os, tempfile
         from .attachments import content_path, MAX_ATTACHMENT_BYTES
         item = repository.attachment(self.con, attachment_id)
         self._require_adapter(item['source_id'], caller)
         if item['status'] != 'queued' or not isinstance(data, bytes) or len(data) > MAX_ATTACHMENT_BYTES or (item['byte_size'] is not None and len(data) != item['byte_size']):
             raise ValueError('invalid attachment data')
+        import json
+        from .attachments import rejection_reason
+        content = repository.content(self.con, repository.get_message(self.con, item['message_id'])['intake_receipt_id'])
+        descriptors = json.loads(content['attachments'])
+        descriptor = next((entry for index, entry in enumerate(descriptors) if entry.get('provider_attachment_ref', f'legacy-index:{index}') == item['provider_attachment_ref']), {})
+        reason = rejection_reason(self.channel_home, item['source_id'], descriptor.get('mime_type') or mimetypes.guess_type(item['original_name'] or '')[0] or 'application/octet-stream', data)
+        if reason:
+            repository.reject_attachment(self.con, attachment_id, item['source_id'], reason, self.clock().isoformat(), holder, generation)
+            return
         digest = hashlib.sha256(data).hexdigest()
+        if item['sha256'] and digest != item['sha256']:
+            repository.reject_attachment(self.con, attachment_id, item['source_id'], 'digest_mismatch', self.clock().isoformat(), holder, generation)
+            return
         path = content_path(self.channel_home, item['source_id'], digest)
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         path = content_path(self.channel_home, item['source_id'], digest)

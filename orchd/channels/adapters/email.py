@@ -113,6 +113,8 @@ def normalize_message(message, *, tenant_ref):
             if len(attachments) >= 20:
                 raise ValueError('too many attachments')
             item = {'name': filename, 'status': 'referenced' if ref and size <= MAX_ATTACHMENT_BYTES else 'unavailable', 'bytes': size}
+            if part.get('mimeType'):
+                item['mime_type'] = part['mimeType'].lower()
             if ref:
                 item['provider_attachment_ref'] = ref
             attachments.append(item)
@@ -252,7 +254,10 @@ class EmailAdapter:
             return {'status':'succeeded','count':len(receipts)}
         except Exception as error:
             if job:
-                self.service.finish_sync_job(self.source_id, job, holder, generation, caller=self.caller, error='sync_failed')
+                try:
+                    self.service.finish_sync_job(self.source_id, job, holder, generation, caller=self.caller, error='sync_failed')
+                except (PermissionError, ValueError):
+                    pass
             if self.health['status'] != 'degraded':
                 self.health['status'] = 'degraded'
             status = getattr(error, 'status_code', None) or getattr(getattr(error, 'resp', None), 'status', None)
@@ -265,7 +270,13 @@ class EmailAdapter:
                 pass
             raise
         finally:
-            self.service.release_source_lease(self.source_id,holder,generation,caller=self.caller)
+            import sys
+            failed = sys.exc_info()[0] is not None
+            try:
+                self.service.release_source_lease(self.source_id,holder,generation,caller=self.caller)
+            except PermissionError:
+                if not failed:
+                    raise
 
 
 class GmailTransport:
