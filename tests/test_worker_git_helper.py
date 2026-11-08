@@ -20,7 +20,8 @@ class WorkerGitHelperTest(unittest.TestCase):
                     patch.object(runtime.os, "name", "nt"):
                 env = runtime.worker_env()
             self.assertEqual(env["GIT_CONFIG_VALUE_0"], "")
-            self.assertEqual(env["GIT_CONFIG_VALUE_1"], f'!"{launcher.resolve().as_posix()}" auth git-credential')
+            expected_launcher = os.path.abspath(launcher).replace("\\", "/")
+            self.assertEqual(env["GIT_CONFIG_VALUE_1"], f'!"{expected_launcher}" auth git-credential')
             self.assertEqual(env["GIT_CONFIG_VALUE_2"], "true")
             self.assertEqual(env["ORCHD_GH_WRAPPER_DIR"], root)
             self.assertEqual(env["GH_REPO"], "Owner/repo")
