@@ -3,6 +3,7 @@
 The definition is `docs/development/delivery.pipeline.json` at the Hub's fetched origin/HEAD commit (see
 docs/design/staged-pipeline.md). Only `repos`, `artifact_rules`, `checks` and `repo_checks` are read here; stages belong to the staged pipeline (#121)."""
 import fnmatch
+import contextlib
 import json
 import os
 import re
@@ -21,6 +22,7 @@ from .platform_process import background_options
 
 DEFINITION = "docs/development/delivery.pipeline.json"
 KINDS = ("preflight", "pr")
+REAP_GRACE = 5  # seconds to collect output after a timed-out check is killed
 OUTPUT_LIMIT = 20000
 CHECK_KEYS = {"argv", "cwd", "timeout_seconds", "allowed_exit_codes", "env_allowlist", "required"}
 
@@ -205,10 +207,19 @@ def run(con, task, kind, projects=None, env=None):
             except subprocess.TimeoutExpired:
                 if os.name == "nt":
                     from .quota import _reap
-                    _reap(proc)
+                    _reap(proc, since=started)
                 else:
                     os.killpg(proc.pid, signal.SIGKILL)
-                output = (proc.communicate()[0] or "") + f"\ntimed out after {check['timeout_seconds']}s"
+                # A descendant that escaped the kill (own session/job) can keep the pipe open; never wait for it.
+                try:
+                    output = proc.communicate(timeout=REAP_GRACE)[0] or ""
+                except subprocess.TimeoutExpired:
+                    with contextlib.suppress(OSError):
+                        proc.kill()
+                    with contextlib.suppress(OSError, ValueError):
+                        proc.stdout.close()
+                    output = "output unavailable: a leftover child process kept the pipe open"
+                output += f"\ntimed out after {check['timeout_seconds']}s"
         except OSError as error:
             output = f"could not start {check['argv'][0]}: {error.strerror or error}"
     finally:

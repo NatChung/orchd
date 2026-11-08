@@ -122,3 +122,42 @@ class WindowsForegroundViewerTests(unittest.TestCase):
         self.rt.claude = str(Path(self.tmp.name) / 'missing' / 'claude.exe')
         with self.assertRaisesRegex(FileNotFoundError, 'claude.exe'):
             self._open(lambda: self.rt.open_viewer('job-1'), 'wt.exe')
+
+
+class ReapWindowsTests(unittest.TestCase):
+    """_reap_windows is platform-neutral code driven through fakes, so it runs on every OS."""
+
+    def fake(self, pid, ppid, born=100.0, children=()):
+        proc = MagicMock()
+        proc.pid, proc.ppid.return_value, proc.create_time.return_value = pid, ppid, born
+        proc.children.return_value = list(children)
+        return proc
+
+    def run_reap(self, popen_pid, running, processes, since=None):
+        popen = MagicMock(pid=popen_pid)
+        popen.poll.return_value = None if running else 0
+        with patch('psutil.Process', side_effect=lambda pid: next(p for p in processes if p.pid == pid)), \
+                patch('psutil.process_iter', return_value=processes), \
+                patch('psutil.wait_procs', side_effect=lambda procs, timeout: ([], [])):
+            quota._reap_windows(popen, grace=0, since=since)
+
+    def test_exited_parent_does_not_leave_its_orphan_running(self):
+        grandchild = self.fake(31, 30)
+        orphan = self.fake(30, 10, children=[grandchild])  # parent pid 10 is already gone
+        unrelated = self.fake(99, 1)
+        self.run_reap(10, running=False, processes=[orphan, grandchild, unrelated])
+        orphan.terminate.assert_called_once()
+        grandchild.terminate.assert_called_once()
+        unrelated.terminate.assert_not_called()
+
+    def test_pid_reuse_guard_skips_processes_older_than_the_probe(self):
+        old = self.fake(30, 10, born=50.0)
+        self.run_reap(10, running=False, processes=[old], since=100.0)
+        old.terminate.assert_not_called()
+
+    def test_running_parent_is_terminated_with_its_children(self):
+        child = self.fake(11, 10)
+        root = self.fake(10, 1, children=[child])
+        self.run_reap(10, running=True, processes=[root, child])
+        root.terminate.assert_called_once()
+        child.terminate.assert_called_once()

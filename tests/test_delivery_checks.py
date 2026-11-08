@@ -3,6 +3,7 @@ import os
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -166,6 +167,22 @@ class PreflightTest(ChecksBase):
         self.publish(dict(self.definition, checks={"preflight": dict(PREFLIGHT, timeout_seconds=1)}))
         self.script_at_base("preflight", "sleep 5")
         record = delivery_checks.run(self.con, self.task, "preflight", self.root)
+        self.assertFalse(record["passed"])
+        self.assertIsNone(record["exit_code"])
+        self.assertIn("timed out", record["output"])
+
+    def test_timeout_does_not_hang_on_a_child_that_escaped_the_kill(self):
+        # The grandchild leaves the process group and keeps the output pipe open after the check is killed:
+        # an unbounded communicate() would wait for it for 30s (the Windows reap can miss such a process).
+        self.publish(dict(self.definition, checks={"preflight": dict(PREFLIGHT, timeout_seconds=1)}))
+        self.script_at_base("preflight",
+                            "python3 -c \"import subprocess,sys;"
+                            "subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],start_new_session=True)\";"
+                            " sleep 30")
+        started = time.monotonic()
+        with patch.object(delivery_checks, "REAP_GRACE", 1):
+            record = delivery_checks.run(self.con, self.task, "preflight", self.root)
+        self.assertLess(time.monotonic() - started, 15)
         self.assertFalse(record["passed"])
         self.assertIsNone(record["exit_code"])
         self.assertIn("timed out", record["output"])

@@ -299,25 +299,47 @@ def _stopping():
     return _stop is not None and _stop.is_set()
 
 
-def _reap(process, grace=3):
-    """Terminate a probe process group, escalating to kill; never raises."""
-    if process.poll() is not None:
-        return
-    if os.name == 'nt':
-        import psutil
+def _reap_windows(process, grace=3, since=None):
+    """Terminate a Windows probe tree. Windows has no process group to signal, so walk descendants.
+
+    The root may already have exited while a descendant still holds its pipes; such orphans keep the dead root's
+    PID as their parent PID, so they are still found (born at/after `since`, which guards against PID reuse)."""
+    import psutil
+    victims = []
+    try:
+        root = psutil.Process(process.pid) if process.poll() is None else None
+    except psutil.Error:
+        root = None
+    if root is not None:
         try:
-            root = psutil.Process(process.pid)
-            children = root.children(recursive=True)
+            victims = [*reversed(root.children(recursive=True)), root]
         except psutil.Error:
-            return
-        for child in [*reversed(children), root]:
-            with contextlib.suppress(psutil.Error, OSError):
-                child.terminate()
-        _, alive = psutil.wait_procs([root, *children], timeout=grace)
-        for child in alive:
-            with contextlib.suppress(psutil.Error, OSError):
-                child.kill()
-        psutil.wait_procs(alive, timeout=grace)
+            victims = [root]
+    else:
+        for candidate in psutil.process_iter():
+            try:
+                if candidate.ppid() != process.pid or (since is not None and candidate.create_time() < since):
+                    continue
+                victims.extend([*reversed(candidate.children(recursive=True)), candidate])
+            except psutil.Error:
+                continue
+    for victim in victims:
+        with contextlib.suppress(psutil.Error, OSError):
+            victim.terminate()
+    _, alive = psutil.wait_procs(victims, timeout=grace)
+    for victim in alive:
+        with contextlib.suppress(psutil.Error, OSError):
+            victim.kill()
+    psutil.wait_procs(alive, timeout=grace)
+
+
+def _reap(process, grace=3, since=None):
+    """Terminate a probe process group, escalating to kill; never raises."""
+    if os.name == 'nt':
+        # Do not return early when the root already exited: its descendants may still hold the pipes.
+        _reap_windows(process, grace, since)
+        return
+    if process.poll() is not None:
         return
     for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, grace)):
         try:
@@ -334,13 +356,14 @@ def _reap(process, grace=3):
 
 def _run(cmd, timeout, **kwargs):
     """subprocess.run replacement whose child is registered so stop_background can reap it."""
+    since = time.time()
     process = subprocess.Popen(cmd, **background_options(), **kwargs)
     with _children_lock:
         _children.add(process)
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except BaseException:
-        _reap(process)
+        _reap(process, since=since)
         raise
     finally:
         with _children_lock:
