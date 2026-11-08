@@ -317,6 +317,10 @@ window reason after 1800 seconds, and `expired TTL` is a reason after 900 second
   worker or feed stdout back into its prompt. Each hook adds CLI startup and a
   subscription-status network read; there is no periodic idle Claude process.
   Use `quota --probe sonnet` to refresh an idle worker's subscription.
+  A second `StopFailure` hook (matcher `rate_limit`) runs `orchd _claude-limit`,
+  which records a `rate_limit` message for the task owning that session (once
+  per prompt), so `auto` skips `sonnet` for the cooldown. The Orch is notified;
+  the automatic provider switch stays Codex-only.
 
 [Claude's built-in `/usage`](https://code.claude.com/docs/en/interactive-mode)
 reports subscription usage. On locally verified Claude Code 2.1.299 it works in

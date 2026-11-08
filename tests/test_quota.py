@@ -297,6 +297,10 @@ class QuotaTest(unittest.TestCase):
             command = settings['hooks']['Stop'][0]['hooks'][0]['command']
             self.assertIn('quota --probe sonnet', command)
             self.assertIn('ORCHD_HOME=' + tmp, command)
+            limit = settings['hooks']['StopFailure'][1]
+            self.assertEqual(limit['matcher'], 'rate_limit')
+            self.assertIn('_claude-limit', limit['hooks'][0]['command'])
+            self.assertIn('ORCHD_HOME=' + tmp, limit['hooks'][0]['command'])
 
     def test_codex_read_and_updated_preserve_buckets(self):
         with tempfile.TemporaryDirectory() as tmp:
