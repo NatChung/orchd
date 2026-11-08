@@ -204,6 +204,7 @@ class WorkflowRunTests(unittest.TestCase):
         run_id = self.start(plan)
         author = self.tick(run_id)['attempts'][0]['task_id']
         self.output(author, {})
+        core.report(self.con, self.rt, author, 'done', 'Repeated open-author result', 'Same retained output', output_file='.gstack/output.json')
         with self.assertRaisesRegex(ValueError, 'before independent'):
             core.close(self.con, self.rt, author)
         state = self.tick(run_id)
@@ -584,7 +585,8 @@ class WorkflowRunTests(unittest.TestCase):
         author = self.tick(run_id)['attempts'][0]['task_id']
         with runs._locked(self.con):
             self.assertTrue(runs.cancel(self.con, self.rt, run_id, orch_thread='example-orch', reason='Stop in-flight operation')['cleanup_pending'])
-            core.report(self.con, self.rt, author, 'blocked', 'Late failure', 'Retained late report')
+            with self.assertRaisesRegex(ValueError, 'Terminal workflow'):
+                core.report(self.con, self.rt, author, 'blocked', 'Late failure', 'Retained late report')
             self.assertIsNone(runs.show(self.con, run_id)['repair_run_id'])
         self.assertEqual(self.tick(run_id)['state'], 'cancelled')
         self.assertEqual(self.con.execute('SELECT COUNT(*) FROM workflow_runs').fetchone()[0], 1)
@@ -666,6 +668,113 @@ class WorkflowRunTests(unittest.TestCase):
         self.tick(child)
         self.assert_recovery_stopped_at_original_origin(parent, child)
         self.assertIn('Reconcile refused', runs.show(self.con, parent)['note'])
+
+    def test_delivered_answer_then_worker_report_resumes_without_manual_advance(self):
+        run_id = self.start()
+        task = self.tick(run_id)['attempts'][0]['task_id']
+        core.ask(self.con, self.rt, task, 'May I proceed within the existing scope?')
+        self.tick(run_id)
+        receipt = core.answer(self.con, self.rt, task, 'Proceed within the existing fixed scope', orch_id='example-orch')
+        self.assertEqual(receipt['status'], 'delivered')
+        self.output(task, {'implementation_instructions': 'Exact next-stage bytes\n'})
+        self.assertEqual(runs.show(self.con, run_id)['state'], 'active')
+        state = self.tick(run_id, 2)
+        self.assertEqual(state['step_index'], 1)
+        self.assertEqual(len(state['attempts']), 2)
+        event = next(e for e in runs.events(self.con, run_id) if e['kind'] == 'answered_report_resumed')
+        proof = json.loads(event['body'])
+        self.assertLess(proof['question_id'], proof['answer_id'])
+        self.assertLess(proof['answer_id'], proof['report_id'])
+
+    def test_done_without_delivered_answer_stays_awaiting_input(self):
+        run_id = self.start()
+        task = self.tick(run_id)['attempts'][0]['task_id']
+        core.ask(self.con, self.rt, task, 'Unanswered scoped question?')
+        with self.assertRaisesRegex(ValueError, 'delivered answer'):
+            self.output(task, {'implementation_instructions': 'Premature report'})
+        self.assertEqual(self.tick(run_id)['state'], 'awaiting_input')
+        self.assertEqual(store.get_task(self.con, task)['status'], 'question')
+        self.assertEqual(len(self.rt.created), 1)
+
+    def test_queued_answer_is_not_delivery_and_cannot_resume(self):
+        run_id = self.start()
+        task = self.tick(run_id)['attempts'][0]['task_id']
+        core.ask(self.con, self.rt, task, 'Question pending a reachable worker?')
+        def disconnected(*args):
+            raise OSError('Synthetic socket unavailable')
+        original_send = self.rt.send_uds
+        self.rt.send_uds = disconnected
+        with self.assertRaises(ValueError):
+            core.answer(self.con, self.rt, task, 'This reply is queued, not delivered', orch_id='example-orch')
+        self.assertGreater(len(store.pending_answers(self.con, task)), 0)
+        with self.assertRaisesRegex(ValueError, 'delivered answer'):
+            self.output(task, {'implementation_instructions': 'Premature report'})
+        self.assertEqual(self.tick(run_id)['state'], 'awaiting_input')
+        self.rt.send_uds = original_send
+        delivered = core.answer(self.con, self.rt, task, flush=True, orch_id='example-orch')
+        self.assertEqual(delivered['status'], 'delivered')
+        self.output(task, {'implementation_instructions': 'Output after the actual queued-answer delivery'})
+        self.assertEqual(runs.show(self.con, run_id)['state'], 'active')
+
+    def test_old_answer_does_not_answer_a_later_question_version(self):
+        run_id = self.start()
+        task = self.tick(run_id)['attempts'][0]['task_id']
+        core.ask(self.con, self.rt, task, 'First scoped question?')
+        core.answer(self.con, self.rt, task, 'Answer to the first question', orch_id='example-orch')
+        core.ask(self.con, self.rt, task, 'Second question still needs an answer?')
+        with self.assertRaisesRegex(ValueError, 'latest question'):
+            self.output(task, {'implementation_instructions': 'Cannot use the stale answer'})
+        self.assertEqual(self.tick(run_id)['state'], 'awaiting_input')
+
+    def test_cancelled_task_late_ask_and_report_preserve_terminal_state(self):
+        run_id = self.start()
+        task = self.tick(run_id)['attempts'][0]['task_id']
+        runs.cancel(self.con, self.rt, run_id, orch_thread='example-orch', reason='Stop')
+        messages = self.con.execute('SELECT COUNT(*) FROM messages').fetchone()[0]
+        events = len(runs.events(self.con, run_id))
+        reply = self.con.execute('SELECT reply FROM interface_requests WHERE id=?', (self.request_id,)).fetchone()[0]
+        with self.assertRaisesRegex(ValueError, 'Terminal workflow'):
+            core.ask(self.con, self.rt, task, 'Late question after cancellation')
+        with self.assertRaisesRegex(ValueError, 'Terminal workflow'):
+            core.report(self.con, self.rt, task, 'done', 'Late result', 'Late evidence')
+        self.assertEqual(store.get_task(self.con, task)['status'], 'closed')
+        self.assertEqual(self.tick(run_id)['state'], 'cancelled')
+        self.assertEqual(self.con.execute('SELECT COUNT(*) FROM messages').fetchone()[0], messages)
+        self.assertEqual(len(runs.events(self.con, run_id)), events)
+        self.assertEqual(self.con.execute('SELECT reply FROM interface_requests WHERE id=?', (self.request_id,)).fetchone()[0], reply)
+        self.assertEqual(len(self.rt.created), 1)
+
+    def test_answered_recovery_worker_resumes_child_without_restarting_parent_steps(self):
+        parent, child = self.pending_recovery()
+        task = self.tick(child)['attempts'][0]['task_id']
+        core.ask(self.con, self.rt, task, 'May I continue the fixed repair scope?')
+        self.assertEqual(runs.show(self.con, parent)['state'], 'awaiting_input')
+        core.answer(self.con, self.rt, task, 'Continue the already declared repair scope', orch_id='example-orch')
+        self.output(task, {})
+        self.assertEqual(runs.show(self.con, child)['state'], 'active')
+        self.assertEqual(runs.show(self.con, parent)['state'], 'repairing')
+        self.assertEqual(runs.show(self.con, parent)['step_index'], 0)
+        self.assertEqual(len(self.tick(child)['attempts']), 2)
+        self.assertEqual(len(self.rt.created), 3)
+
+    def test_cancellation_during_report_capture_cannot_reopen_closed_task(self):
+        run_id = self.start()
+        task_id = self.tick(run_id)['attempts'][0]['task_id']
+        task = store.get_task(self.con, task_id)
+        path = Path(task['worktree']) / '.gstack/output.json'
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps({'schema_version': runs.OUTPUT_SCHEMA, 'values': {'implementation_instructions': 'Captured before cancel'}}))
+        capture = runs.prepare_report
+        def cancel_after_capture(*args):
+            value = capture(*args)
+            runs.cancel(self.con, self.rt, run_id, orch_thread='example-orch', reason='Cancelled during output capture')
+            return value
+        with patch.object(runs, 'prepare_report', side_effect=cancel_after_capture):
+            with self.assertRaisesRegex(ValueError, 'Terminal workflow'):
+                core.report(self.con, self.rt, task_id, 'done', 'Late result', 'Evidence', output_file='.gstack/output.json')
+        self.assertEqual(store.get_task(self.con, task_id)['status'], 'closed')
+        self.assertEqual(runs.show(self.con, run_id)['state'], 'cancelled')
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM messages WHERE task_id=? AND kind='report'", (task_id,)).fetchone()[0], 0)
 
     def test_memory_database_never_starts_a_process(self):
         con = store.connect(':memory:')

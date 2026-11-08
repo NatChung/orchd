@@ -454,6 +454,7 @@ def report(con, rt, task_id, status, summary, evidence, output_file=None):
     # the ordinary report/adoption ordering, including notification to a new owner.
     transaction = store.immediate(con) if workflow_runs.task_origin(con, task_id) is not None else contextlib.nullcontext()
     with transaction:
+        workflow_runs.guard_callback(con, task_id)
         mid = store.add_message(con, task_id, "report", f"{status}: {summary}", evidence)
         store.update_task(con, task_id, status=status)
         workflow_runs.observe_report(con, task_id=task_id, message_id=mid, status=status, output=output)
@@ -468,12 +469,15 @@ def progress(con, rt, task_id, text):
 
 
 def ask(con, rt, task_id, question):
-    task = store.get_task(con, task_id)
-    question_summary.warn(question)
-    mid = store.add_message(con, task_id, "question", question)
-    store.update_task(con, task_id, status="question")
     from . import workflow_runs
-    workflow_runs.observe_question(con, task_id=task_id, message_id=mid)
+    transaction = store.immediate(con) if workflow_runs.task_origin(con, task_id) is not None else contextlib.nullcontext()
+    with transaction:
+        workflow_runs.guard_callback(con, task_id)
+        task = store.get_task(con, task_id)
+        question_summary.warn(question)
+        mid = store.add_message(con, task_id, "question", question)
+        store.update_task(con, task_id, status="question")
+        workflow_runs.observe_question(con, task_id=task_id, message_id=mid)
     return _wake(con, rt, task, mid, f"question: {_short(question_summary.wake_note(question))}")
 
 

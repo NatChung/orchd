@@ -236,17 +236,52 @@ def _output(task, output_file, expected):
     return raw
 
 
+def guard_callback(con, task_id):
+    attempt = _attempt(con, task_id)
+    if attempt is None:
+        return
+    run = _get(con, attempt['run_id'])
+    if store.get_task(con, task_id)['status'] == 'closed' or run['state'] in ('cancelling', 'cancelled', 'done', 'needs_adoption'):
+        raise ValueError('Terminal workflow tasks cannot reopen through late callbacks')
+
+
+def _delivered_answer(con, task_id, before=None):
+    question = con.execute("SELECT id FROM messages WHERE task_id=? AND kind='question' ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
+    if question is None:
+        return None
+    upper = ' AND id<?' if before is not None else ''
+    args = (task_id, question['id'], before) if before is not None else (task_id, question['id'])
+    answer = con.execute("SELECT id FROM messages WHERE task_id=? AND kind='answer' AND id>?" + upper + ' ORDER BY id DESC LIMIT 1', args).fetchone()
+    return dict(question_id=question['id'], answer_id=answer['id']) if answer else None
+
+
+def _resume_answered_report(con, attempt, message_id):
+    run = _get(con, attempt['run_id'])
+    if run['state'] != 'awaiting_input':
+        return
+    proof = _delivered_answer(con, attempt['task_id'], before=message_id)
+    if proof is None:
+        raise ValueError('Workflow done report needs a delivered answer after the latest question; queued answers are not delivery')
+    _state(con, run['id'], 'active')
+    _event(con, run['id'], 'answered_report_resumed', dict(proof, report_id=message_id), attempt['task_id'], message_id)
+    if run['parent_run_id']:
+        parent = _get(con, run['parent_run_id'])
+        if parent['state'] == 'awaiting_input':
+            _state(con, parent['id'], 'repairing', 'Answered recovery worker continued within the fixed scope')
+
+
 def prepare_report(con, task_id, status, output_file):
     attempt = _attempt(con, task_id)
     if attempt is None:
         if output_file is not None:
             raise ValueError('output_file is only supported for workflow run tasks')
         return None
-    if store.get_task(con, task_id)['status'] == 'closed':
-        raise ValueError('Closed workflow tasks cannot report again')
+    guard_callback(con, task_id)
     spec = _json(attempt['spec'])
     if status != 'done':
         return None
+    if _get(con, attempt['run_id'])['state'] == 'awaiting_input' and _delivered_answer(con, task_id) is None:
+        raise ValueError('Workflow done report needs a delivered answer after the latest question; queued answers are not delivery')
     if not spec['outputs'] and output_file is None:
         return workflows.canonical(dict(schema_version=OUTPUT_SCHEMA, values={}))
     return _output(store.get_task(con, task_id), output_file, spec['outputs'])
@@ -260,10 +295,14 @@ def observe_report(con, *, task_id, message_id, status, output):
     if attempt['report_id'] is not None:
         if attempt['output'] != output:
             raise ValueError('Workflow task already reported different output')
+        if status == 'done':
+            _resume_answered_report(con, attempt, message_id)
         return
     con.execute('UPDATE workflow_run_attempts SET state=?,output=?,output_digest=?,report_id=? WHERE id=?',
                 ('reported' if status == 'done' else 'blocked', output, _hash(output) if output is not None else None, message_id, attempt['id']))
     _event(con, attempt['run_id'], 'report', dict(status=status, output_digest=_hash(output) if output is not None else None, output_basis='no_declared_outputs_task_self_report' if not _json(attempt['spec'])['outputs'] else 'captured_task_output_schema_validated'), task_id, message_id)
+    if status == 'done':
+        _resume_answered_report(con, attempt, message_id)
     if status == 'blocked':
         _fail(con, _get(con, attempt['run_id']), 'Worker reported blocked', task_id=task_id, message_id=message_id)
 
