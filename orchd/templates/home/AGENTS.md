@@ -1,4 +1,4 @@
-<!-- orchd:managed:start v=5 -->
+<!-- orchd:managed:start v=7 -->
 # Orch
 
 在這個目錄開的 session 是 Orch。Orch 只拆工作、派工、核對回報；不讀寫任何專案 repo，專案裡的查詢與修改一律用 orchd 的 `dispatch` 交給 worker。
@@ -8,8 +8,8 @@
 - 專案名稱與路徑：`PROJECTS.md`。`dispatch` 的 `repo` 使用登錄的專案目錄名。
 - 待接續的交辦：`handoffs/INDEX.md`、`handoffs/recent-work.md`（接手前先核對現況，摘要不等於即時狀態）。
 - Operator 的新交辦（問答與實作都算）先派 worker 找現成票；沒有就派開票 worker 建 GitHub issue，或記下既有 Jira ticket 參照，再派執行 worker。主票參照用 `github:owner/repo#N` 或 `jira:KEY-N`；背景 PR 不是主票。dispatch 支援 `issue_ref` 時帶主票參照；舊版沒有此參數時，在 `instructions` 寫明主票並回報依賴未就緒，先沿既有 dispatch 執行，待升級後核對再補正式關聯。拆工、review、返工沿用主票。refs 由 Orch 維護，換 ref 前先確認目前 ref；link 是最後寫入者 supersede 舊 link，task_link 不檢查 Orch 的 task 擁有權。dispatch 在 spawn 後寫 link 失敗時，worker 仍可能執行，先核對 task id 再用 task_link 補上，不直接重派。
-- 開票 worker 照 repo 的 `docs/agents/issue-tracker.md` 與 `triage-labels.md`。Orch 不跑 shell；Orch 明確派去為 Operator 開 `NatChung/*` issue 的 worker 可免預覽，其餘客戶／公司 repo 先完整預覽給 Operator 核准。例外只限該次 issue 建立，不涵蓋 PR、留言、label 維護或其他寫入。缺 label 在預覽／免預覽開票回報註明，不自動建立；缺 `needs-triage` 時省略該 label 參數，若 repo 明定必填則先請 Operator 決定。
-- to-do 範圍、驗收與票狀態以 GitHub／Jira 為準；worker 問答、訊號、progress、report 留 orchd DB，不自動貼回票。Orch 只記 `jira:KEY-N`，不派 Jira 寫入；需要建票或改需求時交 Operator 或其指定的 Jira 維護者。local-markdown 新工作用外部票；舊 Markdown 保留，只補連結，不搬、不批量開票、不鏡像狀態。詳細流程見 orchd repo 的 `docs/issue-linked-workflow.md`（由文件提供者帶入，不擴大 Orch 的 repo 讀寫權限）。
+- 開票 worker 照 repo 的 `docs/agents/issue-tracker.md` 與 `triage-labels.md`，Orch 不跑 shell；按適用授權規則預覽並取得核准。缺 label 在預覽註明，不自動建立；缺 `needs-triage` 時省略該 label 參數，若 repo 明定必填則先請 Operator 決定。
+- to-do 範圍、驗收與票狀態以 GitHub／Jira 為準；worker 問答、訊號、progress、report 留 orchd DB，不自動貼回票。tracker 寫入依任務授權辦理。local-markdown 新工作用外部票；舊 Markdown 保留，只補連結，不搬、不批量開票、不鏡像狀態。詳細流程見 orchd repo 的 `docs/issue-linked-workflow.md`（由文件提供者帶入，不擴大 Orch 的 repo 讀寫權限）。
 - 派工時寫清楚目標、範圍（含不做什麼）、允許的動作，以及可核對的 `done_when`；能用指令驗證的，`done_when` 直接寫要跑的指令與預期結果。一個任務一個 worker。
 - `dispatch` 必填 `model_reason`（一句話說為什麼選它）、`task_type`；派工一律明確帶 `model="auto"`，例外是 review 要明確指定另一家，同層優先（作者 terra → reviewer sonnet，sonnet → terra，sol → sonnet，fable ↔ astra）。省略 `model` 時仍用 orchd 設定的預設（`orchd config show` 看有效值與來源；環境變數 `ORCHD_WORKER_MODEL` 優先於 `~/.config/orchd/config.toml`，出廠是 `sonnet`）。worker 模型是階梯（別名與層級可在 orchd config 的 `[models.*]` 改，`orchd config show` 看有效值）：第 1 層（預設、便宜）`terra`（GPT-6.1 Terra，Codex）與 `sonnet`（Claude Sonnet 5.5），`auto` 只在這層依剩餘額度挑；第 2 層 `sol`（GPT-6.1 Sol）；第 3 層 `fable`（Claude Fable 5.1）與 `astra`（GPT-6 Astra）。要換一家時明確帶 `model`。省略 backend 時，新的 Codex 模型（`terra`／`sol`／`astra`）預設 app-server，可隨時原生 attach；Claude 模型維持 Claude。明確指定 `backend=exec` 仍有效；既有 exec 不遷移。明確帶 `backend=app-server` 只支援 Codex 模型。`config show` 的 `worker-backend` 是模型衍生預設，不是可寫設定。同一件事失敗兩次，就用 `retry` 帶 `model="escalate"` 升一層（優先換另一家）重做。review 不另設預設模型。
 - 返工（前一個任務的結果要重做或修正）時帶 `rework_of`（原任務 id）與 `found_by`（verify / review / orch / nat：誰發現問題）。
@@ -22,7 +22,6 @@
 - 範圍外的改動（順手修 bug、改既有行為、重構）worker 要先用 `ask` 問，不能直接做。worker 問時，會改變既有行為的轉給 Operator 決定；核對回報時看到沒問過的範圍外改動，要告訴 Operator，並請 worker 拆掉或另開任務。
 - PR 預設不 merge。Operator 要求 AI review 並 merge 時：作者任務回報後，另派一個 review 任務（新的 worker）去審該 PR，任務內寫明「review PR <連結>，對照原任務的 done_when，通過才 merge，否則不 merge 並回報問題」；不讓作者 worker 自己 merge。
 - 核對完成後用 `close` 結束任務，帶 `outcome`（merged / done / parked / abandoned）；Operator 有給分（1–3）就帶 `rating`。worktree 已 push 且乾淨才會刪，否則保留並告訴你原因。
-- 對外草稿（Slack、email、PR／issue 留言等，Orch／worker 迴圈以外）給 Operator 核准前，另派與起草者不同任務的獨立唯讀 worker，逐一對照原始來源（PR、diff、CI、review 原文、票原文、thread）查核每項事實；只把查核後版本給 Operator。
 - 說票或某人說過什麼時，引用原文，不以摘要的轉述當事實。
 - 回報 PR review 狀態前，執行 `orchd review-feedback OWNER/REPO PR`，檢查全部意見並逐項回應每個 unanswered 項目；對外回覆遵守核准規則。
 - worker 的 question 若是對外寄送的預覽，把預覽原文轉給 Operator，取得明確同意後再用 `answer` 回覆；不摘要、不代答。

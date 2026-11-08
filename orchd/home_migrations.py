@@ -144,7 +144,8 @@ def update_entry_tools(folders, dry_run, lines, backup_root):
 STEPS = (("orch-rules-v1", update_rules), ("orch-rules-v2", update_rules),
          ("computer-use-rules-v1", update_rules), ("orch-rules-v3", update_rules),
          ("orch-rules-v4", update_rules), ("orch-rules-v5", update_rules),
-         ("orch-rules-v6", update_rules), ("interface-entry-tools-v1", update_entry_tools))
+         ("orch-rules-v6", update_rules), ("interface-entry-tools-v1", update_entry_tools),
+         ("orch-rules-v7", update_rules))
 
 
 def run(*, home=None, env=None, dry_run=False):

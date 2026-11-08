@@ -1,8 +1,7 @@
 # Orch：先有票，再派工
 
 Operator 的新交辦，不論問答或實作，都先找現成票；沒有就先建立 GitHub
-issue，或取得既有 Jira ticket 的參照，之後才派執行 worker；版本支援時 dispatch 帶 `issue_ref`，
-舊版則在 instructions 寫明主票並回報依賴未就緒（見第 3 節）。
+issue，或取得 Jira ticket 的參照，之後才派執行 worker；dispatch 帶 `issue_ref`（見第 3 節）。
 同一張票可以拆成多個 worker 任務，每個任務只有一個主參照。
 
 流程原則：外部 tracker 是工作目的、範圍、驗收與票狀態的唯一來源；
@@ -19,8 +18,7 @@ orchd DB 保存 worker 問答、訊號與執行證據，兩者只用主票參照
    符合就沿用。背景 PR、教材案例或 goals.source 的來源票不能自動當主票。
 3. 無符合的 GitHub issue 時，準備標題、工作目的、範圍、驗收條件、
    背景連結與預定 labels，由開票 worker 按下節權限開票。Jira 路由沒有現成 ticket 時，
-   請 Operator 或其指定的 Jira 維護者提供或建立票並給參照；
-   Orch 不直接建立、留言或修改 Jira，也不以此流程派 Jira 寫入 worker。
+   依任務授權取得或建立票並給參照。
 4. GitHub 開票後 read-back，確認它是 issue 而非 PR、內容正確且可存取，
    使用 API 回傳的 canonical owner/repo 與正整數票號。
    Jira 記 `jira:KEY-N`（key 大寫）；無法唯讀核對時明示未核對，
@@ -37,25 +35,19 @@ Orch 不跑 shell，repo 查詢與開票交給前置 worker；開票任務要明
 
 | 動作／目的地 | Orch 流程 |
 | --- | --- |
-| 在 `NatChung/*` 建 GitHub issue | Orch 明確派出的開票 worker 可免預覽；開後 read-back |
-| 在客戶／公司 repo 建 issue | 將完整預覽給 Operator，取得核准後才開；開後 read-back |
-| Jira | 只記既有參照，不直接寫 Jira |
+| 建 GitHub issue | 完整預覽給 Operator，取得核准後才開；開後 read-back |
+| Jira 寫入 | 依任務授權及適用的預覽規則辦理 |
 | 建立缺少的 GitHub label | 獨立維護任務，精確預覽並核准；不隨開票自動建立 |
 
-公司與客戶 repo 的預覽必須含目的地 repo、標題、完整 body、將套用的
-現存 labels，以及缺少的 labels。未知 owner 的權限先問 Operator。
-免預覽適用於 Orch 明確派去為 Operator 建立 NatChung issue 的 worker，
-只限該次 issue 建立；其他 worker 寫入仍走 `orchd ask`，不延伸到 PR、
-留言、修改、關票或 label 維護。派工必須明示此例外的 repo 與開票範圍；
-repo guide 的預覽規則見 [issue tracker](agents/issue-tracker.md)。
+預覽必須含目的地 repo、標題、完整 body、將套用的現存 labels，
+以及缺少的 labels。repo guide 見 [issue tracker](agents/issue-tracker.md)。
 
 以 tracker guide 的 mapping 作期望、live labels 作實際，逐個角色比對。
 只套已存在且 mapping 正確的 label，不自動建、改名或刪除 label。
 缺 label 時可省略缺項，預覽註明「缺少 X，本次不套用」；若 repo 規則
 要求該 label，先完成獨立維護或取得 Operator 的處理決定，再開票。
-NatChung 免預覽開票也要在開票回報註明缺項；需要預覽時一併列出。
 缺 `needs-triage` 時，開票命令省略 `--label needs-triage`，套用其他已存在
-且適用的 labels，並在預覽／免預覽回報列明缺項與實際清單；
+且適用的 labels，並在預覽列明缺項與實際清單；
 若 repo 明定 needs-triage 必填，先請 Operator 決定或完成獨立維護再開票。
 Jira 不套 GitHub 五角色，legacy local phase 不當作 GitHub label。
 可交辦的 dry-run 清單見 [label reconciliation](examples/tracker-label-reconciliation.md)。
@@ -78,9 +70,7 @@ Operator 交辦 → 前置 worker 查／建立主票 → 核對參照 → 派執
 派工只寫 worker 的執行目標、操作限制、允許動作與 `done_when` 驗證步驟，
 不要貼整份 issue body。worker 唯讀查原票取得完整範圍。
 拆工、review、返工都沿用主票 ref；背景票仍是背景連結。
-scope 或驗收需要調整時，GitHub 由取得相應寫入授權的 worker 更新工作定義；
-開票免預覽不授權後續改票。Jira 由 Operator 或其指定的 Jira 維護者在 Jira
-更新，Orch 只記參照並等待確認，不直接寫入，也不派 worker 代寫 Jira。
+scope 或驗收需要調整時，由取得相應寫入授權的 worker 更新工作定義。
 worker ask、Operator 回答、訊號、progress、report 留 DB，不鏡像到票的留言或本文。
 
 ### 版本依賴與舊版退路
@@ -141,9 +131,8 @@ local-markdown 專案的既有 Markdown 原地保留，不搬、不刪、
 
 人工走查合成例子：選 `example-app` 的 GitHub route，唯讀取得 issue #12，
 核對 `github:example-owner/example-app#12`，dispatch 帶同 ref；再從 snapshot
-選該 ref 的 tasks，依 task id 查 DB 執行紀錄。Jira 例子只記 `jira:DEMO-7`，
-不寫 Jira；reader 不可用時明示 unavailable，不當成無票或已關票。
+選該 ref 的 tasks，依 task id 查 DB 執行紀錄。Jira 例子使用 `jira:DEMO-7`；
+reader 不可用時明示 unavailable，不當成無票或已關票。
 
-已安裝的 Orch home 指示由 Operator 維護；repo 的
-`orchd/templates/home/AGENTS.md` 只提供範本，Operator 決定是否套用，
-不執行 init 覆寫個人檔案。
+`orchd init` 與 home migration 會更新已安裝 home 的 managed 區塊，並保留區塊外內容及備份。
+安裝或升級前，先將需保留的本機規則放在 managed 區塊外。

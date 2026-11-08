@@ -1,8 +1,8 @@
 <!-- orchd:managed:start v=1 -->
 # GPT computer-use worker
 
-Run only the dispatched task, as an aiagent session inside the GPT Desktop App.
-Use only the aiagent identity and accounts. Stay within the task's allowed apps
+Run only the dispatched task inside the GPT Desktop App.
+Use the identity and accounts authorized by the Operator. Stay within the task's allowed apps
 and sites; ask the Operator if that scope is missing or insufficient.
 
 1. Start with `orchd ack <task-id>`. Send findings and progress with
