@@ -27,12 +27,17 @@ def real_gh():
     # packaged one, would otherwise call each other forever.
     me = Path(__file__).resolve()
     own = me.read_bytes()
+    excluded = {os.path.normcase(str(me.parent))}
+    if os.environ.get("ORCHD_GH_WRAPPER_DIR"):
+        excluded.add(os.path.normcase(str(Path(os.environ["ORCHD_GH_WRAPPER_DIR"]).resolve())))
     for directory in os.environ.get("PATH", os.defpath).split(os.pathsep):
+        if os.path.normcase(str(Path(directory or ".").resolve())) in excluded:
+            continue
         candidate = shutil.which("gh", path=directory or ".")
         if not candidate:
             continue
         path = Path(candidate).resolve()
-        if os.environ.get("ORCHD_GH_WRAPPER_DIR") and path.parent == Path(os.environ["ORCHD_GH_WRAPPER_DIR"]).resolve():
+        if os.path.normcase(str(path.parent)) in excluded:
             continue
         try:
             if path == me or path.read_bytes() == own:
@@ -82,6 +87,10 @@ GLOBAL_FLAGS = ("-h", "--help", "--version")
 
 
 def main():
+    if "ORCHD_GH_WRAPPER_ACTIVE" in os.environ:
+        print("orchd gh: recursion detected; refusing to launch gh", file=sys.stderr)
+        return 1
+    os.environ["ORCHD_GH_WRAPPER_ACTIVE"] = "1"
     real = real_gh()
     if not real:
         print("orchd gh: no real gh executable found in PATH", file=sys.stderr)
