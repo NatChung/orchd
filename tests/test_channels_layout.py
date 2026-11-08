@@ -16,14 +16,14 @@ class ChannelLayoutTest(unittest.TestCase):
         first = channel_layout.apply(home=self.home, env=self.env)
         root = self.home / "custom" / "channel"
         self.assertEqual(first["layout_version"], 1)
-        before = {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+        before = {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
         self.assertIn(b"outbound_enabled = false", before["channels.toml"])
         for name in ("email", "slack", "line"):
             self.assertIn(b"enabled = false", before[name + "/config.toml"])
             self.assertTrue((root / name / "state").is_dir())
             self.assertIn(name + "/mapping.toml", before)
         channel_layout.apply(home=self.home, env=self.env)
-        self.assertEqual(before, {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()})
+        self.assertEqual(before, {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()})
 
     def test_plan_does_not_write(self):
         channel_layout.plan(home=self.home, env=self.env)
@@ -43,3 +43,86 @@ class ChannelLayoutTest(unittest.TestCase):
         state.write_bytes(b"new data")
         channel_layout.rollback(receipt["migration_id"], home=self.home, env=self.env, apply=True)
         self.assertEqual(state.read_bytes(), b"new data")
+
+
+    def test_interrupted_apply_resumes_same_receipt(self):
+        from unittest.mock import patch
+        real = channel_layout._atomic
+        calls = []
+        def interrupted(path, data):
+            calls.append(path)
+            if len(calls) == 2:
+                raise OSError("synthetic interruption")
+            real(path, data)
+        with patch.object(channel_layout, "_atomic", side_effect=interrupted):
+            with self.assertRaises(OSError):
+                channel_layout.apply(home=self.home, env=self.env)
+        result = channel_layout.apply(home=self.home, env=self.env)
+        self.assertEqual(result["layout_version"], 1)
+        self.assertTrue((self.home / "custom/channel/slack/config.toml").is_file())
+
+    def test_symlink_check_rejects_reparse_point(self):
+        from unittest.mock import patch
+        target = self.home / "custom/channel"
+        target.mkdir(parents=True)
+        original = Path.is_symlink
+        with patch.object(Path, "is_symlink", lambda p: True if p == target else original(p)):
+            with self.assertRaisesRegex(ValueError, "symlink"):
+                channel_layout.plan(home=self.home, env=self.env)
+
+    @unittest.skipUnless(__import__("os").name == "nt", "Windows ACL API only")
+    def test_windows_acl_is_private(self):
+        from orchd import platform_process
+        channel_layout.apply(home=self.home, env=self.env)
+        for directory in (self.home / "custom/channel", self.home / "custom/channel/email/state"):
+            platform_process.validate_private(directory)
+        channel_layout._validate_file(self.home / "custom/channel/email/config.toml")
+
+    def test_repeat_does_not_change_journal_bytes(self):
+        channel_layout.apply(home=self.home, env=self.env)
+        state = self.home / "state/migrations/channels/layout.sqlite3"
+        before = state.read_bytes()
+        channel_layout.apply(home=self.home, env=self.env)
+        self.assertEqual(before, state.read_bytes())
+
+    def test_real_symlink_is_rejected_or_privilege_skip(self):
+        target = self.home / "outside"
+        target.mkdir()
+        link = self.home / "custom/channel"
+        link.parent.mkdir()
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except OSError as error:
+            self.skipTest(f"creating Windows symlink unavailable: {error}")
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            channel_layout.plan(home=self.home, env=self.env)
+
+    def test_secret_bearing_explicit_legacy_manifest_is_not_backed_up(self):
+        legacy = self.home / "legacy.toml"
+        legacy.write_text('[source]\ntoken = "synthetic-sensitive-value"\n', encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "secret_externalization_required"):
+            channel_layout.apply(home=self.home, env=self.env, legacy_manifest=legacy)
+        self.assertFalse((self.home / "state").exists())
+        self.assertFalse((self.home / "custom").exists())
+
+    def test_cli_classifies_layout_operations_without_startup_migration(self):
+        from orchd import cli
+        parser = cli.build_parser()
+        for argv in (["install", "--dry-run", "--json"],
+                     ["channels", "layout", "plan"],
+                     ["channels", "layout", "rollback", "--migration", "abc", "--dry-run"]):
+            self.assertEqual(cli._home_policy(parser.parse_args(argv)), "skip")
+
+    def test_rollback_keeps_a_user_modified_file(self):
+        receipt = channel_layout.apply(home=self.home, env=self.env)
+        changed = self.home / "custom/channel/slack/config.toml"
+        changed.write_bytes(b"user edit")
+        result = channel_layout.rollback(receipt["migration_id"], home=self.home, env=self.env, apply=True)
+        self.assertEqual(changed.read_bytes(), b"user edit")
+        self.assertIn(str(changed), result["conflicts"])
+
+    def test_explicit_channel_home_is_respected(self):
+        env = {**self.env, "ORCHD_CHANNEL_HOME": str(self.home / "elsewhere")}
+        channel_layout.apply(home=self.home, env=env)
+        self.assertTrue((self.home / "elsewhere/line/config.toml").is_file())
+        self.assertFalse((self.home / "custom/channel").exists())

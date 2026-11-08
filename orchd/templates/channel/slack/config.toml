@@ -1,0 +1,10 @@
+schema_version = 1
+[[sources]]
+id = "demo-slack"
+provider = "slack"
+tenant_ref = "demo-tenant"
+account_ref = "demo-account-a"
+app_ref = "demo-app-a"
+app_credential_ref = "os-store:demo/slack/app"
+api_credential_ref = "os-store:demo/slack/api"
+enabled = false

@@ -1,0 +1,4 @@
+[channels]
+schema_version = 1
+host_id = "demo-host-a"
+outbound_enabled = false
