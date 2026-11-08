@@ -60,3 +60,18 @@ class WrapperResolutionTest(unittest.TestCase):
             self.assertEqual(self.wrapper['main'](), 0)
             self.assertEqual(os.environ['ORCHD_GH_WRAPPER_ACTIVE'], '1')
             call.assert_called_once()
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows child process')
+    def test_nested_credential_helper_is_allowed_and_cannot_recurse(self):
+        import io
+        from types import SimpleNamespace
+
+        stdin = SimpleNamespace(buffer=io.BytesIO(b'host=github.com\n'))
+        with patch.dict(os.environ, {'ORCHD_GH_WRAPPER_ACTIVE': '1', 'ORCHD_CONFIG_DIR': str(self.root)}, clear=True), \
+             patch.dict(self.globals, {'real_gh': lambda: 'fake.exe'}), \
+             patch('sys.argv', ['gh', 'auth', 'git-credential', 'get']), \
+             patch('sys.stdin', stdin), \
+             patch.object(self.globals['subprocess'], 'call', return_value=0) as call:
+            self.assertEqual(self.wrapper['main'](), 0)
+            call.assert_called_once()
+            self.assertNotEqual(self.wrapper['main'](), 0)
