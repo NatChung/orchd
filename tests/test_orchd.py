@@ -84,7 +84,7 @@ class FakeRuntime:
     def remove_worktree(self, repo_path, worktree, base=None):
         self.removed.append(worktree)
 
-    def open_viewer(self, job):
+    def open_viewer(self, job, worktree=None):
         self.viewed.append(job)
 
     def codex_log(self, task_id):

@@ -23,7 +23,7 @@ import psutil
 from . import store, unix_socket
 from .app_transport import RPC, RPCError
 from .processes import cleanup_processes, task_processes
-from .platform_process import detached_options, make_private, validate_private
+from .platform_process import background_python, detached_options, make_private, validate_private
 from .runtime import CODEX_MEMORIES_OFF
 
 BACKEND = 'app-server'
@@ -196,7 +196,7 @@ def start(con, rt, task, prompt, model, pending=(), brief=None):
     # Use the launching package; -P excludes the worktree while honoring PYTHONPATH.
     env['PYTHONPATH'] = str(Path(__file__).resolve().parents[1]) + os.pathsep + env.get('PYTHONPATH','')
     with open(directory/'supervisor.log', 'a') as out:
-        child = subprocess.Popen([sys.executable, '-P', '-m', 'orchd.app_worker', 'supervise', database,
+        child = subprocess.Popen([background_python(), '-P', '-m', 'orchd.app_worker', 'supervise', database,
                                   task['id'], generation], cwd=task['worktree'], env=env,
                                  stdin=subprocess.DEVNULL, stdout=out, stderr=out, **detached_options())
     # Windows venv launchers can start a second Python process. Never overwrite a
@@ -628,8 +628,6 @@ class Supervisor:
 
 
 def viewer(database, task_id, generation):
-    if os.name == 'nt':
-        raise RuntimeError('worker viewer is not supported on Windows yet')
     con=store.connect(database)
     task=store.get_task(con,task_id)
     if task['generation']!=generation or task['status']=='closed':
@@ -644,8 +642,11 @@ def viewer(database, task_id, generation):
     # exec keeps the registered PID/birth/group across the native TUI's lifetime.
     # Mark its descendants even if closing the terminal reparents them.
     os.chdir(task['worktree'])
-    os.execvpe(task['codex_bin'], [task['codex_bin'],'--remote','unix://'+task['endpoint'],
-                                '--no-alt-screen','resume',task['session_id']], worker_env(task['worktree']))
+    command = [task['codex_bin'], '--remote', 'unix://'+task['endpoint'],
+               '--no-alt-screen', 'resume', task['session_id']]
+    if os.name == 'nt':
+        return subprocess.call(command, env=worker_env(task['worktree']))
+    os.execvpe(task['codex_bin'], command, worker_env(task['worktree']))
 
 
 def main():

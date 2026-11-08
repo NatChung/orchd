@@ -120,16 +120,23 @@ class SupervisorIsolationTest(IsolationBase):
 
     def test_viewer_command_ignores_worktree_orchd(self):
         rt = Runtime()
-        with patch.object(rt, 'run') as run, patch('orchd.runtime.worker_env', return_value={}):
+        with patch.object(rt, 'run') as run, patch('orchd.runtime.worker_env', return_value={}), \
+             patch('orchd.runtime.subprocess.Popen') as popen, patch('orchd.runtime.shutil.which', return_value=None):
             rt.open_app_viewer(str(self.db), store.get_task(self.con, self.id))
-        cmd = run.call_args.args[0]
-        tail = cmd[cmd.index('-e') + 1:]
+        if os.name == 'nt':
+            tail = popen.call_args.args[0]
+            self.assertEqual(popen.call_args.kwargs['cwd'], str(self.worktree))
+            env = popen.call_args.kwargs['env']
+        else:
+            cmd = run.call_args.args[0]
+            tail = cmd[cmd.index('-e') + 1:]
+            self.assertIn(f"--working-directory={self.worktree}", cmd)
+            env = None
         self.assertIn('-P', tail)
         self.assertLess(tail.index('-P'), tail.index('-m'))
-        self.assertIn(f"--working-directory={self.worktree}", cmd)
         # Run exactly what the terminal would, in the poisoned worktree: it must reach orchd's own code.
         proc = subprocess.run([*tail[:tail.index('viewer') + 1], '/nonexistent', 'x', 'y'], cwd=self.worktree,
-                              capture_output=True, text=True, timeout=30)
+                              capture_output=True, text=True, timeout=30, env=env)
         self.assertNotIn('SHADOWED-ORCHD-LOADED', proc.stderr)
         self.assertNotIn(str(self.worktree), proc.stderr)  # failed inside orchd's own store, not the shadow
 

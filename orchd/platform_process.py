@@ -1,11 +1,29 @@
 """Platform-specific private worker directories and detached process options."""
 import os
 import subprocess
+import sys
+from pathlib import Path
+
+
+def background_python():
+    """Avoid the Windows venv console launcher creating a visible terminal."""
+    if os.name == "nt":
+        candidate = Path(sys.executable).with_name("pythonw.exe")
+        if candidate.is_file():
+            return str(candidate)
+    return sys.executable
 
 
 def detached_options():
     if os.name == "nt":
         return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS}
+    return {"start_new_session": True}
+
+
+def background_options():
+    """Suppress a Windows console while preserving redirected standard handles."""
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
     return {"start_new_session": True}
 
 

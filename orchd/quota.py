@@ -22,6 +22,7 @@ from pathlib import Path
 
 from . import store
 from .file_lock import try_lock
+from .platform_process import background_options
 
 # Observations are refreshed in the background every BACKGROUND_PERIOD seconds, so TTL must outlast a
 # period plus probe latency (3x margin); the 7-day windows move slowly, so this stays accurate enough.
@@ -290,7 +291,7 @@ def claude_usage(cache, text, now=None):
 
 
 _stop = None  # threading.Event once a background refresher exists
-_children = set()
+_children = {}  # process -> start time, so cleanup can guard against PID reuse
 _children_lock = threading.Lock()
 
 
@@ -298,8 +299,56 @@ def _stopping():
     return _stop is not None and _stop.is_set()
 
 
-def _reap(process, grace=3):
+def _reap_windows(process, grace=3, since=None):
+    """Terminate a Windows probe tree. Windows has no process group to signal, so walk descendants.
+
+    The root may already have exited while a descendant still holds its pipes; such orphans keep the dead root's
+    PID as their parent PID, so they are still found. Two PID-reuse guards bound that orphan scan: a candidate
+    must be born at/after `since` (its own PID was not recycled from before the probe), and before the dead root's
+    PID could have been handed to anyone else. `process.poll()` is handle-based on Windows, so once it reports
+    an exit, any live process holding `process.pid` is an unrelated newcomer: its children were born at/after it
+    and are never touched. Without such a holder, the exit was observed no later than now, which bounds the window."""
+    import psutil
+    victims = []
+    ended = time.time()
+    try:
+        root = psutil.Process(process.pid) if process.poll() is None else None
+    except psutil.Error:
+        root = None
+    if root is not None:
+        try:
+            victims = [*reversed(root.children(recursive=True)), root]
+        except psutil.Error:
+            victims = [root]
+    else:
+        with contextlib.suppress(psutil.Error):
+            ended = min(ended, psutil.Process(process.pid).create_time())  # the dead root's PID was reused
+        for candidate in psutil.process_iter():
+            try:
+                if candidate.ppid() != process.pid:
+                    continue
+                born = candidate.create_time()
+                if (since is not None and born < since) or born >= ended:
+                    continue
+                victims.extend([*reversed(candidate.children(recursive=True)), candidate])
+            except psutil.Error:
+                continue
+    for victim in victims:
+        with contextlib.suppress(psutil.Error, OSError):
+            victim.terminate()
+    _, alive = psutil.wait_procs(victims, timeout=grace)
+    for victim in alive:
+        with contextlib.suppress(psutil.Error, OSError):
+            victim.kill()
+    psutil.wait_procs(alive, timeout=grace)
+
+
+def _reap(process, grace=3, since=None):
     """Terminate a probe process group, escalating to kill; never raises."""
+    if os.name == 'nt':
+        # Do not return early when the root already exited: its descendants may still hold the pipes.
+        _reap_windows(process, grace, since)
+        return
     if process.poll() is not None:
         return
     for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, grace)):
@@ -317,25 +366,26 @@ def _reap(process, grace=3):
 
 def _run(cmd, timeout, **kwargs):
     """subprocess.run replacement whose child is registered so stop_background can reap it."""
-    process = subprocess.Popen(cmd, start_new_session=True, **kwargs)
+    since = time.time()
+    process = subprocess.Popen(cmd, **background_options(), **kwargs)
     with _children_lock:
-        _children.add(process)
+        _children[process] = since
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except BaseException:
-        _reap(process)
+        _reap(process, since=since)
         raise
     finally:
         with _children_lock:
-            _children.discard(process)
+            _children.pop(process, None)
     return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
 
 
 def _reap_children():
     with _children_lock:
-        children = list(_children)
-    for process in children:
-        _reap(process)
+        children = list(_children.items())
+    for process, since in children:
+        _reap(process, since=since)
 
 
 def sanitized_error(error):
@@ -399,12 +449,13 @@ def _probe(cache, provider, binary=None):
         endpoint = str(Path(tmp) / 'rpc.sock')
         process = None
         rpc = None
+        since = time.time()
         try:
             process = subprocess.Popen([binary or 'codex', 'app-server', '--listen', 'unix://' + endpoint],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                start_new_session=True)
+                **background_options())
             with _children_lock:
-                _children.add(process)
+                _children[process] = since
             deadline = time.monotonic() + 10
             while not Path(endpoint).exists():
                 if _stopping():
@@ -422,9 +473,9 @@ def _probe(cache, provider, binary=None):
             if rpc is not None:
                 rpc.close()
             if process is not None:
-                _reap(process)
+                _reap(process, since=since)
                 with _children_lock:
-                    _children.discard(process)
+                    _children.pop(process, None)
 
 
 def period():

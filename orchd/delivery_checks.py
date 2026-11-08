@@ -3,6 +3,7 @@
 The definition is `docs/development/delivery.pipeline.json` at the Hub's fetched origin/HEAD commit (see
 docs/design/staged-pipeline.md). Only `repos`, `artifact_rules`, `checks` and `repo_checks` are read here; stages belong to the staged pipeline (#121)."""
 import fnmatch
+import contextlib
 import json
 import os
 import re
@@ -17,9 +18,12 @@ from urllib.parse import urlsplit
 
 from . import config, paths, store, worker_flow
 from .runtime import redact
+from .platform_process import background_options
 
 DEFINITION = "docs/development/delivery.pipeline.json"
 KINDS = ("preflight", "pr")
+IS_WINDOWS = os.name == "nt"
+REAP_GRACE = 5  # seconds to collect output after a timed-out check is killed
 OUTPUT_LIMIT = 20000
 CHECK_KEYS = {"argv", "cwd", "timeout_seconds", "allowed_exit_codes", "env_allowlist", "required"}
 
@@ -197,13 +201,25 @@ def run(con, task, kind, projects=None, env=None):
         exit_code, output = None, ""
         try:
             proc = subprocess.Popen(check["argv"], cwd=cwd, env=child, stdin=subprocess.DEVNULL, text=True,
-                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **background_options())
             try:
                 output, _ = proc.communicate(timeout=check["timeout_seconds"])
                 exit_code = proc.returncode
             except subprocess.TimeoutExpired:
-                os.killpg(proc.pid, signal.SIGKILL)
-                output = (proc.communicate()[0] or "") + f"\ntimed out after {check['timeout_seconds']}s"
+                _kill_check(proc, started)
+                # A descendant that escaped the kill (own session/job) can keep the pipe open; never wait for it.
+                try:
+                    output = proc.communicate(timeout=REAP_GRACE)[0] or ""
+                except subprocess.TimeoutExpired:
+                    with contextlib.suppress(OSError):
+                        proc.kill()
+                    if not IS_WINDOWS:
+                        # On Windows communicate()'s daemon reader thread is still blocked in read() on this very
+                        # stream and closing it can block on the buffered-reader lock: abandon it instead.
+                        with contextlib.suppress(OSError, ValueError):
+                            proc.stdout.close()
+                    output = "output unavailable: a leftover child process kept the pipe open"
+                output += f"\ntimed out after {check['timeout_seconds']}s"
         except OSError as error:
             output = f"could not start {check['argv'][0]}: {error.strerror or error}"
     finally:
@@ -216,6 +232,19 @@ def run(con, task, kind, projects=None, env=None):
          json.dumps(check["argv"]), check["cwd"], space["ORCHD_TEST_NAMESPACE"], task["base"], head, exit_code,
          passed, _bounded(output), started, time.time() - started))
     return con.execute("SELECT * FROM check_runs WHERE id=?", (cursor.lastrowid,)).fetchone()
+
+
+def _kill_check(proc, started):
+    """Kill a timed-out check and its descendants; the process group may already be gone (parent exited)."""
+    if IS_WINDOWS:
+        from .quota import _reap
+        _reap(proc, since=started)
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        with contextlib.suppress(OSError):
+            proc.kill()
 
 
 def _scratch_dir():
