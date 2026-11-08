@@ -625,7 +625,9 @@ class McpTest(unittest.TestCase):
                   "entry_inbox", "send_to_nat", "resend_to_nat", "ask_nat", "entry_tag", "entry_question_show", "entry_question_snooze",
                   "entry_question_cancel", "goal_list", "goal_set", "task_link", "task_unlink", "quota_status",
                           "intake_pending", "intake_show", "intake_decide", "intake_resolve", "intake_decisions",
-                          "intake_backlog", "intake_take_unassigned", "interface_requests", "interface_reply", "interface_dismiss"})
+                          "intake_backlog", "intake_take_unassigned", "interface_requests", "interface_reply", "interface_dismiss",
+                          "channels_messages", "channels_search", "channels_message", "channels_conversation", "channels_sync",
+                          "channels_sync_status", "channels_attachment_request", "channels_attachment_read", "channels_draft"})
         self.assertNotIn("isError", replies[2]["result"])
         (row,) = json.loads(replies[3]["result"]["content"][0]["text"])
         self.assertEqual(row["orch_thread"], "thread-X")
