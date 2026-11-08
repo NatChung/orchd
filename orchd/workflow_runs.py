@@ -324,6 +324,17 @@ def task_origin(con, task_id):
     return dict(json.loads(run['origin']), run_id=run['id'], state=run['state'])
 
 
+def guard_interface_reply(con, request_id, orch_id):
+    """Transport boundary: the engine owns pending run replies, including recovery children."""
+    request = con.execute('SELECT orch_id,reply FROM interface_requests WHERE id=?', (request_id,)).fetchone()
+    if request is None or request['reply'] is not None:
+        return
+    if con.execute('SELECT 1 FROM workflow_runs WHERE request_id=? LIMIT 1', (request_id,)).fetchone():
+        if request['orch_id'] != orch_id:
+            raise ValueError('Workflow request is not owned by this Orch')
+        raise ValueError('Workflow engine owns this source route; manual interim/final replies are refused. Use workflow_run_show')
+
+
 def guard_desktop_route(con, orch_id, task_id=None):
     if task_id is not None:
         task = store.get_task(con, task_id)

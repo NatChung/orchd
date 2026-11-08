@@ -53,6 +53,7 @@ class WorkflowRunTests(unittest.TestCase):
         registration = interface.register(self.con, name='example-interface', orch_id='example-orch', token='synthetic-adapter-token')
         request = interface.submit(self.con, self.rt, name='example-interface', token=registration['token'], conversation='example-chat', request_key='request1', text='Run the scoped synthetic example')
         self.request_id = request['request_id']
+        self.interface_token = registration['token']
         for name in ('delivery-service', 'reminder-service'):
             root = self.folder / name
             root.mkdir()
@@ -448,6 +449,53 @@ class WorkflowRunTests(unittest.TestCase):
         event = next(e for e in runs.events(self.con, run_id) if e['kind'] == 'report')
         self.assertEqual(json.loads(event['body'])['output_basis'], 'no_declared_outputs_task_self_report')
         self.assertEqual(self.tick(run_id, 2)['state'], 'done')
+
+    def test_manual_interface_reply_cannot_preempt_engine_owned_request(self):
+        run_id = self.start()
+        self.tick(run_id)
+        for kind in ('interim', 'final'):
+            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, 'engine owns this source route'):
+                runs.guard_interface_reply(self.con, self.request_id, 'example-orch')
+                interface.reply(self.con, 'example-orch', request_id=self.request_id, text='Premature manual reply', kind=kind)
+        row = self.con.execute('SELECT interim,reply FROM interface_requests WHERE id=?', (self.request_id,)).fetchone()
+        self.assertIsNone(row['interim'])
+        self.assertIsNone(row['reply'])
+        with self.assertRaisesRegex(ValueError, 'not owned'):
+            runs.guard_interface_reply(self.con, self.request_id, 'different-orch')
+
+    def test_recovery_child_keeps_the_same_request_under_engine_ownership(self):
+        repair = copy.deepcopy(self.plan['steps'][1])
+        repair.update(id='repair', inputs={'instructions': {'context': 'failure'}}, verification=self.verification())
+        plan = copy.deepcopy(self.plan)
+        plan['failure_steps'] = [repair]
+        parent = self.start(plan)
+        author = self.tick(parent)['attempts'][0]['task_id']
+        core.report(self.con, self.rt, author, 'blocked', 'Negative check', 'Source evidence')
+        child = runs.show(self.con, parent)['repair_run_id']
+        child_task = self.tick(child)['attempts'][0]['task_id']
+        self.assertEqual(runs.show(self.con, child)['request_id'], self.request_id)
+        with self.assertRaisesRegex(ValueError, 'engine owns this source route'):
+            runs.guard_interface_reply(self.con, self.request_id, 'example-orch')
+        with self.assertRaisesRegex(ValueError, 'before independent'):
+            core.close(self.con, self.rt, child_task)
+        self.assertIsNone(self.con.execute('SELECT reply FROM interface_requests WHERE id=?', (self.request_id,)).fetchone()[0])
+
+    def test_nonrun_interface_reply_and_completed_idempotent_reply_remain_compatible(self):
+        request = interface.submit(self.con, self.rt, name='example-interface', token=self.interface_token, conversation='unrelated-chat', request_key='unrelated', text='Unrelated legacy request')
+        runs.guard_interface_reply(self.con, request['request_id'], 'example-orch')
+        interface.reply(self.con, 'example-orch', request_id=request['request_id'], text='Legacy reply')
+        self.assertEqual(self.con.execute('SELECT reply FROM interface_requests WHERE id=?', (request['request_id'],)).fetchone()[0], 'Legacy reply')
+        run_id = self.start()
+        first = self.tick(run_id)['attempts'][0]['task_id']
+        self.output(first, {'implementation_instructions': 'Exact next input'})
+        second = self.tick(run_id, 2)['attempts'][1]['task_id']
+        core.report(self.con, self.rt, second, 'done', 'Self report', 'No outputs')
+        self.assertEqual(self.tick(run_id, 2)['state'], 'done')
+        reply = self.con.execute('SELECT reply FROM interface_requests WHERE id=?', (self.request_id,)).fetchone()[0]
+        runs.guard_interface_reply(self.con, self.request_id, 'example-orch')
+        interface.reply(self.con, 'example-orch', request_id=self.request_id, text=reply)
+        with self.assertRaisesRegex(ValueError, 'different content'):
+            interface.reply(self.con, 'example-orch', request_id=self.request_id, text='Different reply')
 
     def test_memory_database_never_starts_a_process(self):
         con = store.connect(':memory:')
