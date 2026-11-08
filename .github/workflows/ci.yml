@@ -1,0 +1,62 @@
+name: CI
+
+# Unit tests, compile and an isolated install of the built wheel (issue #7).
+# No daemon, Orch or worker is started and no provider account is used; passing CI is not
+# end-to-end acceptance. See docs/install-verification.md for the manual new-machine checklist.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Unit tests (Linux, Python ${{ matrix.python }})
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.13']
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install runtime dependencies
+        run: python -m pip install .
+      - name: Unit tests
+        run: python -m unittest discover -s tests
+      - name: Compile
+        run: python -m compileall -q orchd scripts tests
+
+  package:
+    # Native Windows runs the build and wheel install here; its unit-test subset lives in
+    # native-portability.yml because the full suite assumes POSIX process and socket behavior.
+    name: Build and isolated wheel install (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - name: Build sdist and wheel
+        run: uv build --out-dir dist
+      - name: Check wheel contents, isolated install, --help and pre-init doctor
+        run: python -I scripts/check-package.py dist

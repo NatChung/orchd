@@ -181,7 +181,7 @@ uv pip install -e .
 uv build
 ```
 
-自動測試主要使用 mock 與暫存環境。人工 app-server acceptance 可執行 `python3 scripts/app_server_e2e.py`，需要 tmux、已登入的 Codex 與暫存環境；這不代表所有 GUI、provider 或版本組合都已驗證。
+CI（`.github/workflows/`）會執行測試、compile、build、以隔離目錄安裝 wheel，並以固定版本的 gitleaks 掃描；已安裝套件與 checkout 的差異、未 init 時 `doctor` 的預期結果與人工新機器驗收步驟見 [install verification](docs/install-verification.md)，公開前請依 [release checklist](docs/release-checklist.md) 檢查。自動測試主要使用 mock 與暫存環境。人工 app-server acceptance 可執行 `python3 scripts/app_server_e2e.py`，需要 tmux、已登入的 Codex 與暫存環境；這不代表所有 GUI、provider 或版本組合都已驗證。
 
 修改請開 branch 與 pull request，由另一位 reviewer 核對。提交問題或 log 前先遮蔽秘密與私人資料。
 
