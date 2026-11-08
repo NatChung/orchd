@@ -55,6 +55,7 @@ Orch 指令現在必須明確使用 `orch start|stop|restart|list|attach`。舊�
 | 指令與完整參數 | 說明 | 常用範例 |
 | --- | --- | --- |
 | `orchd binding [--entry NAME] [--new \| --to ORCH_ID \| --status]` | 將 Desktop interface 綁定到存活的 Claude Orch，或查看綁定。 | `orchd binding` |
+| `orchd entry thread (--issue-refs REFS \| --issue-ref REF \| --question-id ID \| --task-id TASK) [--entry NAME] [--limit N] [--per-question-limit N] [--cursor C] [--json]` | 從私有 DB 副本唯讀查 entry thread：issue-ref 摘要，或依題目／task 查完整問答（可分頁）。 | `orchd entry thread --question-id 101 --limit 3 --json` |
 
 先跑 `orchd init` 建立 interface 設定。`binding` 預設 entry 為 desktop；尚無綁定時才會自動啟動 Orch，已有綁定則沿用。已綁定的 Orch 停止或確認死亡時會報錯，需用 `--new` 明確啟動並重新綁定，舊 Orch 的未結問題仍留在原處。Claude 因閒置退出的 session 可原地 resume；失敗時也需 `--new`。`--new` 開新 Orch、`--to` 指定存活 Orch、`--status` 唯讀查綁定／健康／問題／delivery，三者互斥。
 

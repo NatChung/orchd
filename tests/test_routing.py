@@ -299,6 +299,41 @@ class RoutingTest(unittest.TestCase):
         self.assertFalse(core.rate_limit_notice(self.con, self.rt, task['id'], {'code': 'usage_limit_exceeded'}, 'old'))
         self.assertEqual(self.rt.woken, [])
 
+    def claude_hook(self, task, prompt='p1', error='rate_limit'):
+        # Documented StopFailure input: https://code.claude.com/docs/en/hooks#stopfailure-input
+        return {'session_id': task['session_id'], 'prompt_id': prompt, 'hook_event_name': 'StopFailure',
+                'error': error, 'error_details': '429 Too Many Requests',
+                'last_assistant_message': 'API Error: Rate limit reached'}
+
+    def test_claude_limit_recorded_once_and_auto_skips_sonnet(self):
+        self.observe(95)
+        task = self.dispatch()
+        self.assertEqual(task['model'], core.WORKER_MODELS['sonnet'])
+        self.assertTrue(core.claude_stop_failure(self.con, self.rt, self.claude_hook(task)))
+        self.assertFalse(core.claude_stop_failure(self.con, self.rt, self.claude_hook(task)))
+        rows = self.con.execute("SELECT body FROM messages WHERE kind='rate_limit'").fetchall()
+        self.assertEqual([json.loads(r[0])['provider'] for r in rows], ['sonnet'])
+        self.assertEqual(len(self.rt.woken), 1)
+        self.assertIn('no automatic retry for Claude workers', core.inbox(self.con, 'orch')[0]['body'])
+        self.assertEqual(self.rt.auto_requests, [])  # notice only: the automatic switch stays Codex-only
+        self.assertNotEqual(routing.select(self.con)['selected_alias'], 'sonnet')
+        self.assertNotEqual(self.dispatch()['model'], core.WORKER_MODELS['sonnet'])
+        self.assertEqual(routing.select(self.con, now=time.time()+601)['selected_alias'], 'sonnet')
+        self.assertTrue(core.claude_stop_failure(self.con, self.rt, self.claude_hook(task, prompt='p2')))
+
+    def test_claude_hook_ignores_other_errors_stale_sessions_and_closed_tasks(self):
+        task = self.dispatch(model='sonnet')
+        self.assertFalse(core.claude_stop_failure(self.con, self.rt, self.claude_hook(task, error='server_error')))
+        self.assertFalse(core.claude_stop_failure(self.con, self.rt, dict(self.claude_hook(task), session_id='unknown')))
+        self.assertFalse(core.claude_stop_failure(self.con, self.rt, {}))
+        self.assertFalse(core.rate_limit_notice(self.con, self.rt, task['id'], {'type': 'rate_limit'}, 'old', session_id='old'))
+        core.retry(self.con, self.rt, task['id'], 'sonnet', 'manual test')
+        self.assertFalse(core.claude_stop_failure(self.con, self.rt, self.claude_hook(task)))  # replaced worker
+        store.update_task(self.con, task['id'], status='closed')
+        self.assertFalse(core.claude_stop_failure(self.con, self.rt, self.claude_hook(store.get_task(self.con, task['id']))))
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM messages WHERE kind='rate_limit'").fetchone()[0], 0)
+        self.assertEqual(self.rt.woken, [])
+
     def test_real_process_smoke(self):
         result = subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1]/'scripts/routing-smoke.py')],
                                 capture_output=True, text=True, timeout=15)

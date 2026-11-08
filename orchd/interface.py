@@ -140,6 +140,8 @@ def submit(con, rt, *, name, token, conversation, request_key, text, _receipt_ho
         _text(value)
     with store.immediate(con):
         row = _auth(con, name, token)
+        from .channels.repository import require_legacy_admission
+        require_legacy_admission(con, adapter=name)
         old = con.execute('SELECT * FROM interface_requests WHERE interface_id=? AND conversation=? AND request_key=?',
                           (row['id'], conversation, request_key)).fetchone()
         if old and old['body'] != text:

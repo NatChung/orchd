@@ -14,6 +14,10 @@ class MigrationTest(unittest.TestCase):
             self.assertEqual(shared.execute('PRAGMA foreign_keys').fetchone()[0], 0)
             # Reconstruct the pre-PR2 intake schema before populating the old DB.
             shared.execute('ALTER TABLE intake_content DROP COLUMN channel_metadata')
+            for table, columns in (('intake_drafts', ('payload_json','payload_hash')),
+                                   ('intake_approvals', ('payload_hash','entry_answer_ref'))):
+                for column in columns:
+                    shared.execute(f'ALTER TABLE {table} DROP COLUMN {column}')
             shared.execute("INSERT INTO intake_content(receipt_id,status,text,attachments,created_at) VALUES('legacy-receipt','complete','synthetic body','[]',0)")
             shared.execute("INSERT INTO intake_events(receipt_id,version,provider,account,company,event_id,source_ref,source_time,received_at,producer,summary,content_sha256,state,acked_at,acked_by) VALUES('legacy-receipt',2,'slack','a','t','event','room',1,2,'producer','summary','hash','acked',3,'orch')")
             shared.execute("INSERT INTO intake_drafts(draft_id,version,receipt_id,provider,sender,target,source_ref,level,summary,body,body_sha256,expires_at,state,created_by,created_at,updated_at) VALUES('draft',1,'legacy-receipt','slack','a','target','room','L2','summary','synthetic reply','hash',100,'approved','orch',1,2)")
@@ -30,7 +34,8 @@ class MigrationTest(unittest.TestCase):
             self.assertIn('channel_metadata', {r['name'] for r in channel.execute('PRAGMA table_info(intake_content)')})
             self.assertEqual(channel.execute("SELECT text FROM intake_content WHERE receipt_id='legacy-receipt'").fetchone()[0], 'synthetic body')
             self.assertEqual(tuple(channel.execute("SELECT state,acked_at,acked_by FROM intake_events WHERE receipt_id='legacy-receipt'").fetchone()), before)
-            self.assertEqual(tuple(channel.execute("SELECT * FROM intake_approvals WHERE approval_id='approval'").fetchone()), approval_before)
+            self.assertEqual(tuple(channel.execute("SELECT approval_id,draft_id,version,body_sha256,sender,target,source_ref,expires_at,idempotency_key,actor,created_at FROM intake_approvals WHERE approval_id='approval'").fetchone()), approval_before)
+            self.assertEqual(tuple(channel.execute("SELECT payload_hash,entry_answer_ref FROM intake_approvals WHERE approval_id='approval'").fetchone()), (None,None))
             with self.assertRaises(sqlite3.IntegrityError):
                 channel.execute("INSERT INTO channel_source_leases VALUES('missing','holder',1,'2026')")
             channel.close()
@@ -177,3 +182,20 @@ class MigrationTest(unittest.TestCase):
                 self.assertIsNone(check.execute("SELECT name FROM sqlite_master WHERE name='orchd_channel_migrations'").fetchone())
             finally:
                 check.close()
+
+
+class ConnectTraceTest(unittest.TestCase):
+    def test_second_connect_does_not_alter_channel_metadata(self):
+        from unittest.mock import patch
+        statements=[]
+        real_connect=sqlite3.connect
+        def traced(*args,**kwargs):
+            con=real_connect(*args,**kwargs)
+            con.set_trace_callback(statements.append)
+            return con
+        with tempfile.TemporaryDirectory() as d, patch.object(store.sqlite3,'connect',traced):
+            path=Path(d)/'db'
+            store.connect(path).close()
+            statements.clear()
+            store.connect(path).close()
+            self.assertFalse([sql for sql in statements if 'ALTER TABLE intake_content' in sql and 'channel_metadata' in sql])

@@ -149,12 +149,22 @@ def channel_layout_step(folders, dry_run, lines, backup_root, *, home, env):
     lines.append(f"channel layout v{result['layout_version']}: {result['root']}")
 
 
+def channel_schema_step(folders, dry_run, lines, backup_root, *, home, env):
+    from . import channel_layout
+    effective = dict(env)
+    if not effective.get('ORCHD_ROOT') and not effective.get('ORCHD_CHANNEL_HOME'):
+        effective['ORCHD_ROOT'] = str(folders['home'].parent)
+    result = (channel_layout.plan if dry_run else channel_layout.provision)(home=home, env=effective)
+    lines.append('channel-schema-v2: additive schema after layout; retain tables on rollback')
+
+
 # Append ordered (stable id, idempotent callable) steps for future releases.
 STEPS = (("orch-rules-v1", update_rules), ("orch-rules-v2", update_rules),
          ("computer-use-rules-v1", update_rules), ("orch-rules-v3", update_rules),
          ("orch-rules-v4", update_rules), ("orch-rules-v5", update_rules),
          ("orch-rules-v6", update_rules), ("interface-entry-tools-v1", update_entry_tools),
-         ("orch-rules-v7", update_rules), ("channel-layout-v1", channel_layout_step))
+         ("orch-rules-v7", update_rules), ("channel-layout-v1", channel_layout_step),
+         ("orch-rules-v8", update_rules), ("channel-schema-v2", channel_schema_step))
 
 
 def run(*, home=None, env=None, dry_run=False):
@@ -172,7 +182,7 @@ def run(*, home=None, env=None, dry_run=False):
                 lines.append(f"{step}: already applied")
                 continue
             lines.append(f"{step}: {'preview' if dry_run else 'applying'}")
-            if action is channel_layout_step:
+            if action in (channel_layout_step, channel_schema_step):
                 action(folders, dry_run, lines, state_dir(home, env) / "backups", home=home, env=env)
             else:
                 action(folders, dry_run, lines, state_dir(home, env) / "backups")

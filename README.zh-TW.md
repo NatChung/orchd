@@ -95,7 +95,7 @@ orchd upgrade
 
 ## 問題與貢獻
 
-一般 bug 與改善放在[公開 issues](https://github.com/NatChung/orchd/issues)，使用假資料並遮蔽 log。含客戶資訊、個資、內部網址或敏感設定的內容，放在有存取控制的私人 tracker；既有私人使用者可使用 orchd-archive。任何 issue 都不要貼 secrets。詳見 [CONTRIBUTING.md](CONTRIBUTING.md)。
+一般 bug 與改善放在[公開 issues](https://github.com/NatChung/orchd/issues)，使用假資料並遮蔽 log。含客戶資訊、個資、內部網址或敏感設定的內容，放在有存取控制的私人 tracker；既有私人使用者可使用 orchd-archive。任何 issue 都不要貼 secrets。交給 orchd 的工作留在本機任務紀錄，不開公開 issue。回報格式、五個 triage labels，以及 review 與 PR 流程見 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 設定
 
@@ -109,7 +109,9 @@ orchd upgrade
 | Orch home | `~/orch/home` | `ORCHD_ORCH_HOME` |
 | Desktop 入口 | `~/orch/interface` | `ORCHD_INTERFACE_HOME` |
 | Computer-use session 家目錄 | `~/orch/gpt-computer-use-worker` | 跟隨 `ORCHD_ROOT` |
-| 專案目錄 | `~/projects` | `ORCHD_PROJECTS` |
+| 專案目錄 | HOME 底下 checkout 的上層目錄，否則 `~/projects` | `config.toml` 的 `projects_dir`、`ORCHD_PROJECTS` |
+
+以上是預設值。本 README、Orch home 的 `AGENTS.md` 與 `PROJECTS.md`，以及 [runbooks](docs/runbooks/) 提到 `~/projects`、`~/orch/home`、`~/orch/interface` 或 `~/.local/share/orchd` 時，若有設定覆寫，以對應的有效值為準。`orchd config show` 會列出有效的專案目錄與來源；worker worktree 放在 `<專案目錄>/.orchd-worktrees/`。覆寫請在 `orchd init` 前設定：init 依有效路徑建立各目錄、記錄給之後的 home 規則 migration 使用，並把 `ORCHD_HOME`、`ORCHD_CONFIG_DIR`、`ORCHD_PROJECTS` 帶進 Desktop MCP server（它們不繼承 shell 的環境變數）。
 
 安裝套件後執行 `orchd init`，也會建立 computer-use session 家目錄、managed `AGENTS.md` 與 `reports/` 證據目錄。重跑 init 會備份並更新 managed 區塊，保留區塊外的自訂內容。Desktop 派工仍在設計階段，見[backend 設計](docs/design/computer-use-worker.md)。
 
@@ -145,7 +147,7 @@ orchd binding
 orchd list
 ```
 
-在 `~/orch/home` 手動接受 Claude trust，再於 Codex Desktop 開啟 `~/orch/interface`、選擇 init 建立的 interface 權限，先要求 status，再交辦工作。
+在 Orch home（預設 `~/orch/home`；`init` 會印出實際路徑）手動接受 Claude trust，再於 Codex Desktop 開啟 Desktop 入口（預設 `~/orch/interface`）、選擇 init 建立的 interface 權限，先要求 status，再交辦工作。
 
 `binding` 必須先跑 `init`；尚無綁定時會啟動 Orch，已有綁定但 Orch 離線時會報錯，需明確用 `orchd binding --new` 開新 Orch 並重新綁定。Claude 因閒置退出的 session 可原地 resume。
 
@@ -181,7 +183,7 @@ uv pip install -e .
 uv build
 ```
 
-自動測試主要使用 mock 與暫存環境。人工 app-server acceptance 可執行 `python3 scripts/app_server_e2e.py`，需要 tmux、已登入的 Codex 與暫存環境；這不代表所有 GUI、provider 或版本組合都已驗證。
+CI（`.github/workflows/`）會執行測試、compile、build、以隔離目錄安裝 wheel，並以固定版本的 gitleaks 掃描；已安裝套件與 checkout 的差異、未 init 時 `doctor` 的預期結果與人工新機器驗收步驟見 [install verification](docs/install-verification.md)，公開前請依 [release checklist](docs/release-checklist.md) 檢查。自動測試主要使用 mock 與暫存環境。人工 app-server acceptance 可執行 `python3 scripts/app_server_e2e.py`，需要 tmux、已登入的 Codex 與暫存環境；這不代表所有 GUI、provider 或版本組合都已驗證。
 
 修改請開 branch 與 pull request，由另一位 reviewer 核對。提交問題或 log 前先遮蔽秘密與私人資料。
 

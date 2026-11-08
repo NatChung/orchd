@@ -470,7 +470,8 @@ def submit_answer(con, rt, entry_id, question_id, expected_version, expected_sta
 
 def _send(con, rows, recipient, transport):
     """Send rows in order; a failure stops this batch (a failed row is retried first next time), but a row that
-    failed MAX_SEND_ATTEMPTS times is held and no longer blocks later rows, which may then arrive before it."""
+    failed MAX_SEND_ATTEMPTS times is held and no longer blocks later rows, which may then arrive before it.
+    A row the Orch read meanwhile (read_at set) is delivered and is never downgraded."""
     result = {}
     for row in rows:
         reason = _desktop_route_error(con, row)
@@ -478,18 +479,25 @@ def _send(con, rows, recipient, transport):
             _cancel_wrong_desktop_route(con, row, reason)
             result[row['id']] = 'cancelled'
             continue
-        con.execute("UPDATE entry_messages SET delivery='sending', attempts=attempts+1, recipient=?, "
-                    "delivery_error=NULL WHERE id=?", (recipient, row["id"]))
+        if not con.execute("UPDATE entry_messages SET delivery='sending', attempts=attempts+1, recipient=?, "
+                           "delivery_error=NULL WHERE id=? AND read_at IS NULL", (recipient, row["id"])).rowcount:
+            result[row["id"]] = "delivered"
+            continue
         try:
             transport(row)
         except Exception as error:
             try:
                 held = row["direction"] == "out" and row["attempts"] + 1 >= MAX_SEND_ATTEMPTS
                 with store.immediate(con):
-                    con.execute("UPDATE entry_messages SET delivery=?, delivery_error=? WHERE id=?",
-                                ("held" if held else "failed", f"{type(error).__name__}: {error}"[:500], row["id"]))
-                    if held and row["question_state"] == "current":
+                    read = not con.execute("UPDATE entry_messages SET delivery=?, delivery_error=? "
+                                           "WHERE id=? AND read_at IS NULL",
+                                           ("held" if held else "failed", f"{type(error).__name__}: {error}"[:500],
+                                            row["id"])).rowcount
+                    if held and not read and row["question_state"] == "current":
                         _park_failed_question(con, row)
+                if read:
+                    result[row["id"]] = "delivered"
+                    continue
                 result[row["id"]] = "held" if held else "failed"
             except Exception:
                 result[row["id"]] = "uncertain"

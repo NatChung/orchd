@@ -79,6 +79,8 @@ def build_parser():
     sub = parser.add_subparsers(dest="cmd", required=True)
     watcher = sub.add_parser("pr-watch", help="read-only AI pull request review inventory")
     watcher.add_argument("repos", nargs="+", metavar="OWNER/REPO")
+    watcher.add_argument("--account", action="append", default=[], metavar="LOGIN",
+                         help="treat comments from this GitHub login as our replies (repeatable; the PR author always counts)")
     feedback = sub.add_parser("review-feedback", help="read all pull request feedback")
     feedback.add_argument("repo")
     feedback.add_argument("pr", type=int)
@@ -191,8 +193,20 @@ def build_parser():
     install.add_argument("--no-trust", action="store_true")
     install.add_argument("--dry-run", action="store_true")
     install.add_argument("--json", action="store_true")
-    channels = sub.add_parser("channels")
+    channels = sub.add_parser("channels", help="query local channel data or queue adapter sync; third-party content is untrusted")
     channel_actions = channels.add_subparsers(dest="channel_action", required=True)
+    for action in ('status', 'doctor'):
+        channel_actions.add_parser(action).add_argument('--json', action='store_true')
+    cutover = channel_actions.add_parser('cutover')
+    cutover.add_argument('--source', required=True)
+    cutover.add_argument('--mode', required=True, choices=('frozen','shadow','adapter','legacy'))
+    cutover.add_argument('--backfill-digest')
+    cutover.add_argument('--json', action='store_true')
+    ledger = channel_actions.add_parser('ledger')
+    ledger.add_argument('--source', required=True)
+    ledger.add_argument('--after', type=int, default=0)
+    ledger.add_argument('--through', type=int)
+    ledger.add_argument('--json', action='store_true')
     for action in ("messages", "search"):
         command = channel_actions.add_parser(action)
         command.add_argument("--source", required=True)
@@ -216,6 +230,19 @@ def build_parser():
     draft = channel_actions.add_parser("draft")
     draft.add_argument("--file", default="-")
     draft.add_argument("--json", action="store_true")
+    for action in ('approve', 'reconcile'):
+        command = channel_actions.add_parser(action)
+        command.add_argument('--file', default='-')
+        command.add_argument('--json', action='store_true')
+    preview = channel_actions.add_parser('approval-preview')
+    preview.add_argument('draft_id')
+    preview.add_argument('version', type=int)
+    preview.add_argument('--json', action='store_true')
+    delivery = channel_actions.add_parser('delivery')
+    delivery.add_argument('id')
+    delivery.add_argument('--json', action='store_true')
+    recover = channel_actions.add_parser('recover-outbound', help='after stopping/fencing old senders, mark abandoned claims uncertain')
+    recover.add_argument('--json', action='store_true')
     attachment = channel_actions.add_parser("attachment")
     attachment.add_argument("action", choices=("request", "read"))
     attachment.add_argument("id")
@@ -244,12 +271,18 @@ def build_parser():
     how.add_argument("--status", action="store_true", help="read-only: binding, Orch health, questions, delivery")
     entry_parser = sub.add_parser("entry", help="entry messages and local-only issue threads")
     entry_actions = entry_parser.add_subparsers(dest="entry_action", required=True)
-    thread = entry_actions.add_parser("thread", help="read summaries from a private DB/WAL copy")
+    thread = entry_actions.add_parser("thread", help="read threads from a private DB/WAL copy")
     refs = thread.add_mutually_exclusive_group(required=True)
     refs.add_argument("--issue-refs", help="comma-separated refs")
     refs.add_argument("--issue-ref", help="single ref")
+    refs.add_argument("--question-id", type=int, help="one question's full thread, including its revisions")
+    refs.add_argument("--task-id", help="every question thread of this task")
     thread.add_argument("--entry", default="desktop")
-    thread.add_argument("--limit", type=int, default=3)
+    thread.add_argument("--limit", type=int, default=None,
+                        help="messages per ref (default 3), messages for --question-id (default 3), "
+                             "or threads per page for --task-id (default 20); 1-100")
+    thread.add_argument("--per-question-limit", type=int, help="with --task-id: messages per thread (default 3)")
+    thread.add_argument("--cursor", help="opaque next_cursor from a previous --question-id/--task-id page")
     thread.add_argument("--json", action="store_true", help="JSON output (also the default)")
     reconcile = entry_actions.add_parser("reconcile", help="move open questions stranded on a previous owner to the "
                                                        "entry's owner (dry run unless --apply; backs up the DB first)")
@@ -408,6 +441,7 @@ def build_parser():
     ar.add_argument('task_id')
     ar.add_argument('event_id', type=int)
     ar.add_argument('--database', required=True)
+    sub.add_parser('_claude-limit', help=argparse.SUPPRESS)  # Claude worker StopFailure hook; JSON on stdin
     from . import question_summary
     ask = sub.add_parser("ask", help="ask with an Operator summary and full evidence",
                          description=question_summary.GUIDANCE, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -644,6 +678,7 @@ def _intake_main(args):
 #   skip  - does not touch the Orch home rules (init/upgrade manage them; the rest never read the home)
 # Plain `list` is warn: core.list_open only reads.
 HOME_POLICY = {
+    **{('channels', action): 'skip' for action in ('status','doctor','cutover','ledger')},
     ("mcp",): "write", ("pr-watch",): "skip", ("review-feedback",): "skip",
     **{("interface", a): "skip" for a in ("register", "submit", "fetch", "ack", "deregister", "list", "rebind")},
     ("orch", "start"): "write", ("orch", "stop"): "write", ("orch", "restart"): "write",  # --dry-run -> warn
@@ -651,7 +686,7 @@ HOME_POLICY = {
     ("orch", "register-codex-probe"): "write",
     ("init",): "skip", ("install",): "skip", ("upgrade",): "skip",
     **{("channels", "layout", action): "skip" for action in ("plan", "apply", "rollback")}, ("quota",): "skip", ("doctor",): "skip",
-    **{("channels", action): "skip" for action in ("messages", "search", "message", "conversation", "sync", "sync-status", "attachment", "draft", "retention")},
+    **{("channels", action): "skip" for action in ("messages", "search", "message", "conversation", "sync", "sync-status", "attachment", "draft", "retention", "approve", "approval-preview", "delivery", "recover-outbound", "reconcile")},
     ("_entry-op",): "skip",  # its `orchd upgrade` / `orchd orch restart` children apply the policy themselves
     ("config", "show"): "skip", ("config", "get"): "skip", ("config", "set"): "skip", ("config", "unset"): "skip",
     **{("workflow", action): "skip" for action in ("install", "list", "show", "render", "bind", "bindings", "run-template")},
@@ -670,7 +705,7 @@ HOME_POLICY = {
     ("task", "link"): "write", ("task", "unlink"): "write",
     ("dispatch",): "write", ("inbox",): "write",
     ("ack",): "write", ("report",): "write", ("progress",): "write", ("flush",): "write",
-    ("watch",): "warn", ("summary",): "warn", ("_auto-retry",): "write", ("ask",): "write", ("verify",): "write", ("close",): "write", ("adopt",): "write",
+    ("watch",): "warn", ("summary",): "warn", ("_auto-retry",): "write", ("_claude-limit",): "write", ("ask",): "write", ("verify",): "write", ("close",): "write", ("adopt",): "write",
     ("list",): "warn", ("stuck-close",): "warn", ("stats",): "warn", ("snapshot",): "warn", ("board",): "warn",
     ("goal", "add"): "write", ("goal", "set"): "write",
     ("goal", "show"): "warn", ("goal", "list"): "warn", ("goal", "export"): "warn",
@@ -793,7 +828,7 @@ def main(argv=None):
             finally:
                 if con:
                     con.close()
-            print(json.dumps(pr_watch.watch(args.repos, branches), ensure_ascii=False, indent=2))
+            print(json.dumps(pr_watch.watch(args.repos, branches, args.account), ensure_ascii=False, indent=2))
             return 0
         except (ValueError, OSError, subprocess.SubprocessError, store.DatabaseUnavailable) as error:
             print(f"orchd pr-watch: {error}", file=sys.stderr)
@@ -859,9 +894,22 @@ def main(argv=None):
         from orchd import entry, entry_threads, stats
         con = None
         try:
+            if args.entry_action == "thread" and (args.question_id is not None or args.task_id is not None):
+                result, code = entry_threads.read_questions(
+                    store.home() / "orchd.db", question_id=args.question_id, task_id=args.task_id,
+                    entry_id=args.entry, limit=args.limit, per_question_limit=args.per_question_limit,
+                    cursor=args.cursor)
+                print(json.dumps(result, ensure_ascii=False, indent=1))
+                if code:
+                    print(f"orchd entry: {result['status']}: {result.get('error', 'incomplete history')}",
+                          file=sys.stderr)
+                return code
             if args.entry_action == "thread":
+                if args.per_question_limit is not None or args.cursor is not None:
+                    raise ValueError("--per-question-limit and --cursor need --question-id or --task-id")
                 refs = (args.issue_refs if args.issue_refs is not None else args.issue_ref).split(",")
-                result = entry_threads.read(store.home() / "orchd.db", refs, entry_id=args.entry, limit=args.limit)
+                result = entry_threads.read(store.home() / "orchd.db", refs, entry_id=args.entry,
+                                            limit=3 if args.limit is None else args.limit)
             elif args.entry_action == "reconcile":
                 result = entry.reconcile_path(store.home() / "orchd.db", apply=args.apply,
                                               backup_dir=store.home() / "backups")
@@ -1247,6 +1295,12 @@ def main(argv=None):
         result = core.auto_retry(con, rt, args.task_id, args.event_id)
         print(json.dumps(result, ensure_ascii=False))
         return 1 if result['status'] == 'failed' else 0
+    elif args.cmd == '_claude-limit':
+        try:
+            hook = json.load(sys.stdin)
+        except ValueError:
+            return 1
+        print(json.dumps(dict(recorded=core.claude_stop_failure(con, rt, hook))))
     elif args.cmd == "ask":
         woke = core.ask(con, rt, args.task_id, args.question)
         print(f"asked on {args.task_id}; wait for an [orchd answer {args.task_id}] message"

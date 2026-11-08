@@ -161,6 +161,8 @@ def submit(con, payload, *, producer, producers, _receipt_hook=None):
     check_producer(producers, producer, event["provider"], event["account"])
     digest = _content_hash(event)
     with store.immediate(con):
+        from .channels.repository import require_legacy_admission
+        require_legacy_admission(con, provider=event['provider'], account=event['account'])
         row = con.execute("SELECT * FROM intake_events WHERE provider=? AND account=? AND event_id=?",
                           (event["provider"], event["account"], event["event_id"])).fetchone()
         if row is not None:
@@ -491,7 +493,7 @@ def _draft_row(con, draft_id, version):
 
 
 def _refuse_channel_outbound(con, row):
-    """Channel-backed drafts cannot use the legacy send gate before PR5."""
+    """Channel-backed drafts must always use the exact Entry/channel send gate."""
     if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='channel_messages'").fetchone():
         return
     if row['receipt_id'] is not None and con.execute('SELECT 1 FROM channel_messages WHERE intake_receipt_id=?', (row['receipt_id'],)).fetchone():
@@ -511,7 +513,7 @@ def _draft_receipt(row, status, **extra):
                 body_sha256=row["body_sha256"], expires_at=row["expires_at"], **extra)
 
 
-def draft(con, payload, *, actor="orch"):
+def draft(con, payload, *, actor="orch", _channel_payload=None, _now=None):
     """New draft, or the next version of an existing draft_id (older versions become superseded and their
     approvals stop counting). Any content change is a new version and needs a fresh approval."""
     if actor not in ACTORS:
@@ -531,7 +533,10 @@ def draft(con, payload, *, actor="orch"):
     expires_at = _time(payload.get("expires_at"), "expires_at")
     template = _text(payload.get("template"), "template", required=False)
     draft_id = payload.get("draft_id") or "dr_" + uuid.uuid4().hex[:12]
-    now = time.time()
+    now = time.time() if _now is None else _now
+    from .channels.models import canonical, digest as payload_digest
+    payload_json = canonical(_channel_payload) if _channel_payload is not None else None
+    payload_hash = payload_digest(_channel_payload) if _channel_payload is not None else None
     with store.immediate(con):
         if payload.get("receipt_id") is not None:
             event = _event(con, payload["receipt_id"])
@@ -545,7 +550,7 @@ def draft(con, payload, *, actor="orch"):
                 raise IntakeError("invalid_state", f"draft is {prior['state']}; it cannot be revised")
             same = dict(receipt_id=payload.get("receipt_id"), provider=payload["provider"],
                         level=payload.get("level", "L2"), template=template, expires_at=expires_at,
-                        body_sha256=digest, **{k: v for k, v in fields.items() if k != "body"})
+                        body_sha256=digest, payload_hash=payload_hash, **{k: v for k, v in fields.items() if k != "body"})
             if all(prior[k] == v for k, v in same.items()) and prior["state"] in ("pending_approval", "approved"):
                 return _draft_receipt(prior, "unchanged")
             con.execute("UPDATE intake_drafts SET state='superseded',updated_at=? WHERE draft_id=? AND version=? "
@@ -558,6 +563,8 @@ def draft(con, payload, *, actor="orch"):
             (draft_id, version, payload.get("receipt_id"), payload["provider"], fields["sender"], fields["target"],
              fields["source_ref"], payload.get("level", "L2"), template, fields["summary"], fields["body"], digest,
              expires_at, actor, now, now))
+        con.execute('UPDATE intake_drafts SET payload_json=?,payload_hash=? WHERE draft_id=? AND version=?',
+                    (payload_json, payload_hash, draft_id, version))
         _log(con, "draft", f"{draft_id}:{version}")
         return _draft_receipt(_draft_row(con, draft_id, version), "drafted")
 
@@ -665,6 +672,7 @@ def record_receipt(con, payload, *, actor="connector"):
     detail = _text(payload.get("detail"), "detail", limit=500, required=False)
     with store.immediate(con):
         row = _draft_row(con, payload.get("draft_id"), payload.get("version"))
+        _refuse_channel_outbound(con, row)
         if row["state"] == outcome and (row["connector_receipt_id"] or None) == (receipt_id or None):
             return _draft_receipt(row, "duplicate")
         resolving = row["state"] == "uncertain" and actor == "operator" and outcome in ("sent", "failed")

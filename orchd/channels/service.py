@@ -16,8 +16,23 @@ class ChannelService:
             self.con.close()
             raise
 
+    def session_factory(self):
+        """Capture a factory on the owning thread; each callback owns its connection."""
+        path = repository.database_path(self.con)
+        clock, retention, home = self.clock, self.retention, self.channel_home
+        return lambda: ChannelService(path, clock=clock, retention=retention, channel_home=home)
+
     def close(self):
         self.con.close()
+
+    def cutover(self, source_id, mode, *, caller, backfill=None):
+        policy.require_operator(caller)
+        from . import recovery
+        return recovery.cutover(self, source_id, mode, backfill=backfill)
+
+    def cutover_ledger(self, source_id, *, caller, after=0, through=None):
+        policy.require_operator(caller)
+        return repository.cutover_ledger(self.con, source_id, after=after, through=through)
 
     def provision_source(self, source, *, caller):
         policy.require_operator(caller)
@@ -42,11 +57,71 @@ class ChannelService:
             raise ValueError('unsupported provider')
         repository.provision(self.con, source)
 
-    def receive(self, source_id, event, *, caller):
+    def receive(self, source_id, event, *, caller, automation=None, accept_tombstone=False):
         policy.require_source(caller, source_id)
         if caller.role != 'adapter':
             raise PermissionError('adapter required')
-        return repository.receive(self.con, source_id, models.validate_event(event), caller.identity, self.clock)
+        receipt = repository.receive(self.con, source_id, models.validate_event(event), caller.identity, self.clock, automation=automation, accept_tombstone=accept_tombstone)
+        if event['content'].get('unavailable_reason') == 'deleted':
+            self._cleanup_deleted_storage()
+        return receipt
+
+    def _require_adapter(self, source_id, caller):
+        policy.require_source(caller, source_id)
+        source = repository.source(self.con, source_id)
+        if caller.role != 'adapter' or not source['enabled'] or source['adapter_id'] != caller.identity:
+            raise PermissionError('adapter not authorized for source')
+        return source
+
+    def acquire_source_lease(self, source_id, holder, *, caller, seconds=60):
+        from datetime import timedelta
+        self._require_adapter(source_id, caller)
+        if not holder or type(seconds) is not int or seconds <= 0:
+            raise ValueError('invalid lease')
+        now = self.clock()
+        return repository.acquire_source_lease(self.con, source_id, holder, now.isoformat(), (now + timedelta(seconds=seconds)).isoformat())
+
+    def release_source_lease(self, source_id, holder, generation, *, caller):
+        self._require_adapter(source_id, caller)
+        repository.release_source_lease(self.con, source_id, holder, generation, self.clock().isoformat())
+
+    def renew_source_lease(self, source_id, holder, generation, *, caller, seconds=900):
+        from datetime import timedelta
+        self._require_adapter(source_id, caller)
+        if type(seconds) is not int or seconds <= 0:
+            raise ValueError('invalid lease duration')
+        now = self.clock()
+        repository.renew_source_lease(self.con, source_id, holder, generation, now.isoformat(), (now + timedelta(seconds=seconds)).isoformat())
+
+    def adapter_source(self, source_id, *, caller):
+        import json
+        source = self._require_adapter(source_id, caller)
+        source['credential_refs'] = json.loads(source.pop('credential_refs_json'))
+        return source
+
+    def checkpoint(self, source_id, scope, *, caller):
+        self._require_adapter(source_id, caller)
+        return repository.checkpoint(self.con, source_id, scope)
+
+    def commit_checkpoint(self, source_id, scope, cursor, receipts, holder, generation, *, caller):
+        self._require_adapter(source_id, caller)
+        repository.commit_checkpoint(self.con, source_id, scope, cursor, receipts, holder, generation, self.clock().isoformat())
+
+    def claim_sync_job(self, source_id, holder, generation, *, caller):
+        self._require_adapter(source_id, caller)
+        return repository.claim_sync_job(self.con, source_id, holder, generation, self.clock().isoformat())
+
+    def finish_sync_job(self, source_id, job_id, holder, generation, *, caller, error=None):
+        self._require_adapter(source_id, caller)
+        if error not in (None, 'sync_failed'):
+            raise ValueError('invalid sync error')
+        repository.finish_sync_job(self.con, source_id, job_id, holder, generation, self.clock().isoformat(), error)
+
+    def record_adapter_health(self, source_id, holder, generation, state, *, caller):
+        self._require_adapter(source_id, caller)
+        if state not in ('healthy', 'degraded', 'credential_error'):
+            raise ValueError('invalid adapter health')
+        repository.record_adapter_health(self.con, source_id, holder, generation, self.clock().isoformat(), state)
 
 
 
@@ -63,13 +138,29 @@ class ChannelService:
             row = repository.get_message(self.con, message_id)
         content = repository.content(self.con, row['intake_receipt_id'])
         content['attachments'] = json.loads(content['attachments'])
+        attachment_rows = repository.message_attachments(self.con, message_id)
+        for item, attachment in zip(content['attachments'], attachment_rows):
+            item['attachment_id'] = attachment['id']
+            item['status'] = attachment['status']
         content['metadata'] = json.loads(content.pop('channel_metadata'))
         if row['deleted_at']:
             content = {'status':'unavailable','text':None,'attachments':[],
                        'unavailable_reason':content['unavailable_reason'] or 'deleted'}
         return {'schema_version':1,'source_id':row['source_id'],'message_id':row['id'],'receipt_id':row['intake_receipt_id'],
-                'status':content['status'],'last_synced_at':None,'freshness':'unknown','next_cursor':None,
+                'status':content['status'],**self._freshness(row['source_id']),'next_cursor':None,
                 'trust':row['trust'],'content':content}
+
+    def _freshness(self, source_id):
+        from datetime import datetime, timedelta
+        checkpoint = repository.checkpoint(self.con, source_id, 'mail')
+        heartbeat = repository.checkpoint(self.con, source_id, 'adapter_heartbeat')
+        health = repository.checkpoint(self.con, source_id, 'adapter_health')
+        last = checkpoint['committed_cursor'] if checkpoint else None
+        online = bool(heartbeat and self.clock() - datetime.fromisoformat(heartbeat['committed_cursor']) <= timedelta(minutes=5))
+        fresh = bool(last and self.clock() - datetime.fromisoformat(last) <= timedelta(minutes=5))
+        status = 'offline' if not online else ('degraded' if health and health['receipt_set_hash'] != 'healthy' else 'online')
+        return {'last_synced_at':last, 'freshness':'fresh' if fresh else 'stale', 'adapter_status':status,
+                'credential_error':bool(health and health['receipt_set_hash'] == 'credential_error')}
 
     def messages(self, source_id, *, caller, limit=100, cursor=''):
         policy.require_source(caller, source_id)
@@ -77,7 +168,7 @@ class ChannelService:
             raise ValueError('invalid limit')
         owner = None if caller.role == 'operator' else (caller.owner_orch or caller.identity)
         rows=repository.list_messages(self.con, source_id,limit+1,cursor,owner)
-        return {'schema_version':1,'source_id':source_id,'status':'partial','freshness':'unknown','last_synced_at':None,'messages':[self.message(r['id'],caller=caller) for r in rows[:limit]],'next_cursor':rows[limit-1]['id'] if len(rows)>limit else None}
+        return {'schema_version':1,'source_id':source_id,'status':'partial',**self._freshness(source_id),'messages':[self.message(r['id'],caller=caller) for r in rows[:limit]],'next_cursor':rows[limit-1]['id'] if len(rows)>limit else None}
 
     def search(self, source_id, query, *, caller, limit=100):
         if not isinstance(query,str) or not query.strip():
@@ -107,11 +198,61 @@ class ChannelService:
             item['status']='queued'
         return {'schema_version':1,'source_id':item['source_id'],'attachment_id':attachment_id,'status':item['status']}
 
-    def approve(self, *args, **kwargs):
-        raise PermissionError('outbound disabled')
+    def approval_preview(self, draft_id, version, *, caller):
+        from .delivery import preview
+        draft, value, message, src, route = repository.outbound_draft(self.con, draft_id, version)
+        policy.require_message(caller, message)
+        return preview(draft)
 
-    def claim_outbound(self, *args, **kwargs):
-        raise PermissionError('outbound disabled')
+    def approve(self, draft_id=None, version=None, payload_hash=None, entry_answer_ref=None, *, caller):
+        policy.require_operator(caller)
+        # Approval itself is harmless with outbound disabled; sending still requires
+        # the separately configured enablement and a current exact Entry answer.
+        return repository.approve_outbound(self.con, draft_id, version, payload_hash, entry_answer_ref, self.clock())
+
+    def claim_outbound(self, source_id=None, *, caller, limit=100):
+        policy.require_outbound_enabled(self.channel_home)
+        self._require_adapter(source_id, caller)
+        if type(limit) is not int or not 1 <= limit <= 500:
+            raise ValueError('invalid claim limit')
+        def check_enabled():
+            policy.require_outbound_enabled(self.channel_home)
+            source = repository.source(self.con, source_id)
+            if source['provider'] == 'gmail':
+                import json
+                refs = json.loads(source['credential_refs_json'])
+                if not refs.get('send') or refs.get('send') == refs.get('read'):
+                    raise PermissionError('separate Gmail send credential required')
+                policy.require_gmail_send_enabled(self.channel_home, source_id)
+        return repository.claim_outbound(self.con, source_id, caller.identity, self.clock(), limit, check_enabled)
+
+    def record_outcome(self, delivery_id, attempt_no, outcome, provider_receipt=None, *, caller):
+        row = repository.outbound_delivery(self.con, delivery_id)
+        policy.require_source(caller, row['source_id'])
+        if caller.role != 'adapter':
+            raise PermissionError('adapter required')
+        return repository.record_outbound_outcome(self.con, delivery_id, attempt_no, outcome, provider_receipt, caller.identity, self.clock())
+
+    def delivery(self, delivery_id, *, caller):
+        row = repository.outbound_delivery(self.con, delivery_id)
+        policy.require_source(caller, row['source_id'])
+        policy.require_message(caller, repository.get_message(self.con, row['message_id']))
+        return dict(row, attempts=repository.delivery_attempts(self.con, delivery_id))
+
+    def cancel_draft(self, draft_id, *, caller):
+        policy.require_operator(caller)
+        return repository.cancel_outbound(self.con, draft_id, self.clock())
+
+    def recover_outbound(self, *, caller):
+        """Control-plane only; stop/fence the old adapter before calling."""
+        from . import recovery
+        policy.require_operator(caller)
+        return recovery.recover(self)
+
+    def reconcile_outbound(self, delivery_id, outcome, provider_receipt=None, *, evidence, caller):
+        from . import recovery
+        policy.require_operator(caller)
+        return recovery.reconcile(self, delivery_id, outcome, provider_receipt, evidence)
 
 
     def delete_message(self, message_id, *, caller):
@@ -141,23 +282,100 @@ class ChannelService:
         owner = None if caller.role == 'operator' else (caller.owner_orch or caller.identity)
         ids=repository.conversation_messages(self.con,conversation_id,cursor,limit+1,owner)
         return {'schema_version':1,'source_id':source_id,'status':'partial' if len(ids)>limit else 'available',
-                'last_synced_at':None,'freshness':'unknown','next_cursor':ids[limit-1] if len(ids)>limit else None,
+                **self._freshness(source_id),'next_cursor':ids[limit-1] if len(ids)>limit else None,
                 'messages':[self.message(mid,caller=caller) for mid in ids[:limit]]}
 
     def read_attachment(self, attachment_id, *, caller):
         item=repository.attachment(self.con,attachment_id)
         policy.require_message(caller,item)
+        self.message(item['message_id'], caller=caller)
+        item=repository.attachment(self.con,attachment_id)
+        if item['status'] == 'available':
+            import base64
+            try:
+                with self.open_attachment(attachment_id, caller=caller) as handle:
+                    data = handle.read()
+            except FileNotFoundError:
+                return {'schema_version':1,'source_id':item['source_id'],'attachment_id':attachment_id,'status':'unavailable'}
+            return {'schema_version':1,'source_id':item['source_id'],'attachment_id':attachment_id,'status':'available','content_base64':base64.b64encode(data).decode('ascii')}
         status = 'unavailable' if item['status'] in ('deleted', 'unavailable') else 'adapter_unavailable'
         return {'schema_version':1,'source_id':item['source_id'],'attachment_id':attachment_id,'status':status}
+
+    def open_attachment(self, attachment_id, *, caller):
+        """Return an authorized, integrity-checked local binary stream."""
+        import hashlib
+        from .attachments import content_path
+        item = repository.attachment(self.con, attachment_id)
+        policy.require_message(caller, item)
+        self.message(item['message_id'], caller=caller)
+        item = repository.attachment(self.con, attachment_id)
+        if item['status'] != 'available':
+            raise ValueError('attachment unavailable')
+        handle = content_path(self.channel_home, item['source_id'], item['storage_key']).open('rb')
+        try:
+            digest, size = hashlib.sha256(), 0
+            for chunk in iter(lambda: handle.read(65536), b''):
+                digest.update(chunk)
+                size += len(chunk)
+            if size != item['byte_size'] or digest.hexdigest() != item['sha256']:
+                raise ValueError('attachment integrity failure')
+            handle.seek(0)
+            return handle
+        except BaseException:
+            handle.close()
+            raise
+
+    def queued_attachments(self, source_id, *, caller):
+        self._require_adapter(source_id, caller)
+        return repository.queued_attachments(self.con, source_id)
+
+    def store_attachment(self, attachment_id, data, holder, generation, *, caller):
+        import hashlib, mimetypes, os, tempfile
+        from .attachments import content_path, MAX_ATTACHMENT_BYTES
+        item = repository.attachment(self.con, attachment_id)
+        self._require_adapter(item['source_id'], caller)
+        if item['status'] != 'queued' or not isinstance(data, bytes) or len(data) > MAX_ATTACHMENT_BYTES or (item['byte_size'] is not None and len(data) != item['byte_size']):
+            raise ValueError('invalid attachment data')
+        import json
+        from .attachments import rejection_reason
+        content = repository.content(self.con, repository.get_message(self.con, item['message_id'])['intake_receipt_id'])
+        descriptors = json.loads(content['attachments'])
+        descriptor = next((entry for index, entry in enumerate(descriptors) if entry.get('provider_attachment_ref', f'legacy-index:{index}') == item['provider_attachment_ref']), {})
+        reason = rejection_reason(self.channel_home, item['source_id'], descriptor.get('mime_type') or mimetypes.guess_type(item['original_name'] or '')[0] or 'application/octet-stream', data)
+        if reason:
+            repository.reject_attachment(self.con, attachment_id, item['source_id'], reason, self.clock().isoformat(), holder, generation)
+            return
+        digest = hashlib.sha256(data).hexdigest()
+        if item['sha256'] and digest != item['sha256']:
+            repository.reject_attachment(self.con, attachment_id, item['source_id'], 'digest_mismatch', self.clock().isoformat(), holder, generation)
+            return
+        path = content_path(self.channel_home, item['source_id'], digest)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = content_path(self.channel_home, item['source_id'], digest)
+        existed = path.exists()
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix='.attachment-')
+        try:
+            with os.fdopen(fd, 'wb') as handle:
+                handle.write(data)
+            os.replace(tmp, path)
+            try:
+                repository.attachment_available(self.con, attachment_id, item['source_id'], digest, len(data), self.clock().isoformat(), holder, generation)
+            except BaseException:
+                if not existed:
+                    path.unlink(missing_ok=True)
+                raise
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
 
     def draft_reply(self, message_id, payload, *, caller):
         row=repository.get_message(self.con,message_id)
         policy.require_message(caller,row)
         if row['deleted_at']:
             raise ValueError('cannot draft from deleted message')
-        if not isinstance(payload,dict) or set(payload) != {'sender','target','body','expires_at'}:
-            raise ValueError('invalid draft payload')
-        return repository.draft(self.con,row,payload)
+        if caller.role not in ('operator', 'orch', 'worker'):
+            raise PermissionError('adapter cannot draft or widen sender grants')
+        return repository.draft(self.con,row,payload,self.clock)
 
     def routes(self, *, caller):
         policy.require_operator(caller)

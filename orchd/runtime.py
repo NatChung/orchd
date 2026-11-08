@@ -604,6 +604,11 @@ class Runtime:
                               'quota', '--probe', 'sonnet', '--binary', self.claude]) + ' >/dev/null 2>&1'
         hooks = {event: [{'hooks': [{'type': 'command', 'command': command, 'timeout': 25}]}]
                  for event in ('SessionStart', 'UserPromptSubmit', 'Stop', 'StopFailure')}
+        # StopFailure's stdin carries the API error type; record a provider limit like a Codex turn.failed (#112).
+        limit = shlex.join(['env', 'ORCHD_HOME=' + str(store.home()), *paths.orchd_command(),
+                            '_claude-limit']) + ' >/dev/null 2>&1'
+        hooks['StopFailure'].append({'matcher': 'rate_limit',
+                                     'hooks': [{'type': 'command', 'command': limit, 'timeout': 25}]})
         return self.start_claude(worktree, sock, model, [
             "--dangerously-skip-permissions", "--settings", json.dumps({"crossSessionInbound": "accept",
                 "hooks": hooks,

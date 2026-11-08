@@ -95,7 +95,7 @@ Compare the commit reported by `orchd upgrade` with public `main`; the package v
 
 ## Issues and contributions
 
-Use [public issues](https://github.com/NatChung/orchd/issues) for general bugs and improvements, with synthetic examples and redacted logs. Keep customer details, personal information, internal URLs, and sensitive configuration in an access-controlled private tracker (for existing private users, orchd-archive). Never post secrets in any issue. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Use [public issues](https://github.com/NatChung/orchd/issues) for general bugs and improvements, with synthetic examples and redacted logs. Keep customer details, personal information, internal URLs, and sensitive configuration in an access-controlled private tracker (for existing private users, orchd-archive). Never post secrets in any issue. Work you hand to orchd stays in your local task records, not in public issues. [CONTRIBUTING.md](CONTRIBUTING.md) gives the report format, the five triage labels, and the review and pull request flow.
 
 ## Configuration
 
@@ -108,6 +108,8 @@ Use [public issues](https://github.com/NatChung/orchd/issues) for general bugs a
 | Desktop entry | `~/orch/interface` | `ORCHD_INTERFACE_HOME` |
 | Computer-use session home | `~/orch/gpt-computer-use-worker` | under `ORCHD_ROOT` |
 | Projects directory | parent of a checkout under HOME, else `~/projects` | `projects_dir` in `config.toml`, `ORCHD_PROJECTS` |
+
+These are defaults. Wherever this README, the Orch home's `AGENTS.md` and `PROJECTS.md`, or the [runbooks](docs/runbooks/) name `~/projects`, `~/orch/home`, `~/orch/interface` or `~/.local/share/orchd`, read the effective value of the matching override. `orchd config show` prints the effective projects directory and its source; worker worktrees go under `<projects directory>/.orchd-worktrees/`. Set overrides before `orchd init`: init creates the homes at the effective paths, records them for later home-rule migrations, and passes `ORCHD_HOME`, `ORCHD_CONFIG_DIR` and `ORCHD_PROJECTS` to the Desktop MCP servers, which do not inherit your shell.
 
 `orchd init` also creates the computer-use session home with managed `AGENTS.md` rules and a `reports/` evidence folder. Re-running init refreshes that managed block with backups and preserves user content outside it. The package manager does not provision homes automatically: run `orchd install` after a bare package install. The official installer wrappers run it after installation. Desktop dispatch is design-only; see [the proposed backend](docs/design/computer-use-worker.md).
 
@@ -149,7 +151,7 @@ orchd binding
 orchd list
 ```
 
-Accept Claude trust manually in `~/orch/home`, then open `~/orch/interface` in Codex Desktop, select the interface permissions created by init, request status first, and describe your work.
+Accept Claude trust manually in the Orch home (default `~/orch/home`; `init` prints the actual path), then open the Desktop entry (default `~/orch/interface`) in Codex Desktop, select the interface permissions created by init, request status first, and describe your work.
 
 `binding` requires `init` first. It starts an Orch when no binding exists; an offline bound Orch causes an error and requires `orchd binding --new` to start a replacement and rebind. A session retired by Claude for idling can resume in place.
 
@@ -187,7 +189,7 @@ uv pip install -e .
 uv build
 ```
 
-Automated tests mainly use mocks and temporary environments. For manual app-server acceptance, run `python3 scripts/app_server_e2e.py` with tmux, Codex authentication, and an isolated temporary environment. This does not imply every GUI, provider, or version combination has been verified.
+CI (`.github/workflows/`) runs the tests, compile, build and an isolated wheel install, plus a pinned gitleaks scan; see [install verification](docs/install-verification.md) for installed package vs. checkout, the expected pre-init `doctor` result and the manual new-machine checklist, and [the release checklist](docs/release-checklist.md) before publishing. Automated tests mainly use mocks and temporary environments. For manual app-server acceptance, run `python3 scripts/app_server_e2e.py` with tmux, Codex authentication, and an isolated temporary environment. This does not imply every GUI, provider, or version combination has been verified.
 
 Use a branch and pull request for changes, with a different reviewer checking the result. Redact credentials and private information before posting issues or logs.
 
@@ -199,7 +201,10 @@ Use a branch and pull request for changes, with a different reviewer checking th
 
 Run `orchd pr-watch OWNER/REPO [OWNER/REPO ...]` to print JSON for open PRs on
 `orchd/` branches or with the `ai-agent` label. The command only reads GitHub.
-It uses the PR author as the reply owner. Inline replies are matched by thread;
+It uses the PR author as the reply owner; pass `--account LOGIN` (repeatable)
+to also count replies from other accounts you operate. A later comment-only review
+does not replace a reviewer's approval or change request, and a reviewer's later
+approval hides that reviewer's earlier review bodies. Inline replies are matched by thread;
 issue comments have no thread, so any later author comment is treated as a reply.
 The cutoff uses the latest available head commit date, force-push time, or restore
 time from the PR timeline. This is a lower bound and may precede the last push.

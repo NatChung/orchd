@@ -57,6 +57,28 @@ class HomeMigrationTest(unittest.TestCase):
         self.assertEqual(self.run_migrations()[0], 0)
         self.assertTrue(self.file.read_bytes().endswith(b" later edit"))
 
+    def test_v8_refreshes_v7_block_with_projects_override_wording_and_keeps_outside_bytes(self):
+        prefix, suffix = "自訂規則\n".encode(), "\n自訂結尾".encode()
+        old = prefix + b"<!-- orchd:managed:start v=7 -->\n~/projects only\n<!-- orchd:managed:end -->" + suffix
+        self.existing(old)
+        con = migrations.connect(self.home, self.env)
+        with con:
+            folders = migrations.targets(self.home, self.env, con)
+            scope = migrations.json.dumps({r: str(f.absolute()) for r, f in folders.items()}, sort_keys=True)
+            for step, _ in migrations.STEPS:
+                if step != "orch-rules-v8":
+                    con.execute("INSERT INTO applied VALUES(?, ?, 0)", (step, scope))
+        con.close()
+        code, lines = self.run_migrations()
+        self.assertEqual(code, 0, lines)
+        content = self.file.read_bytes()
+        self.assertTrue(content.startswith(prefix) and content.endswith(suffix))
+        for needle in ("orchd:managed:start v=8", "ORCHD_PROJECTS", "projects_dir", "ORCHD_CONFIG_DIR"):
+            self.assertIn(needle.encode(), content)
+        self.assertNotIn(b"~/projects only", content)
+        self.assertEqual(next(self.backups("home").iterdir()).read_bytes(), old)
+        self.assertIn(("orch-rules-v8",), self.applied())
+
     def test_v7_rejects_bad_markers_without_recording_step(self):
         for old in (b"<!-- orchd:managed:start v=5 -->unfinished",
                     b"<!-- orchd:managed:end --><!-- orchd:managed:start v=5 -->",
@@ -97,7 +119,7 @@ class HomeMigrationTest(unittest.TestCase):
         self.assertIn("原檔已有的相同規則可以手動刪掉", "\n".join(lines))
         self.assertIn(str(backups[0]), "\n".join(lines))
         self.assertIn("restore:", "\n".join(lines))
-        self.assertEqual(self.applied(), [("channel-layout-v1",), ("computer-use-rules-v1",), ("interface-entry-tools-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",), ("orch-rules-v6",), ("orch-rules-v7",)])
+        self.assertEqual(self.applied(), [("channel-layout-v1",), ("channel-schema-v2",), ("computer-use-rules-v1",), ("interface-entry-tools-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",), ("orch-rules-v6",), ("orch-rules-v7",), ("orch-rules-v8",)])
         self.assertEqual(self.run_migrations()[0], 0)
         self.assertEqual(self.file.read_bytes(), content)
         self.assertEqual(list(self.backups("home").glob("AGENTS.md.*")), backups)
@@ -112,7 +134,7 @@ class HomeMigrationTest(unittest.TestCase):
         # A new release adds a new step; old steps stay recorded and are skipped.
         with patch.object(migrations, "STEPS", (("orch-rules-v1", migrations.update_rules), ("orch-rules-v2", migrations.update_rules))):
             self.assertEqual(self.run_migrations()[0], 0)
-        self.assertEqual(self.applied(), [("channel-layout-v1",), ("computer-use-rules-v1",), ("interface-entry-tools-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",), ("orch-rules-v6",), ("orch-rules-v7",)])
+        self.assertEqual(self.applied(), [("channel-layout-v1",), ("channel-schema-v2",), ("computer-use-rules-v1",), ("interface-entry-tools-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",), ("orch-rules-v6",), ("orch-rules-v7",), ("orch-rules-v8",)])
 
     def test_v2_step_refreshes_a_v1_block_with_the_intake_rule_and_keeps_outside_bytes(self):
         prefix, suffix = b"mine before\n", b"\nmine after"
@@ -127,8 +149,8 @@ class HomeMigrationTest(unittest.TestCase):
         content = self.file.read_bytes()
         self.assertTrue(content.startswith(prefix) and content.endswith(suffix))
         self.assertIn("polling".encode(), content)
-        self.assertIn(b"orchd:managed:start v=7", content)
-        self.assertEqual(self.applied(), [("channel-layout-v1",), ("computer-use-rules-v1",), ("interface-entry-tools-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",), ("orch-rules-v6",), ("orch-rules-v7",)])
+        self.assertIn(b"orchd:managed:start v=8", content)
+        self.assertEqual(self.applied(), [("channel-layout-v1",), ("channel-schema-v2",), ("computer-use-rules-v1",), ("interface-entry-tools-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",), ("orch-rules-v6",), ("orch-rules-v7",), ("orch-rules-v8",)])
 
     def test_v4_refreshes_recorded_v3_and_preserves_user_content(self):
         prefix, suffix = b"before\r\n", b"\r\nafter"
@@ -145,7 +167,7 @@ class HomeMigrationTest(unittest.TestCase):
         self.assertEqual(code, 0, lines)
         content = self.file.read_bytes()
         self.assertTrue(content.startswith(prefix) and content.endswith(suffix))
-        self.assertIn(b"orchd:managed:start v=7", content)
+        self.assertIn(b"orchd:managed:start v=8", content)
         self.assertNotIn("對外草稿（Slack".encode(), content)
         self.assertIn(("orch-rules-v4",), self.applied())
         self.assertEqual(next(self.backups("home").iterdir()).read_bytes(), old)
@@ -168,7 +190,7 @@ class HomeMigrationTest(unittest.TestCase):
         self.assertEqual(code, 0, lines)
         content = self.file.read_bytes()
         self.assertTrue(content.startswith(prefix) and content.endswith(suffix))
-        self.assertIn(b"orchd:managed:start v=7", content)
+        self.assertIn(b"orchd:managed:start v=8", content)
         self.assertIn(b"review-feedback", content)
         self.assertIn(("orch-rules-v5",), self.applied())
         self.assertEqual(next(self.backups("home").iterdir()).read_bytes(), old)
@@ -206,7 +228,7 @@ class HomeMigrationTest(unittest.TestCase):
         before = sorted(self.home.rglob("*"))
         code, lines = self.run_migrations(dry_run=True)
         self.assertEqual(code, 0, lines)
-        self.assertIn("+<!-- orchd:managed:start v=7 -->", "\n".join(lines))
+        self.assertIn("+<!-- orchd:managed:start v=8 -->", "\n".join(lines))
         self.assertEqual(self.file.read_bytes(), b"local")
         self.assertEqual(sorted(self.home.rglob("*")), before)
 
@@ -346,7 +368,7 @@ class StartupMigrationTest(unittest.TestCase):
         lines = self.ensure()
         content = self.file.read_bytes()
         self.assertTrue(content.startswith(self.prefix) and content.endswith(self.suffix))
-        self.assertIn(b"orchd:managed:start v=7", content)
+        self.assertIn(b"orchd:managed:start v=8", content)
         self.assertEqual([b.read_bytes() for b in self.backups()], [before])
         self.assertIn("restart", "\n".join(lines).lower())
 
@@ -400,7 +422,7 @@ class StartupMigrationTest(unittest.TestCase):
         out = subprocess.run([sys.executable, "bin/orchd", "mcp"], input="", env=self.isolated_env(),
                              capture_output=True, text=True)
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertIn(b"orchd:managed:start v=7", self.file.read_bytes())
+        self.assertIn(b"orchd:managed:start v=8", self.file.read_bytes())
         self.assertEqual(out.stdout, "")  # stdout is the MCP protocol channel
         self.assertIn("restart", out.stderr.lower())
 
@@ -450,7 +472,7 @@ class StartupMigrationTest(unittest.TestCase):
         self.stale()
         subprocess.run([sys.executable, "bin/orchd", "ack", "nosuchtask"], input="", env=self.isolated_env(),
                        capture_output=True, text=True)
-        self.assertIn(b"orchd:managed:start v=7", self.file.read_bytes())
+        self.assertIn(b"orchd:managed:start v=8", self.file.read_bytes())
 
     def test_early_return_mutating_entries_apply_home_migrations(self):
         """goal add/set and entry send/ask/tag return before any later hook; they must still migrate (#59)."""
@@ -462,7 +484,7 @@ class StartupMigrationTest(unittest.TestCase):
                 self.stale()
                 subprocess.run([sys.executable, "bin/orchd", *argv], input="", env=self.isolated_env(),
                                capture_output=True, text=True)
-                self.assertIn(b"orchd:managed:start v=7", self.file.read_bytes())
+                self.assertIn(b"orchd:managed:start v=8", self.file.read_bytes())
                 self.assertEqual(len(self.backups()), 1)
 
     def test_early_return_read_only_entries_only_warn(self):
@@ -506,7 +528,7 @@ class StartupMigrationTest(unittest.TestCase):
         self.reconcile_db()
         subprocess.run([sys.executable, "bin/orchd", "entry", "reconcile", "--apply"], input="", env=self.isolated_env(),
                        capture_output=True, text=True)
-        self.assertIn(b"orchd:managed:start v=7", self.file.read_bytes())
+        self.assertIn(b"orchd:managed:start v=8", self.file.read_bytes())
         self.assertEqual(len(self.backups()), 1)
 
     def test_every_cli_subcommand_has_a_home_migration_policy(self):
@@ -541,7 +563,7 @@ class IntakeRuleTemplateTest(unittest.TestCase):
         block = text[text.index("<!-- orchd:managed:start"):text.index("<!-- orchd:managed:end -->")]
         for needle in ("[orchd intake]", "polling", "指令", "不回覆", "不逐則問", "決策卡", "intake_pending"):
             self.assertIn(needle, block)
-        self.assertIn("v=7", block.splitlines()[0])
+        self.assertIn("v=8", block.splitlines()[0])
 
     def test_home_template_points_orchs_at_env_facts(self):
         text = (bootstrap.TEMPLATES / "home/AGENTS.md").read_text(encoding="utf-8")
@@ -562,15 +584,25 @@ class ChannelUpgradeTest(unittest.TestCase):
             trust.write_bytes(b"# synthetic trust config\n")
             binding = home / "state/orchd.db"
             binding.parent.mkdir()
-            binding.write_bytes(b"synthetic existing binding bytes")
+            from orchd import store
+            con = store.connect(binding)
+            con.execute("INSERT INTO entries VALUES('desktop','demo-orch','demo-thread',0,NULL)")
+            con.close()
+            before = binding.read_bytes()
             code, lines = migrations.run(home=home, env=env, dry_run=True)
             self.assertEqual(code, 0, lines)
+            self.assertEqual(binding.read_bytes(), before)
             self.assertFalse((home / "root/channel").exists())
             code, lines = migrations.run(home=home, env=env)
             self.assertEqual(code, 0, lines)
             self.assertEqual(interface.read_bytes(), b"original interface")
             self.assertEqual(trust.read_bytes(), b"# synthetic trust config\n")
-            self.assertEqual(binding.read_bytes(), b"synthetic existing binding bytes")
+            con = store.connect_readonly(binding)
+            try:
+                self.assertEqual(tuple(con.execute('SELECT * FROM entries').fetchone()),
+                                 ('desktop','demo-orch','demo-thread',0,None))
+            finally:
+                con.close()
             self.assertTrue((home / "root/channel/line/config.toml").is_file())
 
     def test_upgrade_uses_previously_registered_custom_home(self):

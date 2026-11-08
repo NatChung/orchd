@@ -55,6 +55,7 @@ Removed entry points exit with code 2 and point to the new command. Without a su
 | Command and complete arguments | Description | Common example |
 | --- | --- | --- |
 | `orchd binding [--entry NAME] [--new \| --to ORCH_ID \| --status]` | Bind the Desktop interface to a live Claude Orch, or inspect the binding. | `orchd binding` |
+| `orchd entry thread (--issue-refs REFS \| --issue-ref REF \| --question-id ID \| --task-id TASK) [--entry NAME] [--limit N] [--per-question-limit N] [--cursor C] [--json]` | Read-only entry threads from a private DB copy: issue-ref summaries, or full question/task threads with pagination. | `orchd entry thread --question-id 101 --limit 3 --json` |
 
 Run `orchd init` first to create the interface configuration. `binding` defaults to entry desktop. It starts an Orch when there is no binding yet; otherwise it reuses the binding. A stopped or confirmed-dead bound Orch causes an error: use `--new` explicitly to start and rebind, leaving the old Orch's open questions with it. A session retired by Claude for idling can resume in place; a failed resume also requires `--new`. Mutually exclusive modes: `--new` starts a new Orch, `--to` selects a live Orch, `--status` reads binding/health/questions/delivery only.
 
