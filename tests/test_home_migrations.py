@@ -82,6 +82,7 @@ class HomeMigrationTest(unittest.TestCase):
         original = "# 自訂規則\r\n原文不要改".encode()
         self.existing(original)
         self.file.chmod(0o640)
+        original_mode = self.file.stat().st_mode & 0o777
         code, lines = self.run_migrations()
         self.assertEqual(code, 0, lines)
         content = self.file.read_bytes()
@@ -92,7 +93,7 @@ class HomeMigrationTest(unittest.TestCase):
         self.assertEqual(backups[0].read_bytes(), original)
         self.assertEqual(backups[0].parent, (self.home / "state/backups/home").absolute())
         self.assertEqual(list(self.file.parent.glob("*orchd-backup*")), [])
-        self.assertEqual(self.file.stat().st_mode & 0o777, 0o640)
+        self.assertEqual(self.file.stat().st_mode & 0o777, original_mode)
         self.assertIn("原檔已有的相同規則可以手動刪掉", "\n".join(lines))
         self.assertIn(str(backups[0]), "\n".join(lines))
         self.assertIn("restore:", "\n".join(lines))
@@ -264,7 +265,10 @@ class HomeMigrationTest(unittest.TestCase):
         target = self.home / "other.md"
         target.write_bytes(b"local")
         self.file.parent.mkdir(parents=True)
-        self.file.symlink_to(target)
+        try:
+            self.file.symlink_to(target)
+        except OSError as error:
+            self.skipTest(f"symlink privilege unavailable: {error}")
         self.assertEqual(self.run_migrations()[0], 1)
         self.assertEqual(target.read_bytes(), b"local")
         self.assertEqual(self.applied(), [])
@@ -278,7 +282,7 @@ class HomeMigrationTest(unittest.TestCase):
         overridden = dict(self.env, ORCHD_ROOT=str(self.home / "other"))
         self.assertEqual(migrations.run(home=self.home, env=overridden)[0], 0)
         self.assertTrue((self.home / "other/home/AGENTS.md").is_file())
-        self.assertEqual(len(self.applied()), 18)  # 9 steps x 2 scopes; step completion is scoped to home paths
+        self.assertEqual(len(self.applied()), 2 * len(migrations.STEPS))  # completion is scoped to home paths
 
     def test_cli_dry_run_and_migrations_only_need_no_uv_install(self):
         env = {**{k: v for k, v in os.environ.items() if not k.startswith("ORCHD_")}, **self.env, "ORCHD_ROOT": str(self.home / "orch")}

@@ -158,6 +158,52 @@ def plan(*, home=None, env=None, legacy_manifest=None):
     return {"root": str(root), "layout_version": VERSION, "files": sorted(files)}
 
 
+def _make_private(path):
+    if os.name != "nt":
+        path.chmod(0o700)
+        return
+    import ctypes
+    from ctypes import wintypes
+    adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    token = wintypes.HANDLE()
+    sid_text = wintypes.LPWSTR()
+    descriptor = ctypes.c_void_p()
+    kernel.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.LocalFree.argtypes = [ctypes.c_void_p]
+    adv.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    adv.GetTokenInformation.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    adv.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
+    adv.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
+    adv.SetFileSecurityW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p]
+    try:
+        if not adv.OpenProcessToken(kernel.GetCurrentProcess(), 8, ctypes.byref(token)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        needed = wintypes.DWORD()
+        adv.GetTokenInformation(token, 1, None, 0, ctypes.byref(needed))
+        buffer = ctypes.create_string_buffer(needed.value)
+        if not adv.GetTokenInformation(token, 1, buffer, needed, ctypes.byref(needed)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        sid = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_void_p))[0]
+        if not adv.ConvertSidToStringSidW(sid, ctypes.byref(sid_text)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        # Protected DACL; only the current user can access the directory and children.
+        sddl = f"O:{sid_text.value}D:P(A;OICI;FA;;;{sid_text.value})"
+        if not adv.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(descriptor), None):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if not adv.SetFileSecurityW(str(path), 0x80000005, descriptor):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        if descriptor:
+            kernel.LocalFree(descriptor)
+        if sid_text:
+            kernel.LocalFree(sid_text)
+        if token:
+            kernel.CloseHandle(token)
+    platform_process.validate_private(path)
+
+
 def _mkdir_private(path):
     _check_path(path)
     if path.exists():
@@ -166,7 +212,7 @@ def _mkdir_private(path):
         platform_process.validate_private(path)
         return False
     path.mkdir(mode=0o700)
-    platform_process.make_private(path)
+    _make_private(path)
     return True
 
 

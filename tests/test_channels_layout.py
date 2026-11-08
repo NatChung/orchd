@@ -163,3 +163,9 @@ class ChannelLayoutTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             channel_layout.apply(home=self.home, env=self.env)
         self.assertFalse((self.home / "state").exists())
+
+    @unittest.skipUnless(__import__("os").name == "nt", "Windows ACL API only")
+    def test_windows_provisioning_uses_security_api_without_shell_tools(self):
+        from unittest.mock import patch
+        with patch("subprocess.run", side_effect=AssertionError("no ACL shell tools")), patch("subprocess.check_output", side_effect=AssertionError("no identity shell tools")):
+            channel_layout.apply(home=self.home, env=self.env)
