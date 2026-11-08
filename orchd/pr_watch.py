@@ -11,7 +11,7 @@ def _get(endpoint):
     return [item for page in pages for item in page] if pages and isinstance(pages[0], list) else pages[0]
 
 
-def watch(repos, task_branches=None):
+def watch(repos, task_branches=None, accounts=()):
     task_branches = task_branches or {}
     output = []
     for repo in repos:
@@ -29,6 +29,7 @@ def watch(repos, task_branches=None):
             commit = _get(f'{root}/commits/{sha}')
             head_time = commit['commit']['committer']['date']
             owner = pr['user']['login']
+            ours = {owner.lower()} | {account.lower() for account in accounts}
             timeline = _get(f'{root}/issues/{number}/timeline?per_page=100')
             times = [event['committer']['date'] for event in timeline
                      if event.get('event') == 'committed' and event.get('sha') == sha
@@ -42,8 +43,12 @@ def watch(repos, task_branches=None):
             issue = _get(f'{root}/issues/{number}/comments?per_page=100')
             latest = {}
             for review in sorted(reviews, key=lambda r: r.get('submitted_at') or ''):
+                name = review['user']['login']
+                # Like GitHub's reviewDecision, a later comment does not replace an approval or change request.
+                if review['state'] == 'COMMENTED' and latest.get(name, {}).get('state') in ('APPROVED', 'CHANGES_REQUESTED'):
+                    continue
                 if review.get('submitted_at') and review['state'] in ('APPROVED', 'COMMENTED', 'CHANGES_REQUESTED', 'DISMISSED'):
-                    latest[review['user']['login']] = {'state': review['state'], 'time': review['submitted_at'], 'url': review['html_url']}
+                    latest[name] = {'state': review['state'], 'time': review['submitted_at'], 'url': review['html_url']}
             latest = {name: review for name, review in latest.items() if review['state'] != 'DISMISSED'}
             comments = [dict(kind=kind, id=c['id'], author=c['user']['login'], time=c['created_at'],
                              body=c['body'], url=c['html_url'], reply_to=c.get('in_reply_to_id'))
@@ -56,15 +61,20 @@ def watch(repos, task_branches=None):
                 return c['id']
             new = []
             for c in comments:
-                if c['author'].lower() == owner.lower():
+                if c['author'].lower() in ours:
                     continue
-                replies = [x['time'] for x in comments if x['author'].lower() == owner.lower() and x['kind'] == c['kind']
+                replies = [x['time'] for x in comments if x['author'].lower() in ours and x['kind'] == c['kind']
                            and (c['kind'] == 'issue' or thread(x) == thread(c))]
                 if c['time'] > max([cutoff or ''] + replies):
                     new.append(c)
+            issue_replies = [c['time'] for c in comments if c['kind'] == 'issue' and c['author'].lower() in ours]
             for review in reviews:
-                if (review.get('submitted_at') and review.get('body') and review['user']['login'].lower() != owner.lower()
-                        and review['submitted_at'] > max([cutoff or ''] + [c['time'] for c in comments if c['kind'] == 'issue' and c['author'].lower() == owner.lower()])):
+                # A reviewer's later approval supersedes that reviewer's earlier review bodies.
+                approvals = [r['submitted_at'] for r in reviews if r.get('submitted_at') and r['state'] == 'APPROVED'
+                             and r['user']['login'] == review['user']['login']]
+                if (review.get('submitted_at') and review.get('body') and review['user']['login'].lower() not in ours
+                        and review['submitted_at'] > max([cutoff or ''] + issue_replies)
+                        and review['submitted_at'] >= max(approvals, default='')):
                     new.append(dict(kind='review', author=review['user']['login'], time=review['submitted_at'],
                                     body=review['body'], url=review['html_url']))
             requested = [name for name, review in latest.items() if review['state'] == 'CHANGES_REQUESTED']

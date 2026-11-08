@@ -68,6 +68,8 @@ def build_parser():
     sub = parser.add_subparsers(dest="cmd", required=True)
     watcher = sub.add_parser("pr-watch", help="read-only AI pull request review inventory")
     watcher.add_argument("repos", nargs="+", metavar="OWNER/REPO")
+    watcher.add_argument("--account", action="append", default=[], metavar="LOGIN",
+                         help="treat comments from this GitHub login as our replies (repeatable; the PR author always counts)")
     feedback = sub.add_parser("review-feedback", help="read all pull request feedback")
     feedback.add_argument("repo")
     feedback.add_argument("pr", type=int)
@@ -699,7 +701,7 @@ def main(argv=None):
             finally:
                 if con:
                     con.close()
-            print(json.dumps(pr_watch.watch(args.repos, branches), ensure_ascii=False, indent=2))
+            print(json.dumps(pr_watch.watch(args.repos, branches, args.account), ensure_ascii=False, indent=2))
             return 0
         except (ValueError, OSError, subprocess.SubprocessError, store.DatabaseUnavailable) as error:
             print(f"orchd pr-watch: {error}", file=sys.stderr)
