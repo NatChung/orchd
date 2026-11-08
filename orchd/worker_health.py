@@ -10,15 +10,15 @@ DEFAULT_STALE_HOURS = 24
 FINISHED = ("done", "blocked")
 
 
-def has_report(con, task_id):
-    return con.execute("SELECT 1 FROM messages WHERE task_id=? AND kind='report' LIMIT 1", (task_id,)).fetchone() is not None
+def worker_messages(con, statuses):
+    """{task_id: (last_report_at, has_report)} for tasks in `statuses`, in one read-only query.
 
-
-def last_report_at(con, task_id):
-    """Time of the latest ack/progress/question/report the worker sent, or None. Read-only."""
-    row = con.execute("SELECT MAX(created_at) FROM messages WHERE task_id=? AND kind IN (?,?,?,?)",
-                      (task_id, *WORKER_KINDS)).fetchone()
-    return row[0]
+    last_report_at is the latest ack/progress/question/report the worker sent; tasks with none are absent."""
+    marks = ",".join("?" * len(statuses))
+    rows = con.execute(f"SELECT m.task_id, MAX(m.created_at), MAX(m.kind='report') FROM messages m "
+                       f"JOIN tasks t ON t.id=m.task_id WHERE t.status IN ({marks}) AND m.kind IN (?,?,?,?) "
+                       f"GROUP BY m.task_id", (*statuses, *WORKER_KINDS)).fetchall()
+    return {task_id: (at, bool(reported)) for task_id, at, reported in rows}
 
 
 def stale_hours(override=None):

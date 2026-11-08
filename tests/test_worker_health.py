@@ -334,3 +334,18 @@ class StaleAndLastReportTest(ListOpenHealthTest):
         tool = next(x for x in mcp_server.TOOLS if x["name"] == "list_open")
         self.assertIn("PID", tool["description"])
         self.assertIn("attention_only", tool["inputSchema"]["properties"])
+
+    def test_last_report_is_read_in_one_query_for_all_tasks(self):
+        ids = [self.dispatch()["id"] for _ in range(3)]
+        for task_id in ids:
+            core.ack(self.con, task_id)
+        core.report(self.con, self.rt, ids[0], "done", "ok", "")
+        statements = []
+        self.con.set_trace_callback(statements.append)
+        try:
+            rows = self.listing(None)
+        finally:
+            self.con.set_trace_callback(None)
+        self.assertEqual(sum("MAX(m.created_at)" in s for s in statements), 1)
+        self.assertEqual(rows[ids[0]]["worker_health"], "finished")
+        self.assertTrue(all(rows[i]["last_report_at"] is not None for i in ids))

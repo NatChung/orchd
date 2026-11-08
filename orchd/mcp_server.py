@@ -661,9 +661,10 @@ def call(name, args, thread, con, rt, sent=None, *, reply_id=None):
     if name == "list_orchs":
         return inventory.list_orchs(con, rt, observe=True)
     if name == "list_open":
-        rows = core.list_open(con, rt, stale_hours=args.get('stale_hours'), attention_only=bool(args.get('attention_only')))
-        shown = [t for t in rows if args.get('group_id') is None or t['group_id'] == args['group_id']]
-        total = len(core.list_open(con, rt, stale_hours=args.get('stale_hours'))) if args.get('with_counts') else len(shown)
+        rows = core.list_open(con, rt, stale_hours=args.get('stale_hours'))  # once: liveness probes are not free
+        shown = [t for t in rows if (args.get('group_id') is None or t['group_id'] == args['group_id'])
+                 and (not args.get('attention_only') or core.needs_attention(t))]
+        total = len(rows) if args.get('with_counts') else len(shown)
         # Include closed tasks: a concurrent close after the health read must not erase a position.
         positions = {t['id']: (t['created_at'], t['id'])
                      for t in con.execute("SELECT id,created_at FROM tasks")}
