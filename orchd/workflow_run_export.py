@@ -7,6 +7,7 @@ import subprocess
 
 from . import workflows
 
+EVIDENCE_SCHEMA = 'orchd-run-evidence/v1'
 KINDS = ('dispatch', 'ack', 'report', 'close', 'verify_lock', 'verification')
 
 
@@ -101,7 +102,7 @@ def _snapshot(con, task_id):
         if run is None:
             raise ValueError('Workflow run is unavailable')
         attempts = [dict(row) for row in con.execute(
-            'SELECT a.*,t.repo,t.worktree,t.status AS task_status FROM workflow_run_attempts a '
+            'SELECT a.*,t.repo,t.worktree,t.status AS task_status,t.verifies AS task_verifies FROM workflow_run_attempts a '
             'LEFT JOIN tasks t ON t.id=a.task_id WHERE a.run_id=? ORDER BY a.step_index,a.role', (run['id'],))]
         messages = [dict(row) for row in con.execute(
             'SELECT m.id,m.task_id,m.kind,m.body,m.evidence,m.created_at,t.repo '
@@ -109,9 +110,29 @@ def _snapshot(con, task_id):
             'JOIN workflow_run_attempts a ON a.task_id=m.task_id '
             'WHERE a.run_id=? AND m.kind IN (' + ','.join('?' for _ in KINDS) + ') ORDER BY m.id',
             (run['id'], *KINDS))]
-        return dict(task), dict(run), attempts, messages
+        events = [dict(row) for row in con.execute(
+            'SELECT id,run_id,kind,task_id,source_message_id,body,created_at FROM workflow_run_events WHERE run_id=? ORDER BY id', (run['id'],))]
+        return dict(task), dict(run), attempts, messages, events
     finally:
         con.execute('RELEASE SAVEPOINT workflow_evidence_export')
+
+
+def _dispatch_spec(raw):
+    spec = _load(raw)
+    if not isinstance(spec, dict):
+        raise ValueError('Stored workflow dispatch spec must be an object')
+    result = {key: spec[key] for key in ('repo', 'stage', 'task_type', 'outputs', 'verifies') if key in spec}
+    if isinstance(spec.get('workflow'), dict):
+        result['workflow'] = {key: spec['workflow'][key] for key in ('name', 'commit', 'digest', 'stage', 'inputs') if key in spec['workflow']}
+    return result
+
+
+def _raw_file(attempt):
+    if attempt['output'] is None:
+        return None
+    if not isinstance(attempt['id'], str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,127}', attempt['id']):
+        raise ValueError('Stored attempt ID cannot form a safe output filename')
+    return 'outputs/' + attempt['id'] + '.json'
 
 
 def export_for_task(con, task_id, output_dir, *, env=None):
@@ -125,7 +146,7 @@ def export_for_task(con, task_id, output_dir, *, env=None):
     if task_hint is None:
         raise ValueError('Task must belong to exactly one workflow run')
     output = _destination(dict(task_hint), output_dir, env)
-    task, run, attempts, messages = _snapshot(con, task_id)
+    task, run, attempts, messages, events = _snapshot(con, task_id)
     if task['worktree'] != task_hint['worktree']:
         raise ValueError('Workflow export task worktree changed during inspection')
     plan = _load(run['plan'])
@@ -152,29 +173,45 @@ def export_for_task(con, task_id, output_dir, *, env=None):
             stages.append(stage)
         previous = stages[-1]['id']
     audit_plan = dict(schema_version='workflow-run-plan/v1', run_id=run['id'], workflow=plan['workflow'], stages=stages)
-    state = dict(schema_version='orchd-run-export/v1', run_id=run['id'], exported_by_task=task_id,
+    state = dict(schema_version='orchd-run-export/v1', evidence_schema_version=EVIDENCE_SCHEMA,
+                 run_events_file='run-events.jsonl', core_messages_file='core.jsonl',
+                 parent_run_id=run['parent_run_id'], run_id=run['id'], exported_by_task=task_id,
                  state=run['state'], step_index=run['step_index'], version=run['version'],
                  workflow=plan['workflow'], plan_digest=run['plan_digest'],
                  attempts=[{key: a[key] for key in ('step_index', 'role', 'task_id', 'state', 'repo', 'task_status',
                                                    'output_digest', 'report_id', 'lock_id')} |
-                           dict(worktree=a['worktree'], output_values=_output_values(a['output']),
+                           dict(attempt_id=a['id'], task_verifies=a['task_verifies'], dispatch_spec=_dispatch_spec(a['spec']),
+                                output_raw_file=_raw_file(a), worktree=a['worktree'], output_values=_output_values(a['output']),
                                 output_raw_digest=_digest(a['output']) if a['output'] is not None else None) for a in attempts],
                  unresolved_inputs=missing, expected_transitions=transitions,
                  frozen_plan=plan,
                  limitations=['Snapshot of supplied run evidence, not acceptance or method compliance.',
                               'The exporting task may not yet have a result; absent events are not synthesized.',
                               'Ordered transitions use report/native verification; close-based audit dependency edges are intentionally omitted.',
-                              'Output values are opaque task declarations, not permission to read referenced paths.'])
+                              'Output values are opaque task declarations, not permission to read referenced paths.',
+                              'Native verification records prove a stored lock/result only; current HEAD freshness is not inspected.',
+                              'Receipt hashes preserve exported bytes, not a signature or independent acceptance.'])
     files = {'auditplan.json': workflows.canonical(audit_plan),
              'core.jsonl': b''.join(workflows.canonical(row) for row in messages),
+             'run-events.jsonl': b''.join(workflows.canonical(row) for row in events),
              'run.json': workflows.canonical(state)}
-    receipt = dict(schema_version='orchd-run-export-receipt/v1', run_id=run['id'], task_id=task_id,
+    files.update({_raw_file(a): bytes(a['output']) for a in attempts if a['output'] is not None})
+    if len({name.casefold() for name in files}) != len(files):
+        raise ValueError('Export filenames collide on a case-insensitive filesystem')
+    receipt = dict(schema_version='orchd-run-export-receipt/v1', evidence_schema_version=EVIDENCE_SCHEMA,
+                   run_event_count=len(events), last_run_event_id=events[-1]['id'] if events else None,
+                   output_count=sum(a['output'] is not None for a in attempts),
+                   run_id=run['id'], task_id=task_id,
                    plan_digest=run['plan_digest'], files={name: _digest(raw) for name, raw in files.items()},
                    message_count=len(messages), last_message_id=messages[-1]['id'] if messages else None,
                    output_dir=str(output), basis='Real scoped task messages; task results remain self-reported.')
     # New directory and exclusive files preserve any prior export, including partial runs.
     output.mkdir(mode=0o700)
     for name, raw in {**files, 'receipt.json': workflows.canonical(receipt)}.items():
-        with (output / name).open('xb') as stream:
+        target = output / name
+        if target.parent != output:
+            target.parent.mkdir(mode=0o700, exist_ok=True)
+        with target.open('xb') as stream:
             stream.write(raw)
+        target.chmod(0o600)
     return receipt

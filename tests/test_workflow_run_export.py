@@ -189,5 +189,122 @@ class ExportTests(unittest.TestCase):
         self.assertFalse(self.con.in_transaction)
 
 
+    def test_native_events_and_exact_output_bytes_are_hash_bound_to_one_run(self):
+        raw = b'{ "schema_version": "orchd-workflow-output/v1", "values": {"instructions": "exact\\n"} }\n'
+        wrong = 'sha256:' + 'd' * 64
+        self.con.execute("UPDATE workflow_run_attempts SET output=?,output_digest=? WHERE task_id='prepare1'", (raw, wrong))
+        body = '{ "status": "done", "output_digest": "stored value" }'
+        self.con.execute('INSERT INTO workflow_run_events(run_id,kind,task_id,source_message_id,body,created_at) VALUES(?,?,?,?,?,?)',
+                         ('run-one', 'report', 'prepare1', 2, body, 123.75))
+        self.con.execute('INSERT INTO workflow_run_events(run_id,kind,body,created_at) VALUES(?,?,?,?)',
+                         ('unrelated-run', 'started', 'SECRET_OTHER_RUN_EVENT', 124))
+        result = self.run_export()
+        root = Path(result['output_dir'])
+        state = json.loads((root / 'run.json').read_bytes())
+        self.assertEqual(state['schema_version'], 'orchd-run-export/v1')
+        self.assertEqual(state['evidence_schema_version'], 'orchd-run-evidence/v1')
+        self.assertEqual(state['run_events_file'], 'run-events.jsonl')
+        self.assertEqual(state['core_messages_file'], 'core.jsonl')
+        events = [json.loads(line) for line in (root / state['run_events_file']).read_bytes().splitlines()]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]['body'], body)
+        self.assertEqual(events[0]['source_message_id'], 2)
+        self.assertEqual(events[0]['created_at'], 123.75)
+        self.assertNotIn('SECRET_OTHER_RUN_EVENT', (root / 'run-events.jsonl').read_text())
+        attempt = next(a for a in state['attempts'] if a['task_id'] == 'prepare1')
+        self.assertEqual(attempt['attempt_id'], 'attempt-prepare1')
+        self.assertEqual((root / attempt['output_raw_file']).read_bytes(), raw)
+        self.assertEqual(attempt['output_raw_digest'], export._digest(raw))
+        self.assertEqual(attempt['output_digest'], wrong)  # Preserve a mismatch for the independent consumer.
+        self.assertEqual(result['files'][attempt['output_raw_file']], export._digest(raw))
+        self.assertEqual(result['run_event_count'], 1)
+        self.assertEqual(result['last_run_event_id'], events[-1]['id'])
+        self.assertEqual(result['output_count'], 1)
+        self.assertEqual(json.loads((root / 'receipt.json').read_bytes()), result)
+
+    def test_native_lock_result_and_actual_verifies_relation_are_preserved(self):
+        self.con.execute("UPDATE tasks SET verifies='author1' WHERE id='review1'")
+        spec = dict(repo='example-service', stage='review', task_type='review', outputs=[], verifies='author1',
+                    workflow=dict(self.plan['workflow'], stage='review', inputs={}),
+                    instructions='SECRET_RENDERED_PROMPT', done_when='SECRET_RENDERED_CRITERIA')
+        self.con.execute("UPDATE workflow_run_attempts SET spec=? WHERE task_id='review1'", (workflows.canonical(spec),))
+        lock = dict(sha='a' * 40, paths={'src/example.py': 'b' * 40}, command='python3 -m unittest', orch_thread='example-orch')
+        proof = dict(author='author1', verifier='review1', lock_id=6, sha='a' * 40, exit=1, passed=True)
+        for kind, value in (('verify_lock', lock), ('verification', proof)):
+            self.con.execute('INSERT INTO messages(task_id,kind,body,evidence,created_at) VALUES(?,?,?,?,?)',
+                             ('author1', kind, 'Native stored record', json.dumps(value), 125))
+        root = Path(self.run_export()['output_dir'])
+        state = json.loads((root / 'run.json').read_bytes())
+        reviewer = next(a for a in state['attempts'] if a['task_id'] == 'review1')
+        self.assertEqual(reviewer['task_verifies'], 'author1')
+        self.assertEqual(reviewer['dispatch_spec']['verifies'], 'author1')
+        self.assertEqual(reviewer['dispatch_spec']['workflow'], spec['workflow'])
+        self.assertNotIn('SECRET_RENDERED', json.dumps(state))
+        records = [json.loads(line) for line in (root / 'core.jsonl').read_bytes().splitlines()]
+        actual = [json.loads(row['evidence']) for row in records if row['kind'] in ('verify_lock', 'verification')]
+        self.assertEqual(actual, [lock, proof])  # Export does not turn the stored passed flag into acceptance.
+        self.assertTrue(any('freshness' in line for line in state['limitations']))
+
+    def test_output_event_and_run_version_share_one_read_snapshot(self):
+        old = self.con.execute("SELECT output FROM workflow_run_attempts WHERE task_id='prepare1'").fetchone()[0]
+        new = workflows.canonical(dict(schema_version='orchd-workflow-output/v1', values={'instructions': 'New writer state'}))
+        self.con.execute('INSERT INTO workflow_run_events(run_id,kind,body,created_at) VALUES(?,?,?,?)', ('run-one', 'started', '{}', 1))
+        writer = store.connect(self.root / 'fixture.db')
+        self.addCleanup(writer.close)
+        changed = []
+        def concurrent_commit(sql):
+            if 'FROM workflow_run_events' in sql and sql.lstrip().startswith('SELECT') and not changed:
+                changed.append(True)
+                with store.immediate(writer):
+                    writer.execute("UPDATE workflow_run_attempts SET output=? WHERE task_id='prepare1'", (new,))
+                    writer.execute("UPDATE workflow_runs SET version=version+1 WHERE id='run-one'")
+                    writer.execute('INSERT INTO workflow_run_events(run_id,kind,body,created_at) VALUES(?,?,?,?)', ('run-one', 'step_succeeded', '{"step_index":0}', 2))
+        self.con.set_trace_callback(concurrent_commit)
+        try:
+            result = self.run_export()
+        finally:
+            self.con.set_trace_callback(None)
+        self.assertEqual(changed, [True])
+        root = Path(result['output_dir'])
+        state = json.loads((root / 'run.json').read_bytes())
+        attempt = next(a for a in state['attempts'] if a['task_id'] == 'prepare1')
+        self.assertEqual(state['version'], 1)
+        self.assertEqual((root / attempt['output_raw_file']).read_bytes(), old)
+        self.assertEqual(result['run_event_count'], 1)
+        self.assertNotIn('step_succeeded', (root / 'run-events.jsonl').read_text())
+        self.assertEqual(writer.execute("SELECT version FROM workflow_runs WHERE id='run-one'").fetchone()[0], 2)
+        self.assertEqual(writer.execute("SELECT output FROM workflow_run_attempts WHERE task_id='prepare1'").fetchone()[0], new)
+
+    def test_parent_child_reference_does_not_implicitly_expand_export_scope(self):
+        self.con.execute('INSERT INTO workflow_runs(id,request_id,parent_run_id,orch_thread,idempotency_key,plan,plan_digest,origin,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                         ('repair-run', 1, 'run-one', 'example-orch', 'repair', workflows.canonical(self.plan), 'sha256:' + 'e' * 64, '{}', 'active', 2, 2))
+        self.con.execute('INSERT INTO workflow_run_events(run_id,kind,body,created_at) VALUES(?,?,?,?)',
+                         ('run-one', 'recovery_started', '{"repair_run_id":"repair-run"}', 2))
+        self.con.execute('INSERT INTO workflow_run_events(run_id,kind,body,created_at) VALUES(?,?,?,?)',
+                         ('repair-run', 'failure', 'SECRET_CHILD_EVENT', 3))
+        root = Path(self.run_export()['output_dir'])
+        state = json.loads((root / 'run.json').read_bytes())
+        self.assertIsNone(state['parent_run_id'])
+        events = (root / 'run-events.jsonl').read_text()
+        self.assertIn('repair-run', events)
+        self.assertNotIn('SECRET_CHILD_EVENT', events)
+        self.assertNotIn('SECRET_CHILD_EVENT', (root / 'run.json').read_text())
+
+    def test_missing_outputs_remain_missing_and_unsafe_attempt_paths_fail_before_writes(self):
+        self.con.execute("UPDATE workflow_run_attempts SET output=NULL WHERE task_id='prepare1'")
+        receipt = self.run_export()
+        root = Path(receipt['output_dir'])
+        state = json.loads((root / 'run.json').read_bytes())
+        self.assertEqual(receipt['output_count'], 0)
+        self.assertTrue(all(a['output_raw_file'] is None for a in state['attempts']))
+        self.assertFalse((root / 'outputs').exists())
+        raw = workflows.canonical(dict(schema_version='orchd-workflow-output/v1', values={'instructions': 'Actual captured output'}))
+        self.con.execute("UPDATE workflow_run_attempts SET id='../escape',output=? WHERE task_id='prepare1'", (raw,))
+        with self.assertRaisesRegex(ValueError, 'safe output filename'):
+            self.run_export('.local/unsafe')
+        self.assertFalse((self.worktree / '.local/unsafe').exists())
+        self.assertFalse((self.worktree / '.local/escape.json').exists())
+
+
 if __name__ == '__main__':
     unittest.main()
