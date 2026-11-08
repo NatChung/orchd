@@ -403,6 +403,21 @@ TOOLS += [
 ]
 
 
+for _name, _fields, _required in (
+    ('channels_messages', {'source_id': 'string', 'limit': 'integer', 'cursor': 'string'}, ['source_id']),
+    ('channels_search', {'source_id': 'string', 'query': 'string', 'limit': 'integer'}, ['source_id', 'query']),
+    ('channels_message', {'message_id': 'string'}, ['message_id']),
+    ('channels_conversation', {'conversation_id': 'string', 'cursor': 'string', 'limit': 'integer'}, ['conversation_id']),
+    ('channels_sync', {'source_id': 'string', 'request_key': 'string'}, ['source_id', 'request_key']),
+    ('channels_sync_status', {'job_id': 'string'}, ['job_id']),
+    ('channels_attachment_request', {'attachment_id': 'string'}, ['attachment_id']),
+    ('channels_attachment_read', {'attachment_id': 'string'}, ['attachment_id']),
+    ('channels_draft', {'message_id': 'string', 'payload': 'object'}, ['message_id', 'payload']),
+):
+    TOOLS.append({'name': _name, 'description': 'Local channel API; checks caller source grants and never connects to a platform.',
+                  'inputSchema': {'type': 'object', 'additionalProperties': False, 'required': _required,
+                                  'properties': {k: {'type': v} for k, v in _fields.items()}}})
+
 ENTRY_TOOLS = [
     {"name": "foreground",
      "description": "Open a new Ghostty window for the bound Orch ({target: 'orch'}) or its worker "
@@ -539,10 +554,26 @@ def intake_call(name, args, thread, con, rt=None):
         return intake.pending(con, None if args.get("unassigned") else thread, args.get("limit", 100),
                               cursor=args.get("cursor"))
     if name == "intake_show":
+        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='channel_messages'").fetchone():
+            linked = con.execute('SELECT id FROM channel_messages WHERE intake_receipt_id=?', (args['receipt_id'],)).fetchone()
+            if linked:
+                from .channels import policy, service as channel_service
+                channel = channel_service.ChannelService(con.execute('PRAGMA database_list').fetchone()[2], retention=policy.retention_policies())
+                try:
+                    channel.message(linked[0], caller=policy.caller_for_identity(thread))
+                finally:
+                    channel.close()
         return intake_bridge.show(con, args["receipt_id"], thread)
     if name == "intake_decide":
+        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='channel_messages'").fetchone() and con.execute('SELECT 1 FROM channel_messages WHERE intake_receipt_id=?', (args.get('receipt_id'),)).fetchone():
+            from .channels import policy, service as channel_service
+            channel_service.require_legacy_access(con, args['receipt_id'], policy.caller_for_identity(thread))
         return intake_decide.decide(con, args, orch_id=thread)
     if name == "intake_resolve":
+        decision = con.execute('SELECT receipt_id FROM intake_decisions WHERE decision_id=?', (args.get('decision_id'),)).fetchone()
+        if decision and con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='channel_messages'").fetchone() and con.execute('SELECT 1 FROM channel_messages WHERE intake_receipt_id=?', (decision[0],)).fetchone():
+            from .channels import policy, service as channel_service
+            channel_service.require_legacy_access(con, decision[0], policy.caller_for_identity(thread))
         return intake_decide.resolve(con, args, orch_id=thread)
     if name == "intake_decisions":
         return intake_decide.decisions(con, args.get("receipt_id"), orch_id=thread, state=args.get("state"))
@@ -553,24 +584,32 @@ def intake_call(name, args, thread, con, rt=None):
             jobs = None  # no runtime snapshot: stopped owners are still flagged, dead ones are not guessed
         return intake_decide.backlog(con, owner=thread, jobs=jobs)
     if name == "intake_take_unassigned":
+        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='channel_messages'").fetchone():
+            from .channels import policy, service as channel_service
+            for receipt_id in args.get('receipt_ids') or []:
+                if con.execute('SELECT 1 FROM channel_messages WHERE intake_receipt_id=?', (receipt_id,)).fetchone():
+                    channel_service.require_legacy_access(con, receipt_id, policy.caller_for_identity(thread))
         return intake.take_unassigned(con, args.get("receipt_ids"), thread)
     raise ValueError(f"unknown tool {name}")
 
 
 def call(name, args, thread, con, rt, sent=None, *, reply_id=None):
-    from . import interface
+    from .channels import service as channel_service
+    if name.startswith('channels_'):
+        from .channels import mcp as channel_mcp
+        return channel_mcp.call(name, args, thread, con)
     if name == "interface_requests":
         if set(args) - {"after_id", "limit"}:
             raise ValueError("interface_requests accepts only after_id and limit")
-        return interface.requests(con, thread, **args)
+        return channel_service.legacy_interface(con, 'requests', actor=thread, payload=args)
     if name == "interface_dismiss":
         if set(args) != {"request_id", "reason"}:
             raise ValueError("interface_dismiss accepts only request_id and reason")
-        return interface.dismiss(con, thread, **args)
+        return channel_service.legacy_interface(con, 'dismiss', actor=thread, payload=args)
     if name == "interface_reply":
         if not {"request_id", "text"} <= set(args) or set(args) - {"request_id", "text", "kind"}:
             raise ValueError("interface_reply accepts only request_id, text and optional kind; route is immutable")
-        return interface.reply(con, thread, **args)
+        return channel_service.legacy_interface(con, 'reply', actor=thread, payload=args)
     if name == 'dispatch_batch':
         return core.dispatch_batch(con, rt, orch_thread=thread, tasks=args['tasks'])
     if name == 'quota_status':

@@ -150,13 +150,13 @@ def _receipt(row, status):
                                       "exclusion_rule_version")})
 
 
-def submit(con, payload, *, producer, producers):
+def submit(con, payload, *, producer, producers, _receipt_hook=None):
     """Durable receipt for one normalized event. Same key and content returns the original receipt as
     `duplicate`; same key with different content is `conflict` and changes nothing. Validation and the
     producer grant run before any write."""
     if isinstance(payload, dict) and payload.get("version") == 2:  # evidence + suggestions: intake_bridge
         from . import intake_bridge
-        return intake_bridge.submit(con, payload, producer=producer, producers=producers)
+        return intake_bridge.submit(con, payload, producer=producer, producers=producers, _receipt_hook=_receipt_hook)
     event, owner = _normalize(payload)
     check_producer(producers, producer, event["provider"], event["account"])
     digest = _content_hash(event)
@@ -166,6 +166,8 @@ def submit(con, payload, *, producer, producers):
         if row is not None:
             if row["content_sha256"] != digest:
                 raise IntakeError("conflict", "event_id already received with different content; not overwritten")
+            if _receipt_hook:
+                _receipt_hook(con, row['receipt_id'])
             return _receipt(row, "duplicate")
         if owner is not None:
             _check_owner(con, owner)
@@ -177,6 +179,8 @@ def submit(con, payload, *, producer, producers):
              event["source_ref"], event["thread_ref"], event["source_time"], time.time(), producer,
              event["summary"], digest, owner))
         _log(con, "event", receipt_id)
+        if _receipt_hook:
+            _receipt_hook(con, receipt_id)
         return _receipt(con.execute("SELECT * FROM intake_events WHERE receipt_id=?", (receipt_id,)).fetchone(),
                         "received")
 
@@ -486,6 +490,18 @@ def _draft_row(con, draft_id, version):
     return row
 
 
+def _refuse_channel_outbound(con, row):
+    """Channel-backed drafts cannot use the legacy send gate before PR5."""
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='channel_messages'").fetchone():
+        return
+    if row['receipt_id'] is not None and con.execute('SELECT 1 FROM channel_messages WHERE intake_receipt_id=?', (row['receipt_id'],)).fetchone():
+        raise IntakeError('invalid_state', 'channel outbound is disabled')
+    provider = 'gmail' if row['provider'] == 'email' else row['provider']
+    if con.execute('SELECT 1 FROM channel_sources WHERE provider=? AND (account_ref=? OR id=?)',
+                   (provider, row['sender'], row['sender'])).fetchone():
+        raise IntakeError('invalid_state', 'channel outbound is disabled')
+
+
 def _latest(con, draft_id):
     return con.execute("SELECT MAX(version) FROM intake_drafts WHERE draft_id=?", (draft_id,)).fetchone()[0]
 
@@ -575,11 +591,15 @@ def approve(con, payload, *, actor="operator"):
     with store.immediate(con):
         old = con.execute("SELECT * FROM intake_approvals WHERE idempotency_key=?", (key,)).fetchone()
         if old is not None:
+            existing_draft = con.execute('SELECT * FROM intake_drafts WHERE draft_id=? AND version=?', (old['draft_id'], old['version'])).fetchone()
+            if existing_draft is not None:
+                _refuse_channel_outbound(con, existing_draft)
             if tuple(old[k] for k in need[:-1]) != tuple(payload[k] for k in need[:-1]):
                 raise IntakeError("idempotency_conflict", "idempotency_key was used for a different approval")
             return dict(status="duplicate", approval_id=old["approval_id"], draft_id=old["draft_id"],
                         version=old["version"], expires_at=old["expires_at"], idempotency_key=key)
         row = _draft_row(con, payload["draft_id"], payload["version"])
+        _refuse_channel_outbound(con, row)
         if row["state"] == "superseded" or payload["version"] != _latest(con, payload["draft_id"]) \
                 or row["body_sha256"] != payload["body_sha256"]:
             raise IntakeError("stale", "draft changed since it was shown; review the latest version")
@@ -607,6 +627,7 @@ def claim(con, draft_id, version):
     to deduplicate its own send. A second claim never hands the draft out again."""
     with store.immediate(con):
         row = _draft_row(con, draft_id, version)
+        _refuse_channel_outbound(con, row)
         if row["state"] in ("sending", "sent", "uncertain", "failed"):
             raise IntakeError("already_claimed", f"draft is {row['state']}; automatic resend is refused")
         if row["state"] != "approved":

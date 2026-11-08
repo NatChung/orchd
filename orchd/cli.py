@@ -147,6 +147,36 @@ def build_parser():
     install.add_argument("--json", action="store_true")
     channels = sub.add_parser("channels")
     channel_actions = channels.add_subparsers(dest="channel_action", required=True)
+    for action in ("messages", "search"):
+        command = channel_actions.add_parser(action)
+        command.add_argument("--source", required=True)
+        command.add_argument("--limit", type=int, default=100)
+        command.add_argument("--json", action="store_true")
+        if action == "search":
+            command.add_argument("--query", required=True)
+        else:
+            command.add_argument("--cursor", default="")
+    for action in ("message", "conversation", "sync-status"):
+        command = channel_actions.add_parser(action)
+        command.add_argument("id")
+        command.add_argument("--json", action="store_true")
+        if action == "conversation":
+            command.add_argument("--cursor", default="")
+            command.add_argument("--limit", type=int, default=100)
+    sync = channel_actions.add_parser("sync")
+    sync.add_argument("--source", required=True)
+    sync.add_argument("--request-key", required=True)
+    sync.add_argument("--json", action="store_true")
+    draft = channel_actions.add_parser("draft")
+    draft.add_argument("--file", default="-")
+    draft.add_argument("--json", action="store_true")
+    attachment = channel_actions.add_parser("attachment")
+    attachment.add_argument("action", choices=("request", "read"))
+    attachment.add_argument("id")
+    attachment.add_argument("--json", action="store_true")
+    retention = channel_actions.add_parser("retention")
+    retention.add_argument("action", choices=("sweep",))
+    retention.add_argument("--json", action="store_true")
     layout = channel_actions.add_parser("layout")
     layout_actions = layout.add_subparsers(dest="layout_action", required=True)
     for action in ("plan", "apply"):
@@ -452,11 +482,40 @@ def _intake_main(args):
             event = payload if isinstance(payload, dict) else {}
             intake.check_producer(producers, args.producer, event.get("provider"), event.get("account"))
         con = None if action == "reconcile" else store.connect()  # reconcile opens the DB read-only until --apply
+        if con is not None and action in ('decide', 'resolve', 'draft', 'classify', 'exclude', 'bind', 'ack', 'cancel', 'draft-show') and \
+                con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='channel_messages'").fetchone():
+            receipt_ids = []
+            if isinstance(payload, dict) and payload.get('receipt_id'):
+                receipt_ids.append(payload['receipt_id'])
+            if getattr(args, 'receipt', None):
+                value = args.receipt
+                receipt_ids.extend(value if isinstance(value, list) else [value])
+            receipt_ids.extend(getattr(args, 'receipts', None) or [])
+            if action in ('cancel', 'draft-show'):
+                row = con.execute('SELECT receipt_id FROM intake_drafts WHERE draft_id=? ORDER BY version DESC LIMIT 1', (args.draft,)).fetchone()
+                if row and row[0]:
+                    receipt_ids.append(row[0])
+            if action == 'resolve' and isinstance(payload, dict):
+                row = con.execute('SELECT receipt_id FROM intake_decisions WHERE decision_id=?', (payload.get('decision_id'),)).fetchone()
+                if row:
+                    receipt_ids.append(row[0])
+            for receipt_id in receipt_ids:
+                if not con.execute('SELECT 1 FROM channel_messages WHERE intake_receipt_id=?', (receipt_id,)).fetchone():
+                    continue
+                if os.environ.get('ORCHD_WORKTREE'):
+                    raise ValueError('channel operations require the authorized channel API')
+                identity = os.environ.get('ORCHD_ORCH_ID') or os.environ.get('CODEX_THREAD_ID')
+                if identity:
+                    if getattr(args, 'actor', 'orch') == 'operator' or (getattr(args, 'orch', None) and args.orch != identity):
+                        raise ValueError('channel actor does not match caller')
+                    from orchd.channels import policy, service as channel_service
+                    channel_service.require_legacy_access(con, receipt_id, policy.caller_for_identity(identity))
         if action == "reconcile":
             result = intake.reconcile_path(store.home() / "orchd.db", apply=args.apply,
                                            backup_dir=store.home() / "backups", jobs=_live_jobs())
         elif action == "submit":
-            result = intake.submit(con, payload, producer=args.producer, producers=producers)
+            from orchd.channels import service as channel_service
+            result = channel_service.legacy_intake_submit(con, payload, producer=args.producer, producers=producers)
             _notify_urgent(con, result)
         elif action == "suggest":
             from orchd import intake_bridge
@@ -464,6 +523,20 @@ def _intake_main(args):
             _notify_urgent(con, result)
         elif action == "show":
             from orchd import intake_bridge
+            if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='channel_messages'").fetchone() and \
+                    con.execute('SELECT 1 FROM channel_messages WHERE intake_receipt_id=?', (args.receipt,)).fetchone():
+                identity = os.environ.get('ORCHD_ORCH_ID') or os.environ.get('CODEX_THREAD_ID')
+                if os.environ.get('ORCHD_WORKTREE') or (identity and args.viewer != identity):
+                    raise ValueError('channel content requires the authorized channel API')
+                from orchd.channels import policy, repository, service as channel_service
+                message_id = con.execute('SELECT id FROM channel_messages WHERE intake_receipt_id=?', (args.receipt,)).fetchone()[0]
+                message = repository.get_message(con, message_id)
+                caller = policy.caller_for_identity(identity) if identity else policy.Caller(role='operator', sources=frozenset({message['source_id']}), identity='operator')
+                channel = channel_service.ChannelService(con.execute('PRAGMA database_list').fetchone()[2], retention=policy.retention_policies())
+                try:
+                    channel.message(message_id, caller=caller)
+                finally:
+                    channel.close()
             result = intake_bridge.show(con, args.receipt, args.viewer)
         elif action in ("decide", "resolve"):
             from orchd import intake_decide
@@ -531,6 +604,7 @@ HOME_POLICY = {
     ("orch", "register-codex-probe"): "write",
     ("init",): "skip", ("install",): "skip", ("upgrade",): "skip",
     **{("channels", "layout", action): "skip" for action in ("plan", "apply", "rollback")}, ("quota",): "skip", ("doctor",): "skip",
+    **{("channels", action): "skip" for action in ("messages", "search", "message", "conversation", "sync", "sync-status", "attachment", "draft", "retention")},
     ("_entry-op",): "skip",  # its `orchd upgrade` / `orchd orch restart` children apply the policy themselves
     ("config", "show"): "skip", ("config", "get"): "skip", ("config", "set"): "skip", ("config", "unset"): "skip",
     ("binding",): "write",  # --status -> warn
@@ -558,7 +632,9 @@ ACTION_DEST = ("interface_action", "orch_action", "entry_action", "question_acti
 def _home_policy(args):
     cmd = args.cmd.split()[0]
     if cmd == "channels":
-        return HOME_POLICY[(cmd, args.channel_action, args.layout_action)]
+        if args.channel_action == "layout":
+            return HOME_POLICY[(cmd, args.channel_action, args.layout_action)]
+        return HOME_POLICY[(cmd, args.channel_action)]
     action = next((getattr(args, d) for d in ACTION_DEST if getattr(args, d, None)), None)
     policy = HOME_POLICY.get((cmd, action) if action else (cmd,), "write")  # unknown -> write (tests keep the table complete)
     if policy == "write" and (getattr(args, "dry_run", False) or (cmd == "binding" and args.status)
@@ -629,7 +705,7 @@ def main(argv=None):
             print(f"orchd pr-watch: {error}", file=sys.stderr)
             return 1
     if args.cmd == "interface":
-        from orchd import interface
+        from orchd.channels import service as channel_service
         import sqlite3
         con = None
         try:
@@ -637,18 +713,17 @@ def main(argv=None):
                 raise ValueError("interface rebind is Operator-only; run from a trusted local Operator shell")
             con = store.connect()
             if args.interface_action == "list":
-                result = interface.list_interfaces(con)
+                result = channel_service.legacy_interface(con, "list")
             elif args.interface_action == "rebind":
-                result = interface.rebind(con, Runtime(), old_id=args.old_id, new_id=args.new_id, dry_run=args.dry_run)
+                result = channel_service.legacy_interface(con, "rebind", runtime=Runtime(), payload=dict(old_id=args.old_id, new_id=args.new_id, dry_run=args.dry_run))
             else:
                 payload = json.load(sys.stdin)
                 if not isinstance(payload, dict):
                     raise ValueError("expected JSON object")
-                action = getattr(interface, args.interface_action)
                 if args.interface_action == "ack":
                     # Identity comes from the calling Orch, never adapter JSON.
                     payload['orch_id'] = os.environ.get("ORCHD_ORCH_ID") or None
-                result = action(con, Runtime(), **payload) if args.interface_action == "submit" else action(con, **payload)
+                result = channel_service.legacy_interface(con, args.interface_action, runtime=Runtime(), payload=payload)
             print(json.dumps(result, ensure_ascii=False))
             return 0
         except (ValueError, TypeError, OSError, sqlite3.Error) as error:
@@ -816,6 +891,9 @@ def main(argv=None):
             return 1
     if args.cmd == "channels":
         import sqlite3
+        if args.channel_action != "layout":
+            from orchd.channels import cli as channel_cli
+            return channel_cli.run(args)
         from orchd import channel_layout
         try:
             if args.layout_action == "plan":

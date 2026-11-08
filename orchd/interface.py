@@ -129,7 +129,7 @@ def rebind(con, rt, *, old_id, new_id, dry_run=False):
     return result
 
 
-def submit(con, rt, *, name, token, conversation, request_key, text):
+def submit(con, rt, *, name, token, conversation, request_key, text, _receipt_hook=None):
     for value in (conversation, request_key, text):
         _text(value)
     with store.immediate(con):
@@ -149,6 +149,8 @@ def submit(con, rt, *, name, token, conversation, request_key, text):
                         (time.time() + row['idle_seconds'], row['id']))
         else:
             rid = old['id']
+        if _receipt_hook:
+            _receipt_hook(con, rid, row)
     # The durable row is itself the outbox. No transport under the write lock.
     error = wake(con, rt, rid)
     return dict(request_id=rid, duplicate=old is not None, wake_error=error)

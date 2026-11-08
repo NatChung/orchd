@@ -199,7 +199,7 @@ def latest_revision(con, receipt_id):
                        (receipt_id,)).fetchone()[0]
 
 
-def submit(con, payload, *, producer, producers):
+def submit(con, payload, *, producer, producers, _receipt_hook=None):
     """Version-2 submit. Same identity returns the original receipt as `duplicate` (a new suggestion is appended
     as a new revision); the same key with different text or attachments is `conflict` and changes nothing."""
     from . import intake_notify
@@ -218,6 +218,8 @@ def submit(con, payload, *, producer, producers):
                 revision, appended = _add_suggestion(con, row["receipt_id"], suggestion, producer)
                 if appended:
                     intake_notify.upgrade(con, row["receipt_id"], urgency)
+            if _receipt_hook:
+                _receipt_hook(con, row['receipt_id'])
             return dict(intake._receipt(row, "duplicate"), suggestion_revision=revision)
         if owner is not None:
             intake._check_owner(con, owner)
@@ -241,6 +243,8 @@ def submit(con, payload, *, producer, producers):
             revision, _ = _add_suggestion(con, receipt_id, suggestion, producer)
         if owner is not None:
             intake_notify.enqueue(con, receipt_id, owner, urgency)
+        if _receipt_hook:
+            _receipt_hook(con, receipt_id)
         receipt = intake._receipt(con.execute("SELECT * FROM intake_events WHERE receipt_id=?",
                                               (receipt_id,)).fetchone(), "received")
     return dict(receipt, suggestion_revision=revision, urgency=urgency)
