@@ -119,7 +119,7 @@ class HomeMigrationTest(unittest.TestCase):
         self.assertIn("原檔已有的相同規則可以手動刪掉", "\n".join(lines))
         self.assertIn(str(backups[0]), "\n".join(lines))
         self.assertIn("restore:", "\n".join(lines))
-        self.assertEqual(self.applied(), [("channel-layout-v1",), ("computer-use-rules-v1",), ("interface-entry-tools-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",), ("orch-rules-v6",), ("orch-rules-v7",), ("orch-rules-v8",)])
+        self.assertEqual(self.applied(), [("channel-layout-v1",), ("channel-schema-v2",), ("computer-use-rules-v1",), ("interface-entry-tools-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",), ("orch-rules-v6",), ("orch-rules-v7",), ("orch-rules-v8",)])
         self.assertEqual(self.run_migrations()[0], 0)
         self.assertEqual(self.file.read_bytes(), content)
         self.assertEqual(list(self.backups("home").glob("AGENTS.md.*")), backups)
@@ -134,7 +134,7 @@ class HomeMigrationTest(unittest.TestCase):
         # A new release adds a new step; old steps stay recorded and are skipped.
         with patch.object(migrations, "STEPS", (("orch-rules-v1", migrations.update_rules), ("orch-rules-v2", migrations.update_rules))):
             self.assertEqual(self.run_migrations()[0], 0)
-        self.assertEqual(self.applied(), [("channel-layout-v1",), ("computer-use-rules-v1",), ("interface-entry-tools-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",), ("orch-rules-v6",), ("orch-rules-v7",), ("orch-rules-v8",)])
+        self.assertEqual(self.applied(), [("channel-layout-v1",), ("channel-schema-v2",), ("computer-use-rules-v1",), ("interface-entry-tools-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",), ("orch-rules-v6",), ("orch-rules-v7",), ("orch-rules-v8",)])
 
     def test_v2_step_refreshes_a_v1_block_with_the_intake_rule_and_keeps_outside_bytes(self):
         prefix, suffix = b"mine before\n", b"\nmine after"
@@ -150,7 +150,7 @@ class HomeMigrationTest(unittest.TestCase):
         self.assertTrue(content.startswith(prefix) and content.endswith(suffix))
         self.assertIn("polling".encode(), content)
         self.assertIn(b"orchd:managed:start v=8", content)
-        self.assertEqual(self.applied(), [("channel-layout-v1",), ("computer-use-rules-v1",), ("interface-entry-tools-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",), ("orch-rules-v6",), ("orch-rules-v7",), ("orch-rules-v8",)])
+        self.assertEqual(self.applied(), [("channel-layout-v1",), ("channel-schema-v2",), ("computer-use-rules-v1",), ("interface-entry-tools-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",), ("orch-rules-v6",), ("orch-rules-v7",), ("orch-rules-v8",)])
 
     def test_v4_refreshes_recorded_v3_and_preserves_user_content(self):
         prefix, suffix = b"before\r\n", b"\r\nafter"
@@ -584,15 +584,25 @@ class ChannelUpgradeTest(unittest.TestCase):
             trust.write_bytes(b"# synthetic trust config\n")
             binding = home / "state/orchd.db"
             binding.parent.mkdir()
-            binding.write_bytes(b"synthetic existing binding bytes")
+            from orchd import store
+            con = store.connect(binding)
+            con.execute("INSERT INTO entries VALUES('desktop','demo-orch','demo-thread',0,NULL)")
+            con.close()
+            before = binding.read_bytes()
             code, lines = migrations.run(home=home, env=env, dry_run=True)
             self.assertEqual(code, 0, lines)
+            self.assertEqual(binding.read_bytes(), before)
             self.assertFalse((home / "root/channel").exists())
             code, lines = migrations.run(home=home, env=env)
             self.assertEqual(code, 0, lines)
             self.assertEqual(interface.read_bytes(), b"original interface")
             self.assertEqual(trust.read_bytes(), b"# synthetic trust config\n")
-            self.assertEqual(binding.read_bytes(), b"synthetic existing binding bytes")
+            con = store.connect_readonly(binding)
+            try:
+                self.assertEqual(tuple(con.execute('SELECT * FROM entries').fetchone()),
+                                 ('desktop','demo-orch','demo-thread',0,None))
+            finally:
+                con.close()
             self.assertTrue((home / "root/channel/line/config.toml").is_file())
 
     def test_upgrade_uses_previously_registered_custom_home(self):

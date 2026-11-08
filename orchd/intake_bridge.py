@@ -208,6 +208,8 @@ def submit(con, payload, *, producer, producers, _receipt_hook=None):
     digest = _identity_hash(event, content)
     urgency = _suggestion_urgency(suggestion)
     with store.immediate(con):
+        from .channels.repository import require_legacy_admission
+        require_legacy_admission(con, provider=event['provider'], account=event['account'])
         row = con.execute("SELECT * FROM intake_events WHERE provider=? AND account=? AND event_id=?",
                           (event["provider"], event["account"], event["event_id"])).fetchone()
         if row is not None:

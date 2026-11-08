@@ -6,7 +6,8 @@ from orchd import store
 
 
 def _statements():
-    sql = files('orchd.channels').joinpath('migrations/0001.sql').read_text(encoding='utf-8')
+    sql = '\n'.join(files('orchd.channels').joinpath('migrations/' + name).read_text(encoding='utf-8')
+                    for name in ('0001.sql', '0002.sql'))
     statement = ''
     for line in sql.splitlines(keepends=True):
         statement += line
@@ -16,6 +17,35 @@ def _statements():
             statement = ''
     if statement.strip():
         raise ValueError('incomplete channel migration')
+
+
+def schema_plan(path):
+    """Validate existing channel objects on a private copy, never migrate in place."""
+    from pathlib import Path
+    from orchd.stats import open_snapshot
+    path = Path(path)
+    result = dict(version=2, status='pending', rollback='retain additive tables')
+    if not path.is_file():
+        return result
+    expected = sqlite3.connect(':memory:')
+    try:
+        for statement in _statements():
+            expected.execute(statement)
+        objects = expected.execute("SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND name LIKE 'channel_%'").fetchall()
+    finally:
+        expected.close()
+    with open_snapshot(path) as snap:
+        for kind, name, sql in objects:
+            actual = snap.con.execute('SELECT sql FROM sqlite_master WHERE type=? AND name=?', (kind,name)).fetchone()
+            if actual and actual[0] != sql:
+                raise ValueError('incompatible channel schema: ' + name)
+        if snap.con.execute("SELECT 1 FROM sqlite_master WHERE name='orchd_channel_migrations'").fetchone():
+            versions = {r[0] for r in snap.con.execute('SELECT version FROM orchd_channel_migrations')}
+            if versions - {1,2}:
+                raise ValueError('unsupported channel migration version')
+            if 2 in versions:
+                result['status'] = 'current'
+    return result
 
 
 def connect(path=None):
@@ -42,7 +72,7 @@ def connect(path=None):
         with store.immediate(con):
             con.execute('CREATE TABLE IF NOT EXISTS orchd_channel_migrations(version INTEGER PRIMARY KEY)')
             versions = {row[0] for row in con.execute('SELECT version FROM orchd_channel_migrations')}
-            if versions - {1}:
+            if versions - {1, 2}:
                 raise ValueError('unsupported channel migration version')
             for statement in _statements():
                 con.execute(statement)
@@ -51,6 +81,7 @@ def connect(path=None):
                 if actual is None or actual[0] != sql:
                     raise ValueError(f'incompatible channel schema: {name}')
             con.execute('INSERT OR IGNORE INTO orchd_channel_migrations VALUES (1)')
+            con.execute('INSERT OR IGNORE INTO orchd_channel_migrations VALUES (2)')
         return con
     except BaseException:
         con.close()
@@ -184,6 +215,7 @@ def claim_outbound(con, source_id, adapter_id, now, limit, check_enabled):
     from .models import canonical
     results = []
     with store.immediate(con):
+        require_admission(con, source_id, 'adapter', sending=True)
         check_enabled()
         src = source(con, source_id)
         if not src['enabled'] or src['adapter_id'] != adapter_id:
@@ -268,9 +300,10 @@ def record_outbound_outcome(con, delivery_id, attempt_no, outcome, receipt, adap
         return _finish_outbound(con,delivery,outcome,receipt,now)
 
 
-def recover_outbound(con, now):
-    with store.immediate(con):
-        rows = con.execute("SELECT * FROM channel_deliveries WHERE kind='outbound' AND state='claimed'").fetchall()
+def recover_outbound(con, now, *, source_id=None, in_transaction=False):
+    from contextlib import nullcontext
+    with nullcontext() if in_transaction else store.immediate(con):
+        rows = con.execute("SELECT * FROM channel_deliveries WHERE kind='outbound' AND state='claimed' AND (? IS NULL OR source_id=?)", (source_id, source_id)).fetchall()
         for row in rows:
             con.execute("UPDATE channel_delivery_attempts SET state='uncertain',finished_at=?,error_code='abandoned_claim' WHERE delivery_id=? AND state='started'", (now.isoformat(),row['id']))
             _finish_outbound(con,row,'uncertain',None,now)
@@ -325,6 +358,7 @@ def receive(con, source_id, event, adapter, clock, *, in_transaction=False, auto
     origin = event['origin']
     origin_key = digest(origin)
     with nullcontext() if in_transaction else store.immediate(con):
+        mode = require_admission(con, source_id, 'adapter' if not in_transaction else 'legacy')
         source = con.execute('SELECT * FROM channel_sources WHERE id=?', (source_id,)).fetchone()
         if source is None or not source['enabled'] or source['adapter_id'] != adapter:
             raise PermissionError('adapter not authorized for source')
@@ -345,16 +379,18 @@ def receive(con, source_id, event, adapter, clock, *, in_transaction=False, auto
             if row['content_hash'] != content_hash:
                 return {'status':'conflict','message_id':old['message_id'],'receipt_id':row['intake_receipt_id'],'review_required':True}
             state = con.execute('SELECT state FROM intake_events WHERE receipt_id=?', (row[0],)).fetchone()
-            if suggestion and state and state[0] == 'received':
+            if suggestion and state and state[0] == 'received' and mode != 'shadow':
                 from orchd import intake_notify
                 _, appended = intake_bridge._add_suggestion(con, row[0], suggestion, adapter)
                 if appended:
                     intake_notify.upgrade(con, row[0], intake_bridge._suggestion_urgency(suggestion))
-            return {'status':'duplicate','message_id':old['message_id'],'receipt_id':row[0]}
+            owner_row = con.execute('SELECT owner_orch FROM intake_events WHERE receipt_id=?', (row[0],)).fetchone()
+            if mode != 'adapter' or owner_row[0] is not None or not con.execute('SELECT 1 FROM channel_cutovers WHERE source_id=?', (source_id,)).fetchone():
+                return {'status':'duplicate','message_id':old['message_id'],'receipt_id':row[0]}
         if con.execute("SELECT 1 FROM channel_messages m JOIN intake_content c ON c.receipt_id=m.intake_receipt_id WHERE m.origin_key=? AND m.deleted_at IS NOT NULL AND c.unavailable_reason='deleted' LIMIT 1", (origin_key,)).fetchone():
             raise ValueError('origin tombstoned')
         route = _matching_route(con, source_id, origin['conversation_ref'], event['sender_ref'])
-        owner = route['owner_orch'] if route and route['mode'] != 'observer' else None
+        owner = route['owner_orch'] if route and route['mode'] != 'observer' and mode != 'shadow' else None
         existing = con.execute('SELECT * FROM channel_messages WHERE origin_key=? AND revision_key=?', (origin_key,event['revision_key'])).fetchone()
         if existing:
             import json
@@ -379,7 +415,7 @@ def receive(con, source_id, event, adapter, clock, *, in_transaction=False, auto
                 intake_notify.enqueue(con, existing['intake_receipt_id'], owner)
                 con.execute("INSERT INTO channel_deliveries(id,kind,source_id,message_id,route_id,route_version,authority_epoch,target_snapshot,payload_hash,state,idempotency_key,created_at,updated_at) VALUES(?,'wake',?,?,?,?,?,?,?,'queued',?,?,?)",
                             ('cd_'+uuid.uuid4().hex,source_id,existing['id'],route['id'],route['version'],route['authority_epoch'],canonical({'owner_orch':owner}),content_hash,'wake:'+existing['id'],now,now))
-            con.execute('INSERT INTO channel_observations VALUES(?,?,?,?,?,?)',(source_id,event['transport_event_key'],origin_key,existing['id'],event_hash,now))
+            con.execute('INSERT OR IGNORE INTO channel_observations VALUES(?,?,?,?,?,?)',(source_id,event['transport_event_key'],origin_key,existing['id'],event_hash,now))
             return {'status':'duplicate','message_id':existing['id'],'receipt_id':existing['intake_receipt_id']}
         loop_status, provenance = _loop_guard(con, origin, automation, now)
         if loop_status not in ('human', 'allowed') or event['content'].get('unavailable_reason') == 'deleted':
@@ -521,6 +557,7 @@ def source(con, source_id):
 
 def acquire_source_lease(con, source_id, holder, now, until):
     with store.immediate(con):
+        require_admission(con, source_id, 'adapter')
         row = con.execute('SELECT * FROM channel_source_leases WHERE source_id=?', (source_id,)).fetchone()
         if row and row['lease_until'] > now:
             return None
@@ -540,6 +577,7 @@ def release_source_lease(con, source_id, holder, generation, now):
 
 def renew_source_lease(con, source_id, holder, generation, now, until):
     with store.immediate(con):
+        require_admission(con, source_id, 'adapter')
         count = con.execute('UPDATE channel_source_leases SET lease_until=? WHERE source_id=? AND holder_id=? AND generation=? AND lease_until>?',
                             (until, source_id, holder, generation, now)).rowcount
         if count != 1:
@@ -554,6 +592,7 @@ def checkpoint(con, source_id, scope):
 def commit_checkpoint(con, source_id, scope, cursor, receipts, holder, generation, now):
     from .models import digest
     with store.immediate(con):
+        require_admission(con, source_id, 'adapter')
         lease = con.execute('SELECT * FROM channel_source_leases WHERE source_id=?', (source_id,)).fetchone()
         if not lease or lease['holder_id'] != holder or lease['generation'] != generation or lease['lease_until'] <= now:
             raise PermissionError('source lease lost')
@@ -569,6 +608,7 @@ def commit_checkpoint(con, source_id, scope, cursor, receipts, holder, generatio
 
 
 def _require_lease(con, source_id, holder, generation, now):
+    require_admission(con, source_id, 'adapter')
     row = con.execute('SELECT * FROM channel_source_leases WHERE source_id=?', (source_id,)).fetchone()
     if not row or row['holder_id'] != holder or row['generation'] != generation or row['lease_until'] <= now:
         raise PermissionError('source lease lost')
@@ -663,6 +703,7 @@ def link_legacy_intake(con, source_id, receipt_id, *, in_transaction=False):
     from datetime import datetime, timezone
     from .models import digest
     with nullcontext() if in_transaction else store.immediate(con):
+        require_admission(con, source_id, 'legacy')
         prior=con.execute("SELECT new_id FROM channel_legacy_refs WHERE system='intake' AND old_id=? AND new_kind='message'",(receipt_id,)).fetchone()
         if prior:
             return {'status':'linked','message_id':prior[0],'receipt_id':receipt_id}
@@ -760,6 +801,68 @@ def worker_identity(con, worktree):
 
 def database_path(con):
     return con.execute("PRAGMA database_list").fetchone()[2]
+
+
+def require_admission(con, source_id, lane, *, sending=False):
+    """Check the durable fence inside the caller's write transaction."""
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE name='channel_cutovers'").fetchone():
+        return 'adapter'
+    row = con.execute('SELECT mode FROM channel_cutovers WHERE source_id=?', (source_id,)).fetchone()
+    if row is None:  # Prior compatibility; rollout must explicitly fence the source.
+        return 'adapter'
+    mode = row[0]
+    if mode == 'frozen' or (lane == 'legacy' and mode != 'legacy') or (lane == 'adapter' and mode == 'legacy') or (sending and mode != 'adapter'):
+        raise PermissionError('source admission fenced')
+    return mode
+
+
+def require_legacy_admission(con, *, provider=None, account=None, adapter=None):
+    if not con.execute("SELECT 1 FROM sqlite_master WHERE name='channel_sources'").fetchone():
+        return
+    provider = 'gmail' if provider == 'email' else provider
+    rows = con.execute('SELECT id FROM channel_sources WHERE (provider=? AND account_ref=?) OR adapter_id=?', (provider, account, adapter))
+    for row in rows:
+        require_admission(con, row[0], 'legacy')
+
+
+def cutover_ledger(con, source_id, *, after=0, through=None):
+    """Metadata-only ledger at a fixed message high water; no private content."""
+    from .models import digest
+    source(con, source_id)
+    if type(after) is not int or after < 0 or (through is not None and (type(through) is not int or through < after)):
+        raise ValueError('invalid high-water range')
+    high = con.execute('SELECT COALESCE(MAX(rowid),0) FROM channel_messages').fetchone()[0] if through is None else through
+    messages = [dict(r) for r in con.execute('SELECT m.rowid AS sequence,m.id,m.origin_key,m.revision_key,m.intake_receipt_id,m.deleted_at FROM channel_messages m JOIN channel_observations o ON o.message_id=m.id WHERE o.source_id=? AND m.rowid>? AND m.rowid<=? GROUP BY m.id ORDER BY m.rowid', (source_id, after, high))]
+    deliveries = [dict(r) for r in con.execute('SELECT id,kind,state,idempotency_key FROM channel_deliveries WHERE source_id=? ORDER BY id', (source_id,))]
+    attempts = [dict(r) for r in con.execute('SELECT a.delivery_id,a.attempt_no,a.state FROM channel_delivery_attempts a JOIN channel_deliveries d ON d.id=a.delivery_id WHERE d.source_id=? ORDER BY a.delivery_id,a.attempt_no', (source_id,))]
+    work = [dict(r) for r in con.execute('SELECT DISTINCT p.origin_key,p.revision_key,p.lane,p.state FROM channel_processing_claims p JOIN channel_messages m ON m.origin_key=p.origin_key AND m.revision_key=p.revision_key JOIN channel_observations o ON o.message_id=m.id WHERE o.source_id=? ORDER BY p.origin_key,p.revision_key,p.lane', (source_id,))]
+    result = dict(schema_version=1,source_id=source_id,after=after,high_water=high,messages=messages,deliveries=deliveries,attempts=attempts,work=work)
+    return {**result, 'digest': digest(result)}
+
+
+def cutover(con, source_id, mode, now, backfill=None):
+    if mode not in ('adapter', 'legacy', 'shadow', 'frozen'):
+        raise ValueError('invalid cutover mode')
+    with store.immediate(con):
+        source(con, source_id)
+        old = con.execute('SELECT mode FROM channel_cutovers WHERE source_id=?', (source_id,)).fetchone()
+        previous = old[0] if old else 'adapter'
+        if mode != previous:
+            lease = con.execute('SELECT lease_until FROM channel_source_leases WHERE source_id=?', (source_id,)).fetchone()
+            if lease and lease[0] > now.isoformat():
+                raise ValueError('stop and release the adapter before cutover')
+            if previous != 'frozen' and mode not in ('frozen', 'shadow'):
+                raise ValueError('freeze admission before changing writer')
+        if mode == 'frozen':
+            recover_outbound(con, now, source_id=source_id, in_transaction=True)
+        ledger = cutover_ledger(con, source_id)
+        if mode == 'legacy':
+            if any(d['state'] in ('claimed','sending','uncertain') for d in ledger['deliveries']):
+                raise ValueError('reconcile unknown external effects before restoring legacy sender')
+            if ledger['messages'] and backfill != ledger['digest']:
+                raise ValueError('incremental ledger backfill acknowledgement required')
+        con.execute('INSERT INTO channel_cutovers VALUES(?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET mode=excluded.mode,high_water=excluded.high_water,backfill_digest=excluded.backfill_digest,updated_at=excluded.updated_at', (source_id,mode,ledger['high_water'],backfill,now.isoformat()))
+        return dict(source_id=source_id,mode=mode,high_water=ledger['high_water'])
 
 
 def _loop_guard(con, origin, context, now):
