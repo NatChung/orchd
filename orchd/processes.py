@@ -154,16 +154,43 @@ def _predates_worktree(mark):
     return lambda proc: proc.create_time() < born
 
 
+def _started_by_another_account(proc, owner_known):
+    """Windows: a process gets its environment from whoever creates it, so one created by another account's
+    process (a system service starting ctfmon, ChtIME, taskhostw, a search or WMI host, ...) cannot carry the mark.
+    After a sign-in these start later than every older worktree, refuse environment reads, and used to block close.
+    UAC/AIS launches name the requesting process as parent, so an elevated child of a worker keeps a parent of ours
+    and still blocks. psutil's parent() rejects a parent PID reused after the child started. A process of ours whose
+    parent is gone stays unknown (it may be an orphaned worker child); for a process whose owner cannot be read, a
+    gone parent is enough, since nothing of ours is left that could have handed it the mark."""
+    try:
+        parent = proc.parent()
+        if parent is None:
+            return not owner_known
+        return not _owned_by_us(parent)
+    except psutil.AccessDenied:  # the parent's owner cannot be read: not this account
+        return True
+    except psutil.NoSuchProcess:
+        return not owner_known
+    except psutil.Error:
+        return False
+
+
 def _marked_task_process(proc, mark, exclude):
     """Apply one ownership gate to enumerated processes and newly found children."""
     try:
         owned = _owned_by_us(proc)
     except psutil.AccessDenied:
         # Unknown owners are never signalled. Exclude only with independent evidence.
-        if os.name == "nt" and (exclude(proc) or
-                environ_of(proc).get("ORCHD_WORKTREE") != mark):
-            return False
+        if os.name == "nt":
+            def unknown_unreadable(p):
+                return exclude(p) or _started_by_another_account(p, owner_known=False)
+            if environ_of(proc, exclude_unreadable=unknown_unreadable).get("ORCHD_WORKTREE") != mark:
+                return False
         raise
+    if os.name == "nt":
+        def own_unreadable(p):
+            return exclude(p) or _started_by_another_account(p, owner_known=True)
+        return owned and environ_of(proc, exclude_unreadable=own_unreadable).get("ORCHD_WORKTREE") == mark
     return owned and environ_of(proc, exclude_unreadable=exclude).get("ORCHD_WORKTREE") == mark
 
 

@@ -13,8 +13,13 @@ from orchd import app_worker, core, processes, store
 
 
 class FakeProc:
-    def __init__(self, pid, env=None, user="me", born=0.0, denied=False):
+    def __init__(self, pid, env=None, user="me", born=0.0, denied=False, parent=None):
         self.pid, self._env, self._user, self._born, self._denied = pid, env or {}, user, born, denied
+        self._parent = parent
+
+    def parent(self):
+        # By default a process is started by one of ours, so an unreadable one still blocks close.
+        return self._parent if self._parent is not None else FakeProc(1)
 
     def username(self):
         if self._user is None:
