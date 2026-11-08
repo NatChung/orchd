@@ -1,5 +1,5 @@
 # Operator 的 Desktop interface：只轉交原文給綁定的 Orch。由 `orchd init` 產生。
-# 讀不到家目錄、沒有網路、不能寫檔；只掛 orchd 的入口 MCP（relay／status／foreground）。
+# 讀不到家目錄、沒有網路、不能寫檔；只掛 orchd 的入口 MCP（relay／status／foreground／orch_restart／orch_upgrade／orch_op_status）。
 $INTERFACE_BOOTSTRAP
 model = $INTERFACE_MODEL
 model_reasoning_effort = $INTERFACE_EFFORT

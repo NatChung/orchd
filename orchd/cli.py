@@ -313,6 +313,7 @@ def build_parser():
     fl.add_argument("task_id")
     fl.add_argument("--after-pid", type=int)
     fl.add_argument("--turn-log", help=argparse.SUPPRESS)
+    sub.add_parser("_entry-op", help=argparse.SUPPRESS).add_argument("op_id")
     ar = sub.add_parser('_auto-retry', help=argparse.SUPPRESS)
     ar.add_argument('task_id')
     ar.add_argument('event_id', type=int)
@@ -524,6 +525,7 @@ HOME_POLICY = {
     ("orch", "list"): "write", ("orch", "attach"): "write",
     ("orch", "register-codex-probe"): "write",
     ("init",): "skip", ("upgrade",): "skip", ("quota",): "skip", ("doctor",): "skip",
+    ("_entry-op",): "skip",  # its `orchd upgrade` / `orchd orch restart` children apply the policy themselves
     ("config", "show"): "skip", ("config", "get"): "skip", ("config", "set"): "skip", ("config", "unset"): "skip",
     ("binding",): "write",  # --status -> warn
     ("entry", "thread"): "warn", ("entry", "reconcile"): "write",  # no --apply -> warn
@@ -826,6 +828,13 @@ def main(argv=None):
               else doctor.render(checks))
         return doctor.exit_code(checks)
 
+    if args.cmd == "_entry-op":  # detached runner for the interface's orch_restart / orch_upgrade
+        from orchd import entry_ops
+        try:
+            return entry_ops.run(args.op_id)
+        except ValueError as error:
+            print(f"orchd _entry-op: {error}", file=sys.stderr)
+            return 1
     if args.cmd == "upgrade":
         from orchd import upgrade
         code, lines = upgrade.upgrade(migrations_only=args.migrations_only, dry_run=args.dry_run)

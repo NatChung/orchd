@@ -87,6 +87,54 @@ def sync_interface_instructions(interface, backup_dir, *, dry_run=False):
     return True
 
 
+def sync_interface_entry_tools(interface, backup_dir, *, dry_run=False):
+    """Pre-approve entry tools added after init in an existing interface config; returns report lines.
+
+    Only appends missing [mcp_servers.orchd_entry.tools.NAME] tables; every other setting stays as it is. On Windows
+    an orchd-generated developer_instructions line from before the managed marker existed is also refreshed (and
+    marked, so later rule updates reach it); a hand-written one is left alone.
+    """
+    from . import mcp_server
+    file = Path(interface) / ".codex" / "config.toml"
+    if tomllib is None or not file.is_file():
+        return []
+    text = file.read_bytes().decode("utf-8")
+    old = tomllib.loads(text)
+    server = (old.get("mcp_servers") or {}).get("orchd_entry")
+    if not isinstance(server, dict):
+        return [f"skipped: {file} has no [mcp_servers.orchd_entry] (user-managed config)"]
+    names = [t["name"] for t in mcp_server.ENTRY_TOOLS]
+    missing = [name for name in names if name not in (server.get("tools") or {})]
+    new, lines = text, []
+    marker = "# orchd:interface-instructions"
+    legacy = old.get("developer_instructions")
+    if (os.name == "nt" and marker not in text and isinstance(legacy, str)
+            and legacy.startswith("<!-- orchd:managed:start")):
+        rules = interface_instructions(interface)
+        pattern = re.compile(r"(?m)^developer_instructions = [^\r\n]*(\r?\n|$)")
+        new, count = pattern.subn(lambda m: marker + (m[1] or "\n") + "developer_instructions = "
+                                  + _toml_string(rules) + m[1], new)
+        if count != 1 or tomllib.loads(new).get("developer_instructions") != rules:
+            raise ValueError(f"{file}: cannot safely update the interface instructions; regenerate this config")
+        lines.append("interface instructions refreshed")
+    if missing:
+        new += ("" if new.endswith("\n") else "\n") + _approvals("orchd_entry", missing)
+        lines.append("pre-approved entry tools: " + ", ".join(missing))
+    if new == text:
+        return [f"unchanged: {file}"]
+    parsed = tomllib.loads(new)
+    if ({k: v for k, v in parsed.items() if k not in ("developer_instructions", "mcp_servers")}
+            != {k: v for k, v in old.items() if k not in ("developer_instructions", "mcp_servers")}
+            or set(parsed["mcp_servers"]["orchd_entry"]["tools"]) < set(names)):
+        raise ValueError(f"{file}: entry tool update would change other settings; regenerate this config")
+    if dry_run:
+        return [f"would update {file}: " + "; ".join(lines)]
+    from . import home_migrations
+    backup = home_migrations.write_file(file, new.encode("utf-8"), Path(backup_dir))
+    return [f"updated: {file}: " + "; ".join(lines) + f"; backup: {backup}",
+            "Restart the Codex app (or open a new interface conversation) to load the new entry tools."]
+
+
 def planned_files(home, env, orchd_bin=None):
     """{target path: text} for every file init manages."""
     from . import mcp_server  # imported lazily: it pulls in the runtime
