@@ -145,23 +145,36 @@ def stop(con, task):
     # Cleanup uses recorded process identities, never the vanished/untrusted IPC path.
     if os.name == 'nt':
         from . import windows_job
+        receipt = None
         # Verify the supervisor identity before opening the generation-specific job.
         supervisor = process(task['supervisor_identity'])
         if supervisor is None:
             if process(task['server_identity']) is not None:
                 raise RuntimeError('server survives without its owning job; stop refused')
-            return None
-        if not windows_job.terminate(task['generation'], supervisor):
-            if process(task['supervisor_identity']) is None and process(task['server_identity']) is None:
-                return None
+        elif windows_job.terminate(task['generation'], supervisor):
+            for raw in (task['supervisor_identity'], task['server_identity']):
+                deadline = time.monotonic() + 5
+                while process(raw) is not None and time.monotonic() < deadline:
+                    time.sleep(.05)
+                if process(raw) is not None:
+                    raise RuntimeError('worker job not confirmed stopped')
+            receipt = {'terminated_job': task['generation']}
+        elif process(task['supervisor_identity']) is not None or process(task['server_identity']) is not None:
             raise RuntimeError('worker job unavailable; stop refused')
-        for raw in (task['supervisor_identity'], task['server_identity']):
-            deadline = time.monotonic() + 5
-            while process(raw) is not None and time.monotonic() < deadline:
-                time.sleep(.05)
-            if process(raw) is not None:
-                raise RuntimeError('worker job not confirmed stopped')
-        return {'terminated_job': task['generation']}
+        # Viewers and processes that escaped the job (wt-launched viewers, WSL shells) are outside it: stop
+        # registered viewers by identity, then sweep what still carries this task's ORCHD_WORKTREE mark.
+        viewers = [r['identity'] for r in con.execute(
+            'SELECT identity FROM worker_viewers WHERE task_id=? AND generation=?',
+            (task['id'], task['generation'])).fetchall()] if con is not None else []
+        for raw in viewers:
+            stop_identity(raw)
+        if any(process(raw) is not None for raw in viewers):
+            raise RuntimeError('worker viewer not confirmed stopped')
+        worktree = task['worktree'] if 'worktree' in task.keys() else None
+        swept = cleanup_processes(worktree, {}) if worktree else None
+        if swept:
+            receipt = {**(receipt or {}), 'escaped': swept}
+        return receipt
     roots=[p for p in (process(task['supervisor_identity']), process(task['server_identity'])) if p]
     captured = task_processes(task['worktree'], roots) if task['worktree'] else {}
     viewers = con.execute('SELECT identity FROM worker_viewers WHERE task_id=? AND generation=?',

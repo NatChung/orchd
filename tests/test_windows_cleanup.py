@@ -1,0 +1,143 @@
+"""Windows close: process ownership without uids, and app-server leftovers outside the worker job."""
+import json
+import os
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import psutil
+
+from orchd import app_worker, processes
+
+
+class FakeProc:
+    def __init__(self, pid, env=None, user="me", born=0.0, denied=False):
+        self.pid, self._env, self._user, self._born, self._denied = pid, env or {}, user, born, denied
+
+    def username(self):
+        if self._user is None:
+            raise psutil.AccessDenied(self.pid)
+        return self._user
+
+    def environ(self):
+        if self._denied:
+            raise psutil.AccessDenied(self.pid)
+        return self._env
+
+    def create_time(self):
+        return self._born
+
+    def children(self):
+        return []
+
+    def is_running(self):
+        return True
+
+    def status(self):
+        return psutil.STATUS_RUNNING
+
+
+@unittest.skipUnless(os.name == "nt", "Windows ownership rules")
+class WindowsTaskProcessesTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.worktree = str(Path(self.tmp.name).resolve())
+        self.born = os.stat(self.worktree).st_ctime
+        patcher = patch.object(processes, "_WINDOWS_USER", "me")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def scan(self, procs, worktree=None):
+        with patch.object(processes.psutil, "process_iter", return_value=procs), \
+             patch.object(processes.time, "sleep"):
+            return processes.task_processes(worktree or self.worktree)
+
+    def test_marked_process_of_this_user_is_found_without_uids(self):
+        mine = FakeProc(10, {"ORCHD_WORKTREE": self.worktree}, born=self.born + 1)
+        other = FakeProc(11, {"ORCHD_WORKTREE": self.worktree}, user="someone-else", born=self.born + 1)
+        system = FakeProc(12, user=None)
+        self.assertEqual(list(self.scan([mine, other, system])), [10])
+
+    def test_unreadable_helper_older_than_the_worktree_is_skipped(self):
+        ctfmon = FakeProc(20, born=self.born - 60, denied=True)
+        self.assertEqual(self.scan([ctfmon]), {})
+
+    def test_unreadable_process_newer_than_the_worktree_keeps_close_fail_closed(self):
+        late = FakeProc(21, born=self.born + 1, denied=True)
+        with self.assertRaisesRegex(RuntimeError, "cannot inspect process 21"):
+            self.scan([late])
+
+    def test_gone_worktree_skips_unreadable_processes(self):
+        late = FakeProc(22, born=time.time(), denied=True)
+        self.assertEqual(self.scan([late], worktree=str(Path(self.worktree) / "gone")), {})
+
+
+class WindowsAppWorkerStopTests(unittest.TestCase):
+    """The job does not contain wt-launched viewers or WSL shells; close must still stop them."""
+
+    def setUp(self):
+        self.con = MagicMock()
+        self.con.execute.return_value.fetchall.return_value = [{"identity": "viewer-1"}]
+        self.task = {"id": "t1", "generation": "g" * 32, "worktree": "C:/wt/t1",
+                     "supervisor_identity": "sup", "server_identity": "srv"}
+        self.alive = {"viewer-1"}
+
+    def stop(self, terminated=True, swept=None):
+        stopped = []
+
+        def stop_identity(raw):
+            stopped.append(raw)
+            self.alive.discard(raw)
+
+        job = MagicMock()
+        job.terminate.return_value = terminated
+        with patch.object(app_worker.os, "name", "nt"), \
+             patch("orchd.windows_job", job, create=True), \
+             patch.object(app_worker, "process", side_effect=lambda raw: object() if raw in self.alive else None), \
+             patch.object(app_worker, "stop_identity", side_effect=stop_identity), \
+             patch.object(app_worker, "cleanup_processes", return_value=swept) as cleanup:
+            result = app_worker.stop(self.con, self.task)
+        return result, stopped, cleanup
+
+    def test_dead_job_still_stops_viewers_and_sweeps_escaped_processes(self):
+        receipt = {"terminated": [3096], "killed": [], "exited": [3096]}
+        result, stopped, cleanup = self.stop(swept=receipt)
+        self.assertEqual(stopped, ["viewer-1"])
+        cleanup.assert_called_once_with("C:/wt/t1", {})
+        self.assertEqual(result, {"escaped": receipt})
+
+    def test_live_job_is_terminated_then_viewers_stopped(self):
+        self.alive |= {"sup"}
+        job_alive = self.alive
+
+        def terminate(generation, supervisor):
+            job_alive.discard("sup")
+            return True
+
+        job = MagicMock()
+        job.terminate.side_effect = terminate
+        with patch.object(app_worker.os, "name", "nt"), \
+             patch("orchd.windows_job", job, create=True), \
+             patch.object(app_worker, "process", side_effect=lambda raw: object() if raw in self.alive else None), \
+             patch.object(app_worker, "stop_identity", side_effect=lambda raw: self.alive.discard(raw)), \
+             patch.object(app_worker, "cleanup_processes", return_value=None):
+            result = app_worker.stop(self.con, self.task)
+        self.assertEqual(result, {"terminated_job": "g" * 32})
+        self.assertEqual(self.alive, set())
+
+    def test_viewer_that_survives_keeps_the_task_open(self):
+        with patch.object(app_worker.os, "name", "nt"), \
+             patch("orchd.windows_job", MagicMock(), create=True), \
+             patch.object(app_worker, "process", side_effect=lambda raw: object() if raw == "viewer-1" else None), \
+             patch.object(app_worker, "stop_identity"), \
+             patch.object(app_worker, "cleanup_processes") as cleanup:
+            with self.assertRaisesRegex(RuntimeError, "viewer not confirmed stopped"):
+                app_worker.stop(self.con, self.task)
+        cleanup.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()
