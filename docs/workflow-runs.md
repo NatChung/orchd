@@ -24,7 +24,7 @@ The same request and idempotency key with the same plan returns the existing run
 
 ## Let the core advance
 
-Start arms a detached core runner for this profile through `python -P -m orchd.cli`. The package has no `orchd.__main__`; launching it with `-m orchd` fails before reconciliation. `workflow run serve` is part of the installed daemon package, not a script copied into an Orch home. Its lifetime lock prevents two active service loops for the same database. A lost wake is recovered by periodic reconciliation.
+Start arms a detached core runner for this profile through `python -P -m orchd.cli`. The package has no `orchd.__main__`; launching it with `-m orchd` fails before reconciliation. `workflow run serve` is part of the installed daemon package, not a script copied into an Orch home. Its lifetime lock prevents two active service loops for the same database. A lost wake is recovered by periodic reconciliation. After a successful controlled Orch restart, the core ensures this same profile runner outside the owner-migration transaction; an existing lifetime lock prevents a duplicate loop. The stored run and workflow pin are retained.
 
 A step input is an entire string from fixed context, a previously captured output, or an allowed prior-task metadata reference. The core preserves whitespace and Unicode. It captures output bytes once; subsequent changes to the producer file cannot silently alter downstream input. It checks the registered repository and pinned workflow before dispatch.
 

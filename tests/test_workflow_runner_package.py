@@ -6,8 +6,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
+from unittest.mock import patch
+
+from orchd import interface, workflow_runs, workflows
+from orchd.file_lock import try_lock
+from tests import test_orch_restart as restart_fixtures
 
 
 class PackagedWorkflowRunnerTests(unittest.TestCase):
@@ -77,3 +83,53 @@ finally:
             self.assertEqual(observed['state'], 'blocked')
             self.assertEqual(observed['tasks'], 0)
             self.assertFalse((profile / 'home').exists())
+
+
+class WorkflowRunnerRestartTests(unittest.TestCase):
+    def fixture(self):
+        fixture = restart_fixtures.RestartTest()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        return fixture
+
+    def test_restart_ensures_existing_runner_after_committed_owner_migration(self):
+        f = self.fixture()
+        registration = interface.register(f.con, name='example-interface', orch_id='old')
+        request = interface.submit(f.con, f.rt, name='example-interface', token=registration['token'],
+                                   conversation='example-chat', request_key='existing-run', text='Continue this fixed operation')
+        plan = dict(workflow=dict(name='example-workflow', commit='a'*40, digest='sha256:'+'b'*64), steps=[])
+        raw = workflows.canonical(plan)
+        now = time.time()
+        f.con.execute('INSERT INTO workflow_runs(id,request_id,orch_thread,idempotency_key,plan,plan_digest,origin,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                      ('existing-run', request['request_id'], 'old', 'existing-run', raw, workflow_runs._hash(raw), '{}', 'active', now, now))
+        real_ensure = workflow_runs.ensure_runner
+        checks = []
+        def checked(con, rt):
+            self.assertFalse(con.in_transaction)
+            owner = con.execute('SELECT orch_thread FROM workflow_runs WHERE id=?', ('existing-run',)).fetchone()[0]
+            request_owner = con.execute('SELECT orch_id FROM interface_requests WHERE id=?', (request['request_id'],)).fetchone()[0]
+            self.assertNotEqual(owner, 'old')
+            self.assertEqual(owner, request_owner)
+            checks.append(owner)
+            return real_ensure(con, rt)
+        # Model the lifetime lock of an existing service. Real ensure_runner must not
+        # start a second process after migrating the same operation to the new Orch.
+        with f.path.with_suffix('.workflow-service.lock').open('a+b') as service:
+            try_lock(service)
+            with patch.object(workflow_runs, 'ensure_runner', side_effect=checked) as ensure, patch('subprocess.Popen') as spawn:
+                result = f.run_restart()
+        self.assertEqual(result['status'], 'done', result)
+        ensure.assert_called_once()
+        spawn.assert_not_called()
+        self.assertEqual(result['workflow_runner']['state'], 'running')
+        self.assertEqual(checks, [result['new_orch']])
+        self.assertEqual(f.con.execute('SELECT COUNT(*) FROM workflow_runs').fetchone()[0], 1)
+        self.assertEqual(f.con.execute('SELECT COUNT(*) FROM tasks').fetchone()[0], 0)
+
+    def test_failed_restart_does_not_arm_a_workflow_runner(self):
+        f = self.fixture()
+        f.rt.start_orch.side_effect = RuntimeError('Synthetic startup failure')
+        with patch.object(workflow_runs, 'ensure_runner') as ensure:
+            result = f.run_restart()
+        self.assertEqual(result['status'], 'failed')
+        ensure.assert_not_called()

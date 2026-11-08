@@ -167,6 +167,8 @@ def restart(con, rt, old_id=None, model=None, dry_run=False):
                 result["interfaces_migrated"] = migrated
         # The durable sweep also recovers interruption before this best-effort wake.
         result["interface_wakes"] = interface.sweep(con, rt)
+        from . import workflow_runs
+        result["workflow_runner"] = workflow_runs.ensure_runner(con, rt)
         result.update(status="done", step="done", first_prompt="盤點上次")
     except Exception as error:
         result.update(error=f"{type(error).__name__}: {error}", manual_recovery=remedy)
