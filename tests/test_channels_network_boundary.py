@@ -53,7 +53,7 @@ class NetworkBoundaryTest(unittest.TestCase):
                 if isinstance(node,ast.Import): names=[a.name for a in node.names]
                 elif isinstance(node,ast.ImportFrom): names=[node.module or '']
                 else: continue
-                if any(name.startswith(('googleapiclient','google.oauth2','imaplib')) for name in names): offenders.append(str(path))
+                if any(name.startswith(('googleapiclient','google.oauth2','imaplib','slack_sdk','linebot')) for name in names): offenders.append(str(path))
         self.assertEqual(offenders,[])
         from orchd import mcp_server
         names={item['name'] for item in mcp_server.TOOLS}
