@@ -54,7 +54,7 @@ class HomeMigrationTest(unittest.TestCase):
         self.assertIn("原檔已有的相同規則可以手動刪掉", "\n".join(lines))
         self.assertIn(str(backups[0]), "\n".join(lines))
         self.assertIn("restore:", "\n".join(lines))
-        self.assertEqual(self.applied(), [("computer-use-rules-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",)])
+        self.assertEqual(self.applied(), [("computer-use-rules-v1",), ("interface-entry-tools-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",), ("orch-rules-v6",)])
         self.assertEqual(self.run_migrations()[0], 0)
         self.assertEqual(self.file.read_bytes(), content)
         self.assertEqual(list(self.backups("home").glob("AGENTS.md.*")), backups)
@@ -69,7 +69,7 @@ class HomeMigrationTest(unittest.TestCase):
         # A new release adds a new step; old steps stay recorded and are skipped.
         with patch.object(migrations, "STEPS", (("orch-rules-v1", migrations.update_rules), ("orch-rules-v2", migrations.update_rules))):
             self.assertEqual(self.run_migrations()[0], 0)
-        self.assertEqual(self.applied(), [("computer-use-rules-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",)])
+        self.assertEqual(self.applied(), [("computer-use-rules-v1",), ("interface-entry-tools-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",), ("orch-rules-v6",)])
 
     def test_v2_step_refreshes_a_v1_block_with_the_intake_rule_and_keeps_outside_bytes(self):
         prefix, suffix = b"mine before\n", b"\nmine after"
@@ -85,7 +85,7 @@ class HomeMigrationTest(unittest.TestCase):
         self.assertTrue(content.startswith(prefix) and content.endswith(suffix))
         self.assertIn("polling".encode(), content)
         self.assertIn(b"orchd:managed:start v=5", content)
-        self.assertEqual(self.applied(), [("computer-use-rules-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",)])
+        self.assertEqual(self.applied(), [("computer-use-rules-v1",), ("interface-entry-tools-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",), ("orch-rules-v6",)])
 
     def test_v4_refreshes_recorded_v3_and_preserves_user_content(self):
         prefix, suffix = b"before\r\n", b"\r\nafter"
@@ -237,7 +237,7 @@ class HomeMigrationTest(unittest.TestCase):
         overridden = dict(self.env, ORCHD_ROOT=str(self.home / "other"))
         self.assertEqual(migrations.run(home=self.home, env=overridden)[0], 0)
         self.assertTrue((self.home / "other/home/AGENTS.md").is_file())
-        self.assertEqual(len(self.applied()), 12)  # 6 steps x 2 scopes; step completion is scoped to home paths
+        self.assertEqual(len(self.applied()), 16)  # 8 steps x 2 scopes; step completion is scoped to home paths
 
     def test_cli_dry_run_and_migrations_only_need_no_uv_install(self):
         env = {**{k: v for k, v in os.environ.items() if not k.startswith("ORCHD_")}, **self.env, "ORCHD_ROOT": str(self.home / "orch")}

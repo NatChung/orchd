@@ -134,10 +134,17 @@ def update_rules(folders, dry_run, lines, backup_root):
                 lines.append("updated: managed Windows interface instructions")
 
 
+def update_entry_tools(folders, dry_run, lines, backup_root):
+    """Pre-approve entry tools added after init (orch_restart, orch_upgrade, orch_op_status) in the interface config."""
+    lines.extend(bootstrap.sync_interface_entry_tools(folders["interface"], backup_root / "interface-config",
+                                                      dry_run=dry_run))
+
+
 # Append ordered (stable id, idempotent callable) steps for future releases.
 STEPS = (("orch-rules-v1", update_rules), ("orch-rules-v2", update_rules),
          ("computer-use-rules-v1", update_rules), ("orch-rules-v3", update_rules),
-         ("orch-rules-v4", update_rules), ("orch-rules-v5", update_rules))
+         ("orch-rules-v4", update_rules), ("orch-rules-v5", update_rules),
+         ("orch-rules-v6", update_rules), ("interface-entry-tools-v1", update_entry_tools))
 
 
 def run(*, home=None, env=None, dry_run=False):
