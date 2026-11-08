@@ -178,7 +178,7 @@ def read_usage(usage):
 
 
 def _lines(path):
-    for line in Path(path).read_text(errors="replace").splitlines():
+    for line in Path(path).read_text(encoding="utf-8", errors="replace").splitlines():
         try:
             entry = json.loads(line)
         except ValueError:
