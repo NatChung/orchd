@@ -46,6 +46,8 @@ class WindowsLineageTest(unittest.TestCase):
         self.worktree.mkdir()
         self.mark = str(self.worktree.resolve())
         for patcher in (mock.patch.object(processes.os, "name", "nt"),
+                        # Synthetic PIDs must not collide with the test runner's real PID.
+                        mock.patch.object(processes.os, "getpid", return_value=1),
                         mock.patch.object(processes, "_WINDOWS_USER", ME),
                         # With os.name patched, Path() would pick WindowsPath on POSIX and fail to instantiate.
                         mock.patch.object(processes, "Path", type(self.worktree)),
@@ -61,6 +63,12 @@ class WindowsLineageTest(unittest.TestCase):
 
     def service(self):
         return proc(4, owner="NT AUTHORITY\\SYSTEM")
+
+    def test_scanner_own_process_is_skipped_without_inspection(self):
+        scanner = proc(1, owner=None, environ={"ORCHD_WORKTREE": self.mark})
+        self.assertEqual(self.scan(scanner), {})
+        scanner.username.assert_not_called()
+        scanner.environ.assert_not_called()
 
     def test_own_helper_started_by_a_service_after_the_worktree_does_not_block(self):
         # ctfmon.exe / ChtIME.exe / taskhostw.exe after a new sign-in

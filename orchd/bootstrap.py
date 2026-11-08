@@ -184,7 +184,7 @@ def planned_files(home, env, orchd_bin=None):
                 files[target / source.relative_to(TEMPLATES / base)] = text
     files[orch / ".codex" / "config.toml"] += _approvals("orchd", [t["name"] for t in mcp_server.TOOLS])
     # Desktop MCP servers do not inherit the shell that ran init.
-    overrides = {key: env[key] for key in ("ORCHD_HOME", "ORCHD_CONFIG_DIR") if env.get(key)}
+    overrides = {key: env[key] for key in paths.PROFILE_PATH_VARS if env.get(key)}
     if env.get("ORCHD_PROJECTS"):
         overrides["ORCHD_PROJECTS"] = str(paths.projects_dir(home, env))
     if overrides:

@@ -57,7 +57,9 @@ class PackageInstallTests(unittest.TestCase):
             for name in ("shell_tool", "unified_exec", "plugins", "apps", "browser_use", "computer_use"):
                 self.assertFalse(cfg["features"][name], name)
             server = cfg["mcp_servers"]["orchd_entry"]
-            self.assertEqual(set(server["tools"]), {"status", "relay", "foreground", "orch_restart", "orch_upgrade", "orch_op_status"})
+            self.assertEqual(set(server["tools"]),
+                             {"status", "relay", "foreground", "orch_restart", "orch_upgrade", "orch_op_status",
+                              "instance_check", "instance_apply"})
             self.assertTrue(Path(server["command"]).parent.resolve().is_relative_to((root / "tools").resolve()),
                             f"unexpected MCP command {server['command']} for tool root {root}")
             self.assertNotIn(str(source), server["command"])
@@ -75,6 +77,8 @@ class PackageInstallTests(unittest.TestCase):
             self.assertEqual(mcp.returncode, 0, mcp.stdout + mcp.stderr)
             responses = [json.loads(line) for line in mcp.stdout.splitlines() if line.strip()]
             inventory = next(item["result"]["tools"] for item in responses if item.get("id") == 2)
-            self.assertEqual({tool["name"] for tool in inventory}, {"status", "relay", "foreground", "orch_restart", "orch_upgrade", "orch_op_status"})
+            self.assertEqual({tool["name"] for tool in inventory},
+                             {"status", "relay", "foreground", "orch_restart", "orch_upgrade", "orch_op_status",
+                              "instance_check", "instance_apply"})
             self.assertFalse((home / ".codex" / "config.toml").exists())
             self.assertEqual(set(json.loads(command("init", "--no-trust"))["files"].values()), {"unchanged"})

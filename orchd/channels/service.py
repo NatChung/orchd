@@ -518,6 +518,8 @@ def legacy_interface(con, operation, *, runtime=None, actor=None, payload=None):
             channel.close()
         return result
     if operation in ('reply','dismiss'):
+        from orchd import workflow_runs
+        workflow_runs.guard_interface_reply(con, payload.get('request_id'), actor)
         if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='channel_legacy_refs'").fetchone():
             link = con.execute("SELECT new_id FROM channel_legacy_refs WHERE system='interface' AND old_id=? AND new_kind='message'", (str(payload.get('request_id')),)).fetchone()
             if link:
