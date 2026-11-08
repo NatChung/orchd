@@ -37,6 +37,7 @@ Upgrade reads the source recorded by uv. On POSIX it follows that source's defau
 
 For pinned, declarative instructions and per-instance workflow bindings, see [workflow plugins](docs/workflow-plugins.md). Installation is a local action; Orch can inspect installed stages through read-only tools and select them explicitly in dispatch.
 For committed local instructions, project inventory and drift-checked profile setup, see [instance recipes](docs/instances.md).
+To create and maintain your own method and configuration repositories, follow [user-owned workflows](docs/user-owned-workflows.md) and its [reusable agent prompt](docs/prompts/create-user-workflow.md).
 
 ## Native Windows and PowerShell
 

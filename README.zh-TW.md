@@ -30,6 +30,8 @@ orchd upgrade
 
 upgrade 讀取 uv 安裝紀錄的來源，POSIX 安裝該來源預設 branch 的最新 commit；Windows 則保留原先選定的來源與 revision。它保留任務資料與個人設定，再自動執行家目錄規則 migration 並備份；managed 區塊、預覽、重試與舊版第一次更新的操作見[家目錄更新](docs/upgrade-migrations.md)。既有 session／MCP process 仍持有原本程式，請在方便時開始新 session；更新不是重新啟動 daemon 的指令。Checkout 安裝請在自己的 checkout 更新程式。
 
+建立及持續維護自己的工程方法與 Orch 設定 repo，見 [自有 workflow 指南](docs/user-owned-workflows.md)及[可重用的 agent prompt](docs/prompts/create-user-workflow.md)。先確認目標電腦的 OS、權限與既有設定；不預設另一台 PC 的環境。
+
 ## 原生 Windows 與 PowerShell
 
 先安裝 uv、Git，以及上方列出的供應商 CLI，並完成 CLI 登入。在 PowerShell 執行：
