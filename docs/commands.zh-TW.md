@@ -220,6 +220,8 @@ If there are no options, write `選項：無`. The impact line is optional.
 完整送出預覽、測試輸出與證據放在這裡。
 ```
 
+向 Operator 請求權限協助前，先在任務授權範圍內檢查並嘗試適合自行處理的選項：使用者層級安裝、可攜式封存檔搭配使用者 PATH、現有 WSL 中免密碼的 `wsl -u root`，以及 WSL 中的容器。應驗證目前的實際能力，不可假設本機筆記仍然準確；macOS／Linux 的 sudo 也適用相同原則。若 Windows UAC 無法避免，先準備並檢查一個 `Start-Process -Verb RunAs` 命令，讓 Operator 只需核准提示；在問題中說明嘗試過哪些選項及其失敗原因。原有的任務範圍與核准規則仍然適用。
+
 CLI `ask` warns on stderr without rejecting legacy bodies. MCP `ask_nat`
 uses the same contract and returns an additive `warnings` list when the opening
 block is missing. When quoting a worker question, put the Operator summary in

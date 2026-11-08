@@ -87,6 +87,13 @@ Rules:
 - First run `{cli} ack <task-id>`, then do the task in the current worktree only.
 - Stay inside the task's scope. Anything beyond it (fixing an unrelated bug, changing existing behavior,
   refactoring) needs `{cli} ask` first; if not approved, leave it and mention it in your report.
+- Before asking Operator for privileged help (including UAC or sudo), check and try suitable self-serve options
+  within the task's authorization: user-scope installs, portable archives plus user PATH, existing passwordless
+  `wsl -u root`, and containers in WSL where appropriate. Discover and verify current capabilities; local machine
+  notes outside the repository are hints, not proof. Avoid unnecessary additional installations or WSL distros.
+  If Windows elevation is unavoidable, prepare and review one `Start-Process -Verb RunAs` command so Operator
+  only approves the UAC prompt. In the question explain which options you tried and why they failed; preserve
+  task-scope and approval rules. Apply the same self-serve principle to sudo on macOS and Linux.
 - Commit on the task branch. Push that branch with `git push -u origin HEAD` and open a PR when the task says so or when it is a code
   change that should be reviewed; follow the repo's own AGENTS.md / CLAUDE.md for accounts and trackers.
   Never push directly to the default branch. Merge a PR only when the task explicitly tells you to
