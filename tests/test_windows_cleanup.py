@@ -12,6 +12,7 @@ import psutil
 from orchd import app_worker, core, processes, store
 
 REAL_WINDOWS_SESSIONS = processes._windows_sessions
+REAL_SESSION_LOGON = processes._session_logon
 
 
 class FakeProc:
@@ -59,6 +60,10 @@ class WindowsTaskProcessesTests(unittest.TestCase):
         # Fake PIDs must not be judged by whatever real process holds them; orchd runs in session 1.
         self.sessions = {os.getpid(): 1}
         patcher = patch.object(processes, "_windows_sessions", side_effect=lambda: dict(self.sessions))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.logon = None  # sign-in time of session 1 unknown unless a test sets it
+        patcher = patch.object(processes, "_session_logon", side_effect=lambda session: self.logon)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -199,6 +204,47 @@ class WindowsTaskProcessesTests(unittest.TestCase):
         self.sessions[44] = 0
         proc.is_running = MagicMock(return_value=False)  # psutil: that PID now belongs to another process
         self.assertFalse(processes._service_session(proc))
+
+    def test_unreadable_process_born_before_our_sign_in_is_skipped(self):
+        # This session's csrss: newer than a worktree made before the reboot, older than the sign-in.
+        self.logon = self.born + 100
+        csrss = FakeProc(45, user=None, born=self.born + 50, denied=True)
+        self.sessions[45] = 1
+        self.assertEqual(self.scan([csrss]), {})
+
+    def test_unreadable_process_born_after_sign_in_or_with_unknown_sign_in_still_blocks(self):
+        self.sessions[46] = 1
+        for logon in (self.born + 10, None):
+            with self.subTest(logon=logon):
+                self.logon = logon
+                with self.assertRaisesRegex(RuntimeError, "cannot inspect process 46"):
+                    self.scan([FakeProc(46, user=None, born=self.born + 50, denied=True)])
+
+    def test_sign_in_rule_applies_only_to_our_own_session(self):
+        self.logon = self.born + 100
+        self.sessions[47] = 2  # another user's session: its sign-in time is not ours
+        with self.assertRaisesRegex(RuntimeError, "cannot inspect process 47"):
+            self.scan([FakeProc(47, user=None, born=self.born + 50, denied=True)])
+
+    def test_own_helper_whose_unreadable_parent_is_a_service_is_skipped(self):
+        # taskhostw of this user, started by svchost (session 0) after the worktree.
+        svchost = FakeProc(2328, user=None)
+        self.sessions[2328] = 0
+        helper = FakeProc(48, born=self.born + 1, denied=True, parent=svchost)
+        self.assertEqual(self.scan([helper]), {})
+
+    def test_own_helper_whose_unreadable_parent_is_in_our_session_still_blocks(self):
+        parent = FakeProc(2329, user=None)
+        self.sessions[2329] = 1
+        helper = FakeProc(49, born=self.born + 1, denied=True, parent=parent)
+        with self.assertRaisesRegex(RuntimeError, "cannot inspect process 49"):
+            self.scan([helper])
+
+    def test_real_sign_in_time_of_this_session_precedes_this_process(self):
+        logon = REAL_SESSION_LOGON(REAL_WINDOWS_SESSIONS()[os.getpid()])
+        if logon is None:
+            self.skipTest("no interactive sign-in for this session (service or CI runner)")
+        self.assertLess(logon, psutil.Process().create_time())
 
     def test_real_snapshot_reads_this_process_and_a_service(self):
         sessions = REAL_WINDOWS_SESSIONS()  # setUp patches the module attribute; this is the unpatched one

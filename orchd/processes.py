@@ -163,11 +163,17 @@ def _started_by_another_account(proc):
     Only a parent whose owner is positively read as another account counts as evidence. UAC/AIS launches name the
     requesting process as parent, so an elevated child of a worker keeps a parent of ours and still blocks. A gone
     parent (a worker may start an elevated child that inherits the mark and then exit) or a parent whose owner
-    cannot be read is unknown, never evidence: the process stays unknown and blocks close. psutil's parent()
+    cannot be read is unknown, never evidence: the process stays unknown and blocks close, unless that parent
+    runs in session 0 (a service such as svchost starting taskhostw), which no worker can be. psutil's parent()
     rejects a parent PID reused after the child started."""
     try:
         parent = proc.parent()
-        return parent is not None and not _owned_by_us(parent)
+        if parent is None:
+            return False
+        try:
+            return not _owned_by_us(parent)
+        except psutil.AccessDenied:
+            return _service_session(parent)
     except psutil.Error:  # gone, access denied or otherwise unreadable: no independent evidence
         return False
 
@@ -215,6 +221,55 @@ def _service_session(proc):
         return False
 
 
+def _session_logon(session):
+    """When the user signed in to `session` (epoch seconds, WTSQuerySessionInformationW WTSSessionInfo), or None."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class Info(ctypes.Structure):  # WTSINFOW
+            _fields_ = [("State", ctypes.c_int), ("SessionId", wintypes.DWORD),
+                        *[(name, wintypes.DWORD) for name in ("InBytes", "OutBytes", "InFrames", "OutFrames",
+                                                              "InCompressed", "OutCompressed")],
+                        ("WinStationName", wintypes.WCHAR * 32), ("Domain", wintypes.WCHAR * 17),
+                        ("UserName", wintypes.WCHAR * 21),
+                        *[(name, ctypes.c_longlong) for name in ("ConnectTime", "DisconnectTime", "LastInputTime",
+                                                                 "LogonTime", "CurrentTime")]]
+
+        wts = ctypes.WinDLL("wtsapi32", use_last_error=True)
+        wts.WTSQuerySessionInformationW.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_int,
+                                                    ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.DWORD)]
+        wts.WTSQuerySessionInformationW.restype = wintypes.BOOL
+        wts.WTSFreeMemory.argtypes = [ctypes.c_void_p]
+        buffer, size = ctypes.c_void_p(), wintypes.DWORD()
+        if not wts.WTSQuerySessionInformationW(None, session, 24, ctypes.byref(buffer), ctypes.byref(size)):
+            return None
+        try:
+            if size.value < ctypes.sizeof(Info):
+                return None
+            logon = ctypes.cast(buffer, ctypes.POINTER(Info)).contents.LogonTime
+        finally:
+            wts.WTSFreeMemory(buffer)
+        return (logon - 116444736000000000) / 1e7 if logon > 0 else None  # FILETIME -> Unix epoch
+    except (ImportError, OSError, AttributeError, ValueError):
+        return None
+
+
+def _predates_logon(proc):
+    """Windows: a process in orchd's own session born before the user signed in to that session (that session's
+    csrss, winlogon, ...) cannot have been started by a worker, which only runs after sign-in. After a reboot these
+    are newer than older worktrees and refuse every read. Same reuse guard as _service_session."""
+    sessions = _windows_sessions()
+    mine = sessions.get(os.getpid()) if sessions else None
+    if mine in (None, 0) or sessions.get(proc.pid) != mine:
+        return False
+    logon = _session_logon(mine)
+    try:
+        return logon is not None and proc.create_time() < logon and proc.is_running()
+    except psutil.Error:
+        return False
+
+
 def _marked_task_process(proc, mark, exclude):
     """Apply one ownership gate to enumerated processes and newly found children."""
     try:
@@ -242,7 +297,7 @@ def task_processes(worktree, captured=()):
         predates = _predates_worktree(mark)
 
         def exclude(proc):
-            return predates(proc) or _service_session(proc)
+            return predates(proc) or _service_session(proc) or _predates_logon(proc)
     else:
         exclude = _systemd_user_infrastructure
     for proc in captured:
