@@ -184,7 +184,7 @@ uv pip install -e .
 uv build
 ```
 
-Automated tests mainly use mocks and temporary environments. For manual app-server acceptance, run `python3 scripts/app_server_e2e.py` with tmux, Codex authentication, and an isolated temporary environment. This does not imply every GUI, provider, or version combination has been verified.
+CI (`.github/workflows/`) runs the tests, compile, build and an isolated wheel install, plus a pinned gitleaks scan; see [install verification](docs/install-verification.md) for installed package vs. checkout, the expected pre-init `doctor` result and the manual new-machine checklist, and [the release checklist](docs/release-checklist.md) before publishing. Automated tests mainly use mocks and temporary environments. For manual app-server acceptance, run `python3 scripts/app_server_e2e.py` with tmux, Codex authentication, and an isolated temporary environment. This does not imply every GUI, provider, or version combination has been verified.
 
 Use a branch and pull request for changes, with a different reviewer checking the result. Redact credentials and private information before posting issues or logs.
 

@@ -1,0 +1,26 @@
+# gitleaks configuration for orchd (issue #8). CI pins the gitleaks version in
+# .github/workflows/secret-scan.yml; see docs/release-checklist.md for scope and limits.
+#
+# The default gitleaks rules stay on. Each allowlist below is narrow and reviewable: it names one
+# rule, the test paths, and the exact shape of the matched text. Never add a real credential here.
+# Prefer making a test sentinel obviously fake (for example `FAKE_REDACTION_SENTINEL`, or short
+# low-entropy values such as `ghp_secret`, which the default rules do not flag) over adding an
+# exception. A new exception needs the same three parts and a reviewer who checked every match.
+# Fingerprint-only exceptions (.gitleaksignore) are not used, so every exception stays readable here.
+
+title = "orchd gitleaks config"
+minVersion = "v8.30.1"
+
+[extend]
+useDefault = true
+
+# Test fixtures name SSH key *files* (for example `id_ed25519_<label>`) next to `auth.json` to check
+# that the setup wizard never opens credential files. The generic-api-key rule reads the filename as a
+# value. It is a path label, not key material. Real-looking values on other lines are still reported.
+[[allowlists]]
+description = "SSH key filenames used as path labels in tests"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)tests/[^/]+\.py$''']
+regexTarget = "match"
+regexes = ['''"id_ed25519_[A-Za-z0-9_]+"''']
