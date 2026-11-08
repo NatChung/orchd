@@ -175,12 +175,18 @@ def _choice(name, value, valid):
 def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, model=None,
              model_reason=None, task_type=None, rework_of=None, found_by=None, verify=None, manual_checks=None,
              verifies=None, backend=None, goal_id=None, goal_critical=None, issue_ref=None, group_id=None,
-             base_branch=None):
+             base_branch=None, workflow=None, workflow_stage=None, workflow_inputs=None):
     from . import issue_links
     if issue_ref is not None:
         issue_links.validate_ref(issue_ref)
     if not orch_thread:
         raise ValueError("dispatch needs the caller's thread id")
+    repo_path = rt.repo_path(repo)
+    if Path(repo_path).name != repo:
+        raise ValueError('Dispatch requires the registered repo directory name, not a path alias')
+    from . import workflows
+    instructions, done_when, workflow_record = workflows.dispatch_stage(
+        repo, workflow, workflow_stage, workflow_inputs, task_type, instructions, done_when)
     from . import config
     if not isinstance(model_reason, str) or not model_reason.strip():
         raise ValueError("dispatch needs a non-empty model_reason")
@@ -220,7 +226,6 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
         raise ValueError("app-server backend requires a Codex model")
     from . import goals
     goals.validate_link(con, repo, goal_id, goal_critical)
-    repo_path = rt.repo_path(repo)
     kind = worker_kind(WORKER_MODELS[model])
     if kind == "claude" and not rt.claude_trusted(repo_path):
         raise ValueError(f"Claude has not trusted {repo_path}. Ask Operator to run `claude` there once and accept "
@@ -239,6 +244,8 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
                                  remote_branch=remote_branch, remote_repo=remote_repo)
         goals.record_dispatch(con, goal_id, task_id, f"orch:{orch_thread}")
     spec = {k: v for k, v in dict(verify=verify, manual_checks=manual_checks, verifies=verifies).items() if v}
+    if workflow_record is not None:
+        spec['workflow'] = workflow_record
     from .quota import dispatch_shadow
     if quota_shadow is None:
         quota_shadow = dispatch_shadow(backend=backend, task_type='review' if verifies else task_type,

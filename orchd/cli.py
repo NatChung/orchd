@@ -62,6 +62,17 @@ class CommandParser(argparse.ArgumentParser):
         super().error(message)
 
 
+def workflow_inputs(text):
+    from orchd import workflows
+    try:
+        value = workflows.load(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError('expected a JSON object of string parameters') from None
+    if not isinstance(value, dict) or not all(isinstance(item, str) for item in value.values()):
+        raise argparse.ArgumentTypeError('expected a JSON object of string parameters')
+    return value
+
+
 def build_parser():
     parser = CommandParser(prog="orchd", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -84,6 +95,26 @@ def build_parser():
     dispatch.add_argument("--model", help="worker model alias, or auto")
     dispatch.add_argument("--backend", choices=("exec", "app-server"))
     dispatch.add_argument("--base-branch")
+    dispatch.add_argument("--workflow")
+    dispatch.add_argument("--workflow-stage")
+    dispatch.add_argument("--workflow-inputs", type=workflow_inputs, help="JSON object of required string parameters; never pass secrets")
+    workflow = sub.add_parser("workflow", help="install and inspect declarative workflow instructions")
+    workflow_actions = workflow.add_subparsers(dest="workflow_action", required=True)
+    workflow_install = workflow_actions.add_parser("install")
+    workflow_install.add_argument("path", type=Path)
+    workflow_install.add_argument("--commit", required=True)
+    workflow_actions.add_parser("list")
+    workflow_actions.add_parser("bindings")
+    workflow_show = workflow_actions.add_parser("show")
+    workflow_show.add_argument("name")
+    workflow_render = workflow_actions.add_parser("render")
+    workflow_render.add_argument("name")
+    workflow_render.add_argument("stage")
+    workflow_render.add_argument("--inputs", type=workflow_inputs, required=True)
+    workflow_bind = workflow_actions.add_parser("bind")
+    workflow_bind.add_argument("--repo", help="registered project name; omit to bind this config instance's default")
+    workflow_bind.add_argument("--workflow", required=True)
+    workflow_bind.add_argument("--replace", action="store_true")
     inbox = sub.add_parser("inbox", help="read and acknowledge unread worker messages")
     inbox.add_argument("--limit", type=int)
     inbox.add_argument("--message-id", type=int, help="read a full field from a previously listed message")
@@ -607,6 +638,7 @@ HOME_POLICY = {
     **{("channels", action): "skip" for action in ("messages", "search", "message", "conversation", "sync", "sync-status", "attachment", "draft", "retention")},
     ("_entry-op",): "skip",  # its `orchd upgrade` / `orchd orch restart` children apply the policy themselves
     ("config", "show"): "skip", ("config", "get"): "skip", ("config", "set"): "skip", ("config", "unset"): "skip",
+    **{("workflow", action): "skip" for action in ("install", "list", "show", "render", "bind", "bindings")},
     ("binding",): "write",  # --status -> warn
     ("entry", "thread"): "warn", ("entry", "reconcile"): "write",  # no --apply -> warn
     ("intake", "reconcile"): "write",  # no --apply -> warn
@@ -626,7 +658,7 @@ HOME_POLICY = {
     ("goal", "show"): "warn", ("goal", "list"): "warn", ("goal", "export"): "warn",
 }
 ACTION_DEST = ("interface_action", "orch_action", "entry_action", "question_action", "task_action", "task_question_action",
-               "intake_action", "goal_cmd", "config_action", "check_action")
+               "intake_action", "goal_cmd", "config_action", "check_action", "workflow_action")
 
 
 def _home_policy(args):
@@ -673,6 +705,31 @@ def main(argv=None):
         from orchd import home_migrations
         for line in home_migrations.ensure_current(write=policy == "write"):
             print(line, file=sys.stderr)
+    if args.cmd == 'workflow':
+        from orchd import workflows
+        try:
+            if args.workflow_action in ('install', 'bind') and (os.environ.get('ORCHD_ORCH_ID') or os.environ.get('ORCHD_WORKTREE')):
+                raise ValueError('Workflow installation and binding are Operator-only local CLI actions')
+            if args.workflow_action == 'install':
+                result = workflows.install(args.path, args.commit)
+            elif args.workflow_action == 'list':
+                result = workflows.list_workflows()
+            elif args.workflow_action == 'show':
+                result = workflows.show(args.name)
+            elif args.workflow_action == 'render':
+                result = workflows.render(args.name, args.stage, args.inputs)
+            elif args.workflow_action == 'bindings':
+                result = workflows.bindings()
+            else:
+                if args.repo is not None:
+                    if Path(Runtime().repo_path(args.repo)).name != args.repo:
+                        raise ValueError('Bind the registered repo directory name, not a path alias')
+                result = workflows.bind(args.repo, args.workflow, args.replace)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+        except (ValueError, OSError, KeyError, TypeError) as error:
+            print(f'orchd workflow: {error}', file=sys.stderr)
+            return 1
     if args.cmd == "review-feedback":
         from orchd import review_feedback
         import subprocess

@@ -65,6 +65,9 @@ TOOLS = [
                                     "App-server requires sol; existing workers are not migrated."},
          "model_reason": {"type": "string", "description": "One sentence: why this model for this task"},
          "task_type": {"type": "string", "enum": list(core.TASK_TYPES)},
+         "workflow": {"type": "string", "description": "Installed workflow name. Required with stage/inputs for repos bound in this instance."},
+         "workflow_stage": {"type": "string", "description": "Explicit stage from workflow_show; no automatic stage scheduling."},
+         "workflow_inputs": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Exactly the required string parameters; never provide secrets."},
          "rework_of": {"type": "string", "description": "Task id this task redoes or fixes"},
          "found_by": {"type": "string", "enum": list(core.FOUND_BY),
                       "description": "Who found the problem; only with rework_of"},
@@ -231,6 +234,21 @@ TOOLS = [
          "task_id": {"type": "string"},
          "message": {"type": "string", "description": "The next instruction, with any new scope or done_when"}}}},
 ]
+
+WORKFLOW_READ_TOOLS = ('workflow_list', 'workflow_show', 'workflow_render')
+TOOLS.extend([
+    {'name': 'workflow_list', 'annotations': {'readOnlyHint': True},
+     'description': 'List verified installed workflow pins and repo bindings for this config instance. No dispatch or caller registration.',
+     'inputSchema': {'type': 'object', 'properties': {}, 'additionalProperties': False}},
+    {'name': 'workflow_show', 'annotations': {'readOnlyHint': True},
+     'description': 'Show an installed workflow manifest, stages, required inputs, pin and file hashes. No repo read or dispatch.',
+     'inputSchema': {'type': 'object', 'required': ['name'], 'properties': {'name': {'type': 'string'}}, 'additionalProperties': False}},
+    {'name': 'workflow_render', 'annotations': {'readOnlyHint': True},
+     'description': 'Render one installed fixed-version stage with exact string inputs. Text substitution only; does not dispatch or grant permissions. Never supply secrets.',
+     'inputSchema': {'type': 'object', 'required': ['name', 'stage', 'inputs'],
+                     'properties': {'name': {'type': 'string'}, 'stage': {'type': 'string'},
+                                    'inputs': {'type': 'object', 'additionalProperties': {'type': 'string'}}}, 'additionalProperties': False}},
+])
 
 _dispatch_spec = next(t['inputSchema'] for t in TOOLS if t['name'] == 'dispatch')
 _batch_item_spec = dict(_dispatch_spec, properties=dict(_dispatch_spec['properties'],
@@ -594,6 +612,16 @@ def intake_call(name, args, thread, con, rt=None):
 
 
 def call(name, args, thread, con, rt, sent=None, *, reply_id=None):
+    if name in WORKFLOW_READ_TOOLS:
+        from . import workflows
+        required = {'workflow_list': set(), 'workflow_show': {'name'}, 'workflow_render': {'name', 'stage', 'inputs'}}[name]
+        if set(args) != required:
+            raise ValueError('Unexpected or missing workflow query parameters')
+        if name == 'workflow_list':
+            return workflows.list_workflows()
+        if name == 'workflow_show':
+            return workflows.show(args['name'])
+        return workflows.render(args['name'], args['stage'], args['inputs'])
     from .channels import service as channel_service
     if name.startswith('channels_'):
         from .channels import mcp as channel_mcp
@@ -638,7 +666,8 @@ def call(name, args, thread, con, rt, sent=None, *, reply_id=None):
                           manual_checks=args.get("manual_checks"), verifies=args.get("verifies"),
                           backend=args.get("backend"), goal_id=args.get("goal_id"),
                           goal_critical=args.get("goal_critical"), issue_ref=args.get("issue_ref"),
-                          base_branch=args.get("base_branch"))
+                          base_branch=args.get("base_branch"), workflow=args.get('workflow'),
+                          workflow_stage=args.get('workflow_stage'), workflow_inputs=args.get('workflow_inputs'))
         return {"task_id": t["id"], "status": t["status"], "branch": t["branch"], "worktree": t["worktree"],
                 "worker_thread_id": t["session_id"], "worker_turn_id": t["active_turn"] or t["last_completed_turn"],
                 "orch_id": thread, "model": t["model"], "model_reason": t['model_reason'],
@@ -814,7 +843,7 @@ def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY, sent=None):
                 thread = os.environ.get("ORCHD_ORCH_ID")
                 if not thread:
                     thread = meta.get("threadId") or (meta.get("x-codex-turn-metadata") or {}).get("thread_id")
-                    if thread and params.get("name") not in ("list_orchs", "quota_status"):
+                    if thread and params.get("name") not in ("list_orchs", "quota_status", *WORKFLOW_READ_TOOLS):
                         store.register_orch(con, thread, "codex")
                 data = call(params.get("name"), params.get("arguments") or {}, thread, con, rt, marks, reply_id=mid)
             result = core.inbox_result(data)
@@ -822,7 +851,7 @@ def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY, sent=None):
             if sent is None:  # no transport to wait for: serialized fine, so mark now
                 for ids in marks:
                     store.mark_read(con, ids)
-            if (role != "entry" and params.get("name") in ("list_orchs", "quota_status")) or (
+            if (role != "entry" and params.get("name") in ("list_orchs", "quota_status", *WORKFLOW_READ_TOOLS)) or (
                     role == "entry" and params.get("name") in ("foreground", "orch_restart", "orch_upgrade", "orch_op_status")):
                 result["structuredContent"] = data
         except Exception as error:

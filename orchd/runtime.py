@@ -165,8 +165,9 @@ def mcp_env(orch_id):
     """--bg sessions are spawned by the Claude daemon, not by us, so only env written into the MCP config
     reaches the Orch's MCP server."""
     env = {"ORCHD_ORCH_ID": orch_id, "ORCHD_PROJECTS": str(paths.projects_dir())}
-    if os.environ.get("ORCHD_HOME"):
-        env["ORCHD_HOME"] = os.environ["ORCHD_HOME"]
+    for key in paths.PROFILE_PATH_VARS:
+        if os.environ.get(key):
+            env[key] = os.environ[key]
     return env
 
 

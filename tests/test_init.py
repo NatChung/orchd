@@ -197,6 +197,16 @@ class InitTest(unittest.TestCase):
                 "ORCHD_CONFIG_DIR": str(self.home / "settings"),
             })
 
+    def test_profile_paths_reach_both_desktop_mcp_servers(self):
+        self.env = {key: str(self.home / ('profile-' + key.lower())) for key in paths.PROFILE_PATH_VARS}
+        # A config-file override is a file, not a separate settings directory.
+        self.env['ORCHD_CONFIG_FILE'] = str(self.home / 'profile-settings.toml')
+        self.init(trust=False)
+        for folder, server in ((paths.orch_home(self.home, self.env), 'orchd'),
+                               (paths.interface_home(self.home, self.env), 'orchd_entry')):
+            config = tomllib.loads((folder / '.codex/config.toml').read_text())
+            self.assertEqual(config['mcp_servers'][server]['env'], self.env)
+
     def test_migrate_copies_kept_files_and_skips_generated_and_vcs(self):
         old = Path(self.tmp.name) / "old-orch"
         for path, text in {"AGENTS.md": "old rules", ".codex/config.toml": "old", ".git/HEAD": "ref", ".gitignore": "x",

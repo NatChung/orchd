@@ -10,6 +10,9 @@ import shlex
 import sys
 from pathlib import Path
 
+PROFILE_PATH_VARS = ("ORCHD_HOME", "ORCHD_ROOT", "ORCHD_CONFIG_DIR", "ORCHD_CONFIG_FILE", "ORCHD_ORCH_HOME",
+                     "ORCHD_INTERFACE_HOME", "ORCHD_CHANNEL_HOME", "ORCHD_EXECUTABLE")
+
 
 def root(home=None, env=None):
     env = os.environ if env is None else env
