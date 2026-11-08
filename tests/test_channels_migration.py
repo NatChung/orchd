@@ -182,3 +182,20 @@ class MigrationTest(unittest.TestCase):
                 self.assertIsNone(check.execute("SELECT name FROM sqlite_master WHERE name='orchd_channel_migrations'").fetchone())
             finally:
                 check.close()
+
+
+class ConnectTraceTest(unittest.TestCase):
+    def test_second_connect_does_not_alter_channel_metadata(self):
+        from unittest.mock import patch
+        statements=[]
+        real_connect=sqlite3.connect
+        def traced(*args,**kwargs):
+            con=real_connect(*args,**kwargs)
+            con.set_trace_callback(statements.append)
+            return con
+        with tempfile.TemporaryDirectory() as d, patch.object(store.sqlite3,'connect',traced):
+            path=Path(d)/'db'
+            store.connect(path).close()
+            statements.clear()
+            store.connect(path).close()
+            self.assertFalse([sql for sql in statements if 'ALTER TABLE intake_content' in sql and 'channel_metadata' in sql])

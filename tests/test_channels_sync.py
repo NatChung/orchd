@@ -97,3 +97,27 @@ class SyncTest(unittest.TestCase):
                 result=EmailAdapter(svc,'s',caller,Slow(),store,activation=datetime(2026,1,1,tzinfo=timezone.utc),clock=lambda:current[0]).poll()
                 self.assertEqual(result['status'],'succeeded')
             finally: svc.close()
+
+
+class LostLeaseFailureTest(unittest.TestCase):
+    def test_original_failure_survives_expired_lease(self):
+        from orchd.channels.adapters.email import EmailAdapter
+        from orchd.channels.secret_store import FakeSecretStore
+        with tempfile.TemporaryDirectory() as d:
+            now=[datetime(2026,1,2,tzinfo=timezone.utc)]
+            svc=service.ChannelService(Path(d)/'db',clock=lambda:now[0],channel_home=Path(d)/'channel')
+            class Failing:
+                def list_messages(self,*args,**kwargs):
+                    now[0]+=timedelta(minutes=16)
+                    raise RuntimeError('original transport failure')
+            try:
+                svc.provision_source({'id':'s','host_id':'h','provider':'gmail','account_ref':'a','adapter_id':'adapter','enabled':True,'credential_refs':{'read':'os-store:email/read'}},caller=policy.Caller(role='operator'))
+                adapter=policy.Caller(role='adapter',sources=frozenset({'s'}),identity='adapter')
+                worker=policy.Caller(role='worker',sources=frozenset({'s'}),identity='worker')
+                job=svc.request_sync('s','request',{},caller=worker)
+                secrets=FakeSecretStore({('adapter','s','os-store:email/read'):b'fake'})
+                with self.assertRaisesRegex(RuntimeError,'original transport failure'):
+                    EmailAdapter(svc,'s',adapter,Failing(),secrets,activation=now[0],clock=lambda:now[0]).run_pending()
+                result=svc.sync_status(job['job_id'],caller=worker)
+                self.assertEqual((result['state'],result['error_code']),('failed','sync_failed'))
+            finally: svc.close()

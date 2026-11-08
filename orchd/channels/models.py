@@ -55,12 +55,14 @@ def validate_event(event):
     if not isinstance(content.get('attachments', []), list) or len(content.get('attachments', [])) > 20:
         raise ValueError('invalid attachments')
     for item in content.get('attachments', []):
-        if not isinstance(item, dict) or set(item) - {'name', 'status', 'sha256', 'bytes', 'note', 'provider_attachment_ref'}:
+        if not isinstance(item, dict) or set(item) - {'name', 'status', 'sha256', 'bytes', 'note', 'provider_attachment_ref', 'mime_type'}:
             raise ValueError('invalid attachment')
         if not isinstance(item.get('name'), str) or not item['name'] or item.get('status') not in ('referenced', 'unavailable'):
             raise ValueError('invalid attachment metadata')
         if 'provider_attachment_ref' in item and (not isinstance(item['provider_attachment_ref'], str) or not item['provider_attachment_ref']):
             raise ValueError('invalid attachment reference')
+        if 'mime_type' in item and (not isinstance(item['mime_type'], str) or len(item['mime_type']) > 200 or '/' not in item['mime_type']):
+            raise ValueError('invalid attachment MIME type')
         if 'bytes' in item and (type(item['bytes']) is not int or item['bytes'] < 0):
             raise ValueError('invalid attachment size')
         if 'sha256' in item:

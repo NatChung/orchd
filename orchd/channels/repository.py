@@ -632,7 +632,12 @@ def claim_sync_job(con, source_id, holder, generation, now):
 
 def finish_sync_job(con, source_id, job_id, holder, generation, now, error):
     with store.immediate(con):
-        _require_lease(con, source_id, holder, generation, now)
+        if error:
+            lease = con.execute('SELECT holder_id,generation FROM channel_source_leases WHERE source_id=?', (source_id,)).fetchone()
+            if not lease or lease['holder_id'] != holder or lease['generation'] != generation:
+                raise PermissionError('source lease lost')
+        else:
+            _require_lease(con, source_id, holder, generation, now)
         count = con.execute("UPDATE channel_sync_jobs SET state=?,completed_at=?,error_code=? WHERE id=? AND source_id=? AND state='running'",
                             ('failed' if error else 'succeeded', now, error, job_id, source_id)).rowcount
         if count != 1:
@@ -892,3 +897,22 @@ def _loop_guard(con, origin, context, now):
         con.execute('INSERT INTO channel_loop_state(scope_key,correlation_id,turns,window_start,reset_at,paused,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(scope_key,correlation_id) DO UPDATE SET turns=turns+excluded.turns,paused=MAX(paused,excluded.paused),updated_at=excluded.updated_at',
                     (scope,context.correlation_id,int(status=='allowed'),now,reset_at,int(status!='allowed'),now))
     return status, provenance
+
+
+def reject_attachment(con, attachment_id, source_id, reason, now, holder, generation):
+    import json
+    from .models import canonical
+    with store.immediate(con):
+        _require_lease(con, source_id, holder, generation, now)
+        row = con.execute("SELECT a.provider_attachment_ref,m.intake_receipt_id FROM channel_attachments a JOIN channel_messages m ON m.id=a.message_id JOIN channel_conversations c ON c.id=m.conversation_id WHERE a.id=? AND c.source_id=? AND a.status='queued' AND m.deleted_at IS NULL", (attachment_id,source_id)).fetchone()
+        if row is None:
+            raise ValueError('attachment no longer queued')
+        content = con.execute('SELECT attachments FROM intake_content WHERE receipt_id=?', (row['intake_receipt_id'],)).fetchone()
+        items = json.loads(content[0])
+        for index, item in enumerate(items):
+            if item.get('provider_attachment_ref', f'legacy-index:{index}') == row['provider_attachment_ref']:
+                item['status'] = 'unavailable'
+                item['note'] = reason
+                break
+        con.execute('UPDATE intake_content SET attachments=? WHERE receipt_id=?', (canonical(items),row['intake_receipt_id']))
+        con.execute("UPDATE channel_attachments SET status='unavailable',updated_at=? WHERE id=?", (now,attachment_id))
