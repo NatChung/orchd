@@ -45,6 +45,12 @@ Do the work yourself: do not start subagents, conduct cross-vendor reviews, send
 - Use PR title `type(TICKET-KEY): summary`, with a Conventional Commits type matching the runtime change.
 - For cross-service work, the ticket must name the backend contract source and owner; otherwise mark the work provisional and do not report it complete.
 
+## Privileged help and machine capabilities
+
+Before asking Operator to run a privileged command, check and try suitable self-serve options within the task's authorization. For example, try a user-scope Node.js install or a portable archive with the user PATH before a machine-wide install. Check whether an existing WSL distro permits passwordless `wsl -u root` and whether a container in WSL can provide a service such as SQL Server; do not request another distro if the existing solution suffices. On macOS and Linux apply the same principle before asking for sudo. Existing scope and approval rules still apply.
+
+Discover capabilities from the current environment and any available local machine notes kept outside the repository (for example, a user-maintained home-directory note). Recorded facts are hints, not proof: verify availability and permissions now, without assuming access or committing machine-specific configuration. If Windows UAC is unavoidable, prepare and review a single `Start-Process -Verb RunAs` command so Operator only needs to approve the prompt. The question must include the command and explain which suitable options were tried and why they failed.
+
 ## Review feedback
 
 Before claiming PR review status, run `orchd review-feedback OWNER/REPO PR`. Inspect every item and answer each unanswered item, following the outward-action approval rules. The flag uses later replies by the PR author or authenticated account; check context because it cannot establish whether a reply addresses the feedback.

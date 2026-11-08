@@ -220,6 +220,8 @@ If there are no options, write `選項：無`. The impact line is optional.
 完整送出預覽、測試輸出與證據放在這裡。
 ```
 
+Before asking for privileged help, check and try suitable authorized self-serve options (user-scope installs, portable archives and user PATH, existing passwordless `wsl -u root`, and containers in WSL); verify current capabilities rather than assuming local notes are still accurate. On macOS/Linux apply the same principle to sudo. If Windows UAC is unavoidable, prepare and review one `Start-Process -Verb RunAs` command for Operator to approve the prompt, and explain in the question which options were tried and why they failed. Existing scope and approval rules still apply.
+
 CLI `ask` warns on stderr without rejecting legacy bodies. MCP `ask_nat`
 uses the same contract and returns an additive `warnings` list when the opening
 block is missing. When quoting a worker question, put the Operator summary in
