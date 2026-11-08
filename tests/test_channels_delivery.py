@@ -1,6 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from orchd.channels import policy
-from tests.channel_outbound_helpers import OutboundCase
+from tests.channel_outbound_helpers import BeforeClaimUpdate, OutboundCase
 
 
 class DeliveryTest(OutboundCase):
@@ -76,18 +76,66 @@ class DeliveryTest(OutboundCase):
         self.assertEqual(ledger[-1][1]['body']['threadId'],'synthetic-thread')
 
     def test_concurrent_claim_has_exactly_one_winner(self):
+        import sqlite3
+        from threading import Event
         approved = self.approve()
         factory = self.svc.session_factory()
-        def claim(_):
+        ready, at_update, attempted, first_done = (Event() for _ in range(4))
+        def competitor():
             svc = factory()
             try:
-                return svc.claim_outbound('s', caller=self.adapter)
+                svc.con.execute('PRAGMA busy_timeout=0')
+                ready.set()
+                self.assertTrue(at_update.wait(5), 'first claimant never reached UPDATE')
+                try:
+                    result = svc.claim_outbound('s', caller=self.adapter)
+                except sqlite3.OperationalError as error:
+                    if 'locked' not in str(error):
+                        raise
+                    # BEGIN IMMEDIATE must prevent the competitor from reading
+                    # stale queued/approved state while the first is paused.
+                    attempted.set()
+                    self.assertTrue(first_done.wait(5), 'first claimant did not finish')
+                    return True, svc.claim_outbound('s', caller=self.adapter)
+                attempted.set()
+                return False, result
             finally:
+                attempted.set()
                 svc.close()
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            claimed = sum(list(pool.map(claim, range(2))), [])
+        def pause():
+            at_update.set()
+            self.assertTrue(attempted.wait(5), 'competitor did not attempt claim')
+        self.svc.con = BeforeClaimUpdate(self.svc.con, pause)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(competitor)
+            self.assertTrue(ready.wait(5), 'second connection not ready')
+            try:
+                first = self.svc.claim_outbound('s', caller=self.adapter)
+            finally:
+                first_done.set()
+            blocked, second = future.result(timeout=5)
+        self.assertTrue(blocked, 'competitor entered during the first transaction')
+        claimed = first + second
         self.assertEqual(len(claimed), 1)
         self.assertEqual(claimed[0]['id'], approved['delivery_id'])
+        delivery = self.svc.delivery(approved['delivery_id'], caller=self.op)
+        self.assertEqual(delivery['state'], 'claimed')
+        self.assertEqual(len(delivery['attempts']), 1)
+        self.assertEqual(delivery['attempts'][0]['attempt_no'], 1)
+
+    def test_stale_selected_delivery_must_lose_cas_without_attempt(self):
+        approved = self.approve()
+        connection = self.svc.con
+        def cancel_before_update():
+            # Inject a state change after selection/validation, precisely at the
+            # CAS seam. This isolates CAS from BEGIN IMMEDIATE's serialization;
+            # the race test above separately proves cross-connection locking.
+            connection.execute("UPDATE channel_deliveries SET state='cancelled' WHERE id=?", (approved['delivery_id'],))
+        self.svc.con = BeforeClaimUpdate(connection, cancel_before_update)
+        self.assertEqual(self.svc.claim_outbound('s', caller=self.adapter), [])
+        delivery = self.svc.delivery(approved['delivery_id'], caller=self.op)
+        self.assertEqual(delivery['state'], 'cancelled')
+        self.assertEqual(delivery['attempts'], [])
 
     def test_gate_rechecks_pause_route_and_cross_source(self):
         self.approve()

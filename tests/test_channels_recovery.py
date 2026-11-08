@@ -2,6 +2,27 @@ from tests.channel_outbound_helpers import OutboundCase
 
 
 class RecoveryTest(OutboundCase):
+    def assert_uncertain_once(self, delivery_id):
+        delivery = self.svc.delivery(delivery_id, caller=self.op)
+        self.assertEqual(delivery['state'], 'uncertain')
+        self.assertEqual(len(delivery['attempts']), 1)
+        self.assertEqual(delivery['attempts'][0]['state'], 'uncertain')
+        self.assertEqual(delivery['attempts'][0]['attempt_no'], 1)
+
+    def assert_unknown_sweeps_are_read_only(self, runner):
+        statements = []
+        self.svc.con.set_trace_callback(statements.append)
+        try:
+            for _ in range(4):
+                self.assertEqual(runner.sweep(), [])
+        finally:
+            self.svc.con.set_trace_callback(None)
+        # A widened SELECT currently hits the queued-only cancellation guard,
+        # so state/count assertions alone cannot detect that mutation. Unknown
+        # rows must be excluded from the sweep, not even considered for writes.
+        writes = [sql for sql in statements if sql.startswith('UPDATE channel_deliveries')]
+        self.assertEqual(writes, [], 'unknown-only sweep attempted delivery state writes')
+
     def test_provider_acceptance_then_database_failure_recovers_without_resend(self):
         from unittest.mock import patch
         from orchd.channels.delivery import OutboundRunner
@@ -21,7 +42,7 @@ class RecoveryTest(OutboundCase):
         runner = OutboundRunner(self.svc,'s',self.adapter,fake)
         for _ in range(4): runner.sweep()
         self.assertEqual(fake.sends,1)
-        self.assertEqual(self.svc.delivery(approved['delivery_id'],caller=self.op)['state'],'uncertain')
+        self.assert_uncertain_once(approved['delivery_id'])
 
     def test_crash_after_claim_restart_reconcile_never_requeues(self):
         self.approve()
@@ -31,6 +52,7 @@ class RecoveryTest(OutboundCase):
         self.assertEqual(self.svc.recover_outbound(caller=self.op)['uncertain'], 1)
         for _ in range(3):
             self.assertEqual(self.svc.claim_outbound('s', caller=self.adapter), [])
+        self.assert_uncertain_once(claim['id'])
         result = self.svc.reconcile_outbound(claim['id'], 'provider_accepted', 'found-receipt', evidence='synthetic provider lookup', caller=self.op)
         self.assertEqual(result['state'], 'provider_accepted')
         history = self.svc.delivery(claim['id'], caller=self.op)['attempts']
@@ -41,7 +63,7 @@ class RecoveryTest(OutboundCase):
         from orchd.channels.delivery import OutboundRunner
         for mode in ('lost_receipt', 'timeout'):
             with self.subTest(mode=mode):
-                self.approve(self.draft(body=mode))
+                approved = self.approve(self.draft(body=mode))
                 class FakeTransport:
                     sends = 0
                     def send(self, payload, key):
@@ -51,9 +73,16 @@ class RecoveryTest(OutboundCase):
                         return None  # provider accepted, receipt was lost
                 transport = FakeTransport()
                 runner = OutboundRunner(self.svc, 's', self.adapter, transport)
-                for _ in range(4):
-                    runner.sweep()
+                runner.sweep()
+                self.assert_unknown_sweeps_are_read_only(runner)
                 self.assertEqual(transport.sends, 1)
+                self.assert_uncertain_once(approved['delivery_id'])
+                self.svc.close()
+                self.open()
+                runner = OutboundRunner(self.svc, 's', self.adapter, transport)
+                self.assert_unknown_sweeps_are_read_only(runner)
+                self.assertEqual(transport.sends, 1)
+                self.assert_uncertain_once(approved['delivery_id'])
 
     def test_adapter_cannot_reconcile_or_retry_unknown(self):
         self.approve()

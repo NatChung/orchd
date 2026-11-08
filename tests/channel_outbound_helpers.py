@@ -6,6 +6,21 @@ from tests.channel_helpers import ChannelCase, NOW
 from tests.test_entry import EntryRuntime
 
 
+class BeforeClaimUpdate:
+    """Test-only scheduling seam; all SQLite operations still hit the real DB."""
+    def __init__(self, connection, hook):
+        self.connection, self.hook = connection, hook
+
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+
+    def execute(self, sql, parameters=()):
+        if sql.startswith("UPDATE channel_deliveries SET state='claimed'") and self.hook:
+            hook, self.hook = self.hook, None
+            hook()
+        return self.connection.execute(sql, parameters)
+
+
 class OutboundCase(ChannelCase):
     def setUp(self):
         super().setUp()
