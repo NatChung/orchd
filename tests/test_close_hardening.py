@@ -177,7 +177,7 @@ class PidUnknownTest(unittest.TestCase):
 
     def process(self, cwd="/elsewhere"):
         proc = mock.Mock(spec=psutil.Process, pid=987654)
-        proc.uids.return_value = mock.Mock(real=os.getuid())
+        proc.uids.return_value = mock.Mock(real=os.getuid(), effective=os.getuid())
         proc.environ.side_effect = psutil.AccessDenied(987654)
         if isinstance(cwd, Exception):
             proc.cwd.side_effect = cwd
@@ -197,6 +197,14 @@ class PidUnknownTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "cannot inspect process 987654"):
                 processes.task_processes("/wt/demo-t1")
 
+    def test_setuid_process_with_unreadable_environ_is_skipped(self):
+        proc = self.process()
+        proc.uids.return_value = mock.Mock(real=os.getuid(), effective=0)
+        with mock.patch.object(processes.os, "getuid", return_value=501), \
+                mock.patch.object(processes.psutil, "process_iter", return_value=[proc]):
+            proc.uids.return_value.real = 501
+            self.assertEqual(processes.task_processes("/wt/demo-t1"), {})
+
     def test_process_with_unreadable_uid_blocks(self):
         proc = self.process()
         proc.uids.side_effect = psutil.AccessDenied(987654)
@@ -210,7 +218,7 @@ class VanishingProcessTest(unittest.TestCase):
 
     def process(self, running):
         proc = mock.Mock(spec=psutil.Process, pid=987654)
-        proc.uids.return_value = mock.Mock(real=os.getuid())
+        proc.uids.return_value = mock.Mock(real=os.getuid(), effective=os.getuid())
         proc.environ.side_effect = SystemError("returned a result with an exception set")
         proc.is_running.return_value = running
         return proc

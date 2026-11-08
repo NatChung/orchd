@@ -130,10 +130,12 @@ _WINDOWS_USER = None
 
 
 def _owned_by_us(proc):
-    """POSIX compares real uids. Windows has no uids: compare account names; a process whose owner cannot be read
+    """POSIX compares real and effective uids. Windows has no uids: compare account names; a process whose owner cannot be read
     belongs to SYSTEM or another account, so it cannot hold this user's task mark."""
     if os.name != "nt":
-        return proc.uids().real == os.getuid()
+        uids = proc.uids()
+        uid = os.getuid()
+        return uids.real == uid and uids.effective == uid
     global _WINDOWS_USER
     if _WINDOWS_USER is None:
         _WINDOWS_USER = psutil.Process().username()
