@@ -3,4 +3,5 @@
 set -eu
 source=${1:-git+https://github.com/NatChung/orchd.git}
 uv tool install "$source"
-orchd install
+bin_dir=$(uv tool dir --bin)
+"$bin_dir/orchd" install

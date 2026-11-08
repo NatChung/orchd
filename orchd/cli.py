@@ -149,8 +149,9 @@ def build_parser():
     channel_actions = channels.add_subparsers(dest="channel_action", required=True)
     layout = channel_actions.add_parser("layout")
     layout_actions = layout.add_subparsers(dest="layout_action", required=True)
-    layout_actions.add_parser("plan")
-    layout_actions.add_parser("apply")
+    for action in ("plan", "apply"):
+        command = layout_actions.add_parser(action)
+        command.add_argument("--legacy-manifest", help="explicit legacy manifest to inspect")
     rollback = layout_actions.add_parser("rollback")
     rollback.add_argument("--migration", required=True)
     choice = rollback.add_mutually_exclusive_group(required=True)
@@ -814,24 +815,26 @@ def main(argv=None):
             print(f"orchd _entry-op: {error}", file=sys.stderr)
             return 1
     if args.cmd == "channels":
+        import sqlite3
         from orchd import channel_layout
         try:
             if args.layout_action == "plan":
-                result = channel_layout.plan()
+                result = channel_layout.plan(legacy_manifest=args.legacy_manifest)
             elif args.layout_action == "apply":
-                result = channel_layout.apply()
+                result = channel_layout.apply(legacy_manifest=args.legacy_manifest)
             else:
                 result = channel_layout.rollback(args.migration, apply=args.apply)
             print(json.dumps(result, ensure_ascii=False, indent=1))
             return 1 if result.get("conflicts") else 0
-        except (ValueError, OSError) as error:
+        except (ValueError, OSError, sqlite3.Error) as error:
             print(f"channel layout: {error}", file=sys.stderr)
             return 1
     if args.cmd == "install":
+        import subprocess
         from orchd import bootstrap
         try:
             result = bootstrap.install(Runtime(), trust=not args.no_trust, dry_run=args.dry_run)
-        except (ValueError, OSError) as error:
+        except (ValueError, OSError, subprocess.SubprocessError) as error:
             print(f"install: {error}", file=sys.stderr)
             return 1
         print(json.dumps(result, ensure_ascii=False, indent=1))

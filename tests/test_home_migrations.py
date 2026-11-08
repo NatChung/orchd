@@ -566,10 +566,29 @@ class ChannelUpgradeTest(unittest.TestCase):
             interface = home / "root/interface/notes.txt"
             interface.parent.mkdir(parents=True)
             interface.write_bytes(b"original interface")
+            trust = home / ".codex/config.toml"
+            trust.parent.mkdir()
+            trust.write_bytes(b"# synthetic trust config\n")
+            binding = home / "state/orchd.db"
+            binding.parent.mkdir()
+            binding.write_bytes(b"synthetic existing binding bytes")
             code, lines = migrations.run(home=home, env=env, dry_run=True)
             self.assertEqual(code, 0, lines)
             self.assertFalse((home / "root/channel").exists())
             code, lines = migrations.run(home=home, env=env)
             self.assertEqual(code, 0, lines)
             self.assertEqual(interface.read_bytes(), b"original interface")
+            self.assertEqual(trust.read_bytes(), b"# synthetic trust config\n")
+            self.assertEqual(binding.read_bytes(), b"synthetic existing binding bytes")
             self.assertTrue((home / "root/channel/line/config.toml").is_file())
+
+    def test_upgrade_uses_previously_registered_custom_home(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            root = home / "registered"
+            state = home / "state"
+            migrations.record_init(home, {"ORCHD_ROOT": str(root), "ORCHD_HOME": str(state)})
+            code, lines = migrations.run(home=home, env={"ORCHD_HOME": str(state)})
+            self.assertEqual(code, 0, lines)
+            self.assertTrue((root / "channel/slack/config.toml").exists())
+            self.assertFalse((home / "orch/channel").exists())

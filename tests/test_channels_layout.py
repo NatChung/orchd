@@ -109,7 +109,7 @@ class ChannelLayoutTest(unittest.TestCase):
         from orchd import cli
         parser = cli.build_parser()
         for argv in (["install", "--dry-run", "--json"],
-                     ["channels", "layout", "plan"],
+                     ["channels", "layout", "plan", "--legacy-manifest", "synthetic.toml"],
                      ["channels", "layout", "rollback", "--migration", "abc", "--dry-run"]):
             self.assertEqual(cli._home_policy(parser.parse_args(argv)), "skip")
 
@@ -126,3 +126,30 @@ class ChannelLayoutTest(unittest.TestCase):
         channel_layout.apply(home=self.home, env=env)
         self.assertTrue((self.home / "elsewhere/line/config.toml").is_file())
         self.assertFalse((self.home / "custom/channel").exists())
+
+    def test_missing_file_after_completed_migration_is_not_recreated(self):
+        channel_layout.apply(home=self.home, env=self.env)
+        target = self.home / "custom/channel/slack/config.toml"
+        target.unlink()
+        with self.assertRaisesRegex(ValueError, "conflict"):
+            channel_layout.apply(home=self.home, env=self.env)
+        self.assertFalse(target.exists())
+
+    def test_rollback_preview_reports_new_state_without_writing(self):
+        receipt = channel_layout.apply(home=self.home, env=self.env)
+        state = self.home / "custom/channel/email/state/spool"
+        state.write_bytes(b"synthetic")
+        before = {str(p): p.read_bytes() for p in self.home.rglob("*") if p.is_file()}
+        result = channel_layout.rollback(receipt["migration_id"], home=self.home, env=self.env, apply=False)
+        self.assertIn(str(state.parent), result["conflicts"])
+        self.assertEqual(before, {str(p): p.read_bytes() for p in self.home.rglob("*") if p.is_file()})
+
+    def test_standalone_layout_uses_registered_home(self):
+        from orchd import home_migrations
+        root = self.home / "registered"
+        state = self.home / "state"
+        home_migrations.record_init(self.home, {"ORCHD_ROOT": str(root), "ORCHD_HOME": str(state)})
+        env = {"ORCHD_HOME": str(state)}
+        channel_layout.apply(home=self.home, env=env)
+        self.assertTrue((root / "channel/email/config.toml").is_file())
+        self.assertFalse((self.home / "orch/channel").exists())

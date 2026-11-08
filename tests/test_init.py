@@ -296,3 +296,15 @@ class ChannelInstallTest(unittest.TestCase):
             self.assertEqual(result["layout_version"], 1)
             self.assertTrue((home / "root/channel/email/config.toml").is_file())
             self.assertFalse((home / ".codex/config.toml").exists())
+
+    def test_install_conflict_does_not_provision_homes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            env = {"ORCHD_ROOT": str(home / "root"), "ORCHD_HOME": str(home / "state")}
+            conflict = home / "root/channel/email/config.toml"
+            conflict.parent.mkdir(parents=True)
+            conflict.write_text("user content", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                bootstrap.install(TrustRuntime(), home=home, env=env, trust=False, orchd_bin="synthetic")
+            self.assertFalse((home / "root/home").exists())
+            self.assertEqual(conflict.read_text(encoding="utf-8"), "user content")

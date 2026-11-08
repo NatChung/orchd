@@ -18,9 +18,19 @@ TEMPLATES = Path(__file__).parent / "templates" / "channel"
 def _locations(home, env):
     home = Path(home or Path.home())
     env = os.environ if env is None else env
-    root = paths.channel_home(home, env).absolute()
     state = Path(env.get("ORCHD_HOME") or home / ".local/share/orchd").absolute() / "migrations" / "channels"
-    return root, state
+    if not env.get("ORCHD_ROOT") and not env.get("ORCHD_CHANNEL_HOME"):
+        from . import home_migrations
+        _check_path(home_migrations.state_path(home, env))
+        con = home_migrations.connect(home, env, readonly=True)
+        try:
+            if con:
+                saved_home = home_migrations.targets(home, env, con)["home"]
+                return (saved_home.parent / "channel").absolute(), state
+        finally:
+            if con:
+                con.close()
+    return paths.channel_home(home, env).absolute(), state
 
 
 def _check_path(path):
@@ -164,6 +174,12 @@ def _atomic(path, data):
             out.flush()
             os.fsync(out.fileno())
         os.replace(tmp, path)
+        if os.name != "nt":
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
@@ -173,7 +189,12 @@ def _state(root, state):
     # Parents above the migration directory are managed by existing orchd state.
     state.parent.mkdir(parents=True, exist_ok=True)
     _mkdir_private(state)
-    db = sqlite3.connect(state / "layout.sqlite3", timeout=30, isolation_level=None)
+    db_path = state / "layout.sqlite3"
+    _check_path(db_path)
+    db = sqlite3.connect(db_path, timeout=30, isolation_level=None)
+    if os.name != "nt":
+        os.chmod(db_path, 0o600)
+    _validate_file(db_path)
     db.execute("CREATE TABLE IF NOT EXISTS migrations (id TEXT PRIMARY KEY, root TEXT NOT NULL, status TEXT NOT NULL, files TEXT NOT NULL, dirs TEXT NOT NULL)")
     db.execute("BEGIN IMMEDIATE")
     return db
@@ -185,17 +206,32 @@ def apply(*, home=None, env=None, legacy_manifest=None):
     files = _files()
     state.parent.mkdir(parents=True, exist_ok=True)
     _mkdir_private(state)
-    lock = sqlite3.connect(state / "lock.sqlite3", timeout=30, isolation_level=None)
+    lock_path = state / "lock.sqlite3"
+    _check_path(lock_path)
+    lock = sqlite3.connect(lock_path, timeout=30, isolation_level=None)
+    if os.name != "nt":
+        os.chmod(lock_path, 0o600)
+    _validate_file(lock_path)
     lock.execute("BEGIN IMMEDIATE")
     db = None
     try:
         db = _state(root, state)
         complete = db.execute("SELECT id FROM migrations WHERE root=? AND status='complete' ORDER BY rowid DESC LIMIT 1", (str(root),)).fetchone()
-        if complete and all((root / name).is_file() and _digest((root / name).read_bytes()) == _digest(data) for name, data in files.items()):
-            return {**planned, "migration_id": complete[0]}
+        if complete:
+            if all((root / name).is_file() and _digest((root / name).read_bytes()) == _digest(data) for name, data in files.items()):
+                return {**planned, "migration_id": complete[0]}
+            raise ValueError("channel layout conflict: a migration-owned file is missing")
         row = db.execute("SELECT id, files, dirs FROM migrations WHERE root=? AND status='pending'", (str(root),)).fetchone()
         if row:
             migration, entries, dirs = row[0], json.loads(row[1]), json.loads(row[2])
+            if {entry.get("path") for entry in entries} != set(files):
+                raise ValueError("invalid channel migration journal")
+            for entry in entries:
+                name = entry["path"]
+                if entry.get("new_hash") != _digest(files[name]) or entry.get("original") != str(root / name):
+                    raise ValueError("invalid channel migration journal")
+            if any(Path(name) != root and not Path(name).is_relative_to(root) for name in dirs):
+                raise ValueError("invalid channel migration journal")
         else:
             migration = uuid.uuid4().hex
             entries = [{"path": name, "original": str(root / name), "old_hash": None, "new_hash": _digest(data), "backup": None, "created": not (root / name).exists(), "status": "pending"} for name, data in files.items()]
@@ -238,6 +274,19 @@ def apply(*, home=None, env=None, legacy_manifest=None):
 def rollback(migration_id, *, home=None, env=None, apply=False):
     root, state = _locations(home, env)
     _check_path(state)
+    if not apply:
+        return _rollback(migration_id, root=root, state=state, apply=False)
+    lock = sqlite3.connect(state / "lock.sqlite3", timeout=30, isolation_level=None)
+    try:
+        lock.execute("BEGIN IMMEDIATE")
+        return _rollback(migration_id, root=root, state=state, apply=True)
+    finally:
+        lock.rollback()
+        lock.close()
+
+
+def _rollback(migration_id, *, root, state, apply):
+    _check_path(state)
     db = sqlite3.connect((state / "layout.sqlite3").as_uri() + "?mode=ro", uri=True)
     try:
         row = db.execute("SELECT root, files, dirs, status FROM migrations WHERE id=?", (migration_id,)).fetchone()
@@ -245,8 +294,22 @@ def rollback(migration_id, *, home=None, env=None, apply=False):
         db.close()
     if not row or row[0] != str(root) or row[3] != "complete":
         raise ValueError("unknown migration")
+    entries = json.loads(row[1])
+    directories = json.loads(row[2])
+    # Validate the entire receipt before making any changes.
+    for entry in entries:
+        relative = Path(entry["path"])
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("unsafe migration receipt")
+        _check_path(root / relative)
+    for name in directories:
+        directory = Path(name)
+        if directory != root and not directory.is_relative_to(root):
+            raise ValueError("unsafe migration receipt")
+        _check_path(directory)
     conflicts = []
-    for entry in json.loads(row[1]):
+    removed = set()
+    for entry in entries:
         relative = Path(entry["path"])
         if relative.is_absolute() or ".." in relative.parts:
             raise ValueError("unsafe migration receipt")
@@ -256,18 +319,26 @@ def rollback(migration_id, *, home=None, env=None, apply=False):
             continue
         if not target.is_file() or _digest(target.read_bytes()) != entry["new_hash"]:
             conflicts.append(str(target))
-        elif apply:
-            target.unlink()
-    for name in reversed(json.loads(row[2])):
+        else:
+            if apply:
+                target.unlink()
+            removed.add(target)
+    for name in reversed(directories):
         directory = Path(name)
         if directory != root and not directory.is_relative_to(root):
             raise ValueError("unsafe migration receipt")
         _check_path(directory)
-        if apply and directory.exists():
-            try:
-                directory.rmdir()
-            except OSError:
+        if directory.exists():
+            if apply:
+                try:
+                    directory.rmdir()
+                    removed.add(directory)
+                except OSError:
+                    conflicts.append(str(directory))
+            elif any(child not in removed for child in directory.iterdir()):
                 conflicts.append(str(directory))
+            else:
+                removed.add(directory)
     if apply and not conflicts:
         db = sqlite3.connect(state / "layout.sqlite3")
         try:
