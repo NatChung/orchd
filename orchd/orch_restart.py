@@ -139,6 +139,8 @@ def restart(con, rt, old_id=None, model=None, dry_run=False):
                 if current is None or current["orch_id"] != old_id:
                     raise ValueError("Desktop binding changed during restart; inspect it before rebinding")
             migrated = interface.migrate_owner(c, old_id, new_id)
+            from . import workflow_runs
+            workflow_runs.migrate_owner(c, old_id, new_id)
             c.execute("UPDATE interface_orch_successors SET current_orch=? WHERE current_orch=?", (new_id, old_id))
             c.execute("INSERT INTO interface_orch_successors(old_orch,current_orch) VALUES(?,?)", (old_id, new_id))
 

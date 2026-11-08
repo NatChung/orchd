@@ -62,10 +62,12 @@ plan = workflows.run_template(
 
 Context overrides may contain a subset of the declared keys. Unspecified keys retain their defaults. Unknown keys and non-string values are rejected. Values preserve Unicode, whitespace, trailing newlines, and literal template or shell syntax. They are data, not code. The returned object is separate from the cached template, so caller mutation does not modify the installation.
 
-Pass the resolved plan to the existing run start boundary with an authenticated request ID. An Orch start interface can resolve the named template internally, avoiding model reconstruction of the graph. The Operator direct-plan boundary remains available. Starting a run freezes its plan and pin; later package installation does not change that run.
+Pass the resolved plan to the existing run start boundary with an authenticated request ID. The Orch workflow_run_start interface resolves the named template internally, avoiding model reconstruction of the graph. The Operator direct-plan boundary remains available. Starting a run freezes its plan and pin; later package installation does not change that run.
 
 ## Checks
 
 ```sh
 python3 -m unittest tests.test_workflow_run_templates tests.test_workflows
 ```
+
+See [automatic run lifecycle and control](workflow-runs.md) for start, native verification, bounded repairs, cancellation and evidence limits.

@@ -100,6 +100,8 @@ def build_parser():
     dispatch.add_argument("--workflow-inputs", type=workflow_inputs, help="JSON object of required string parameters; never pass secrets")
     workflow = sub.add_parser("workflow", help="install and inspect declarative workflow instructions")
     workflow_actions = workflow.add_subparsers(dest="workflow_action", required=True)
+    from . import workflow_run_cli
+    workflow_run_cli.add_parser(workflow_actions, workflow_inputs)
     workflow_install = workflow_actions.add_parser("install")
     workflow_install.add_argument("path", type=Path)
     workflow_install.add_argument("--commit", required=True)
@@ -111,6 +113,10 @@ def build_parser():
     workflow_render.add_argument("name")
     workflow_render.add_argument("stage")
     workflow_render.add_argument("--inputs", type=workflow_inputs, required=True)
+    workflow_template = workflow_actions.add_parser('run-template', help='read a committed run template with fixed graph and exact context')
+    workflow_template.add_argument('name')
+    workflow_template.add_argument('template')
+    workflow_template.add_argument('--context', type=workflow_inputs, default={})
     workflow_bind = workflow_actions.add_parser("bind")
     workflow_bind.add_argument("--repo", help="registered project name; omit to bind this config instance's default")
     workflow_bind.add_argument("--workflow", required=True)
@@ -389,6 +395,7 @@ def build_parser():
     rep.add_argument("--status", required=True, choices=["done", "blocked"])
     rep.add_argument("--summary", required=True)
     rep.add_argument("--evidence", default="")
+    rep.add_argument("--output-file", type=Path, help="declared workflow JSON output inside this task's worktree")
     prog = sub.add_parser("progress")
     prog.add_argument("task_id")
     prog.add_argument("text")
@@ -647,7 +654,8 @@ HOME_POLICY = {
     **{("channels", action): "skip" for action in ("messages", "search", "message", "conversation", "sync", "sync-status", "attachment", "draft", "retention")},
     ("_entry-op",): "skip",  # its `orchd upgrade` / `orchd orch restart` children apply the policy themselves
     ("config", "show"): "skip", ("config", "get"): "skip", ("config", "set"): "skip", ("config", "unset"): "skip",
-    **{("workflow", action): "skip" for action in ("install", "list", "show", "render", "bind", "bindings")},
+    **{("workflow", action): "skip" for action in ("install", "list", "show", "render", "bind", "bindings", "run-template")},
+    **{('workflow', 'run', action): 'skip' for action in ('start', 'show', 'cancel', 'reconcile', 'serve', 'export')},
     **{('instance', action): 'skip' for action in ('apply', 'check')},
     ("binding",): "write",  # --status -> warn
     ("entry", "thread"): "warn", ("entry", "reconcile"): "write",  # no --apply -> warn
@@ -673,6 +681,8 @@ ACTION_DEST = ("interface_action", "orch_action", "entry_action", "question_acti
 
 def _home_policy(args):
     cmd = args.cmd.split()[0]
+    if cmd == 'workflow' and args.workflow_action == 'run':
+        return HOME_POLICY[(cmd, 'run', args.run_action)]
     if cmd == "channels":
         if args.channel_action == "layout":
             return HOME_POLICY[(cmd, args.channel_action, args.layout_action)]
@@ -728,6 +738,9 @@ def main(argv=None):
             print(f'orchd instance: {error}', file=sys.stderr)
             return 1
     if args.cmd == 'workflow':
+        if args.workflow_action == 'run':
+            from . import workflow_run_cli
+            return workflow_run_cli.run(args, _caller_orch)
         from orchd import workflows
         try:
             if args.workflow_action in ('install', 'bind') and (os.environ.get('ORCHD_ORCH_ID') or os.environ.get('ORCHD_WORKTREE')):
@@ -740,6 +753,8 @@ def main(argv=None):
                 result = workflows.show(args.name)
             elif args.workflow_action == 'render':
                 result = workflows.render(args.name, args.stage, args.inputs)
+            elif args.workflow_action == 'run-template':
+                result = workflows.run_template(args.name, args.template, args.context)
             elif args.workflow_action == 'bindings':
                 result = workflows.bindings()
             else:
@@ -1218,7 +1233,8 @@ def main(argv=None):
         core.ack(con, args.task_id)
         print(f"acked {args.task_id}")
     elif args.cmd == "report":
-        woke = core.report(con, rt, args.task_id, args.status, args.summary, args.evidence)
+        woke = core.report(con, rt, args.task_id, args.status, args.summary, args.evidence,
+                           **({'output_file': args.output_file} if args.output_file is not None else {}))
         print(f"reported {args.task_id}" + ("" if woke else " (stored; waking Orch failed, it will see it in list_open)"))
     elif args.cmd == "progress":
         woke = core.progress(con, rt, args.task_id, args.text)

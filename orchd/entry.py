@@ -10,6 +10,7 @@ could not be written) is uncertain and is never resent automatically. A queued q
 it becomes the current one. delivered means it reached the Orch's socket, the Desktop queue or a tool
 result; it never means read by Operator, and never approval.
 """
+import contextlib
 import hashlib
 import math
 import os
@@ -124,16 +125,50 @@ def _insert(con, entry, direction, kind, body, **fields):
     return cur.lastrowid
 
 
+def _desktop_route_error(con, row):
+    """Use stored links only; arbitrary message prose never identifies a workflow task."""
+    from . import workflow_runs
+    if row['direction'] != 'out':
+        return None
+    task_id = row['task_id']
+    if task_id is None and row['source_message_id'] is not None:
+        source = con.execute('SELECT task_id FROM messages WHERE id=?', (row['source_message_id'],)).fetchone()
+        task_id = source['task_id'] if source else None
+    if task_id is not None:
+        origin = workflow_runs.task_origin(con, task_id)
+        if origin is None:
+            return None  # Unrelated legacy task handovers keep their existing Desktop behavior.
+        return f"Workflow reply belongs to request {origin['request_id']}; Desktop route cancelled"
+    try:
+        workflow_runs.guard_desktop_route(con, row['orch_id'])
+    except ValueError as error:
+        return str(error)
+    return None
+
+
+def _cancel_wrong_desktop_route(con, row, reason):
+    with contextlib.nullcontext() if con.in_transaction else store.immediate(con):
+        current = _row(con, row['id'])
+        if current['question_state'] not in (None, 'answered', 'cancelled', 'superseded'):
+            _history(con, current, 'cancelled', 'orchd:workflow-origin', reason)
+            con.execute("UPDATE entry_messages SET question_state='cancelled',reason=? WHERE id=?", (reason, row['id']))
+        # Do not rewrite a historical delivered/uncertain receipt into an unsent fact.
+        delivery = current['delivery'] if current['delivery'] in ('delivered', 'sending') else 'cancelled'
+        con.execute('UPDATE entry_messages SET delivery=?,delivery_error=? WHERE id=?', (delivery, reason, row['id']))
+
+
 def current_question(con, entry):
-    return con.execute("SELECT * FROM entry_messages WHERE entry_id=? AND orch_id=? AND kind='question' "
-                       "AND question_state='current' ORDER BY id LIMIT 1", (entry["id"], entry["orch_id"])).fetchone()
+    rows = con.execute("SELECT * FROM entry_messages WHERE entry_id=? AND orch_id=? AND kind='question' "
+                       "AND question_state='current' ORDER BY id", (entry["id"], entry["orch_id"])).fetchall()
+    return next((row for row in rows if _desktop_route_error(con, row) is None), None)
 
 
 def queued_questions(con, entry):
-    return con.execute("SELECT * FROM entry_messages WHERE entry_id=? AND orch_id=? AND kind='question' "
+    rows = con.execute("SELECT * FROM entry_messages WHERE entry_id=? AND orch_id=? AND kind='question' "
                        f"AND question_state='queued' AND NOT (delivery='held' AND attempts>={MAX_SEND_ATTEMPTS}) "
                        "ORDER BY COALESCE(queue_order,id),id",
                        (entry["id"], entry["orch_id"])).fetchall()
+    return [row for row in rows if _desktop_route_error(con, row) is None]
 
 
 def _queue_tail(con):
@@ -372,6 +407,9 @@ def cancel_task_questions(con, task_id):
 
 def _save_reply(con, bound, question, text, actor, **fields):
     """Shared Desktop/dashboard completion and FIFO promotion; caller owns the transaction."""
+    reason = _desktop_route_error(con, question)
+    if reason:
+        raise ValueError(reason)
     if question["question_state"] != "current" or question["delivery"] != "delivered":
         raise ValueError(f"question {question['id']} has not been delivered or is no longer current; nothing was relayed")
     con.execute("UPDATE entry_messages SET question_state='answered' WHERE id=?", (question["id"],))
@@ -435,6 +473,11 @@ def _send(con, rows, recipient, transport):
     failed MAX_SEND_ATTEMPTS times is held and no longer blocks later rows, which may then arrive before it."""
     result = {}
     for row in rows:
+        reason = _desktop_route_error(con, row)
+        if reason:
+            _cancel_wrong_desktop_route(con, row, reason)
+            result[row['id']] = 'cancelled'
+            continue
         con.execute("UPDATE entry_messages SET delivery='sending', attempts=attempts+1, recipient=?, "
                     "delivery_error=NULL WHERE id=?", (recipient, row["id"]))
         try:
@@ -516,6 +559,14 @@ def deliver_outbound(con, rt, entry_id):
         entry = get_entry(con, entry_id)
         # Recover held/current rows written by earlier versions, including after a restart.
         with store.immediate(con):
+            candidates = con.execute("SELECT * FROM entry_messages WHERE entry_id=? AND direction='out' "
+                                     "AND (delivery IN ('pending','failed','held','sending') "
+                                     "OR question_state IN ('current','queued','snoozed'))", (entry_id,)).fetchall()
+            for row in candidates:
+                reason = _desktop_route_error(con, row)
+                if reason:
+                    _cancel_wrong_desktop_route(con, row, reason)
+            _promote(con, entry, 'orchd:workflow-origin', 'promote eligible question after checking original route')
             current = current_question(con, entry)
             if current is not None and current["delivery"] == "held" and current["attempts"] >= MAX_SEND_ATTEMPTS:
                 _park_failed_question(con, current)
@@ -746,6 +797,7 @@ def status(con, rt, entry_id, thread):
                                   "AND (delivery IN ('pending','failed','sending') "
                                   f"OR (delivery='held' AND (question_state IS NULL OR question_state='current' OR attempts>={MAX_SEND_ATTEMPTS}))) "
                                   "ORDER BY id", (entry_id,)).fetchall()
+        undelivered = [row for row in undelivered if _desktop_route_error(con, row) is None]
         # held stays listed until resend_to_nat succeeds: handing it over here would hide the unsent message
         handed = [r["id"] for r in undelivered if r["delivery"] in ("pending", "failed")]
         con.executemany("UPDATE entry_messages SET delivery='delivered', delivered_at=?, recipient=? WHERE id=?",
@@ -856,6 +908,8 @@ def _check_size(what, text):
 
 def send_to_nat(con, rt, orch_id, text, *, issue_ref=None):
     """Orch tool: a plain message to Operator, queued into the entry's Desktop thread byte for byte."""
+    from . import workflow_runs
+    workflow_runs.guard_desktop_route(con, orch_id)
     if not isinstance(text, str) or not text.strip():
         raise ValueError("send_to_nat needs non-empty text")
     _check_size("send_to_nat text", text)
@@ -875,6 +929,8 @@ def resend_to_nat(con, rt, orch_id, message_id):
     row = _row(con, message_id) if isinstance(message_id, int) else None
     if row is None or row["entry_id"] != entry["id"] or row["orch_id"] != orch_id or row["direction"] != "out":
         raise ValueError(f"message {message_id} is not a message of this Orch")
+    from . import workflow_runs
+    workflow_runs.guard_desktop_route(con, orch_id, row['task_id'])
     with _lock(con, entry["id"]), store.immediate(con):
         row = _row(con, message_id)
         if row["delivery"] not in ("failed", "held"):
@@ -903,6 +959,8 @@ def resend_to_nat(con, rt, orch_id, message_id):
 def ask_nat(con, rt, orch_id, text=None, task_id=None, quote_worker_question=False, *,
             supersedes=None, expected_version=None, expected_state=None, reason=None, actor=None, issue_ref=None):
     """Orch tool: one question to Operator. Only one is open at a time; the rest wait in order (Q2)."""
+    from . import workflow_runs
+    workflow_runs.guard_desktop_route(con, orch_id, task_id)
     entry = _entry_of(con, orch_id)
     if issue_ref is not None:
         issue_links.validate_ref(issue_ref)
@@ -988,6 +1046,10 @@ def reply_text(con, orch_id, reply_id, task_id):
         raise ValueError(f"entry message {reply_id} answers question {row['reply_to']} of task {row['task_id']}, "
                          f"not task {task_id}")
     question = _row(con, row["reply_to"])
+    if question is not None:
+        reason = _desktop_route_error(con, question)
+        if reason:
+            raise ValueError(reason)
     if question is not None and question["question_state"] == "superseded":
         raise ValueError("reply belongs to a superseded question; ask for a fresh answer")
     return row["body"]

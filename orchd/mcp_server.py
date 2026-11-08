@@ -236,6 +236,7 @@ TOOLS = [
 ]
 
 WORKFLOW_READ_TOOLS = ('workflow_list', 'workflow_show', 'workflow_render')
+WORKFLOW_QUERY_TOOLS = (*WORKFLOW_READ_TOOLS, 'workflow_run_show', 'workflow_run_template')
 TOOLS.extend([
     {'name': 'workflow_list', 'annotations': {'readOnlyHint': True},
      'description': 'List verified installed workflow pins and repo bindings for this config instance. No dispatch or caller registration.',
@@ -248,6 +249,32 @@ TOOLS.extend([
      'inputSchema': {'type': 'object', 'required': ['name', 'stage', 'inputs'],
                      'properties': {'name': {'type': 'string'}, 'stage': {'type': 'string'},
                                     'inputs': {'type': 'object', 'additionalProperties': {'type': 'string'}}}, 'additionalProperties': False}},
+])
+
+TOOLS.extend([
+    {'name': 'workflow_run_start',
+     'description': 'Start an idempotent run from an installed committed workflow template and exact declared context. The caller cannot replace its stages or review gates. Later stages receive validated output bytes. Grants no new permissions.',
+     'inputSchema': {'type': 'object', 'required': ['workflow', 'template', 'context', 'request_id', 'idempotency_key'],
+                     'properties': {'workflow': {'type': 'string'}, 'template': {'type': 'string'},
+                                    'context': {'type': 'object', 'additionalProperties': {'type': 'string'}},
+                                    'request_id': {'type': 'integer', 'minimum': 1},
+                                    'idempotency_key': {'type': 'string', 'minLength': 1}},
+                     'additionalProperties': False}},
+    {'name': 'workflow_run_template', 'annotations': {'readOnlyHint': True},
+     'description': 'Read a committed installed run template with exact context overrides and the installed workflow pin. No task, source-repository read, or execution.',
+     'inputSchema': {'type': 'object', 'required': ['workflow', 'template', 'context'],
+                     'properties': {'workflow': {'type': 'string'}, 'template': {'type': 'string'},
+                                    'context': {'type': 'object', 'additionalProperties': {'type': 'string'}}},
+                     'additionalProperties': False}},
+    {'name': 'workflow_run_show', 'annotations': {'readOnlyHint': True},
+     'description': 'Read persisted workflow run steps, fixed input/output bindings and evidence. A reported result is not verified acceptance.',
+     'inputSchema': {'type': 'object', 'required': ['run_id'],
+                     'properties': {'run_id': {'type': 'string'}}, 'additionalProperties': False}},
+    {'name': 'workflow_run_cancel',
+     'description': 'Cancel an owned run and its bounded repair child, stop later dispatch and retain task history. Does not rewrite an already delivered final reply.',
+     'inputSchema': {'type': 'object', 'required': ['run_id', 'reason'],
+                     'properties': {'run_id': {'type': 'string'}, 'reason': {'type': 'string', 'minLength': 1}},
+                     'additionalProperties': False}},
 ])
 
 _dispatch_spec = next(t['inputSchema'] for t in TOOLS if t['name'] == 'dispatch')
@@ -637,6 +664,31 @@ def intake_call(name, args, thread, con, rt=None):
 
 
 def call(name, args, thread, con, rt, sent=None, *, reply_id=None):
+    if name in ('workflow_run_start', 'workflow_run_show', 'workflow_run_cancel', 'workflow_run_template'):
+        from . import workflow_runs
+        expected = {'workflow_run_show': {'run_id'}, 'workflow_run_cancel': {'run_id', 'reason'},
+                    'workflow_run_template': {'workflow', 'template', 'context'},
+                    'workflow_run_start': {'workflow', 'template', 'context', 'request_id', 'idempotency_key'}}[name]
+        if set(args) != expected:
+            raise ValueError('Unexpected or missing workflow run parameters')
+        if name == 'workflow_run_show':
+            return workflow_runs.show(con, args['run_id'])
+        if name == 'workflow_run_template':
+            from . import workflows
+            return workflows.run_template(args['workflow'], args['template'], args['context'])
+        if os.environ.get('ORCHD_WORKTREE'):
+            raise ValueError('Workers report their declared output; they cannot control workflow runs')
+        if name == 'workflow_run_cancel':
+            result = workflow_runs.cancel(con, rt, args['run_id'], orch_thread=thread, reason=args['reason'])
+            if result.get('state') == 'cancelling':
+                workflow_runs.ensure_runner(con, rt)
+            return result
+        from . import workflows
+        plan = workflows.run_template(args['workflow'], args['template'], args['context'])
+        result = workflow_runs.start(con, rt, plan=plan, request_id=args['request_id'],
+                                     orch_thread=thread, idempotency_key=args['idempotency_key'])
+        workflow_runs.ensure_runner(con, rt)
+        return result
     if name in WORKFLOW_READ_TOOLS:
         from . import workflows
         required = {'workflow_list': set(), 'workflow_show': {'name'}, 'workflow_render': {'name', 'stage', 'inputs'}}[name]
@@ -871,7 +923,7 @@ def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY, sent=None):
                 thread = os.environ.get("ORCHD_ORCH_ID")
                 if not thread:
                     thread = meta.get("threadId") or (meta.get("x-codex-turn-metadata") or {}).get("thread_id")
-                    if thread and params.get("name") not in ("list_orchs", "quota_status", *WORKFLOW_READ_TOOLS):
+                    if thread and params.get("name") not in ("list_orchs", "quota_status", *WORKFLOW_QUERY_TOOLS):
                         store.register_orch(con, thread, "codex")
                 data = call(params.get("name"), params.get("arguments") or {}, thread, con, rt, marks, reply_id=mid)
             result = core.inbox_result(data)
@@ -879,7 +931,7 @@ def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY, sent=None):
             if sent is None:  # no transport to wait for: serialized fine, so mark now
                 for ids in marks:
                     store.mark_read(con, ids)
-            if (role != "entry" and params.get("name") in ("list_orchs", "quota_status", *WORKFLOW_READ_TOOLS)) or (
+            if (role != "entry" and params.get("name") in ("list_orchs", "quota_status", *WORKFLOW_QUERY_TOOLS)) or (
                     role == "entry" and params.get("name") in ("foreground", "orch_restart", "orch_upgrade", "orch_op_status",
                                                                "instance_check", "instance_apply")):
                 result["structuredContent"] = data
