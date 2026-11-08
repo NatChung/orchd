@@ -48,6 +48,63 @@ class ChannelService:
             raise PermissionError('adapter required')
         return repository.receive(self.con, source_id, models.validate_event(event), caller.identity, self.clock)
 
+    def _require_adapter(self, source_id, caller):
+        policy.require_source(caller, source_id)
+        source = repository.source(self.con, source_id)
+        if caller.role != 'adapter' or not source['enabled'] or source['adapter_id'] != caller.identity:
+            raise PermissionError('adapter not authorized for source')
+        return source
+
+    def acquire_source_lease(self, source_id, holder, *, caller, seconds=60):
+        from datetime import timedelta
+        self._require_adapter(source_id, caller)
+        if not holder or type(seconds) is not int or seconds <= 0:
+            raise ValueError('invalid lease')
+        now = self.clock()
+        return repository.acquire_source_lease(self.con, source_id, holder, now.isoformat(), (now + timedelta(seconds=seconds)).isoformat())
+
+    def release_source_lease(self, source_id, holder, generation, *, caller):
+        self._require_adapter(source_id, caller)
+        repository.release_source_lease(self.con, source_id, holder, generation, self.clock().isoformat())
+
+    def renew_source_lease(self, source_id, holder, generation, *, caller, seconds=900):
+        from datetime import timedelta
+        self._require_adapter(source_id, caller)
+        if type(seconds) is not int or seconds <= 0:
+            raise ValueError('invalid lease duration')
+        now = self.clock()
+        repository.renew_source_lease(self.con, source_id, holder, generation, now.isoformat(), (now + timedelta(seconds=seconds)).isoformat())
+
+    def adapter_source(self, source_id, *, caller):
+        import json
+        source = self._require_adapter(source_id, caller)
+        source['credential_refs'] = json.loads(source.pop('credential_refs_json'))
+        return source
+
+    def checkpoint(self, source_id, scope, *, caller):
+        self._require_adapter(source_id, caller)
+        return repository.checkpoint(self.con, source_id, scope)
+
+    def commit_checkpoint(self, source_id, scope, cursor, receipts, holder, generation, *, caller):
+        self._require_adapter(source_id, caller)
+        repository.commit_checkpoint(self.con, source_id, scope, cursor, receipts, holder, generation, self.clock().isoformat())
+
+    def claim_sync_job(self, source_id, holder, generation, *, caller):
+        self._require_adapter(source_id, caller)
+        return repository.claim_sync_job(self.con, source_id, holder, generation, self.clock().isoformat())
+
+    def finish_sync_job(self, source_id, job_id, holder, generation, *, caller, error=None):
+        self._require_adapter(source_id, caller)
+        if error not in (None, 'sync_failed'):
+            raise ValueError('invalid sync error')
+        repository.finish_sync_job(self.con, source_id, job_id, holder, generation, self.clock().isoformat(), error)
+
+    def record_adapter_health(self, source_id, holder, generation, state, *, caller):
+        self._require_adapter(source_id, caller)
+        if state not in ('healthy', 'degraded', 'credential_error'):
+            raise ValueError('invalid adapter health')
+        repository.record_adapter_health(self.con, source_id, holder, generation, self.clock().isoformat(), state)
+
 
 
     def message(self, message_id, *, caller):
@@ -63,13 +120,29 @@ class ChannelService:
             row = repository.get_message(self.con, message_id)
         content = repository.content(self.con, row['intake_receipt_id'])
         content['attachments'] = json.loads(content['attachments'])
+        attachment_rows = repository.message_attachments(self.con, message_id)
+        for item, attachment in zip(content['attachments'], attachment_rows):
+            item['attachment_id'] = attachment['id']
+            item['status'] = attachment['status']
         content['metadata'] = json.loads(content.pop('channel_metadata'))
         if row['deleted_at']:
             content = {'status':'unavailable','text':None,'attachments':[],
                        'unavailable_reason':content['unavailable_reason'] or 'deleted'}
         return {'schema_version':1,'source_id':row['source_id'],'message_id':row['id'],'receipt_id':row['intake_receipt_id'],
-                'status':content['status'],'last_synced_at':None,'freshness':'unknown','next_cursor':None,
+                'status':content['status'],**self._freshness(row['source_id']),'next_cursor':None,
                 'trust':row['trust'],'content':content}
+
+    def _freshness(self, source_id):
+        from datetime import datetime, timedelta
+        checkpoint = repository.checkpoint(self.con, source_id, 'mail')
+        heartbeat = repository.checkpoint(self.con, source_id, 'adapter_heartbeat')
+        health = repository.checkpoint(self.con, source_id, 'adapter_health')
+        last = checkpoint['committed_cursor'] if checkpoint else None
+        online = bool(heartbeat and self.clock() - datetime.fromisoformat(heartbeat['committed_cursor']) <= timedelta(minutes=5))
+        fresh = bool(last and self.clock() - datetime.fromisoformat(last) <= timedelta(minutes=5))
+        status = 'offline' if not online else ('degraded' if health and health['receipt_set_hash'] != 'healthy' else 'online')
+        return {'last_synced_at':last, 'freshness':'fresh' if fresh else 'stale', 'adapter_status':status,
+                'credential_error':bool(health and health['receipt_set_hash'] == 'credential_error')}
 
     def messages(self, source_id, *, caller, limit=100, cursor=''):
         policy.require_source(caller, source_id)
@@ -77,7 +150,7 @@ class ChannelService:
             raise ValueError('invalid limit')
         owner = None if caller.role == 'operator' else (caller.owner_orch or caller.identity)
         rows=repository.list_messages(self.con, source_id,limit+1,cursor,owner)
-        return {'schema_version':1,'source_id':source_id,'status':'partial','freshness':'unknown','last_synced_at':None,'messages':[self.message(r['id'],caller=caller) for r in rows[:limit]],'next_cursor':rows[limit-1]['id'] if len(rows)>limit else None}
+        return {'schema_version':1,'source_id':source_id,'status':'partial',**self._freshness(source_id),'messages':[self.message(r['id'],caller=caller) for r in rows[:limit]],'next_cursor':rows[limit-1]['id'] if len(rows)>limit else None}
 
     def search(self, source_id, query, *, caller, limit=100):
         if not isinstance(query,str) or not query.strip():
@@ -141,14 +214,79 @@ class ChannelService:
         owner = None if caller.role == 'operator' else (caller.owner_orch or caller.identity)
         ids=repository.conversation_messages(self.con,conversation_id,cursor,limit+1,owner)
         return {'schema_version':1,'source_id':source_id,'status':'partial' if len(ids)>limit else 'available',
-                'last_synced_at':None,'freshness':'unknown','next_cursor':ids[limit-1] if len(ids)>limit else None,
+                **self._freshness(source_id),'next_cursor':ids[limit-1] if len(ids)>limit else None,
                 'messages':[self.message(mid,caller=caller) for mid in ids[:limit]]}
 
     def read_attachment(self, attachment_id, *, caller):
         item=repository.attachment(self.con,attachment_id)
         policy.require_message(caller,item)
+        self.message(item['message_id'], caller=caller)
+        item=repository.attachment(self.con,attachment_id)
+        if item['status'] == 'available':
+            import base64
+            try:
+                with self.open_attachment(attachment_id, caller=caller) as handle:
+                    data = handle.read()
+            except FileNotFoundError:
+                return {'schema_version':1,'source_id':item['source_id'],'attachment_id':attachment_id,'status':'unavailable'}
+            return {'schema_version':1,'source_id':item['source_id'],'attachment_id':attachment_id,'status':'available','content_base64':base64.b64encode(data).decode('ascii')}
         status = 'unavailable' if item['status'] in ('deleted', 'unavailable') else 'adapter_unavailable'
         return {'schema_version':1,'source_id':item['source_id'],'attachment_id':attachment_id,'status':status}
+
+    def open_attachment(self, attachment_id, *, caller):
+        """Return an authorized, integrity-checked local binary stream."""
+        import hashlib
+        from .attachments import content_path
+        item = repository.attachment(self.con, attachment_id)
+        policy.require_message(caller, item)
+        self.message(item['message_id'], caller=caller)
+        item = repository.attachment(self.con, attachment_id)
+        if item['status'] != 'available':
+            raise ValueError('attachment unavailable')
+        handle = content_path(self.channel_home, item['source_id'], item['storage_key']).open('rb')
+        try:
+            digest, size = hashlib.sha256(), 0
+            for chunk in iter(lambda: handle.read(65536), b''):
+                digest.update(chunk)
+                size += len(chunk)
+            if size != item['byte_size'] or digest.hexdigest() != item['sha256']:
+                raise ValueError('attachment integrity failure')
+            handle.seek(0)
+            return handle
+        except BaseException:
+            handle.close()
+            raise
+
+    def queued_attachments(self, source_id, *, caller):
+        self._require_adapter(source_id, caller)
+        return repository.queued_attachments(self.con, source_id)
+
+    def store_attachment(self, attachment_id, data, holder, generation, *, caller):
+        import hashlib, os, tempfile
+        from .attachments import content_path, MAX_ATTACHMENT_BYTES
+        item = repository.attachment(self.con, attachment_id)
+        self._require_adapter(item['source_id'], caller)
+        if item['status'] != 'queued' or not isinstance(data, bytes) or len(data) > MAX_ATTACHMENT_BYTES or (item['byte_size'] is not None and len(data) != item['byte_size']):
+            raise ValueError('invalid attachment data')
+        digest = hashlib.sha256(data).hexdigest()
+        path = content_path(self.channel_home, item['source_id'], digest)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = content_path(self.channel_home, item['source_id'], digest)
+        existed = path.exists()
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix='.attachment-')
+        try:
+            with os.fdopen(fd, 'wb') as handle:
+                handle.write(data)
+            os.replace(tmp, path)
+            try:
+                repository.attachment_available(self.con, attachment_id, item['source_id'], digest, len(data), self.clock().isoformat(), holder, generation)
+            except BaseException:
+                if not existed:
+                    path.unlink(missing_ok=True)
+                raise
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
 
     def draft_reply(self, message_id, payload, *, caller):
         row=repository.get_message(self.con,message_id)

@@ -216,6 +216,22 @@ def queue_attachment(con, attachment_id):
         con.execute("UPDATE channel_attachments SET status='queued' WHERE id=? AND status='referenced'",(attachment_id,))
 
 
+def message_attachments(con, message_id):
+    return [dict(row) for row in con.execute('SELECT id,provider_attachment_ref,status FROM channel_attachments WHERE message_id=? ORDER BY rowid', (message_id,))]
+
+
+def queued_attachments(con, source_id):
+    return [dict(row) for row in con.execute("SELECT a.*,m.provider_message_id FROM channel_attachments a JOIN channel_messages m ON m.id=a.message_id JOIN channel_conversations c ON c.id=m.conversation_id WHERE c.source_id=? AND a.status='queued' ORDER BY a.id", (source_id,))]
+
+
+def attachment_available(con, attachment_id, source_id, digest, size, now, holder, generation):
+    with store.immediate(con):
+        _require_lease(con, source_id, holder, generation, now)
+        count=con.execute("UPDATE channel_attachments SET status='available',sha256=?,storage_key=?,byte_size=?,updated_at=? WHERE id=? AND status='queued' AND message_id IN (SELECT m.id FROM channel_messages m JOIN channel_conversations c ON c.id=m.conversation_id WHERE c.source_id=? AND m.deleted_at IS NULL)", (digest,digest,size,now,attachment_id,source_id)).rowcount
+        if count != 1:
+            raise ValueError('attachment no longer queued')
+
+
 
 def tombstone(con, message_id, source_id, *, reason='deleted'):
     from datetime import datetime, timezone
@@ -246,6 +262,86 @@ def source(con, source_id):
     if row is None:
         raise ValueError('unknown source')
     return dict(row)
+
+
+def acquire_source_lease(con, source_id, holder, now, until):
+    with store.immediate(con):
+        row = con.execute('SELECT * FROM channel_source_leases WHERE source_id=?', (source_id,)).fetchone()
+        if row and row['lease_until'] > now:
+            return None
+        generation = row['generation'] + 1 if row else 1
+        con.execute('INSERT INTO channel_source_leases VALUES(?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET holder_id=excluded.holder_id,generation=excluded.generation,lease_until=excluded.lease_until',
+                    (source_id, holder, generation, until))
+        return generation
+
+
+def release_source_lease(con, source_id, holder, generation, now):
+    with store.immediate(con):
+        changed = con.execute('UPDATE channel_source_leases SET lease_until=? WHERE source_id=? AND holder_id=? AND generation=? AND lease_until>?',
+                              (now, source_id, holder, generation, now)).rowcount
+        if changed != 1:
+            raise PermissionError('source lease lost')
+
+
+def renew_source_lease(con, source_id, holder, generation, now, until):
+    with store.immediate(con):
+        count = con.execute('UPDATE channel_source_leases SET lease_until=? WHERE source_id=? AND holder_id=? AND generation=? AND lease_until>?',
+                            (until, source_id, holder, generation, now)).rowcount
+        if count != 1:
+            raise PermissionError('source lease lost')
+
+
+def checkpoint(con, source_id, scope):
+    row = con.execute('SELECT * FROM channel_checkpoints WHERE source_id=? AND scope=?', (source_id, scope)).fetchone()
+    return dict(row) if row else None
+
+
+def commit_checkpoint(con, source_id, scope, cursor, receipts, holder, generation, now):
+    from .models import digest
+    with store.immediate(con):
+        lease = con.execute('SELECT * FROM channel_source_leases WHERE source_id=?', (source_id,)).fetchone()
+        if not lease or lease['holder_id'] != holder or lease['generation'] != generation or lease['lease_until'] <= now:
+            raise PermissionError('source lease lost')
+        for receipt in receipts:
+            if not con.execute('SELECT 1 FROM channel_observations o JOIN channel_messages m ON m.id=o.message_id WHERE o.source_id=? AND m.intake_receipt_id=?', (source_id, receipt)).fetchone():
+                raise ValueError('receipt not durable for source')
+        old = checkpoint(con, source_id, scope)
+        backwards = old and ((int(old['committed_cursor']) > int(cursor)) if scope == 'history' else (old['committed_cursor'] > cursor))
+        if backwards:
+            raise ValueError('checkpoint cannot move backwards')
+        con.execute('INSERT INTO channel_checkpoints VALUES(?,?,?,?,?,?) ON CONFLICT(source_id,scope) DO UPDATE SET committed_cursor=excluded.committed_cursor,window_end=excluded.window_end,receipt_set_hash=excluded.receipt_set_hash,updated_at=excluded.updated_at',
+                    (source_id, scope, cursor, cursor, digest(sorted(receipts)), now))
+
+
+def _require_lease(con, source_id, holder, generation, now):
+    row = con.execute('SELECT * FROM channel_source_leases WHERE source_id=?', (source_id,)).fetchone()
+    if not row or row['holder_id'] != holder or row['generation'] != generation or row['lease_until'] <= now:
+        raise PermissionError('source lease lost')
+
+
+def record_adapter_health(con, source_id, holder, generation, now, state):
+    with store.immediate(con):
+        _require_lease(con, source_id, holder, generation, now)
+        con.execute("INSERT INTO channel_checkpoints VALUES(?,'adapter_health',?,NULL,?,?) ON CONFLICT(source_id,scope) DO UPDATE SET committed_cursor=excluded.committed_cursor,receipt_set_hash=excluded.receipt_set_hash,updated_at=excluded.updated_at", (source_id, now, state, now))
+
+
+def claim_sync_job(con, source_id, holder, generation, now):
+    with store.immediate(con):
+        _require_lease(con, source_id, holder, generation, now)
+        row = con.execute("SELECT id FROM channel_sync_jobs WHERE source_id=? AND state IN ('pending','running') ORDER BY created_at,id LIMIT 1", (source_id,)).fetchone()
+        if not row:
+            return None
+        con.execute("UPDATE channel_sync_jobs SET state='running',error_code=NULL,completed_at=NULL WHERE id=?", (row['id'],))
+        return row['id']
+
+
+def finish_sync_job(con, source_id, job_id, holder, generation, now, error):
+    with store.immediate(con):
+        _require_lease(con, source_id, holder, generation, now)
+        count = con.execute("UPDATE channel_sync_jobs SET state=?,completed_at=?,error_code=? WHERE id=? AND source_id=? AND state='running'",
+                            ('failed' if error else 'succeeded', now, error, job_id, source_id)).rowcount
+        if count != 1:
+            raise ValueError('sync job not running')
 
 
 def observed_by(con, message_id, source_id):

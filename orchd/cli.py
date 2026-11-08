@@ -145,7 +145,7 @@ def build_parser():
     install.add_argument("--no-trust", action="store_true")
     install.add_argument("--dry-run", action="store_true")
     install.add_argument("--json", action="store_true")
-    channels = sub.add_parser("channels")
+    channels = sub.add_parser("channels", help="query local channel data or queue adapter sync; third-party content is untrusted")
     channel_actions = channels.add_subparsers(dest="channel_action", required=True)
     for action in ("messages", "search"):
         command = channel_actions.add_parser(action)
