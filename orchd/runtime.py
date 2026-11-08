@@ -563,6 +563,17 @@ class Runtime:
             directory.mkdir(mode=0o700, exist_ok=True)
         return str(directory / "w.sock")
 
+    def worker_socket(self, task_id, tag=None):
+        """Messaging endpoint for one Claude worker attempt. Claude on Windows accepts only a named pipe for
+        --messaging-socket-path (a file path exits before init), so Windows gets a fresh pipe name; elsewhere a
+        socket file in the task's private directory. socket_path() keeps naming that directory for logs."""
+        if os.name == "nt":
+            self.socket_path(task_id)  # the private directory still holds this task's logs
+            return "\\\\.\\pipe\\orchd-w-" + task_id + ("-" + tag if tag else "") + "-" + uuid.uuid4().hex
+        if tag is None:
+            return self.socket_path(task_id)
+        return os.path.join(os.path.dirname(self.socket_path(task_id)), f"w-{tag}.sock")
+
     def agents(self, timeout=15):
         out = self.run([self.claude, "agents", "--json"], timeout=timeout).stdout
         data = json.loads(out)

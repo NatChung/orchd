@@ -37,6 +37,9 @@ class FakeRuntime:
     def socket_path(self, task_id):
         return f"/tmp/orchd-{task_id}/w.sock"
 
+    def worker_socket(self, task_id, tag=None):
+        return self.socket_path(task_id) if tag is None else f"/tmp/orchd-{task_id}/w-{tag}.sock"
+
     def start_worker(self, worktree, sock, brief, model):
         self.brief, self.model = brief, model
         return "job1", "session1"

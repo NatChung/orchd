@@ -291,7 +291,7 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
                                                  WORKER_MODELS[model])
             store.update_task(con, task_id, job_id=job, session_id=session, status="running")
         else:
-            sock = rt.socket_path(task_id)
+            sock = rt.worker_socket(task_id)
             job, session = rt.start_worker(worktree, sock, worker_brief(worker_cli(), worktree=worktree, repo=task["repo"], projects=paths.projects_dir()), WORKER_MODELS[model])
             store.update_task(con, task_id, socket=sock, job_id=job, session_id=session, status="running")
             task = store.get_task(con, task_id)
@@ -1542,7 +1542,7 @@ def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT, backend=No
                     worktree, str(directory / f"codex-{tag}.jsonl"),
                     worker_brief(worker_cli(), kind, worktree, task["repo"], paths.projects_dir()) + "\n\n" + prompt, to_model)
             else:
-                new["socket"] = str(directory / f"w-{tag}.sock")
+                new["socket"] = rt.worker_socket(task_id, tag)
                 new["job_id"], new["session_id"] = rt.start_worker(worktree, new["socket"], worker_brief(worker_cli(), worktree=worktree, repo=task["repo"], projects=paths.projects_dir()),
                                                                    to_model)
                 stage = "send"
