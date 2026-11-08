@@ -64,7 +64,8 @@ def root():
 
 def schema(manifest):
     from .core import TASK_TYPES
-    if (not isinstance(manifest, dict) or set(manifest) != {'schema_version', 'name', 'description', 'stages'}
+    if (not isinstance(manifest, dict) or not {'schema_version', 'name', 'description', 'stages'} <= manifest.keys()
+            or manifest.keys() - {'schema_version', 'name', 'description', 'stages', 'run_templates'}
             or manifest['schema_version'] != 'orchd-workflow/v1'):
         raise ValueError('Invalid workflow manifest fields or schema version')
     name(manifest['name'])
@@ -92,6 +93,15 @@ def schema(manifest):
             if not file.endswith('.md'):
                 raise ValueError('Workflow templates must be Markdown files')
             files.add(file)
+    templates = manifest.get('run_templates', {})
+    if not isinstance(templates, dict) or len(templates) > 32:
+        raise ValueError('Run templates must map at most 32 names to JSON files')
+    for key, value in templates.items():
+        name(key)
+        file = relative(value)
+        if not file.endswith('.json'):
+            raise ValueError('Run templates must be JSON files')
+        files.add(file)
     return files
 
 
@@ -110,7 +120,48 @@ def validate_files(files):
                 raise ValueError('Template references undeclared input parameters')
             if '{{' in PLACEHOLDER.sub('', text) or '}}' in PLACEHOLDER.sub('', text):
                 raise ValueError('Invalid workflow placeholder syntax')
+    for file in manifest.get('run_templates', {}).values():
+        if len(files[file]) > 1024 * 1024:
+            raise ValueError('Run template exceeds 1 MiB')
+        _run_template_json(files[file])
     return manifest
+
+
+def _run_template_json(raw):
+    """Validate data packaging here; run start owns full graph/runtime validation."""
+    template = load(raw.decode('utf-8'))
+    required = {'schema_version', 'context', 'steps'}
+    if (not isinstance(template, dict) or not required <= template.keys()
+            or template.keys() - required - {'limits', 'failure_steps'}
+            or template['schema_version'] != 'orchd-run-template/v1'):
+        raise ValueError('Run template needs its schema, context and fixed steps; no embedded workflow pin')
+    context = template['context']
+    if not isinstance(context, dict) or not all(isinstance(k, str) and PARAM.fullmatch(k) and isinstance(v, str) for k, v in context.items()):
+        raise ValueError('Run template context must declare string parameter defaults')
+    for key, maximum in (('steps', 32), ('failure_steps', 8)):
+        if key in template and (not isinstance(template[key], list) or not 1 <= len(template[key]) <= maximum or not all(isinstance(node, dict) for node in template[key])):
+            raise ValueError('Run template steps must be nonempty fixed arrays of objects')
+    if 'limits' in template and not isinstance(template['limits'], dict):
+        raise ValueError('Run template limits must be an object')
+    canonical(template)  # Escaped unpaired surrogates are not UTF-8 string values.
+    return template
+
+
+def run_template(workflow, template_name, context):
+    """Resolve committed data; callers can override context strings, never the step graph."""
+    manifest, files, entry = resolve(workflow)
+    name(template_name)
+    file = manifest.get('run_templates', {}).get(template_name)
+    if file is None:
+        raise ValueError('Unknown installed run template; use workflow show')
+    template = _run_template_json(files[file])
+    if not isinstance(context, dict) or set(context) - set(template['context']) or not all(isinstance(v, str) for v in context.values()):
+        raise ValueError('Run context overrides must contain only declared string parameters')
+    template['context'].update(context)
+    template['schema_version'] = 'orchd-run-plan/v1'
+    template['workflow'] = dict(name=manifest['name'], **entry)
+    canonical(template)
+    return template
 
 
 def read_registry(file, schema_version):
