@@ -14,7 +14,7 @@ backups. Init refreshes this worker's block on repeat runs. Upgrade registers a
 new `computer-use-rules-v1` step and remembers its initialized path.
 
 These instructions are policy, not technical enforcement. Creating the home
-does not establish an aiagent account, grant GUI permissions, or add a backend.
+does not establish an Operator-authorized account, grant GUI permissions, or add a backend.
 
 ## Launch and attach findings
 
@@ -25,11 +25,11 @@ does not establish an aiagent account, grant GUI permissions, or add a backend.
   document `codex://new?path=<encoded-absolute-path>&prompt=<encoded-text>` and
   `codex://threads/<thread-id>`. The new-chat link preloads the composer; it does
   not submit the prompt. These are candidates for manual launch and view_worker,
-  not proof of automated dispatch or aiagent identity selection.
+  not proof of automated dispatch or identity selection.
 - Official [app-server documentation](https://learn.chatgpt.com/docs/app-server)
   supports starting/resuming threads with a cwd, sending turns, and receiving
   events. This does not establish a supported attachment to the Desktop-owned
-  aiagent session or that app-server workers have Desktop computer-use tools.
+  session or that app-server workers have Desktop computer-use tools.
   Existing orchd app-server viewer opens a terminal, which does not meet #84.
 
 No supported end-to-end Desktop dispatch/answer automation hook was established
@@ -82,7 +82,7 @@ After backend approval, add a new managed-rule version and migration with this
 loop; do not ship commands in the installed template before they exist:
 
 ```text
-On Operator start/resume, verify the configured aiagent worker identity and
+On Operator start/resume, verify the configured worker identity and
 state location, then register/reattach this same Desktop session.
 While idle in an active turn, call desktop-worker poll with a bounded wait;
 on an empty timeout, call it again without ending the turn.
@@ -100,9 +100,9 @@ stop GUI actions, report/reconcile, and wait for Operator direction.
 The new backend-specific waiting rule must replace today's instruction to end
 the turn after `ask`: keep a bounded CLI wait active instead, so answers can be
 pulled into this same turn. The Phase 1 template keeps existing worker rules
-until this behavior is approved and implemented. Safety rules remain aiagent
-only, no credential/payment entry, explicit approval, allowed apps/sites,
-secret-free output and sanitized evidence in `reports/<task-id>/`.
+until this behavior is approved and implemented. Safety rules require
+Operator-authorized accounts, no credential/payment entry, explicit approval,
+allowed apps/sites, secret-free output and sanitized evidence in `reports/<task-id>/`.
 
 ### Minimal proposed CLI/MCP surface
 
@@ -121,7 +121,7 @@ CLI-only is sufficient for the pilot if the Desktop session can execute the
 installed absolute orchd binary against the correct state database. Store the
 worker credential in a permission-restricted external config file, never in the
 repo, prompt, command arguments or screenshots. Registration must verify task
-ownership and aiagent identity; an arbitrary caller naming a worker ID must not
+ownership and the authorized identity; an arbitrary caller naming a worker ID must not
 be able to claim its queue. Existing commands lack this proposed Desktop claim
 contract; do not imply that task IDs alone authenticate it. An optional MCP role
 can expose register/reattach, poll, receipt, heartbeat and the four task lifecycle
@@ -168,7 +168,7 @@ return a clear unavailable diagnostic without launching a replacement worker.
 
 Bind approval to task, thread generation, destination and exact action/content;
 changed content or navigation invalidates it. Keep allowlisted apps/sites,
-aiagent-only accounts, Operator-only credential/payment entry, and sanitized
+Operator-authorized accounts, Operator-only credential/payment entry, and sanitized
 step screenshots under `reports/<task-id>/`. Never include secrets in prompts,
 URLs or evidence. AGENTS.md alone cannot enforce these; the future host adapter
 must gate actions and evidence capture or disclose its limitations and stop.
