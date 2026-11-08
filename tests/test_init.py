@@ -181,11 +181,11 @@ class InitTest(unittest.TestCase):
             self.init(trust=False)
 
     def test_non_default_state_dir_reaches_both_mcp_servers(self):
-        self.env = {"ORCHD_HOME": "/tmp/orchd-state"}
+        self.env = {"ORCHD_HOME": str(self.home / "custom-state")}
         self.init(trust=False)
         for folder, server in (("home", "orchd"), ("interface", "orchd_entry")):
             cfg = tomllib.loads((self.home / "orch" / folder / ".codex" / "config.toml").read_text())
-            self.assertEqual(cfg["mcp_servers"][server]["env"], {"ORCHD_HOME": "/tmp/orchd-state"})
+            self.assertEqual(cfg["mcp_servers"][server]["env"], {"ORCHD_HOME": str(self.home / "custom-state")})
 
     def test_projects_override_reaches_both_mcp_servers(self):
         self.env = {"ORCHD_PROJECTS": "~/Git Projects", "ORCHD_CONFIG_DIR": str(self.home / "settings")}
@@ -283,3 +283,28 @@ class InitTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class ChannelInstallTest(unittest.TestCase):
+    def test_install_dry_run_is_write_free_and_install_creates_disabled_layout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            env = {"ORCHD_ROOT": str(home / "root"), "ORCHD_HOME": str(home / "state")}
+            preview = bootstrap.install(TrustRuntime(), home=home, env=env, trust=False, dry_run=True, orchd_bin="synthetic")
+            self.assertEqual(preview["layout_version"], 1)
+            self.assertEqual(list(home.iterdir()), [])
+            result = bootstrap.install(TrustRuntime(), home=home, env=env, trust=False, orchd_bin="synthetic")
+            self.assertEqual(result["layout_version"], 1)
+            self.assertTrue((home / "root/channel/email/config.toml").is_file())
+            self.assertFalse((home / ".codex/config.toml").exists())
+
+    def test_install_conflict_does_not_provision_homes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            env = {"ORCHD_ROOT": str(home / "root"), "ORCHD_HOME": str(home / "state")}
+            conflict = home / "root/channel/email/config.toml"
+            conflict.parent.mkdir(parents=True)
+            conflict.write_text("user content", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                bootstrap.install(TrustRuntime(), home=home, env=env, trust=False, orchd_bin="synthetic")
+            self.assertFalse((home / "root/home").exists())
+            self.assertEqual(conflict.read_text(encoding="utf-8"), "user content")

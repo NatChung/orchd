@@ -1,0 +1,9 @@
+schema_version = 1
+[[sources]]
+id = "demo-email"
+provider = "gmail"
+account_ref = "demo-account-b"
+read_credential_ref = "os-store:demo/email/read"
+send_credential_ref = "os-store:demo/email/send"
+send_enabled = false
+enabled = false

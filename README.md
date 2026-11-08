@@ -18,9 +18,12 @@ Sign in through each provider's CLI and accept the trust prompts for your projec
 
 ```sh
 uv tool install git+https://github.com/NatChung/orchd.git
+orchd install
 uv tool update-shell
 orchd doctor
 ```
+
+`uv tool install` installs the package only; run `orchd install` to provision homes and disabled channel templates. The installation wrappers run provisioning after a successful package install. `orchd install --dry-run --json` previews without writing; `orchd install --no-trust` preserves existing trust settings. Channel credentials use OS secret references; installation does not authorize accounts or enable sources.
 
 `doctor` checks the machine without changing its configuration. Before initialization, it reminds you to set up the Orch home. For development from a checkout, use `bin/orchd`.
 
@@ -103,7 +106,7 @@ Use [public issues](https://github.com/NatChung/orchd/issues) for general bugs a
 | Computer-use session home | `~/orch/gpt-computer-use-worker` | under `ORCHD_ROOT` |
 | Projects directory | parent of a checkout under HOME, else `~/projects` | `projects_dir` in `config.toml`, `ORCHD_PROJECTS` |
 
-`orchd init` also creates the computer-use session home with managed `AGENTS.md` rules and a `reports/` evidence folder. Re-running init refreshes that managed block with backups and preserves user content outside it. Installation includes running init after installing the package. Desktop dispatch is design-only; see [the proposed backend](docs/design/computer-use-worker.md).
+`orchd init` also creates the computer-use session home with managed `AGENTS.md` rules and a `reports/` evidence folder. Re-running init refreshes that managed block with backups and preserves user content outside it. The package manager does not provision homes automatically: run `orchd install` after a bare package install. The official installer wrappers run it after installation. Desktop dispatch is design-only; see [the proposed backend](docs/design/computer-use-worker.md).
 
 `config.toml` in the personal settings directory sets the projects directory shared by doctor and dispatch (`~/` or an absolute path); `ORCHD_PROJECTS` overrides it. The value does not depend on the current working directory, so Desktop and background dispatch use the same location:
 

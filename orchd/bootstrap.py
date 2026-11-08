@@ -274,6 +274,11 @@ def migrate(source, target, stubs=None):
 def init(rt, home=None, env=None, trust=True, source=None, orchd_bin=None):
     home = Path(home or Path.home())
     env = os.environ if env is None else env
+    from . import channel_layout
+    layout_env = dict(env)
+    if not layout_env.get("ORCHD_ROOT") and not layout_env.get("ORCHD_CHANNEL_HOME"):
+        layout_env["ORCHD_ROOT"] = str(paths.root(home, env))
+    channel_layout.plan(home=home, env=layout_env)
     orch, interface = paths.orch_home(home, env), paths.interface_home(home, env)
     planned = planned_files(home, env, orchd_bin)
     from . import home_migrations
@@ -301,6 +306,25 @@ def init(rt, home=None, env=None, trust=True, source=None, orchd_bin=None):
                                   f"not trusted: run `cd {orch} && claude`, accept the trust prompt, then exit")
     from . import home_migrations
     home_migrations.record_init(home, env)
+    from . import channel_layout
+    result["channel_layout"] = channel_layout.apply(home=home, env=layout_env)
+    result["layout_version"] = result["channel_layout"]["layout_version"]
     result["next"] = ("Run `orchd binding` to bind the interface to a Claude Orch, then open "
                       f"{interface} in the Codex Desktop app (permissions: interface).")
     return result
+
+
+def install(rt, home=None, env=None, trust=True, dry_run=False, orchd_bin=None):
+    """Provision the normal homes and the disabled channel layout."""
+    home = Path(home or Path.home())
+    env = os.environ if env is None else env
+    if dry_run:
+        from . import channel_layout
+        layout_env = dict(env)
+        if not layout_env.get("ORCHD_ROOT") and not layout_env.get("ORCHD_CHANNEL_HOME"):
+            layout_env["ORCHD_ROOT"] = str(paths.root(home, env))
+        return {"layout_version": channel_layout.VERSION,
+                "channel_layout": channel_layout.plan(home=home, env=layout_env),
+                "files": [str(p) for p in planned_files(home, env, orchd_bin)],
+                "dry_run": True}
+    return init(rt, home=home, env=env, trust=trust, orchd_bin=orchd_bin)

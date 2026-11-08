@@ -15,8 +15,8 @@ dependencies = ["psutil>=6.0,<8", "websocket-client>=1.8,<2"]
 orchd = "orchd.upgrade:cli"
 
 [tool.setuptools]
-packages = ["orchd"]
+packages = ["orchd", "orchd.channels"]
 
 [tool.setuptools.package-data]
 # `**/*` skips dot-directories, so the .codex templates are named explicitly.
-orchd = ["templates/*/*.md", "templates/*/*/*.md", "templates/*/.codex/*.toml", "worker_bin/gh"]
+orchd = ["templates/*/*.md", "templates/*/*/*.md", "templates/*/.codex/*.toml", "worker_bin/gh", "templates/channel/*.toml", "templates/channel/*/*.toml"]

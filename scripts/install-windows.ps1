@@ -27,3 +27,7 @@ try {
     $env:UV_TOOL_BIN_DIR = $oldBin
 }
 Write-Output "Installed launcher: $(Join-Path $binDir 'orchd.exe'). Use orchd upgrade for future updates."
+
+$launcher = Join-Path $binDir 'orchd.exe'
+& $launcher install
+if ($LASTEXITCODE -ne 0) { throw 'Package installed, but provisioning failed. Retry orchd install.' }

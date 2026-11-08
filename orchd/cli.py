@@ -141,6 +141,22 @@ def build_parser():
     init = sub.add_parser("init")
     init.add_argument("--from", dest="source", help="copy what an old Orch home kept (e.g. ~/projects/orch); never overwrites")
     init.add_argument("--no-trust", action="store_true", help="do not write Codex trust or check Claude trust")
+    install = sub.add_parser("install", help="provision Orch homes and disabled channels")
+    install.add_argument("--no-trust", action="store_true")
+    install.add_argument("--dry-run", action="store_true")
+    install.add_argument("--json", action="store_true")
+    channels = sub.add_parser("channels")
+    channel_actions = channels.add_subparsers(dest="channel_action", required=True)
+    layout = channel_actions.add_parser("layout")
+    layout_actions = layout.add_subparsers(dest="layout_action", required=True)
+    for action in ("plan", "apply"):
+        command = layout_actions.add_parser(action)
+        command.add_argument("--legacy-manifest", help="explicit legacy manifest to inspect")
+    rollback = layout_actions.add_parser("rollback")
+    rollback.add_argument("--migration", required=True)
+    choice = rollback.add_mutually_exclusive_group(required=True)
+    choice.add_argument("--dry-run", action="store_true")
+    choice.add_argument("--apply", action="store_true")
     upgrade_parser = sub.add_parser("upgrade")
     upgrade_parser.add_argument("--migrations-only", action="store_true", help="retry home migrations without reinstalling")
     upgrade_parser.add_argument("--dry-run", action="store_true", help="preview home migrations without writing or reinstalling")
@@ -513,7 +529,8 @@ HOME_POLICY = {
     ("orch", "start"): "write", ("orch", "stop"): "write", ("orch", "restart"): "write",  # --dry-run -> warn
     ("orch", "list"): "write", ("orch", "attach"): "write",
     ("orch", "register-codex-probe"): "write",
-    ("init",): "skip", ("upgrade",): "skip", ("quota",): "skip", ("doctor",): "skip",
+    ("init",): "skip", ("install",): "skip", ("upgrade",): "skip",
+    **{("channels", "layout", action): "skip" for action in ("plan", "apply", "rollback")}, ("quota",): "skip", ("doctor",): "skip",
     ("_entry-op",): "skip",  # its `orchd upgrade` / `orchd orch restart` children apply the policy themselves
     ("config", "show"): "skip", ("config", "get"): "skip", ("config", "set"): "skip", ("config", "unset"): "skip",
     ("binding",): "write",  # --status -> warn
@@ -540,6 +557,8 @@ ACTION_DEST = ("interface_action", "orch_action", "entry_action", "question_acti
 
 def _home_policy(args):
     cmd = args.cmd.split()[0]
+    if cmd == "channels":
+        return HOME_POLICY[(cmd, args.channel_action, args.layout_action)]
     action = next((getattr(args, d) for d in ACTION_DEST if getattr(args, d, None)), None)
     policy = HOME_POLICY.get((cmd, action) if action else (cmd,), "write")  # unknown -> write (tests keep the table complete)
     if policy == "write" and (getattr(args, "dry_run", False) or (cmd == "binding" and args.status)
@@ -795,6 +814,31 @@ def main(argv=None):
         except ValueError as error:
             print(f"orchd _entry-op: {error}", file=sys.stderr)
             return 1
+    if args.cmd == "channels":
+        import sqlite3
+        from orchd import channel_layout
+        try:
+            if args.layout_action == "plan":
+                result = channel_layout.plan(legacy_manifest=args.legacy_manifest)
+            elif args.layout_action == "apply":
+                result = channel_layout.apply(legacy_manifest=args.legacy_manifest)
+            else:
+                result = channel_layout.rollback(args.migration, apply=args.apply)
+            print(json.dumps(result, ensure_ascii=False, indent=1))
+            return 1 if result.get("conflicts") else 0
+        except (ValueError, OSError, sqlite3.Error) as error:
+            print(f"channel layout: {error}", file=sys.stderr)
+            return 1
+    if args.cmd == "install":
+        import subprocess
+        from orchd import bootstrap
+        try:
+            result = bootstrap.install(Runtime(), trust=not args.no_trust, dry_run=args.dry_run)
+        except (ValueError, OSError, subprocess.SubprocessError) as error:
+            print(f"install: {error}", file=sys.stderr)
+            return 1
+        print(json.dumps(result, ensure_ascii=False, indent=1))
+        return 0
     if args.cmd == "upgrade":
         from orchd import upgrade
         code, lines = upgrade.upgrade(migrations_only=args.migrations_only, dry_run=args.dry_run)

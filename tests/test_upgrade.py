@@ -156,5 +156,18 @@ class UpgradeTest(unittest.TestCase):
                     self.assertIn("Retry: orchd upgrade --migrations-only", lines[-1])
 
 
+class ChannelUpgradePlanTest(unittest.TestCase):
+    def test_dry_run_reports_channel_plan_without_network_or_writes(self):
+        import os
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            env = {"HOME": str(home), "USERPROFILE": str(home), "ORCHD_HOME": str(home / "state"), "ORCHD_ROOT": str(home / "root")}
+            with patch.dict(os.environ, env), patch("orchd.upgrade.default_run", side_effect=AssertionError("network")):
+                code, lines = upgrade.upgrade(dry_run=True, run=lambda *a: self.fail("network called"))
+            self.assertEqual(code, 0, lines)
+            self.assertIn("channel layout v1", "\n".join(lines))
+            self.assertEqual(list(home.iterdir()), [])
+
+
 if __name__ == "__main__":
     unittest.main()

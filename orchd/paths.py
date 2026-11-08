@@ -16,6 +16,11 @@ def root(home=None, env=None):
     return Path(env.get("ORCHD_ROOT") or Path(home or Path.home()) / "orch")
 
 
+def channel_home(home=None, env=None):
+    env = os.environ if env is None else env
+    return Path(env.get("ORCHD_CHANNEL_HOME") or root(home, env) / "channel")
+
+
 def orch_home(home=None, env=None):
     env = os.environ if env is None else env
     return Path(env.get("ORCHD_ORCH_HOME") or root(home, env) / "home")
