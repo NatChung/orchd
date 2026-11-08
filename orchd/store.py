@@ -30,6 +30,9 @@ CREATE TABLE IF NOT EXISTS tasks(
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS interface_orch_successors(
+    old_orch TEXT PRIMARY KEY, current_orch TEXT NOT NULL
+);
 -- Durable external interface tables; no changes to Entry/intake schemas.
 CREATE TABLE IF NOT EXISTS interfaces(
     id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, orch_id TEXT NOT NULL,
