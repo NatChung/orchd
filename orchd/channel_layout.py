@@ -139,6 +139,12 @@ def plan(*, home=None, env=None, legacy_manifest=None):
     root, state = _locations(home, env)
     _check_path(root)
     _check_path(state)
+    for directory in [root, *(root / n for n in ("email", "slack", "line")), *(root / n / "state" for n in ("email", "slack", "line"))]:
+        _check_path(directory)
+        if directory.exists():
+            if not directory.is_dir():
+                raise ValueError(f"not a directory: {directory}")
+            platform_process.validate_private(directory)
     files = _files()
     for name, data in files.items():
         target = root / name
@@ -195,7 +201,7 @@ def _state(root, state):
     if os.name != "nt":
         os.chmod(db_path, 0o600)
     _validate_file(db_path)
-    db.execute("CREATE TABLE IF NOT EXISTS migrations (id TEXT PRIMARY KEY, root TEXT NOT NULL, status TEXT NOT NULL, files TEXT NOT NULL, dirs TEXT NOT NULL)")
+    db.execute("CREATE TABLE IF NOT EXISTS migrations (id TEXT PRIMARY KEY, root TEXT NOT NULL, status TEXT NOT NULL, files TEXT NOT NULL, dirs TEXT NOT NULL, layout_version INTEGER NOT NULL)")
     db.execute("BEGIN IMMEDIATE")
     return db
 
@@ -216,13 +222,17 @@ def apply(*, home=None, env=None, legacy_manifest=None):
     db = None
     try:
         db = _state(root, state)
-        complete = db.execute("SELECT id FROM migrations WHERE root=? AND status='complete' ORDER BY rowid DESC LIMIT 1", (str(root),)).fetchone()
+        complete = db.execute("SELECT id, layout_version FROM migrations WHERE root=? AND status='complete' ORDER BY rowid DESC LIMIT 1", (str(root),)).fetchone()
         if complete:
+            if complete[1] != VERSION:
+                raise ValueError("unsupported channel layout version")
             if all((root / name).is_file() and _digest((root / name).read_bytes()) == _digest(data) for name, data in files.items()):
                 return {**planned, "migration_id": complete[0]}
             raise ValueError("channel layout conflict: a migration-owned file is missing")
-        row = db.execute("SELECT id, files, dirs FROM migrations WHERE root=? AND status='pending'", (str(root),)).fetchone()
+        row = db.execute("SELECT id, files, dirs, layout_version FROM migrations WHERE root=? AND status='pending'", (str(root),)).fetchone()
         if row:
+            if row[3] != VERSION:
+                raise ValueError("unsupported channel layout version")
             migration, entries, dirs = row[0], json.loads(row[1]), json.loads(row[2])
             if {entry.get("path") for entry in entries} != set(files):
                 raise ValueError("invalid channel migration journal")
@@ -234,9 +244,9 @@ def apply(*, home=None, env=None, legacy_manifest=None):
                 raise ValueError("invalid channel migration journal")
         else:
             migration = uuid.uuid4().hex
-            entries = [{"path": name, "original": str(root / name), "old_hash": None, "new_hash": _digest(data), "backup": None, "created": not (root / name).exists(), "status": "pending"} for name, data in files.items()]
+            entries = [{"path": name, "original": str(root / name), "old_hash": _digest((root / name).read_bytes()) if (root / name).exists() else None, "new_hash": _digest(data), "backup": None, "created": not (root / name).exists(), "status": "pending"} for name, data in files.items()]
             dirs = []
-            db.execute("INSERT INTO migrations VALUES (?, ?, 'pending', ?, ?)", (migration, str(root), json.dumps(entries), json.dumps(dirs)))
+            db.execute("INSERT INTO migrations VALUES (?, ?, 'pending', ?, ?, ?)", (migration, str(root), json.dumps(entries), json.dumps(dirs), VERSION))
         db.commit()  # receipt exists before any channel file is written
         for directory in [root, *(root / n for n in ("email", "slack", "line")), *(root / n / "state" for n in ("email", "slack", "line"))]:
             if not directory.exists():
@@ -276,7 +286,10 @@ def rollback(migration_id, *, home=None, env=None, apply=False):
     _check_path(state)
     if not apply:
         return _rollback(migration_id, root=root, state=state, apply=False)
-    lock = sqlite3.connect(state / "lock.sqlite3", timeout=30, isolation_level=None)
+    lock_path = state / "lock.sqlite3"
+    _check_path(lock_path)
+    _validate_file(lock_path)
+    lock = sqlite3.connect(lock_path, timeout=30, isolation_level=None)
     try:
         lock.execute("BEGIN IMMEDIATE")
         return _rollback(migration_id, root=root, state=state, apply=True)
@@ -287,7 +300,11 @@ def rollback(migration_id, *, home=None, env=None, apply=False):
 
 def _rollback(migration_id, *, root, state, apply):
     _check_path(state)
-    db = sqlite3.connect((state / "layout.sqlite3").as_uri() + "?mode=ro", uri=True)
+    platform_process.validate_private(state)
+    db_path = state / "layout.sqlite3"
+    _check_path(db_path)
+    _validate_file(db_path)
+    db = sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True)
     try:
         row = db.execute("SELECT root, files, dirs, status FROM migrations WHERE id=?", (migration_id,)).fetchone()
     finally:
@@ -317,7 +334,14 @@ def _rollback(migration_id, *, root, state, apply):
         _check_path(target)
         if not entry["created"] or not target.exists():
             continue
-        if not target.is_file() or _digest(target.read_bytes()) != entry["new_hash"]:
+        try:
+            if not target.is_file():
+                raise ValueError("not a file")
+            _validate_file(target)
+            matches = _digest(target.read_bytes()) == entry["new_hash"]
+        except (OSError, ValueError):
+            matches = False
+        if not matches:
             conflicts.append(str(target))
         else:
             if apply:

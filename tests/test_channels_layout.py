@@ -153,3 +153,13 @@ class ChannelLayoutTest(unittest.TestCase):
         channel_layout.apply(home=self.home, env=env)
         self.assertTrue((root / "channel/email/config.toml").is_file())
         self.assertFalse((self.home / "orch/channel").exists())
+
+    def test_insecure_existing_channel_directory_is_rejected_before_state_write(self):
+        import os
+        root = self.home / "custom/channel"
+        root.mkdir(parents=True)
+        if os.name != "nt":
+            root.chmod(0o755)
+        with self.assertRaises(ValueError):
+            channel_layout.apply(home=self.home, env=self.env)
+        self.assertFalse((self.home / "state").exists())
