@@ -150,8 +150,15 @@ def worker_env(worktree=None):
     env["ORCHD_BIN"] = orchd_bin()
     # Replace even absolute gh credential helpers for GitHub, without writing git config.
     count = int(env.get("GIT_CONFIG_COUNT", "0"))
+    helper = "!gh auth git-credential"
+    if os.name == "nt":
+        launcher = os.path.abspath(os.path.join(wrapper_dir, "gh.cmd"))
+        if os.path.isfile(launcher):
+            # Git invokes shell helpers through sh, where forward slashes preserve Windows paths.
+            launcher = launcher.replace("\\", "/")
+            helper = f'!"{launcher}" auth git-credential'
     for key, value in [("credential.https://github.com.helper", ""),
-                       ("credential.https://github.com.helper", "!gh auth git-credential"),
+                       ("credential.https://github.com.helper", helper),
                        ("credential.https://github.com.useHttpPath", "true")]:
         env[f"GIT_CONFIG_KEY_{count}"] = key
         env[f"GIT_CONFIG_VALUE_{count}"] = value
