@@ -156,24 +156,19 @@ def _predates_worktree(mark):
     return lambda proc: proc.create_time() < born
 
 
-def _started_by_another_account(proc, owner_known):
+def _started_by_another_account(proc):
     """Windows: a process gets its environment from whoever creates it, so one created by another account's
     process (a system service starting ctfmon, ChtIME, taskhostw, a search or WMI host, ...) cannot carry the mark.
     After a sign-in these start later than every older worktree, refuse environment reads, and used to block close.
-    UAC/AIS launches name the requesting process as parent, so an elevated child of a worker keeps a parent of ours
-    and still blocks. psutil's parent() rejects a parent PID reused after the child started. A process of ours whose
-    parent is gone stays unknown (it may be an orphaned worker child); for a process whose owner cannot be read, a
-    gone parent is enough, since nothing of ours is left that could have handed it the mark."""
+    Only a parent whose owner is positively read as another account counts as evidence. UAC/AIS launches name the
+    requesting process as parent, so an elevated child of a worker keeps a parent of ours and still blocks. A gone
+    parent (a worker may start an elevated child that inherits the mark and then exit) or a parent whose owner
+    cannot be read is unknown, never evidence: the process stays unknown and blocks close. psutil's parent()
+    rejects a parent PID reused after the child started."""
     try:
         parent = proc.parent()
-        if parent is None:
-            return not owner_known
-        return not _owned_by_us(parent)
-    except psutil.AccessDenied:  # the parent's owner cannot be read: not this account
-        return True
-    except psutil.NoSuchProcess:
-        return not owner_known
-    except psutil.Error:
+        return parent is not None and not _owned_by_us(parent)
+    except psutil.Error:  # gone, access denied or otherwise unreadable: no independent evidence
         return False
 
 
@@ -185,13 +180,13 @@ def _marked_task_process(proc, mark, exclude):
         # Unknown owners are never signalled. Exclude only with independent evidence.
         if os.name == "nt":
             def unknown_unreadable(p):
-                return exclude(p) or _started_by_another_account(p, owner_known=False)
+                return exclude(p) or _started_by_another_account(p)
             if environ_of(proc, exclude_unreadable=unknown_unreadable).get("ORCHD_WORKTREE") != mark:
                 return False
         raise
     if os.name == "nt":
         def own_unreadable(p):
-            return exclude(p) or _started_by_another_account(p, owner_known=True)
+            return exclude(p) or _started_by_another_account(p)
         return owned and environ_of(proc, exclude_unreadable=own_unreadable).get("ORCHD_WORKTREE") == mark
     return owned and environ_of(proc, exclude_unreadable=exclude).get("ORCHD_WORKTREE") == mark
 

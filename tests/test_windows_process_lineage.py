@@ -64,12 +64,25 @@ class WindowsLineageTest(unittest.TestCase):
         # ctfmon.exe / ChtIME.exe / taskhostw.exe after a new sign-in
         self.assertEqual(self.scan(proc(1744, parent=self.service())), {})
 
-    def test_own_helper_whose_parent_owner_is_unreadable_does_not_block(self):
-        self.assertEqual(self.scan(proc(1744, parent=proc(3812, owner=None))), {})
+    def test_unknown_owner_started_by_a_service_does_not_block(self):
+        self.assertEqual(self.scan(proc(26456, owner=None, parent=self.service())), {})
 
-    def test_unknown_owner_started_by_a_service_or_without_parent_does_not_block(self):
-        self.assertEqual(self.scan(proc(26456, owner=None, parent=None),
-                                   proc(5128, owner=None, parent=proc(900, owner=None))), {})
+    def test_own_helper_whose_parent_owner_is_unreadable_still_blocks(self):
+        # the parent may merely be unreadable; that is not proof it belongs to another account
+        with self.assertRaisesRegex(RuntimeError, "cannot inspect process 1744"):
+            self.scan(proc(1744, parent=proc(3812, owner=None)))
+
+    def test_unknown_owner_with_gone_or_unreadable_parent_still_blocks(self):
+        # an orphaned elevated child of a worker: the parent exited, the child still holds the mark
+        for parent in (None, psutil.NoSuchProcess, psutil.AccessDenied, proc(900, owner=None)):
+            with self.subTest(parent=parent), self.assertRaisesRegex(RuntimeError, "cannot inspect process 26456"):
+                self.scan(proc(26456, owner=None, parent=parent))
+
+    def test_orphaned_descendant_of_a_task_still_blocks(self):
+        worker = proc(90, environ={"ORCHD_WORKTREE": self.mark}, parent=self.service())
+        worker.children.return_value = [proc(91, owner=None, parent=None)]
+        with self.assertRaisesRegex(RuntimeError, "cannot inspect process 91"):
+            self.scan(worker)
 
     def test_own_unreadable_process_started_by_our_process_still_blocks(self):
         with self.assertRaisesRegex(RuntimeError, "cannot inspect process 77"):
