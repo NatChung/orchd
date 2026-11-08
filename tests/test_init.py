@@ -181,11 +181,11 @@ class InitTest(unittest.TestCase):
             self.init(trust=False)
 
     def test_non_default_state_dir_reaches_both_mcp_servers(self):
-        self.env = {"ORCHD_HOME": "/tmp/orchd-state"}
+        self.env = {"ORCHD_HOME": str(self.home / "custom-state")}
         self.init(trust=False)
         for folder, server in (("home", "orchd"), ("interface", "orchd_entry")):
             cfg = tomllib.loads((self.home / "orch" / folder / ".codex" / "config.toml").read_text())
-            self.assertEqual(cfg["mcp_servers"][server]["env"], {"ORCHD_HOME": "/tmp/orchd-state"})
+            self.assertEqual(cfg["mcp_servers"][server]["env"], {"ORCHD_HOME": str(self.home / "custom-state")})
 
     def test_projects_override_reaches_both_mcp_servers(self):
         self.env = {"ORCHD_PROJECTS": "~/Git Projects", "ORCHD_CONFIG_DIR": str(self.home / "settings")}
