@@ -6,6 +6,61 @@ from html.parser import HTMLParser
 MAX_BODY_BYTES = 400_000
 from ..attachments import MAX_ATTACHMENT_BYTES
 READONLY_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly'
+SEND_SCOPE = 'https://www.googleapis.com/auth/gmail.send'
+
+
+class GmailSendTransport:
+    """Independent send-only client, not the read transport's OAuth session."""
+    def __init__(self, client, account, *, scopes):
+        if not isinstance(scopes, (list, tuple, set, frozenset)) or SEND_SCOPE not in scopes:
+            raise PermissionError('gmail.send authorization required')
+        self.client, self.account = client, account
+
+    def send(self, payload, idempotency_key):
+        from email.message import EmailMessage
+        from email.policy import SMTP
+        if payload['provider'] != 'gmail' or payload['account'] != self.account:
+            raise PermissionError('Gmail sender mismatch')
+        if payload['format'] != 'text' or payload['mentions']:
+            raise ValueError('unsupported Gmail format or mentions')
+        message = EmailMessage(policy=SMTP)
+        message['From'] = self.account
+        for key, name in (('to','To'),('cc','Cc'),('bcc','Bcc')):
+            if payload['target'][key]:
+                message[name] = ', '.join(payload['target'][key])
+        message['Subject'] = payload['subject']
+        # A stable Message-ID aids manual reconciliation, never automatic resend.
+        import hashlib
+        message['Message-ID'] = '<'+hashlib.sha256(idempotency_key.encode()).hexdigest()+'@orchd.invalid>'
+        message.set_content(payload['body'])
+        for item in payload['attachments']:
+            data = base64.b64decode(item['data_base64'], validate=True)
+            if len(data) != item['bytes'] or hashlib.sha256(data).hexdigest() != item['sha256']:
+                raise ValueError('Gmail attachment changed')
+            message.add_attachment(data, maintype='application', subtype='octet-stream', filename=item['name'])
+        body = {'raw':base64.urlsafe_b64encode(message.as_bytes()).decode('ascii')}
+        if payload['thread']:
+            body['threadId'] = payload['thread']
+        result = self.client.users().messages().send(userId='me', body=body).execute(num_retries=0)
+        if not isinstance(result, dict) or not result.get('id'):
+            raise ValueError('Gmail acceptance receipt missing')
+        return str(result['id'])
+
+    @classmethod
+    def from_credential(cls, material, account):
+        import json
+        import httplib2
+        from google_auth_httplib2 import AuthorizedHttp
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+        info = json.loads(material.decode('utf-8'))
+        # Do not assume that asking for a scope granted it.
+        scopes = info.get('scopes', [])
+        if not isinstance(scopes, list) or SEND_SCOPE not in scopes:
+            raise PermissionError('gmail.send authorization required')
+        credentials = Credentials.from_authorized_user_info(info, scopes=[SEND_SCOPE])
+        http = AuthorizedHttp(credentials, http=httplib2.Http(timeout=30))
+        return cls(build('gmail','v1',http=http,cache_discovery=False), account, scopes=scopes)
 
 
 class HistoryExpired(Exception):
@@ -89,7 +144,16 @@ def normalize_message(message, *, tenant_ref):
             'sender_ref':headers.get('from') or 'unknown', 'source_time':timestamp, 'content':content}
 
 class EmailAdapter:
-    """One source's receive-only polling adapter; service owns durable state."""
+    """One source's polling adapter, with separately authorized outbound."""
+
+    def send(self, *, transport_factory=None, **payload):
+        from .base import OutboundAdapter
+        if payload:
+            raise PermissionError('raw payload cannot bypass outbound gate')
+        if transport_factory is None:
+            raise PermissionError('outbound transport not enabled')
+        return OutboundAdapter(self.service,self.source_id,self.caller,self.secret_store,transport_factory).sweep()
+
     def __init__(self, service, source_id, caller, transport, secret_store, *, activation, clock, overlap_seconds=60):
         self.service, self.source_id, self.caller = service, source_id, caller
         self.transport, self.secret_store = transport, secret_store

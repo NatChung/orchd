@@ -189,11 +189,61 @@ class ChannelService:
             item['status']='queued'
         return {'schema_version':1,'source_id':item['source_id'],'attachment_id':attachment_id,'status':item['status']}
 
-    def approve(self, *args, **kwargs):
-        raise PermissionError('outbound disabled')
+    def approval_preview(self, draft_id, version, *, caller):
+        from .delivery import preview
+        draft, value, message, src, route = repository.outbound_draft(self.con, draft_id, version)
+        policy.require_message(caller, message)
+        return preview(draft)
 
-    def claim_outbound(self, *args, **kwargs):
-        raise PermissionError('outbound disabled')
+    def approve(self, draft_id=None, version=None, payload_hash=None, entry_answer_ref=None, *, caller):
+        policy.require_operator(caller)
+        # Approval itself is harmless with outbound disabled; sending still requires
+        # the separately configured enablement and a current exact Entry answer.
+        return repository.approve_outbound(self.con, draft_id, version, payload_hash, entry_answer_ref, self.clock())
+
+    def claim_outbound(self, source_id=None, *, caller, limit=100):
+        policy.require_outbound_enabled(self.channel_home)
+        self._require_adapter(source_id, caller)
+        if type(limit) is not int or not 1 <= limit <= 500:
+            raise ValueError('invalid claim limit')
+        def check_enabled():
+            policy.require_outbound_enabled(self.channel_home)
+            source = repository.source(self.con, source_id)
+            if source['provider'] == 'gmail':
+                import json
+                refs = json.loads(source['credential_refs_json'])
+                if not refs.get('send') or refs.get('send') == refs.get('read'):
+                    raise PermissionError('separate Gmail send credential required')
+                policy.require_gmail_send_enabled(self.channel_home, source_id)
+        return repository.claim_outbound(self.con, source_id, caller.identity, self.clock(), limit, check_enabled)
+
+    def record_outcome(self, delivery_id, attempt_no, outcome, provider_receipt=None, *, caller):
+        row = repository.outbound_delivery(self.con, delivery_id)
+        policy.require_source(caller, row['source_id'])
+        if caller.role != 'adapter':
+            raise PermissionError('adapter required')
+        return repository.record_outbound_outcome(self.con, delivery_id, attempt_no, outcome, provider_receipt, caller.identity, self.clock())
+
+    def delivery(self, delivery_id, *, caller):
+        row = repository.outbound_delivery(self.con, delivery_id)
+        policy.require_source(caller, row['source_id'])
+        policy.require_message(caller, repository.get_message(self.con, row['message_id']))
+        return dict(row, attempts=repository.delivery_attempts(self.con, delivery_id))
+
+    def cancel_draft(self, draft_id, *, caller):
+        policy.require_operator(caller)
+        return repository.cancel_outbound(self.con, draft_id, self.clock())
+
+    def recover_outbound(self, *, caller):
+        """Control-plane only; stop/fence the old adapter before calling."""
+        from . import recovery
+        policy.require_operator(caller)
+        return recovery.recover(self)
+
+    def reconcile_outbound(self, delivery_id, outcome, provider_receipt=None, *, evidence, caller):
+        from . import recovery
+        policy.require_operator(caller)
+        return recovery.reconcile(self, delivery_id, outcome, provider_receipt, evidence)
 
 
     def delete_message(self, message_id, *, caller):
@@ -302,9 +352,9 @@ class ChannelService:
         policy.require_message(caller,row)
         if row['deleted_at']:
             raise ValueError('cannot draft from deleted message')
-        if not isinstance(payload,dict) or set(payload) != {'sender','target','body','expires_at'}:
-            raise ValueError('invalid draft payload')
-        return repository.draft(self.con,row,payload)
+        if caller.role not in ('operator', 'orch', 'worker'):
+            raise PermissionError('adapter cannot draft or widen sender grants')
+        return repository.draft(self.con,row,payload,self.clock)
 
     def routes(self, *, caller):
         policy.require_operator(caller)
