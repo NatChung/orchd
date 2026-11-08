@@ -161,6 +161,8 @@ def submit(con, payload, *, producer, producers, _receipt_hook=None):
     check_producer(producers, producer, event["provider"], event["account"])
     digest = _content_hash(event)
     with store.immediate(con):
+        from .channels.repository import require_legacy_admission
+        require_legacy_admission(con, provider=event['provider'], account=event['account'])
         row = con.execute("SELECT * FROM intake_events WHERE provider=? AND account=? AND event_id=?",
                           (event["provider"], event["account"], event["event_id"])).fetchone()
         if row is not None:

@@ -158,7 +158,22 @@ def plan(*, home=None, env=None, legacy_manifest=None):
             _validate_file(target)
             if target.read_bytes() != data:
                 raise ValueError(f"channel layout conflict: {target}")
-    return {"root": str(root), "layout_version": VERSION, "files": sorted(files)}
+    from .channels.repository import schema_plan
+    return {"root": str(root), "layout_version": VERSION, "files": sorted(files),
+            "schema": schema_plan(state.parent.parent / 'orchd.db'),
+            "steps": ["channel-layout-v1", "channel-schema-v2"],
+            "schema_rollback": "disable features; retain additive tables and new-event ledger"}
+
+
+def provision(*, home=None, env=None):
+    """Resume layout first, then additive schema; each has its own durable receipt."""
+    from .channels import repository
+    from . import home_migrations
+    result = apply(home=home, env=env)
+    effective = os.environ if env is None else env
+    con = repository.connect(home_migrations.state_dir(home or Path.home(), effective) / 'orchd.db')
+    con.close()
+    return result
 
 
 def _make_private(path):

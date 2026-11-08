@@ -314,7 +314,7 @@ def init(rt, home=None, env=None, trust=True, source=None, orchd_bin=None):
     from . import home_migrations
     home_migrations.record_init(home, env)
     from . import channel_layout
-    result["channel_layout"] = channel_layout.apply(home=home, env=layout_env)
+    result["channel_layout"] = channel_layout.provision(home=home, env=layout_env)
     result["layout_version"] = result["channel_layout"]["layout_version"]
     result["next"] = ("Run `orchd binding` to bind the interface to a Claude Orch, then open "
                       f"{interface} in the Codex Desktop app (permissions: interface).")

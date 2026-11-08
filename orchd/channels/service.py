@@ -25,6 +25,15 @@ class ChannelService:
     def close(self):
         self.con.close()
 
+    def cutover(self, source_id, mode, *, caller, backfill=None):
+        policy.require_operator(caller)
+        from . import recovery
+        return recovery.cutover(self, source_id, mode, backfill=backfill)
+
+    def cutover_ledger(self, source_id, *, caller, after=0, through=None):
+        policy.require_operator(caller)
+        return repository.cutover_ledger(self.con, source_id, after=after, through=through)
+
     def provision_source(self, source, *, caller):
         policy.require_operator(caller)
         import re

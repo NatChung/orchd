@@ -149,6 +149,18 @@ def build_parser():
     install.add_argument("--json", action="store_true")
     channels = sub.add_parser("channels", help="query local channel data or queue adapter sync; third-party content is untrusted")
     channel_actions = channels.add_subparsers(dest="channel_action", required=True)
+    for action in ('status', 'doctor'):
+        channel_actions.add_parser(action).add_argument('--json', action='store_true')
+    cutover = channel_actions.add_parser('cutover')
+    cutover.add_argument('--source', required=True)
+    cutover.add_argument('--mode', required=True, choices=('frozen','shadow','adapter','legacy'))
+    cutover.add_argument('--backfill-digest')
+    cutover.add_argument('--json', action='store_true')
+    ledger = channel_actions.add_parser('ledger')
+    ledger.add_argument('--source', required=True)
+    ledger.add_argument('--after', type=int, default=0)
+    ledger.add_argument('--through', type=int)
+    ledger.add_argument('--json', action='store_true')
     for action in ("messages", "search"):
         command = channel_actions.add_parser(action)
         command.add_argument("--source", required=True)
@@ -619,6 +631,7 @@ def _intake_main(args):
 #   skip  - does not touch the Orch home rules (init/upgrade manage them; the rest never read the home)
 # Plain `list` is warn: core.list_open only reads.
 HOME_POLICY = {
+    **{('channels', action): 'skip' for action in ('status','doctor','cutover','ledger')},
     ("mcp",): "write", ("pr-watch",): "skip", ("review-feedback",): "skip",
     **{("interface", a): "skip" for a in ("register", "submit", "fetch", "ack", "deregister", "list", "rebind")},
     ("orch", "start"): "write", ("orch", "stop"): "write", ("orch", "restart"): "write",  # --dry-run -> warn

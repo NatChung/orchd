@@ -10,6 +10,10 @@ from . import policy, repository, service
 def run(args):
     svc = None
     try:
+        if args.channel_action in ('status', 'doctor'):
+            from .health import status
+            print(json.dumps(status(), ensure_ascii=False))
+            return 0
         svc=service.ChannelService(store.home() / 'orchd.db', retention=policy.retention_policies())
         identity=os.environ.get('ORCHD_ORCH_ID') or os.environ.get('CODEX_THREAD_ID')
         if os.environ.get('ORCHD_WORKTREE'):
@@ -19,7 +23,11 @@ def run(args):
         else:
             caller=policy.Caller(role='operator',sources=repository.source_ids(svc.con),identity='operator')
         action=args.channel_action
-        if action == 'messages':
+        if action == 'cutover':
+            result = svc.cutover(args.source, args.mode, backfill=args.backfill_digest, caller=caller)
+        elif action == 'ledger':
+            result = svc.cutover_ledger(args.source, after=args.after, through=args.through, caller=caller)
+        elif action == 'messages':
             result=svc.messages(args.source,caller=caller,limit=args.limit,cursor=args.cursor)
         elif action == 'search':
             result=svc.search(args.source,args.query,caller=caller,limit=args.limit)

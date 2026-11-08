@@ -312,7 +312,7 @@ def post_upgrade(prefix, run):
 
 def upgrade(prefix=None, run=default_run, which=shutil.which, checkout=None, *, migrations_only=False, dry_run=False,
             windows=None):
-    """Returns (exit code, lines to print)."""
+    """Returns (exit code, lines to print); dry-run coordinates layout/schema offline."""
     prefix = Path(prefix or sys.prefix)
     windows = os.name == "nt" if windows is None else windows
     if migrations_only or dry_run:

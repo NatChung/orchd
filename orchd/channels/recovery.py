@@ -6,6 +6,10 @@ new send, even when a later investigation proves that the provider rejected it.
 from . import repository
 
 
+def cutover(service, source_id, mode, *, backfill=None):
+    return repository.cutover(service.con, source_id, mode, service.clock(), backfill)
+
+
 def recover(service):
     return repository.recover_outbound(service.con, service.clock())
 
