@@ -600,6 +600,23 @@ class WorkflowRunTests(unittest.TestCase):
         self.assertIsNone(self.con.execute('SELECT reply FROM interface_requests WHERE id=?', (self.request_id,)).fetchone()[0])
         self.assertTrue(any(e['kind'] == 'cancel_cleanup_pending' for e in runs.events(self.con, run_id)))
 
+    def test_run_report_output_transition_failure_rolls_back_message_and_status(self):
+        run_id = self.start()
+        task_id = self.tick(run_id)['attempts'][0]['task_id']
+        task = store.get_task(self.con, task_id)
+        path = Path(task['worktree']) / '.gstack/output.json'
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps({'schema_version': runs.OUTPUT_SCHEMA, 'values': {'implementation_instructions': 'Captured exact output'}}))
+        with patch.object(runs, 'observe_report', side_effect=RuntimeError('synthetic transition failure')):
+            with self.assertRaisesRegex(RuntimeError, 'transition failure'):
+                core.report(self.con, self.rt, task_id, 'done', 'Self report', 'Evidence', output_file='.gstack/output.json')
+        self.assertEqual(store.get_task(self.con, task_id)['status'], task['status'])
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM messages WHERE task_id=? AND kind='report'", (task_id,)).fetchone()[0], 0)
+        attempt = self.con.execute('SELECT report_id,output FROM workflow_run_attempts WHERE task_id=?', (task_id,)).fetchone()
+        self.assertIsNone(attempt['report_id'])
+        self.assertIsNone(attempt['output'])
+        self.assertFalse(self.con.in_transaction)
+
     def test_memory_database_never_starts_a_process(self):
         con = store.connect(':memory:')
         self.addCleanup(con.close)

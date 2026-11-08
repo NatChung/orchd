@@ -10,6 +10,26 @@ from pathlib import Path
 from .file_lock import try_lock
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS tasks(
+    id TEXT PRIMARY KEY,
+    repo TEXT NOT NULL,
+    repo_path TEXT NOT NULL,
+    title TEXT NOT NULL,
+    instructions TEXT NOT NULL,
+    done_when TEXT NOT NULL,
+    orch_thread TEXT NOT NULL,
+    codex_bin TEXT NOT NULL,
+    base TEXT,
+    branch TEXT,
+    worktree TEXT,
+    socket TEXT,
+    job_id TEXT,
+    session_id TEXT,
+    status TEXT NOT NULL,
+    note TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS workflow_runs(
     id TEXT PRIMARY KEY, request_id INTEGER NOT NULL, parent_run_id TEXT UNIQUE,
     orch_thread TEXT NOT NULL, idempotency_key TEXT NOT NULL,
@@ -32,26 +52,6 @@ CREATE TABLE IF NOT EXISTS workflow_run_events(
     kind TEXT NOT NULL, task_id TEXT, source_message_id INTEGER,
     body TEXT NOT NULL, created_at REAL NOT NULL,
     UNIQUE(run_id, kind, source_message_id)
-);
-CREATE TABLE IF NOT EXISTS tasks(
-    id TEXT PRIMARY KEY,
-    repo TEXT NOT NULL,
-    repo_path TEXT NOT NULL,
-    title TEXT NOT NULL,
-    instructions TEXT NOT NULL,
-    done_when TEXT NOT NULL,
-    orch_thread TEXT NOT NULL,
-    codex_bin TEXT NOT NULL,
-    base TEXT,
-    branch TEXT,
-    worktree TEXT,
-    socket TEXT,
-    job_id TEXT,
-    session_id TEXT,
-    status TEXT NOT NULL,
-    note TEXT,
-    created_at REAL NOT NULL,
-    updated_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS interface_orch_successors(
     old_orch TEXT PRIMARY KEY, current_orch TEXT NOT NULL

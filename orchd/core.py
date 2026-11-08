@@ -450,7 +450,10 @@ def report(con, rt, task_id, status, summary, evidence, output_file=None):
     task = store.get_task(con, task_id)
     from . import workflow_runs
     output = workflow_runs.prepare_report(con, task_id, status, output_file)
-    with store.immediate(con):
+    # Only run reports publish an output snapshot and transition atomically. Preserve
+    # the ordinary report/adoption ordering, including notification to a new owner.
+    transaction = store.immediate(con) if workflow_runs.task_origin(con, task_id) is not None else contextlib.nullcontext()
+    with transaction:
         mid = store.add_message(con, task_id, "report", f"{status}: {summary}", evidence)
         store.update_task(con, task_id, status=status)
         workflow_runs.observe_report(con, task_id=task_id, message_id=mid, status=status, output=output)
