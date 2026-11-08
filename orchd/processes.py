@@ -172,6 +172,48 @@ def _started_by_another_account(proc):
         return False
 
 
+def _windows_sessions():
+    """{pid: session id} from one WTSEnumerateProcessesW snapshot, or None. It needs no handle to each process,
+    so it also reads services and protected processes (csrss, search hosts) this user cannot open."""
+    import ctypes
+    from ctypes import wintypes
+
+    class Info(ctypes.Structure):
+        _fields_ = [("SessionId", wintypes.DWORD), ("ProcessId", wintypes.DWORD),
+                    ("pProcessName", wintypes.LPWSTR), ("pUserSid", ctypes.c_void_p)]
+    try:
+        wts = ctypes.WinDLL("wtsapi32", use_last_error=True)
+        wts.WTSEnumerateProcessesW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD,
+                                               ctypes.POINTER(ctypes.POINTER(Info)), ctypes.POINTER(wintypes.DWORD)]
+        wts.WTSEnumerateProcessesW.restype = wintypes.BOOL
+        wts.WTSFreeMemory.argtypes = [ctypes.c_void_p]
+        info, count = ctypes.POINTER(Info)(), wintypes.DWORD()
+        if not wts.WTSEnumerateProcessesW(None, 0, 1, ctypes.byref(info), ctypes.byref(count)):
+            return None
+        try:
+            return {info[i].ProcessId: info[i].SessionId for i in range(count.value)}
+        finally:
+            wts.WTSFreeMemory(info)
+    except (OSError, AttributeError):
+        return None
+
+
+def _service_session(proc):
+    """Windows: session 0 holds only services and what they start. A worker of this user, elevated or not,
+    stays in the interactive session and cannot create a session-0 process, so an unreadable session-0 process
+    cannot carry the mark. Without this, every Windows service started after a worktree (after a reboot: all of
+    them) blocked close. The snapshot is read after `proc` exists and `proc` must still be running afterwards
+    (psutil checks its birth), so a PID reused meanwhile is never judged by another process's session. An
+    unknown session, or orchd itself running in session 0, is no evidence."""
+    sessions = _windows_sessions()
+    if not sessions or sessions.get(os.getpid()) in (None, 0) or sessions.get(proc.pid) != 0:
+        return False
+    try:
+        return proc.is_running()
+    except psutil.Error:
+        return False
+
+
 def _marked_task_process(proc, mark, exclude):
     """Apply one ownership gate to enumerated processes and newly found children."""
     try:
@@ -195,7 +237,13 @@ def task_processes(worktree, captured=()):
     """Snapshot marked processes and their descendants before the worker exits."""
     mark = str(Path(worktree).resolve())
     found = {}
-    exclude = _predates_worktree(mark) if os.name == "nt" else _systemd_user_infrastructure
+    if os.name == "nt":
+        predates = _predates_worktree(mark)
+
+        def exclude(proc):
+            return predates(proc) or _service_session(proc)
+    else:
+        exclude = _systemd_user_infrastructure
     for proc in captured:
         if _alive(proc):
             _descendants(proc, mark, found, exclude)
