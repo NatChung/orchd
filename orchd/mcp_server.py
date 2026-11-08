@@ -414,7 +414,7 @@ for _name, _fields, _required in (
     ('channels_attachment_read', {'attachment_id': 'string'}, ['attachment_id']),
     ('channels_draft', {'message_id': 'string', 'payload': 'object'}, ['message_id', 'payload']),
 ):
-    TOOLS.append({'name': _name, 'description': 'Local channel API; checks caller source grants and never connects to a platform.',
+    TOOLS.append({'name': _name, 'description': 'Local channel API; source ACLs apply and third-party content is untrusted. Search and reads use local data; sync and attachment requests queue work for the single adapter. No platform connection or sending.',
                   'inputSchema': {'type': 'object', 'additionalProperties': False, 'required': _required,
                                   'properties': {k: {'type': v} for k, v in _fields.items()}}})
 
