@@ -38,6 +38,12 @@ def register(con, *, name, orch_id, token=None, idle_seconds=3600):
     if isinstance(idle_seconds, bool) or not isinstance(idle_seconds, int) or not 1 <= idle_seconds <= 604800:
         raise ValueError('idle_seconds must be 1..604800')
     with store.immediate(con):
+        successor = con.execute('SELECT current_orch FROM interface_orch_successors WHERE old_orch=?',
+                                (orch_id,)).fetchone()
+        if successor and con.execute('SELECT 1 FROM interfaces WHERE name=?', (name,)).fetchone():
+            row = _auth(con, name, token)
+            if row['orch_id'] == successor['current_orch']:
+                orch_id = successor['current_orch']
         _owner(con, orch_id)
         bound = con.execute('SELECT orch_id FROM interfaces LIMIT 1').fetchone()
         if bound and bound['orch_id'] != orch_id:

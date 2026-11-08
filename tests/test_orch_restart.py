@@ -402,6 +402,30 @@ class RestartTest(unittest.TestCase):
         return interface.submit(con or self.con, self.rt, **auth, conversation="thread",
                                 request_key=key, text="question")
 
+    def test_stale_registration_follows_two_restarts(self):
+        auth = self.adapter()
+        first = self.run_restart()
+        self.assertEqual(first["status"], "done", first)
+        renewed = interface.register(self.con, **auth, orch_id="old")
+        self.assertEqual(renewed["orch_id"], first["new_orch"])
+        self.submit(auth, key="first")
+        self.assertEqual(len(interface.requests(self.con, first["new_orch"])), 1)
+
+        self.rt.stop_worker.side_effect = lambda job: (self.rt.jobs.pop(job, None),
+                                                       setattr(self.rt, "dead_sockets", {"/fake/new"}))
+        second = self.run_restart()
+        self.assertEqual(second["status"], "done", second)
+        renewed = interface.register(self.con, **auth, orch_id="old")
+        self.assertEqual(renewed["orch_id"], second["new_orch"])
+        self.submit(auth, key="second")
+        self.assertEqual(len(interface.requests(self.con, second["new_orch"])), 2)
+
+    def test_registration_without_successor_still_rejects_stopped_owner(self):
+        auth = self.adapter()
+        store.stop_orch(self.con, "old")
+        with self.assertRaisesRegex(ValueError, "Orch stopped or missing"):
+            interface.register(self.con, **auth, orch_id="old")
+
     def test_restart_moves_all_interfaces_preserving_tokens_and_inactive_leases(self):
         active = self.adapter()
         disabled = self.adapter("disabled")
