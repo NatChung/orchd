@@ -232,12 +232,16 @@ def cached(folder, expected):
     return manifest, actual, receipt
 
 
-def install(repo, commit):
-    manifest, files = source_files(Path(repo), commit)
+def install_record(manifest, files, commit):
     receipt = dict(schema_version='orchd-workflow-install/v1', name=manifest['name'], commit=commit,
                    files={file: digest(raw) for file, raw in sorted(files.items())})
+    return receipt, dict(commit=commit, digest=digest(canonical(receipt)))
+
+
+def install(repo, commit):
+    manifest, files = source_files(Path(repo), commit)
+    receipt, entry = install_record(manifest, files, commit)
     receipt_raw = canonical(receipt)
-    entry = dict(commit=commit, digest=digest(receipt_raw))
     with locked() as folder:
         entries = registry()
         target = safe(folder / manifest['name'] / commit)

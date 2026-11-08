@@ -36,6 +36,7 @@ orchd upgrade
 Upgrade reads the source recorded by uv. On POSIX it follows that source's default branch and drops branch pins. On Windows it retains the recorded source and revision. It preserves task data and personal settings, then runs versioned home-rule migrations with backups. See [home migration behavior](docs/upgrade-migrations.md) for managed blocks, previews, retries, and the first upgrade from a legacy version. Existing sessions and MCP processes can keep the old code; start new sessions when convenient. Upgrade does not restart the daemon. Update checkout installations in their own checkout.
 
 For pinned, declarative instructions and per-instance workflow bindings, see [workflow plugins](docs/workflow-plugins.md). Installation is a local action; Orch can inspect installed stages through read-only tools and select them explicitly in dispatch.
+For committed local instructions, project inventory and drift-checked profile setup, see [instance recipes](docs/instances.md).
 
 ## Native Windows and PowerShell
 

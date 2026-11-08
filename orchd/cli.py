@@ -115,6 +115,15 @@ def build_parser():
     workflow_bind.add_argument("--repo", help="registered project name; omit to bind this config instance's default")
     workflow_bind.add_argument("--workflow", required=True)
     workflow_bind.add_argument("--replace", action="store_true")
+    instance = sub.add_parser('instance', help='apply or check committed instance settings without starting sessions')
+    instance_actions = instance.add_subparsers(dest='instance_action', required=True)
+    for action in ('apply', 'check'):
+        command = instance_actions.add_parser(action)
+        command.add_argument('path', type=Path)
+        command.add_argument('--commit', required=True)
+        command.add_argument('--root', type=Path, required=True)
+        command.add_argument('--projects', type=Path, required=True)
+        command.add_argument('--expected-receipt', help='compare-and-swap against the current raw receipt SHA-256')
     inbox = sub.add_parser("inbox", help="read and acknowledge unread worker messages")
     inbox.add_argument("--limit", type=int)
     inbox.add_argument("--message-id", type=int, help="read a full field from a previously listed message")
@@ -639,6 +648,7 @@ HOME_POLICY = {
     ("_entry-op",): "skip",  # its `orchd upgrade` / `orchd orch restart` children apply the policy themselves
     ("config", "show"): "skip", ("config", "get"): "skip", ("config", "set"): "skip", ("config", "unset"): "skip",
     **{("workflow", action): "skip" for action in ("install", "list", "show", "render", "bind", "bindings")},
+    **{('instance', action): 'skip' for action in ('apply', 'check')},
     ("binding",): "write",  # --status -> warn
     ("entry", "thread"): "warn", ("entry", "reconcile"): "write",  # no --apply -> warn
     ("intake", "reconcile"): "write",  # no --apply -> warn
@@ -658,7 +668,7 @@ HOME_POLICY = {
     ("goal", "show"): "warn", ("goal", "list"): "warn", ("goal", "export"): "warn",
 }
 ACTION_DEST = ("interface_action", "orch_action", "entry_action", "question_action", "task_action", "task_question_action",
-               "intake_action", "goal_cmd", "config_action", "check_action", "workflow_action")
+               "intake_action", "goal_cmd", "config_action", "check_action", "workflow_action", "instance_action")
 
 
 def _home_policy(args):
@@ -705,6 +715,18 @@ def main(argv=None):
         from orchd import home_migrations
         for line in home_migrations.ensure_current(write=policy == "write"):
             print(line, file=sys.stderr)
+    if args.cmd == 'instance':
+        from orchd import instances
+        try:
+            if os.environ.get('ORCHD_ORCH_ID') or os.environ.get('ORCHD_WORKTREE'):
+                raise ValueError('Instance apply/check are Operator-only local actions')
+            result = instances.apply(args.path, args.commit, args.root, args.projects,
+                                     check=args.instance_action == 'check', expected_receipt=args.expected_receipt)
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+            return 0
+        except (ValueError, OSError, KeyError, TypeError) as error:
+            print(f'orchd instance: {error}', file=sys.stderr)
+            return 1
     if args.cmd == 'workflow':
         from orchd import workflows
         try:
