@@ -96,11 +96,7 @@ class HomeMigrationTest(unittest.TestCase):
         self.assertIn("原檔已有的相同規則可以手動刪掉", "\n".join(lines))
         self.assertIn(str(backups[0]), "\n".join(lines))
         self.assertIn("restore:", "\n".join(lines))
-<<<<<<< HEAD
-        self.assertEqual(self.applied(), [("computer-use-rules-v1",), ("interface-entry-tools-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",), ("orch-rules-v6",), ("orch-rules-v7",)])
-=======
-        self.assertEqual(self.applied(), [("channel-layout-v1",), ("computer-use-rules-v1",), ("interface-entry-tools-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",), ("orch-rules-v6",)])
->>>>>>> b0b49a8 (feat(channels): wire installation and upgrade provisioning)
+        self.assertEqual(self.applied(), [("channel-layout-v1",), ("computer-use-rules-v1",), ("interface-entry-tools-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",), ("orch-rules-v6",), ("orch-rules-v7",)])
         self.assertEqual(self.run_migrations()[0], 0)
         self.assertEqual(self.file.read_bytes(), content)
         self.assertEqual(list(self.backups("home").glob("AGENTS.md.*")), backups)
@@ -115,11 +111,7 @@ class HomeMigrationTest(unittest.TestCase):
         # A new release adds a new step; old steps stay recorded and are skipped.
         with patch.object(migrations, "STEPS", (("orch-rules-v1", migrations.update_rules), ("orch-rules-v2", migrations.update_rules))):
             self.assertEqual(self.run_migrations()[0], 0)
-<<<<<<< HEAD
-        self.assertEqual(self.applied(), [("computer-use-rules-v1",), ("interface-entry-tools-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",), ("orch-rules-v6",), ("orch-rules-v7",)])
-=======
-        self.assertEqual(self.applied(), [("channel-layout-v1",), ("computer-use-rules-v1",), ("interface-entry-tools-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",), ("orch-rules-v6",)])
->>>>>>> b0b49a8 (feat(channels): wire installation and upgrade provisioning)
+        self.assertEqual(self.applied(), [("channel-layout-v1",), ("computer-use-rules-v1",), ("interface-entry-tools-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",), ("orch-rules-v6",), ("orch-rules-v7",)])
 
     def test_v2_step_refreshes_a_v1_block_with_the_intake_rule_and_keeps_outside_bytes(self):
         prefix, suffix = b"mine before\n", b"\nmine after"
@@ -134,13 +126,8 @@ class HomeMigrationTest(unittest.TestCase):
         content = self.file.read_bytes()
         self.assertTrue(content.startswith(prefix) and content.endswith(suffix))
         self.assertIn("polling".encode(), content)
-<<<<<<< HEAD
         self.assertIn(b"orchd:managed:start v=7", content)
-        self.assertEqual(self.applied(), [("computer-use-rules-v1",), ("interface-entry-tools-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",), ("orch-rules-v6",), ("orch-rules-v7",)])
-=======
-        self.assertIn(b"orchd:managed:start v=5", content)
-        self.assertEqual(self.applied(), [("channel-layout-v1",), ("computer-use-rules-v1",), ("interface-entry-tools-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",), ("orch-rules-v6",)])
->>>>>>> b0b49a8 (feat(channels): wire installation and upgrade provisioning)
+        self.assertEqual(self.applied(), [("channel-layout-v1",), ("computer-use-rules-v1",), ("interface-entry-tools-v1",), ("orch-rules-v1",), ("orch-rules-v2",), ("orch-rules-v3",), ("orch-rules-v4",), ("orch-rules-v5",), ("orch-rules-v6",), ("orch-rules-v7",)])
 
     def test_v4_refreshes_recorded_v3_and_preserves_user_content(self):
         prefix, suffix = b"before\r\n", b"\r\nafter"

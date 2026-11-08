@@ -154,11 +154,7 @@ STEPS = (("orch-rules-v1", update_rules), ("orch-rules-v2", update_rules),
          ("computer-use-rules-v1", update_rules), ("orch-rules-v3", update_rules),
          ("orch-rules-v4", update_rules), ("orch-rules-v5", update_rules),
          ("orch-rules-v6", update_rules), ("interface-entry-tools-v1", update_entry_tools),
-<<<<<<< HEAD
-         ("orch-rules-v7", update_rules))
-=======
-         ("channel-layout-v1", channel_layout_step))
->>>>>>> b0b49a8 (feat(channels): wire installation and upgrade provisioning)
+         ("orch-rules-v7", update_rules), ("channel-layout-v1", channel_layout_step))
 
 
 def run(*, home=None, env=None, dry_run=False):
