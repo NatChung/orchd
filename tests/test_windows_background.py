@@ -1,6 +1,7 @@
 import os
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 import unittest
 from unittest.mock import MagicMock, patch
@@ -134,9 +135,17 @@ class ReapWindowsTests(unittest.TestCase):
         return proc
 
     def run_reap(self, popen_pid, running, processes, since=None):
+        import psutil
+
+        def lookup(pid):
+            found = [p for p in processes if p.pid == pid]
+            if not found:
+                raise psutil.NoSuchProcess(pid)
+            return found[0]
+
         popen = MagicMock(pid=popen_pid)
         popen.poll.return_value = None if running else 0
-        with patch('psutil.Process', side_effect=lambda pid: next(p for p in processes if p.pid == pid)), \
+        with patch('psutil.Process', side_effect=lookup), \
                 patch('psutil.process_iter', return_value=processes), \
                 patch('psutil.wait_procs', side_effect=lambda procs, timeout: ([], [])):
             quota._reap_windows(popen, grace=0, since=since)
@@ -162,6 +171,24 @@ class ReapWindowsTests(unittest.TestCase):
         root.terminate.assert_called_once()
         child.terminate.assert_called_once()
 
+    def test_reused_root_pid_keeps_the_newcomer_and_its_children_alive(self):
+        # Probe root 10 (started at since=100) exited; an unrelated process now holds PID 10 and has a child.
+        newcomer_child = self.fake(40, 10, born=210.0)
+        newcomer = self.fake(10, 1, born=200.0, children=[newcomer_child])
+        orphan = self.fake(30, 10, born=150.0)  # genuinely spawned by the dead probe root
+        self.run_reap(10, running=False, processes=[newcomer, newcomer_child, orphan], since=100.0)
+        orphan.terminate.assert_called_once()
+        newcomer.terminate.assert_not_called()
+        newcomer_child.terminate.assert_not_called()
+
+    def test_orphan_scan_rejects_children_born_after_the_root_exit_was_observed(self):
+        # The reuser already went away too: only candidates born before the exit was observed can be orphans.
+        late = self.fake(41, 10, born=time.time() + 3600)
+        orphan = self.fake(30, 10, born=150.0)
+        self.run_reap(10, running=False, processes=[late, orphan], since=100.0)
+        orphan.terminate.assert_called_once()
+        late.terminate.assert_not_called()
+
 
 class ReapKeepsProbeStartTimeTests(unittest.TestCase):
     """Every cleanup path hands _reap the probe's start time so a reused PID is never killed."""
@@ -183,3 +210,35 @@ class ReapKeepsProbeStartTimeTests(unittest.TestCase):
                 quota._run(['x'], 1)
         self.assertIsNotNone(reap.call_args.kwargs['since'])
         self.assertNotIn(popen, quota._children)
+
+    def _probe_app_server(self, started, popen_factory):
+        cache = MagicMock()
+        cache.status.return_value = {'sol': {'windows': []}}
+        with patch('orchd.quota.time.time', return_value=started), \
+                patch('orchd.quota.subprocess.Popen', side_effect=popen_factory) as popen, \
+                patch.object(quota, '_reap') as reap:
+            quota._probe(cache, 'sol', binary='codex')
+        return popen.call_args, reap
+
+    def test_app_server_probe_cleanup_passes_the_recorded_start_time_when_the_server_exits(self):
+        process = MagicMock()
+        process.poll.return_value = 0  # app-server died before publishing its socket
+        _, reap = self._probe_app_server(777.5, lambda *a, **k: process)
+        reap.assert_called_once_with(process, since=777.5)
+        self.assertNotIn(process, quota._children)
+
+    def test_app_server_probe_cleanup_passes_the_recorded_start_time_after_a_read(self):
+        process = MagicMock()
+        process.poll.return_value = None
+
+        def popen(cmd, **kwargs):
+            Path(cmd[-1].removeprefix('unix://')).write_text('')  # the server published its socket
+            return process
+
+        with patch('orchd.app_transport.RPC') as rpc:
+            rpc.return_value.call.return_value = {'rate_limits': {}}
+            call_args, reap = self._probe_app_server(888.25, popen)
+        self.assertEqual(call_args.args[0][:2], ['codex', 'app-server'])
+        rpc.return_value.close.assert_called_once()
+        reap.assert_called_once_with(process, since=888.25)
+        self.assertNotIn(process, quota._children)

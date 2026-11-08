@@ -303,9 +303,14 @@ def _reap_windows(process, grace=3, since=None):
     """Terminate a Windows probe tree. Windows has no process group to signal, so walk descendants.
 
     The root may already have exited while a descendant still holds its pipes; such orphans keep the dead root's
-    PID as their parent PID, so they are still found (born at/after `since`, which guards against PID reuse)."""
+    PID as their parent PID, so they are still found. Two PID-reuse guards bound that orphan scan: a candidate
+    must be born at/after `since` (its own PID was not recycled from before the probe), and before the dead root's
+    PID could have been handed to anyone else. `process.poll()` is handle-based on Windows, so once it reports
+    an exit, any live process holding `process.pid` is an unrelated newcomer: its children were born at/after it
+    and are never touched. Without such a holder, the exit was observed no later than now, which bounds the window."""
     import psutil
     victims = []
+    ended = time.time()
     try:
         root = psutil.Process(process.pid) if process.poll() is None else None
     except psutil.Error:
@@ -316,9 +321,14 @@ def _reap_windows(process, grace=3, since=None):
         except psutil.Error:
             victims = [root]
     else:
+        with contextlib.suppress(psutil.Error):
+            ended = min(ended, psutil.Process(process.pid).create_time())  # the dead root's PID was reused
         for candidate in psutil.process_iter():
             try:
-                if candidate.ppid() != process.pid or (since is not None and candidate.create_time() < since):
+                if candidate.ppid() != process.pid:
+                    continue
+                born = candidate.create_time()
+                if (since is not None and born < since) or born >= ended:
                     continue
                 victims.extend([*reversed(candidate.children(recursive=True)), candidate])
             except psutil.Error:
