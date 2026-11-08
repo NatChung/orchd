@@ -283,3 +283,16 @@ class InitTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class ChannelInstallTest(unittest.TestCase):
+    def test_install_dry_run_is_write_free_and_install_creates_disabled_layout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            env = {"ORCHD_ROOT": str(home / "root"), "ORCHD_HOME": str(home / "state")}
+            preview = bootstrap.install(TrustRuntime(), home=home, env=env, trust=False, dry_run=True, orchd_bin="synthetic")
+            self.assertEqual(preview["layout_version"], 1)
+            self.assertEqual(list(home.iterdir()), [])
+            result = bootstrap.install(TrustRuntime(), home=home, env=env, trust=False, orchd_bin="synthetic")
+            self.assertEqual(result["layout_version"], 1)
+            self.assertTrue((home / "root/channel/email/config.toml").is_file())
+            self.assertFalse((home / ".codex/config.toml").exists())
