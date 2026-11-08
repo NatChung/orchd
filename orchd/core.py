@@ -1134,6 +1134,7 @@ def list_open(con, rt, *, now=None, stale_hours=None, attention_only=False):
     out = []
     now = time.time() if now is None else now
     hours = worker_health.stale_hours(stale_hours)
+    heard_by_task = worker_health.worker_messages(con, store.OPEN)
     for t in store.open_tasks(con):
         if app_worker.enabled(t):
             alive = app_worker.health(t)
@@ -1142,9 +1143,9 @@ def list_open(con, rt, *, now=None, stale_hours=None, attention_only=False):
                 None if t["status"] in ("question", "done", "blocked") else False)
         else:
             alive = claude_job_alive(jobs, t["job_id"])
-        heard = worker_health.last_report_at(con, t["id"])
+        heard, reported = heard_by_task.get(t["id"], (None, False))
         stale = worker_health.is_stale(t["status"], heard if heard is not None else t["created_at"], now, hours)
-        health = worker_health.assess(t["status"], alive, worker_health.has_report(con, t["id"]),
+        health = worker_health.assess(t["status"], alive, reported,
                                       task_id=t["id"], worktree=t["worktree"], branch=t["branch"], base=t["base"])
         out.append(dict(task_id=t["id"], repo=t["repo"], title=t["title"], status=t["status"],
                         model=task_model(t), model_reason=limits.cap_text(t['model_reason']), group_id=t['group_id'],
@@ -1163,10 +1164,13 @@ def list_open(con, rt, *, now=None, stale_hours=None, attention_only=False):
                         notification_delivery=store.notification_delivery(con, t["id"]),
                         last_report_at=heard, stale=stale, stale_after_hours=hours,
                         **health))
-    if attention_only:
-        out = [r for r in out if r["stale"] or r["worker_health"] in ("orphan", "unknown") or r["uncertain_delivery"]
-               or r["status"] not in ("starting", "running", "acked")]
-    return out
+    return [r for r in out if needs_attention(r)] if attention_only else out
+
+
+def needs_attention(row):
+    """A list_open row attention_only keeps: anything but a healthy, non-stale starting/running/acked task."""
+    return bool(row["stale"] or row["worker_health"] in ("orphan", "unknown") or row["uncertain_delivery"]
+                or row["status"] not in ("starting", "running", "acked"))
 
 
 def _record_usage(con, rt, task):
