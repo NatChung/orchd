@@ -31,7 +31,7 @@ def make_runner(overrides=None):
     table.update(overrides or {})
 
     def runner(cmd, timeout=15):
-        key = (Path(cmd[0]).name, *cmd[1:])
+        key = (Path(cmd[0]).name.removesuffix(".exe"), *cmd[1:])
         if key not in table:
             raise FileNotFoundError(cmd[0])
         value = table[key]
