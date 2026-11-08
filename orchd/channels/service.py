@@ -16,6 +16,12 @@ class ChannelService:
             self.con.close()
             raise
 
+    def session_factory(self):
+        """Capture a factory on the owning thread; each callback owns its connection."""
+        path = repository.database_path(self.con)
+        clock, retention, home = self.clock, self.retention, self.channel_home
+        return lambda: ChannelService(path, clock=clock, retention=retention, channel_home=home)
+
     def close(self):
         self.con.close()
 
@@ -42,11 +48,14 @@ class ChannelService:
             raise ValueError('unsupported provider')
         repository.provision(self.con, source)
 
-    def receive(self, source_id, event, *, caller):
+    def receive(self, source_id, event, *, caller, automation=None, accept_tombstone=False):
         policy.require_source(caller, source_id)
         if caller.role != 'adapter':
             raise PermissionError('adapter required')
-        return repository.receive(self.con, source_id, models.validate_event(event), caller.identity, self.clock)
+        receipt = repository.receive(self.con, source_id, models.validate_event(event), caller.identity, self.clock, automation=automation, accept_tombstone=accept_tombstone)
+        if event['content'].get('unavailable_reason') == 'deleted':
+            self._cleanup_deleted_storage()
+        return receipt
 
     def _require_adapter(self, source_id, caller):
         policy.require_source(caller, source_id)

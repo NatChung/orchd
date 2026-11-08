@@ -75,7 +75,7 @@ def _matching_route(con, source_id, conversation_ref, sender):
     return matched[0] if matched else None
 
 
-def receive(con, source_id, event, adapter, clock, *, in_transaction=False):
+def receive(con, source_id, event, adapter, clock, *, in_transaction=False, automation=None, accept_tombstone=False):
     from contextlib import nullcontext
     import time
     import uuid
@@ -94,6 +94,13 @@ def receive(con, source_id, event, adapter, clock, *, in_transaction=False):
             raise PermissionError('adapter not authorized for source')
         if (source['provider'],source['tenant_ref']) != (origin['provider'],origin['tenant_ref']):
             raise PermissionError('source origin mismatch')
+        if accept_tombstone and con.execute("SELECT 1 FROM channel_messages m JOIN intake_content c ON c.receipt_id=m.intake_receipt_id WHERE m.origin_key=? AND m.deleted_at IS NOT NULL AND c.unavailable_reason='deleted' LIMIT 1", (origin_key,)).fetchone():
+            previous = con.execute('SELECT origin_key,content_hash FROM channel_observations WHERE source_id=? AND transport_event_key=?',(source_id,event['transport_event_key'])).fetchone()
+            if previous and (previous['origin_key'] != origin_key or (previous['content_hash'] != event_hash and event['content'].get('unavailable_reason') != 'deleted')):
+                raise ValueError('conflict')
+            tomb = con.execute('SELECT id,intake_receipt_id FROM channel_messages WHERE origin_key=? AND deleted_at IS NOT NULL LIMIT 1',(origin_key,)).fetchone()
+            con.execute('INSERT OR IGNORE INTO channel_observations VALUES(?,?,?,?,?,?)',(source_id,event['transport_event_key'],origin_key,tomb['id'],event_hash,now))
+            return {'status':'duplicate','message_id':tomb['id'],'receipt_id':tomb['intake_receipt_id']}
         old = con.execute('SELECT * FROM channel_observations WHERE source_id=? AND transport_event_key=?', (source_id,event['transport_event_key'])).fetchone()
         if old:
             if old['content_hash'] != event_hash:
@@ -114,6 +121,9 @@ def receive(con, source_id, event, adapter, clock, *, in_transaction=False):
         owner = route['owner_orch'] if route and route['mode'] != 'observer' else None
         existing = con.execute('SELECT * FROM channel_messages WHERE origin_key=? AND revision_key=?', (origin_key,event['revision_key'])).fetchone()
         if existing:
+            import json
+            if json.loads(existing['provenance_json']).get('loop_status', 'human') not in ('human','allowed'):
+                owner = None
             if existing['content_hash'] != content_hash:
                 con.execute('INSERT INTO channel_observations VALUES(?,?,?,?,?,?)',(source_id,event['transport_event_key'],origin_key,existing['id'],event_hash,now))
                 return {'status':'conflict','message_id':existing['id'],'receipt_id':existing['intake_receipt_id'],'review_required':True}
@@ -135,6 +145,9 @@ def receive(con, source_id, event, adapter, clock, *, in_transaction=False):
                             ('cd_'+uuid.uuid4().hex,source_id,existing['id'],route['id'],route['version'],route['authority_epoch'],canonical({'owner_orch':owner}),content_hash,'wake:'+existing['id'],now,now))
             con.execute('INSERT INTO channel_observations VALUES(?,?,?,?,?,?)',(source_id,event['transport_event_key'],origin_key,existing['id'],event_hash,now))
             return {'status':'duplicate','message_id':existing['id'],'receipt_id':existing['intake_receipt_id']}
+        loop_status, provenance = _loop_guard(con, origin, automation, now)
+        if loop_status not in ('human', 'allowed') or event['content'].get('unavailable_reason') == 'deleted':
+            owner = None
         conversation_id='cc_'+uuid.uuid4().hex
         con.execute('INSERT OR IGNORE INTO channel_conversations(id,source_id,external_ref,kind,thread_key) VALUES(?,?,?,?,?)',(conversation_id,source_id,origin['conversation_ref'],event['conversation']['kind'],event['conversation']['thread_key']))
         conversation_id=con.execute('SELECT id FROM channel_conversations WHERE source_id=? AND external_ref=? AND thread_key=?',(source_id,origin['conversation_ref'],event['conversation']['thread_key'])).fetchone()[0]
@@ -152,6 +165,9 @@ def receive(con, source_id, event, adapter, clock, *, in_transaction=False):
         if suggestion:
             intake_bridge._add_suggestion(con, receipt_id, suggestion, adapter)
         con.execute('INSERT INTO channel_messages(id,conversation_id,origin_key,provider_message_id,revision_key,direction,trust,sender_ref,source_time,received_at,content_hash,intake_receipt_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(message_id,conversation_id,origin_key,origin['message_id'],event['revision_key'],'in','third_party_data',event['sender_ref'],event['source_time'],now,content_hash,receipt_id))
+        import json
+        provenance = canonical(dict(json.loads(provenance), loop_status=loop_status))
+        con.execute('UPDATE channel_messages SET provenance_json=? WHERE id=?',(provenance,message_id))
         con.execute('INSERT INTO channel_observations VALUES(?,?,?,?,?,?)',(source_id,event['transport_event_key'],origin_key,message_id,event_hash,now))
         for index, attachment in enumerate(content.get('attachments', [])):
             ref = attachment.get('provider_attachment_ref') or f'legacy-index:{index}'
@@ -162,7 +178,9 @@ def receive(con, source_id, event, adapter, clock, *, in_transaction=False):
             con.execute("INSERT INTO channel_processing_claims(origin_key,revision_key,lane,owner_orch,authority_epoch,state,created_at) VALUES(?,?,?,?,?,'claimed',?)", (origin_key,event['revision_key'],'default',owner,route['authority_epoch'],now))
             intake_notify.enqueue(con,receipt_id,owner,intake_bridge._suggestion_urgency(suggestion))
             con.execute('INSERT INTO channel_deliveries(id,kind,source_id,message_id,route_id,route_version,authority_epoch,target_snapshot,payload_hash,state,idempotency_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',('cd_'+uuid.uuid4().hex,'wake',source_id,message_id,route['id'],route['version'],route['authority_epoch'],canonical({'owner_orch':owner}),event_hash,'queued','wake:'+message_id,now,now))
-        return {'status':'received','message_id':message_id,'receipt_id':receipt_id}
+        if event['content'].get('unavailable_reason') == 'deleted':
+            tombstone(con,message_id,source_id,in_transaction=True)
+        return {'status':'received','message_id':message_id,'receipt_id':receipt_id,'loop_status':loop_status}
 
 
 def get_message(con, message_id):
@@ -233,9 +251,10 @@ def attachment_available(con, attachment_id, source_id, digest, size, now, holde
 
 
 
-def tombstone(con, message_id, source_id, *, reason='deleted'):
+def tombstone(con, message_id, source_id, *, reason='deleted', in_transaction=False):
     from datetime import datetime, timezone
-    with store.immediate(con):
+    from contextlib import nullcontext
+    with nullcontext() if in_transaction else store.immediate(con):
         row=con.execute('SELECT m.origin_key FROM channel_messages m JOIN channel_conversations c ON c.id=m.conversation_id WHERE m.id=? AND c.source_id=?',(message_id,source_id)).fetchone()
         if row is None:
             raise PermissionError('message source mismatch')
@@ -306,7 +325,7 @@ def commit_checkpoint(con, source_id, scope, cursor, receipts, holder, generatio
             if not con.execute('SELECT 1 FROM channel_observations o JOIN channel_messages m ON m.id=o.message_id WHERE o.source_id=? AND m.intake_receipt_id=?', (source_id, receipt)).fetchone():
                 raise ValueError('receipt not durable for source')
         old = checkpoint(con, source_id, scope)
-        backwards = old and ((int(old['committed_cursor']) > int(cursor)) if scope == 'history' else (old['committed_cursor'] > cursor))
+        backwards = old and ((int(old['committed_cursor']) > int(cursor)) if scope == 'history' or scope.startswith(('history:', 'thread:')) else (old['committed_cursor'] > cursor))
         if backwards:
             raise ValueError('checkpoint cannot move backwards')
         con.execute('INSERT INTO channel_checkpoints VALUES(?,?,?,?,?,?) ON CONFLICT(source_id,scope) DO UPDATE SET committed_cursor=excluded.committed_cursor,window_end=excluded.window_end,receipt_set_hash=excluded.receipt_set_hash,updated_at=excluded.updated_at',
@@ -492,3 +511,36 @@ def worker_identity(con, worktree):
     if len(matches) != 1 or matches[0]['status'] not in ('starting','running','acked','question'):
         raise PermissionError('worker identity unavailable')
     return {'id':matches[0]['id'],'owner_orch':matches[0]['orch_thread']}
+
+
+def database_path(con):
+    return con.execute("PRAGMA database_list").fetchone()[2]
+
+
+def _loop_guard(con, origin, context, now):
+    """Read provenance and update its budget atomically with receive/processing claim."""
+    import json
+    from datetime import datetime, timedelta
+    from .loops import Automation, guard
+    from .models import digest
+    scope = digest({k:v for k,v in origin.items() if k != 'message_id'})
+    context = Automation() if context is None else context
+    # Validate before using automation fields in a query.
+    guard(context)
+    state = con.execute('SELECT * FROM channel_loop_state WHERE scope_key=? AND correlation_id=?', (scope,context.correlation_id)).fetchone()
+    echo = False
+    for row in con.execute("SELECT a.provider_receipt FROM channel_delivery_attempts a JOIN channel_deliveries d ON d.id=a.delivery_id JOIN channel_sources s ON s.id=d.source_id WHERE d.kind='outbound' AND s.provider=? AND s.tenant_ref=? AND a.state IN ('provider_accepted','delivered')", (origin['provider'],origin['tenant_ref'])):
+        try:
+            receipt = json.loads(row[0] or '{}')
+        except (ValueError, TypeError):
+            continue
+        if isinstance(receipt,dict) and receipt.get('conversation_ref') == origin['conversation_ref'] and receipt.get('message_id') == origin['message_id']:
+            echo = True
+            break
+    status, provenance = guard(context,state=state,sent_echo=echo)
+    if status in ('allowed','hop_limit','budget_exhausted','peer_disabled'):
+        reset_at=(datetime.fromisoformat(now)+timedelta(seconds=300)).isoformat()
+        # Exhaustion stays paused after the window. Only the control plane may reset.
+        con.execute('INSERT INTO channel_loop_state(scope_key,correlation_id,turns,window_start,reset_at,paused,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(scope_key,correlation_id) DO UPDATE SET turns=turns+excluded.turns,paused=MAX(paused,excluded.paused),updated_at=excluded.updated_at',
+                    (scope,context.correlation_id,int(status=='allowed'),now,reset_at,int(status!='allowed'),now))
+    return status, provenance
