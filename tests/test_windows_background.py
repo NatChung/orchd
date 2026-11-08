@@ -161,3 +161,25 @@ class ReapWindowsTests(unittest.TestCase):
         self.run_reap(10, running=True, processes=[root, child])
         root.terminate.assert_called_once()
         child.terminate.assert_called_once()
+
+
+class ReapKeepsProbeStartTimeTests(unittest.TestCase):
+    """Every cleanup path hands _reap the probe's start time so a reused PID is never killed."""
+
+    def test_reap_children_passes_the_recorded_start_time(self):
+        process = MagicMock()
+        with quota._children_lock:
+            quota._children[process] = 123.5
+        self.addCleanup(quota._children.pop, process, None)
+        with patch.object(quota, '_reap') as reap:
+            quota._reap_children()
+        reap.assert_called_once_with(process, since=123.5)
+
+    def test_run_reaps_with_its_start_time_on_failure(self):
+        popen = MagicMock()
+        popen.communicate.side_effect = KeyboardInterrupt
+        with patch('subprocess.Popen', return_value=popen), patch.object(quota, '_reap') as reap:
+            with self.assertRaises(KeyboardInterrupt):
+                quota._run(['x'], 1)
+        self.assertIsNotNone(reap.call_args.kwargs['since'])
+        self.assertNotIn(popen, quota._children)

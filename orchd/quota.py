@@ -291,7 +291,7 @@ def claude_usage(cache, text, now=None):
 
 
 _stop = None  # threading.Event once a background refresher exists
-_children = set()
+_children = {}  # process -> start time, so cleanup can guard against PID reuse
 _children_lock = threading.Lock()
 
 
@@ -359,7 +359,7 @@ def _run(cmd, timeout, **kwargs):
     since = time.time()
     process = subprocess.Popen(cmd, **background_options(), **kwargs)
     with _children_lock:
-        _children.add(process)
+        _children[process] = since
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except BaseException:
@@ -367,15 +367,15 @@ def _run(cmd, timeout, **kwargs):
         raise
     finally:
         with _children_lock:
-            _children.discard(process)
+            _children.pop(process, None)
     return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
 
 
 def _reap_children():
     with _children_lock:
-        children = list(_children)
-    for process in children:
-        _reap(process)
+        children = list(_children.items())
+    for process, since in children:
+        _reap(process, since=since)
 
 
 def sanitized_error(error):
@@ -439,12 +439,13 @@ def _probe(cache, provider, binary=None):
         endpoint = str(Path(tmp) / 'rpc.sock')
         process = None
         rpc = None
+        since = time.time()
         try:
             process = subprocess.Popen([binary or 'codex', 'app-server', '--listen', 'unix://' + endpoint],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 **background_options())
             with _children_lock:
-                _children.add(process)
+                _children[process] = since
             deadline = time.monotonic() + 10
             while not Path(endpoint).exists():
                 if _stopping():
@@ -462,9 +463,9 @@ def _probe(cache, provider, binary=None):
             if rpc is not None:
                 rpc.close()
             if process is not None:
-                _reap(process)
+                _reap(process, since=since)
                 with _children_lock:
-                    _children.discard(process)
+                    _children.pop(process, None)
 
 
 def period():

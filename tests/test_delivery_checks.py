@@ -6,7 +6,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from orchd import config, delivery_checks, store, worker_flow
 
@@ -186,6 +186,43 @@ class PreflightTest(ChecksBase):
         self.assertFalse(record["passed"])
         self.assertIsNone(record["exit_code"])
         self.assertIn("timed out", record["output"])
+
+    def test_timeout_with_the_check_already_exited_still_reports_a_timeout(self):
+        # The check itself exits at once; only a new-session grandchild keeps stdout open. The process group is
+        # gone (or the leader a zombie), so killpg can raise ProcessLookupError: that is not a startup error.
+        self.publish(dict(self.definition, checks={"preflight": dict(PREFLIGHT, timeout_seconds=1)}))
+        self.script_at_base("preflight",
+                            "python3 -c \"import subprocess,sys;"
+                            "subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],start_new_session=True)\"")
+        started = time.monotonic()
+        with patch.object(delivery_checks, "REAP_GRACE", 1):
+            record = delivery_checks.run(self.con, self.task, "preflight", self.root)
+        self.assertLess(time.monotonic() - started, 15)
+        self.assertIn("timed out", record["output"])
+        self.assertNotIn("could not start", record["output"])
+
+    def test_missing_process_group_falls_back_to_killing_the_process(self):
+        proc = MagicMock(pid=4242)
+        with patch.object(delivery_checks, "IS_WINDOWS", False), \
+                patch("os.killpg", side_effect=ProcessLookupError):
+            delivery_checks._kill_check(proc, 0.0)
+        proc.kill.assert_called_once()
+
+    def test_windows_timeout_never_closes_the_stream_a_reader_thread_is_blocked_on(self):
+        # Closing a buffered stream another thread is reading can block forever; the grace period must still end.
+        self.publish(dict(self.definition, checks={"preflight": dict(PREFLIGHT, timeout_seconds=1)}))
+        proc = MagicMock(pid=4242)
+        proc.communicate.side_effect = subprocess.TimeoutExpired("check", 1)
+        real_popen = subprocess.Popen
+        fake = lambda argv, *a, **kw: proc if argv == PREFLIGHT["argv"] else real_popen(argv, *a, **kw)
+        with patch.object(delivery_checks, "IS_WINDOWS", True), patch.object(delivery_checks, "REAP_GRACE", 0), \
+                patch("orchd.quota._reap") as reap, patch("subprocess.Popen", side_effect=fake):
+            record = delivery_checks.run(self.con, self.task, "preflight", self.root)
+        reap.assert_called_once()
+        self.assertEqual(reap.call_args.kwargs["since"] > 0, True)
+        proc.stdout.close.assert_not_called()
+        self.assertIn("timed out", record["output"])
+        self.assertIn("output unavailable", record["output"])
 
     def test_output_is_bounded(self):
         self.script_at_base("preflight", "yes x | head -c 200000")
