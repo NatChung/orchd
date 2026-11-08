@@ -45,8 +45,8 @@ def _get(con, run_id):
 
 
 def _state(con, run_id, state, note=None):
-    con.execute('UPDATE workflow_runs SET state=?,note=?,version=version+1,updated_at=? WHERE id=?',
-                (state, note, time.time(), run_id))
+    con.execute("UPDATE workflow_runs SET state=?,note=?,version=version+1,updated_at=? WHERE id=? AND (state NOT IN ('cancelling','cancelled') OR ? IN ('cancelling','cancelled'))",
+                (state, note, time.time(), run_id, state))
 
 
 def _plugin(pin):
@@ -272,6 +272,10 @@ def _fail(con, run, reason, *, task_id=None, message_id=None, verification=None)
     """At most one fixed recovery run; a recovery failure never recursively starts another."""
     plan = _json(run['plan'])
     with contextlib.nullcontext() if con.in_transaction else store.immediate(con):
+        if _get(con, run['id'])['state'] in ('cancelling', 'cancelled'):
+            return
+        if run['parent_run_id'] and _get(con, run['parent_run_id'])['state'] in ('cancelling', 'cancelled'):
+            return
         captured, provenance, task_refs = {}, {}, []
         for attempt in con.execute('SELECT * FROM workflow_run_attempts WHERE run_id=? ORDER BY step_index,role', (run['id'],)):
             step_id = plan['steps'][attempt['step_index']]['id']
@@ -343,7 +347,7 @@ def guard_desktop_route(con, orch_id, task_id=None):
         if task_origin(con, task_id) is not None:
             raise ValueError('Workflow task replies are fixed to their authenticated request origin; Desktop routing is refused')
         return
-    if con.execute("SELECT 1 FROM workflow_runs WHERE orch_thread=? AND state NOT IN ('done','needs_adoption') LIMIT 1", (orch_id,)).fetchone():
+    if con.execute("SELECT 1 FROM workflow_runs WHERE orch_thread=? AND state NOT IN ('done','needs_adoption','cancelled') LIMIT 1", (orch_id,)).fetchone():
         raise ValueError('This Orch has an external workflow run; unscoped Desktop routing is refused. Use the fixed request origin or an explicit unrelated task')
 
 
@@ -359,6 +363,7 @@ def observe_question(con, *, task_id, message_id):
 
 
 def _notify_attention(con, run):
+    run = _get(con, run['id'])
     from . import interface
     if run['state'] not in ('needs_recovery', 'blocked', 'awaiting_input', 'repairing'):
         return
@@ -386,7 +391,10 @@ def _notify_attention(con, run):
         text = 'Workflow run ' + run['id'] + ' stopped in ' + run['state'] + '. It has not completed. ' + (run['note'] or 'Inspect its retained evidence before recovery.')
         kind = 'final'
     try:
-        interface.reply(con, request['orch_id'], request_id=run['request_id'], text=text, kind=kind)
+        with _transition_lock(con):
+            if _get(con, run['id'])['state'] != run['state']:
+                return
+            interface.reply(con, request['orch_id'], request_id=run['request_id'], text=text, kind=kind)
         _event(con, run['id'], key, dict(request_id=run['request_id'], kind=kind, text_digest=_hash(text.encode())), message_id=source_id)
     except Exception as error:
         if not con.execute("SELECT 1 FROM workflow_run_events WHERE run_id=? AND kind='origin_delivery_pending' AND source_message_id IS ? LIMIT 1", (run['id'], source_id)).fetchone():
@@ -399,7 +407,7 @@ def guard_close(con, task_id, outcome=None):
         return
     run = _get(con, attempt['run_id'])
     spec = _json(attempt['spec'])
-    if run['state'] in ('blocked', 'needs_adoption') and outcome in ('parked', 'abandoned'):
+    if run['state'] in ('blocked', 'needs_adoption', 'cancelling', 'cancelled') and outcome in ('parked', 'abandoned'):
         return
     if attempt['role'] == 'author' and spec.get('verification'):
         from . import verify
@@ -438,6 +446,8 @@ def _inputs(con, run, refs):
 
 
 def _reserve(con, run, node, role, author=None):
+    if _get(con, run['id'])['state'] != 'active':
+        raise ValueError('Workflow run no longer accepts dispatch reservations')
     plan = _json(run['plan'])
     manifest, files = _plugin(plan['workflow'])
     selected = manifest['stages'][node['stage']]
@@ -489,6 +499,8 @@ def _launch(con, rt, run, attempt):
     from . import core
     spec = _json(attempt['spec'])
     with store.immediate(con):
+        if _get(con, run['id'])['state'] != 'active':
+            return
         changed = con.execute("UPDATE workflow_run_attempts SET state='launching' WHERE id=? AND state='reserved'", (attempt['id'],)).rowcount
         if changed != 1:
             return
@@ -529,6 +541,9 @@ def migrate_owner(con, old_orch, new_orch):
 
 def _step(con, rt, run):
     from . import verify
+    run = _get(con, run['id'])
+    if run['state'] != 'active':
+        return
     plan = _json(run['plan'])
     origin = json.loads(run['origin'])
     request = con.execute('SELECT * FROM interface_requests WHERE id=?', (run['request_id'],)).fetchone()
@@ -554,20 +569,23 @@ def _step(con, rt, run):
             except Exception as error:
                 _event(con, run['id'], 'cleanup_pending', dict(error_type=type(error).__name__), attempt['task_id'])
                 return
-        if run['parent_run_id']:
-            final = 'Workflow run ' + run['parent_run_id'] + ' produced a bounded recovery candidate in ' + run['id'] + '. It needs adoption; no merge, deployment or active pin change was performed.'
-        else:
-            final = 'Workflow run ' + run['id'] + ' finished its declared steps. Reports are self-reported; native verification is recorded where required.'
-        interface.reply(con, run['orch_thread'], request_id=run['request_id'], text=final)
-        _state(con, run['id'], 'needs_adoption' if run['parent_run_id'] else 'done')
-        if run['parent_run_id']:
-            _state(con, run['parent_run_id'], 'needs_adoption', 'Bounded recovery candidate awaits adoption')
-            for original in con.execute('SELECT task_id FROM workflow_run_attempts WHERE run_id=?', (run['parent_run_id'],)).fetchall():
-                try:
-                    core.close(con, rt, original['task_id'], outcome='parked')
-                except Exception as error:
-                    _event(con, run['parent_run_id'], 'cleanup_pending', dict(error_type=type(error).__name__), original['task_id'])
-        _event(con, run['id'], 'finished', dict(request_id=run['request_id']))
+        with _transition_lock(con):
+            if _get(con, run['id'])['state'] != 'active':
+                return
+            if run['parent_run_id']:
+                final = 'Workflow run ' + run['parent_run_id'] + ' produced a bounded recovery candidate in ' + run['id'] + '. It needs adoption; no merge, deployment or active pin change was performed.'
+            else:
+                final = 'Workflow run ' + run['id'] + ' finished its declared steps. Reports are self-reported; native verification is recorded where required.'
+            interface.reply(con, run['orch_thread'], request_id=run['request_id'], text=final)
+            _state(con, run['id'], 'needs_adoption' if run['parent_run_id'] else 'done')
+            if run['parent_run_id']:
+                _state(con, run['parent_run_id'], 'needs_adoption', 'Bounded recovery candidate awaits adoption')
+                for original in con.execute('SELECT task_id FROM workflow_run_attempts WHERE run_id=?', (run['parent_run_id'],)).fetchall():
+                    try:
+                        core.close(con, rt, original['task_id'], outcome='parked')
+                    except Exception as error:
+                        _event(con, run['parent_run_id'], 'cleanup_pending', dict(error_type=type(error).__name__), original['task_id'])
+            _event(con, run['id'], 'finished', dict(request_id=run['request_id']))
         return
     node = plan['steps'][run['step_index']]
     attempts = {r['role']: r for r in con.execute('SELECT * FROM workflow_run_attempts WHERE run_id=? AND step_index=?', (run['id'], run['step_index']))}
@@ -629,8 +647,15 @@ def reconcile(con, rt, run_id=None, *, limit=100):
         raise ValueError('Invalid reconcile limit')
     try:
         with _locked(con):
-            runs = [_get(con, run_id)] if run_id else con.execute("SELECT * FROM workflow_runs WHERE state IN ('active','needs_recovery','blocked','awaiting_input','repairing') ORDER BY created_at LIMIT ?", (limit,)).fetchall()
+            runs = [_get(con, run_id)] if run_id else con.execute("SELECT * FROM workflow_runs WHERE state IN ('active','needs_recovery','blocked','awaiting_input','repairing','cancelling') ORDER BY created_at LIMIT ?", (limit,)).fetchall()
             for run in runs:
+                if run['state'] == 'cancelling':
+                    try:
+                        _cancel_cleanup(con, rt, run)
+                    except Exception as error:
+                        if not con.execute("SELECT 1 FROM workflow_run_events WHERE run_id=? AND kind='cancel_cleanup_pending' AND task_id IS NULL", (run['id'],)).fetchone():
+                            _event(con, run['id'], 'cancel_cleanup_pending', dict(error_type=type(error).__name__))
+                    continue
                 if run['state'] != 'active':
                     _notify_attention(con, run)
                     continue
@@ -677,7 +702,7 @@ def ensure_runner(con, rt):
         database = _database(con)
     except ValueError:
         return dict(state='skipped', reason='nonpersistent database')
-    if not con.execute("SELECT 1 FROM workflow_runs WHERE state IN ('active','needs_recovery','blocked','awaiting_input','repairing') LIMIT 1").fetchone():
+    if not con.execute("SELECT 1 FROM workflow_runs WHERE state IN ('active','needs_recovery','blocked','awaiting_input','repairing','cancelling') LIMIT 1").fetchone():
         return dict(state='idle')
     service_lock = database.with_suffix('.workflow-service.lock')
     with service_lock.open('a+b') as handle:
@@ -693,3 +718,88 @@ def ensure_runner(con, rt):
         child = subprocess.Popen(command, cwd=database.parent, env=env, stdin=subprocess.DEVNULL,
                                  stdout=log, stderr=log, **detached_options())
     return dict(state='starting', pid=child.pid)
+
+
+@contextlib.contextmanager
+def _transition_lock(con):
+    """Short reply/cancel fence, separate from worktree/spawn effects."""
+    with _database(con).with_suffix('.workflow-transition.lock').open('a+b') as handle:
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                try_lock(handle)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('Workflow transition busy; retry cancellation')
+                time.sleep(.02)
+        yield
+
+
+def _family(con, run):
+    root = _get(con, run['parent_run_id']) if run['parent_run_id'] else run
+    rows = con.execute('SELECT * FROM workflow_runs WHERE id=? OR parent_run_id=? ORDER BY created_at', (root['id'], root['id'])).fetchall()
+    return root, rows
+
+
+def _cancel_cleanup(con, rt, run):
+    from . import core, interface
+    root, family = _family(con, run)
+    if root['state'] != 'cancelling':
+        return
+    for member in family:
+        for attempt in con.execute('SELECT task_id FROM workflow_run_attempts WHERE run_id=?', (member['id'],)).fetchall():
+            if not con.execute('SELECT 1 FROM tasks WHERE id=?', (attempt['task_id'],)).fetchone():
+                continue  # Reservation never became a task; no spawn is inferred.
+            try:
+                core.close(con, rt, attempt['task_id'], outcome='parked')
+            except Exception as error:
+                if not con.execute("SELECT 1 FROM workflow_run_events WHERE run_id=? AND kind='cancel_cleanup_pending' AND task_id=?", (root['id'], attempt['task_id'])).fetchone():
+                    _event(con, root['id'], 'cancel_cleanup_pending', dict(error_type=type(error).__name__), attempt['task_id'])
+                return
+    with _transition_lock(con):
+        request = con.execute('SELECT * FROM interface_requests WHERE id=?', (root['request_id'],)).fetchone()
+        origin = json.loads(root['origin'])
+        if request is None or any(request[k] != origin[k] for k in ('interface_id', 'conversation', 'request_key')):
+            raise ValueError('Cancellation reply origin no longer matches its frozen request')
+        if request['reply'] is None:
+            interface.reply(con, request['orch_id'], request_id=root['request_id'],
+                            text='Workflow run ' + root['id'] + ' was cancelled; it did not finish successfully. ' + (root['note'] or ''))
+            notification = 'cancelled_final_recorded'
+        else:
+            notification = 'existing_final_retained'
+        with store.immediate(con):
+            for member in family:
+                _state(con, member['id'], 'cancelled', root['note'])
+            _event(con, root['id'], 'cancelled', dict(run_ids=[r['id'] for r in family], origin_notification=notification))
+
+
+def cancel(con, rt, run_id, *, orch_thread, reason):
+    """Cancel one operation and its sole recovery child; never close unrelated tasks."""
+    if not isinstance(reason, str) or not reason.strip() or len(reason) > 4096:
+        raise ValueError('Cancellation needs a nonempty reason under 4096 characters')
+    with _transition_lock(con):
+        run = _get(con, run_id)
+        root, family = _family(con, run)
+        request = con.execute('SELECT orch_id FROM interface_requests WHERE id=?', (root['request_id'],)).fetchone()
+        if request is None or request['orch_id'] != orch_thread:
+            raise ValueError('Cancellation request is not owned by this Orch')
+        if root['state'] in ('done', 'needs_adoption'):
+            live = any(con.execute("SELECT 1 FROM tasks t JOIN workflow_run_attempts a ON a.task_id=t.id WHERE a.run_id=? AND t.status<>'closed' LIMIT 1", (member['id'],)).fetchone() for member in family)
+            if not live:
+                return dict(show(con, root['id']), cancelled=False, already_terminal=True)
+        if root['state'] not in ('cancelling', 'cancelled'):
+            with store.immediate(con):
+                for member in family:
+                    _state(con, member['id'], 'cancelling', reason)
+                _event(con, root['id'], 'cancellation_requested', dict(reason=reason, orch_thread=orch_thread, run_ids=[r['id'] for r in family]))
+    if _get(con, root['id'])['state'] == 'cancelling':
+        try:
+            with _locked(con):
+                _cancel_cleanup(con, rt, _get(con, root['id']))
+        except BlockingIOError:
+            pass  # Intent is durable. The existing runner will finish scoped cleanup.
+    result = show(con, root['id'])
+    event = con.execute("SELECT body FROM workflow_run_events WHERE run_id=? AND kind='cancelled' ORDER BY id DESC LIMIT 1", (root['id'],)).fetchone()
+    return dict(result, cancelled=result['state'] == 'cancelled', cleanup_pending=result['state'] == 'cancelling',
+                origin_notification=json.loads(event['body'])['origin_notification'] if event else 'pending')

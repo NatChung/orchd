@@ -497,6 +497,109 @@ class WorkflowRunTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'different content'):
             interface.reply(self.con, 'example-orch', request_id=self.request_id, text='Different reply')
 
+    def test_cancel_wrong_actor_has_no_side_effect(self):
+        run_id = self.start()
+        task = self.tick(run_id)['attempts'][0]['task_id']
+        before = runs.show(self.con, run_id)
+        messages = self.con.execute('SELECT COUNT(*) FROM messages').fetchone()[0]
+        with self.assertRaisesRegex(ValueError, 'not owned'):
+            runs.cancel(self.con, self.rt, run_id, orch_thread='different-orch', reason='Stop')
+        self.assertEqual(runs.show(self.con, run_id), before)
+        self.assertEqual(self.con.execute('SELECT COUNT(*) FROM messages').fetchone()[0], messages)
+        self.assertNotEqual(store.get_task(self.con, task)['status'], 'closed')
+
+    def test_cancel_before_first_step_prevents_all_future_dispatch(self):
+        run_id = self.start()
+        result = runs.cancel(self.con, self.rt, run_id, orch_thread='example-orch', reason='Synthetic operator cancellation')
+        self.assertTrue(result['cancelled'])
+        self.assertEqual(self.tick(run_id, 3)['state'], 'cancelled')
+        self.assertEqual(self.rt.created, [])
+        self.assertEqual(self.con.execute('SELECT COUNT(*) FROM tasks').fetchone()[0], 0)
+        reply = self.con.execute('SELECT reply FROM interface_requests WHERE id=?', (self.request_id,)).fetchone()[0]
+        self.assertIn('was cancelled', reply)
+        self.assertIn('did not finish successfully', reply)
+
+    def test_cancel_closes_started_recovery_family_but_not_unrelated_task(self):
+        plan = copy.deepcopy(self.plan)
+        repair = copy.deepcopy(plan['steps'][1])
+        repair.update(id='repair', inputs={'instructions': {'context': 'failure'}}, verification=self.verification())
+        plan['failure_steps'] = [repair]
+        parent = self.start(plan)
+        prepare = self.tick(parent)['attempts'][0]['task_id']
+        _, retained = self.output(prepare, {'implementation_instructions': 'Original retained producer output'})
+        author = self.tick(parent, 2)['attempts'][1]['task_id']
+        core.report(self.con, self.rt, author, 'blocked', 'Real failure', 'Source evidence')
+        child = runs.show(self.con, parent)['repair_run_id']
+        recovery = self.tick(child)['attempts'][0]['task_id']
+        unrelated = core.dispatch(self.con, self.rt, orch_thread='example-orch', repo='reminder-service', title='Unrelated task', instructions='Unrelated allowed scope', done_when='Report result', model='sonnet', model_reason='Synthetic control', task_type='code')
+        before_tasks = len(self.rt.created)
+        result = runs.cancel(self.con, self.rt, child, orch_thread='example-orch', reason='Cancel the operation including its recovery')
+        self.assertTrue(result['cancelled'])
+        self.assertEqual(result['run_id'], parent)
+        for task_id in (prepare, author, recovery):
+            task = store.get_task(self.con, task_id)
+            self.assertEqual(task['status'], 'closed')
+            self.assertEqual(task['outcome'], 'parked')
+        self.assertNotEqual(store.get_task(self.con, unrelated['id'])['status'], 'closed')
+        self.assertEqual(runs.show(self.con, child)['state'], 'cancelled')
+        self.assertEqual(self.con.execute('SELECT output FROM workflow_run_attempts WHERE task_id=?', (prepare,)).fetchone()[0], retained)
+        runs.reconcile(self.con, self.rt)
+        self.assertEqual(len(self.rt.created), before_tasks)
+
+    def test_repeated_cancel_is_idempotent_and_does_not_add_effects(self):
+        run_id = self.start()
+        self.tick(run_id)
+        first = runs.cancel(self.con, self.rt, run_id, orch_thread='example-orch', reason='First cancellation reason')
+        before = (len(self.rt.stopped), len(self.rt.removed), len(runs.events(self.con, run_id)), self.con.execute('SELECT COUNT(*) FROM messages').fetchone()[0])
+        again = runs.cancel(self.con, self.rt, run_id, orch_thread='example-orch', reason='A later retry must not rewrite the first reason')
+        self.assertEqual(again, first)
+        self.assertEqual((len(self.rt.stopped), len(self.rt.removed), len(runs.events(self.con, run_id)), self.con.execute('SELECT COUNT(*) FROM messages').fetchone()[0]), before)
+
+    def test_cancel_intent_is_durable_while_effect_lock_is_busy(self):
+        run_id = self.start()
+        self.tick(run_id)
+        with runs._locked(self.con):
+            result = runs.cancel(self.con, self.rt, run_id, orch_thread='example-orch', reason='Stop after in-flight effect')
+            self.assertTrue(result['cleanup_pending'])
+            self.assertEqual(result['state'], 'cancelling')
+        self.assertEqual(self.tick(run_id)['state'], 'cancelled')
+        self.assertEqual(len(self.rt.created), 1)
+
+    def test_cancel_retains_existing_error_final_instead_of_rewriting_history(self):
+        self.rt.start_error = True
+        run_id = self.start()
+        self.tick(run_id)
+        original = self.con.execute('SELECT reply FROM interface_requests WHERE id=?', (self.request_id,)).fetchone()[0]
+        result = runs.cancel(self.con, self.rt, run_id, orch_thread='example-orch', reason='Cancel failed launch')
+        self.assertTrue(result['cancelled'])
+        self.assertEqual(result['origin_notification'], 'existing_final_retained')
+        self.assertEqual(self.con.execute('SELECT reply FROM interface_requests WHERE id=?', (self.request_id,)).fetchone()[0], original)
+
+    def test_late_failure_report_cannot_start_recovery_after_cancel_intent(self):
+        plan = copy.deepcopy(self.plan)
+        repair = copy.deepcopy(plan['steps'][1])
+        repair.update(id='repair', inputs={'instructions': {'context': 'failure'}}, verification=self.verification())
+        plan['failure_steps'] = [repair]
+        run_id = self.start(plan)
+        author = self.tick(run_id)['attempts'][0]['task_id']
+        with runs._locked(self.con):
+            self.assertTrue(runs.cancel(self.con, self.rt, run_id, orch_thread='example-orch', reason='Stop in-flight operation')['cleanup_pending'])
+            core.report(self.con, self.rt, author, 'blocked', 'Late failure', 'Retained late report')
+            self.assertIsNone(runs.show(self.con, run_id)['repair_run_id'])
+        self.assertEqual(self.tick(run_id)['state'], 'cancelled')
+        self.assertEqual(self.con.execute('SELECT COUNT(*) FROM workflow_runs').fetchone()[0], 1)
+
+    def test_cancel_origin_drift_keeps_cleanup_pending_without_retargeting(self):
+        run_id = self.start()
+        task = self.tick(run_id)['attempts'][0]['task_id']
+        with runs._locked(self.con):
+            runs.cancel(self.con, self.rt, run_id, orch_thread='example-orch', reason='Stop safely')
+        self.con.execute('UPDATE interface_requests SET conversation=? WHERE id=?', ('changed-origin', self.request_id))
+        self.assertEqual(self.tick(run_id)['state'], 'cancelling')
+        self.assertEqual(store.get_task(self.con, task)['status'], 'closed')
+        self.assertIsNone(self.con.execute('SELECT reply FROM interface_requests WHERE id=?', (self.request_id,)).fetchone()[0])
+        self.assertTrue(any(e['kind'] == 'cancel_cleanup_pending' for e in runs.events(self.con, run_id)))
+
     def test_memory_database_never_starts_a_process(self):
         con = store.connect(':memory:')
         self.addCleanup(con.close)
