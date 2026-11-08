@@ -167,3 +167,7 @@ class ChannelUpgradePlanTest(unittest.TestCase):
             self.assertEqual(code, 0, lines)
             self.assertIn("channel layout v1", "\n".join(lines))
             self.assertEqual(list(home.iterdir()), [])
+
+
+if __name__ == "__main__":
+    unittest.main()

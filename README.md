@@ -23,6 +23,8 @@ uv tool update-shell
 orchd doctor
 ```
 
+`uv tool install` installs the package only; run `orchd install` to provision homes and disabled channel templates. The installation wrappers run provisioning after a successful package install. `orchd install --dry-run --json` previews without writing; `orchd install --no-trust` preserves existing trust settings. Channel credentials use OS secret references; installation does not authorize accounts or enable sources.
+
 `doctor` checks the machine without changing its configuration. Before initialization, it reminds you to set up the Orch home. For development from a checkout, use `bin/orchd`.
 
 On the first terminal run, if no projects directory is configured or detected, `orchd doctor` asks for the parent directory of your Git repositories and saves it to `config.toml`; it does not ask again. `--json`, `--no-input`, and non-interactive runs only check and never prompt or save.

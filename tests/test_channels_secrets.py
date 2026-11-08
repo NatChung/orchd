@@ -20,3 +20,11 @@ class SecretStoreTest(unittest.TestCase):
         for ref in ("raw-token", "os-store:../escape", "os-store:/absolute", "os-store:a//b"):
             with self.subTest(ref=ref), self.assertRaises(secret_store.SecretUnavailable):
                 secret_store.resolve(ref, adapter="email", source="demo", provider=Provider())
+
+    def test_provider_failure_does_not_expose_secret_material(self):
+        class Provider:
+            def get(self, *args):
+                raise OSError("synthetic-sensitive-material")
+        with self.assertRaises(secret_store.SecretUnavailable) as raised:
+            secret_store.resolve("os-store:demo/email/read", adapter="email", source="demo", provider=Provider())
+        self.assertNotIn("synthetic-sensitive-material", str(raised.exception))

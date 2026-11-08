@@ -18,7 +18,7 @@ def resolve(reference, *, adapter, source, provider):
         raise SecretUnavailable("secret provider unavailable")
     try:
         value = provider.get(adapter, source, reference)
-    except (KeyError, LookupError):
+    except Exception:  # OS providers may include sensitive material in their errors.
         raise SecretUnavailable("secret unavailable for source") from None
     if not isinstance(value, bytes) or not value:
         raise SecretUnavailable("secret unavailable for source")
