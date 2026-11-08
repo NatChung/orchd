@@ -27,6 +27,24 @@ class WindowsClaudeTests(unittest.TestCase):
                 self.assertTrue(wait_for_receipt("session", "real-id", timeout=.1))
                 self.assertFalse(wait_for_receipt("session", "wrong-id", timeout=.1))
 
+    def test_mid_turn_queued_command_counts_as_receipt(self):
+        from orchd.windows_pipe import wait_for_receipt
+        import json
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "projects" / "example"
+            project.mkdir(parents=True)
+            (project / "session.jsonl").write_text("\n".join(json.dumps(x) for x in [
+                {"type": "queue-operation", "operation": "enqueue", "sessionId": "session", "content": "test"},
+                {"type": "attachment", "uuid": "new-id", "attachment": {
+                    "type": "queued_command", "prompt": "test", "source_uuid": "frame-id", "delivery_id": "d"}},
+            ]) + "\n", encoding="utf-8")
+            with patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": tmp}):
+                self.assertTrue(wait_for_receipt("session", "frame-id", timeout=.1))
+                self.assertFalse(wait_for_receipt("session", "new-id", timeout=.1))
+                self.assertFalse(wait_for_receipt("session", "other-id", timeout=.1))
+
     def test_trust_lookup_normalizes_windows_slashes(self):
         import json
         import tempfile

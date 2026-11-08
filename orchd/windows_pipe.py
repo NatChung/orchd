@@ -73,7 +73,8 @@ def send(path, executable, data):
 
 
 def wait_for_receipt(session_id, message_id, timeout=15):
-    """A transcript user event with our UUID proves that Claude admitted the frame."""
+    """A transcript user event with our UUID, or a mid-turn queued_command
+    attachment sourced from it, proves that Claude admitted the frame."""
     if not re.fullmatch(r"[a-zA-Z0-9-]+", session_id) or not re.fullmatch(r"[a-zA-Z0-9-]+", message_id):
         raise ValueError("invalid Claude session or message id")
     config = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
@@ -94,6 +95,11 @@ def wait_for_receipt(session_id, message_id, timeout=15):
                         except (ValueError, UnicodeDecodeError):
                             continue
                         if event.get("type") == "user" and event.get("uuid") == message_id:
+                            return True
+                        attachment = event.get("attachment")
+                        if (event.get("type") == "attachment" and isinstance(attachment, dict)
+                                and attachment.get("type") == "queued_command"
+                                and attachment.get("source_uuid") == message_id):
                             return True
             except OSError:
                 continue
