@@ -172,8 +172,13 @@ class SlackAdapter:
                 if self.transport is not None and hasattr(self.transport,'close'): self.transport.close()
             finally:
                 self.service.release_source_lease(self.source_id,holder,generation,caller=self.caller)
-    def send(self,*args,**kwargs):
-        raise PermissionError('outbound disabled')
+    def send(self, *, transport_factory=None, **payload):
+        from .base import OutboundAdapter
+        if payload:
+            raise PermissionError('raw payload cannot bypass outbound gate')
+        if transport_factory is None:
+            raise PermissionError('outbound transport not enabled')
+        return OutboundAdapter(self.service,self.source_id,self.caller,self.secret_store,transport_factory).sweep()
 
 class SlackTransport:
     """Optional SDK, created only by the adapter. SDK automatically reconnects."""
@@ -201,3 +206,37 @@ class SlackTransport:
             raise SlackError(response.get('error','transport_error'),getattr(response,'headers',{}).get('Retry-After',0)) from None
     def close(self):
         if hasattr(self,'socket'): self.socket.close()
+
+
+class SlackSendTransport:
+    """One Web API call, with SDK HTTP retries disabled by the client factory.
+
+    PR5 supports text/markdown. File upload is a separate external effect and
+    fails closed here until a separately reviewed multi-step send protocol exists.
+    """
+    def __init__(self, client, account):
+        self.client, self.account = client, account
+
+    def send(self, payload, idempotency_key):
+        if payload['provider'] != 'slack' or payload['account'] != self.account:
+            raise PermissionError('Slack sender mismatch')
+        if payload['attachments']:
+            raise ValueError('Slack file sending unavailable')
+        # Mentions are permitted only when explicitly bound by the approval.
+        import re
+        actual = re.findall(r'<@([^>]+)>', payload['body'])
+        if set(actual) != set(payload['mentions']) or '<!channel' in payload['body'] or '<!here' in payload['body'] or '<!everyone' in payload['body']:
+            raise ValueError('Slack mentions differ from approval')
+        import uuid
+        result = self.client.chat_postMessage(channel=payload['target'], text=payload['body'],
+            thread_ts=payload['thread'] or None, client_msg_id=str(uuid.uuid5(uuid.NAMESPACE_URL,idempotency_key)),
+            parse='none', link_names=False, mrkdwn=payload['format']=='markdown',
+            unfurl_links=False, unfurl_media=False)
+        if not result.get('ok') or not result.get('ts'):
+            raise ValueError('Slack acceptance receipt missing')
+        return str(result['ts'])
+
+    @classmethod
+    def from_credential(cls, material, account):
+        from slack_sdk.web import WebClient
+        return cls(WebClient(token=material.decode(), timeout=30, retry_handlers=[]), account)

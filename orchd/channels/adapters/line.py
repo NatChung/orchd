@@ -9,6 +9,43 @@ from ..secret_store import resolve
 
 MAX_WEBHOOK_BYTES=1024*1024
 
+
+class LineSendTransport:
+    """Push only: an approval never consumes an inbound short-lived reply token.
+
+    The injected API boundary is push_message(target, messages, retry_key),
+    returning the provider's durable request receipt. No implicit SDK retries.
+    """
+    def __init__(self, client, account):
+        self.client, self.account = client, account
+
+    def send(self, payload, idempotency_key):
+        if payload['provider'] != 'line' or payload['account'] != self.account:
+            raise PermissionError('LINE sender mismatch')
+        if payload['attachments'] or payload['mentions'] or payload['thread'] or payload['format'] != 'text' or len(payload['body']) > 5000:
+            raise ValueError('unsupported LINE push payload')
+        import uuid
+        result = self.client.push_message(payload['target'], [{'type':'text','text':payload['body']}], str(uuid.uuid5(uuid.NAMESPACE_URL,idempotency_key)))
+        receipt = result.get('request_id') if isinstance(result, dict) else None
+        if not isinstance(receipt, str) or not receipt:
+            raise ValueError('LINE acceptance receipt missing')
+        return receipt
+
+    @classmethod
+    def from_credential(cls, material, account):
+        class PushClient:
+            def push_message(self, target, messages, retry_key):
+                # urllib performs one request; never install an automatic retry
+                # handler for this non-idempotent boundary.
+                from urllib.request import Request, urlopen
+                request = Request('https://api.line.me/v2/bot/message/push',
+                    data=json.dumps({'to':target,'messages':messages},ensure_ascii=False).encode('utf-8'),
+                    headers={'Authorization':'Bearer '+material.decode(), 'Content-Type':'application/json',
+                             'X-Line-Retry-Key':retry_key},method='POST')
+                with urlopen(request,timeout=30) as response:
+                    return {'request_id':response.headers.get('x-line-request-id')}
+        return cls(PushClient(),account)
+
 def valid_line_signature(raw, signature_header, signing_key):
     if not isinstance(raw,bytes) or not isinstance(signature_header,str) or not signing_key:
         return False
@@ -94,8 +131,13 @@ class LineReceiver:
             return count
         finally:
             self.service.release_source_lease(self.source_id,holder,generation,caller=self.caller)
-    def send(self, *args, **kwargs):
-        raise PermissionError('outbound disabled')
+    def send(self, *, transport_factory=None, **payload):
+        from .base import OutboundAdapter
+        if payload:
+            raise PermissionError('raw payload cannot bypass outbound gate')
+        if transport_factory is None:
+            raise PermissionError('outbound transport not enabled')
+        return OutboundAdapter(self.service,self.source_id,self.caller,self.secret_store,transport_factory).sweep()
     def handler(self):
         """A dedicated HTTP surface: no operator/admin routes, no request logging."""
         from http.server import BaseHTTPRequestHandler

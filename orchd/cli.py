@@ -172,6 +172,19 @@ def build_parser():
     draft = channel_actions.add_parser("draft")
     draft.add_argument("--file", default="-")
     draft.add_argument("--json", action="store_true")
+    for action in ('approve', 'reconcile'):
+        command = channel_actions.add_parser(action)
+        command.add_argument('--file', default='-')
+        command.add_argument('--json', action='store_true')
+    preview = channel_actions.add_parser('approval-preview')
+    preview.add_argument('draft_id')
+    preview.add_argument('version', type=int)
+    preview.add_argument('--json', action='store_true')
+    delivery = channel_actions.add_parser('delivery')
+    delivery.add_argument('id')
+    delivery.add_argument('--json', action='store_true')
+    recover = channel_actions.add_parser('recover-outbound', help='after stopping/fencing old senders, mark abandoned claims uncertain')
+    recover.add_argument('--json', action='store_true')
     attachment = channel_actions.add_parser("attachment")
     attachment.add_argument("action", choices=("request", "read"))
     attachment.add_argument("id")
@@ -613,7 +626,7 @@ HOME_POLICY = {
     ("orch", "register-codex-probe"): "write",
     ("init",): "skip", ("install",): "skip", ("upgrade",): "skip",
     **{("channels", "layout", action): "skip" for action in ("plan", "apply", "rollback")}, ("quota",): "skip", ("doctor",): "skip",
-    **{("channels", action): "skip" for action in ("messages", "search", "message", "conversation", "sync", "sync-status", "attachment", "draft", "retention")},
+    **{("channels", action): "skip" for action in ("messages", "search", "message", "conversation", "sync", "sync-status", "attachment", "draft", "retention", "approve", "approval-preview", "delivery", "recover-outbound", "reconcile")},
     ("_entry-op",): "skip",  # its `orchd upgrade` / `orchd orch restart` children apply the policy themselves
     ("config", "show"): "skip", ("config", "get"): "skip", ("config", "set"): "skip", ("config", "unset"): "skip",
     ("binding",): "write",  # --status -> warn

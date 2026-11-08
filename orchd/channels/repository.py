@@ -66,6 +66,242 @@ def provision(con, source):
                     (source['id'], source['host_id'], source['provider'], source.get('tenant_ref',''), source['account_ref'], source['adapter_id'], canonical(source.get('credential_refs',{})), int(source.get('enabled',False)), 1, digest(source), now))
 
 
+def outbound_draft(con, draft_id, version):
+    from .models import digest
+    import json
+    if not isinstance(draft_id, str) or type(version) is not int or version < 1:
+        raise ValueError('invalid draft identity')
+    row = con.execute('SELECT * FROM intake_drafts WHERE draft_id=? AND version=?', (draft_id, version)).fetchone()
+    if row is None or not row['payload_json']:
+        raise ValueError('exact channel draft required; legacy body approval cannot authorize it')
+    value = json.loads(row['payload_json'])
+    if digest(value) != row['payload_hash']:
+        raise ValueError('draft payload hash changed')
+    # Detect mutations of either the legacy fields or the full payload.
+    from orchd import intake
+    from .delivery import normalize_payload
+    message = con.execute('SELECT id FROM channel_messages WHERE intake_receipt_id=?', (row['receipt_id'],)).fetchone()
+    if message is None:
+        raise ValueError('draft message missing')
+    message = get_message(con, message[0])
+    src = source(con, value['source_id'])
+    if message['source_id'] != src['id'] or message['deleted_at']:
+        raise ValueError('draft source changed or message deleted')
+    route = con.execute('SELECT * FROM channel_routes WHERE id=? AND version=?', (value['route_id'], value['route_version'])).fetchone()
+    normalized = normalize_payload({k: v for k, v in value.items() if k not in ('provider', 'route_id', 'route_version', 'authority_epoch')}
+                                   | {'expires_at': row['expires_at']}, src, message, route, value['thread'])
+    target = json.dumps(value['target'], sort_keys=True) if isinstance(value['target'], dict) else value['target']
+    if (normalized != value or row['sender'] != value['sender'] or row['target'] != target or
+            row['source_ref'] != message['external_ref'] or row['body'] != value['body'] or intake._sha(row['body']) != row['body_sha256']):
+        raise ValueError('draft fields changed')
+    return dict(row), value, message, src, route
+
+
+def _entry_approval_chain(con, draft, value, message, answer_ref):
+    """Validate stored Entry evidence; no payload actor string can stand in for it."""
+    from orchd import entry
+    from .delivery import preview
+    if type(answer_ref) is not int or answer_ref < 1:
+        raise ValueError('Entry answer reference required')
+    answer = con.execute('SELECT * FROM entry_messages WHERE id=?', (answer_ref,)).fetchone()
+    if answer is None or answer['entry_id'] != entry.DEFAULT_ENTRY or answer['direction'] != 'in' or answer['kind'] != 'reply':
+        raise ValueError('trusted Desktop Entry answer required')
+    question = con.execute('SELECT * FROM entry_messages WHERE id=?', (answer['reply_to'],)).fetchone()
+    binding = con.execute('SELECT * FROM entries WHERE id=?', (answer['entry_id'],)).fetchone()
+    if (question is None or binding is None or question['kind'] != 'question' or question['direction'] != 'out'
+            or question['entry_id'] != answer['entry_id'] or question['orch_id'] != answer['orch_id']
+            or binding['orch_id'] != answer['orch_id'] or answer['orch_id'] != message['owner_orch']
+            or question['question_state'] != 'answered' or question['delivery'] != 'delivered'):
+        raise ValueError('Entry binding or question no longer matches')
+    expected = preview(draft)
+    if question['body'] != expected['preview'] or answer['body'] != expected['answer']:
+        raise ValueError('Entry answer does not approve this exact preview')
+    for row in (question, answer):
+        size, sha = entry.digest(row['body'])
+        if (size, sha) != (row['body_bytes'], row['body_sha256']):
+            raise ValueError('Entry body integrity mismatch')
+    history = con.execute("SELECT * FROM entry_question_history WHERE question_id=? ORDER BY id DESC LIMIT 1", (question['id'],)).fetchone()
+    if (history is None or history['to_state'] != 'answered' or history['version'] != question['version']
+            or not history['actor'].startswith('operator:')):
+        raise ValueError('Entry question approval history missing')
+    submission = con.execute('SELECT * FROM entry_answer_submissions WHERE entry_id=? AND question_id=? AND version=? AND reply_id=?',
+                             (answer['entry_id'], question['id'], question['version'], answer_ref)).fetchone()
+    dashboard = submission is not None and submission['body_sha256'] == answer['body_sha256']
+    desktop = (answer['source_thread'] and answer['source_thread'] == binding['thread_id'] and answer['source_item_id']
+               and history['actor'] == 'operator:' + answer['source_thread'])
+    if not dashboard and not desktop:
+        raise ValueError('trusted Entry submission or Desktop source evidence required')
+
+
+def _outbound_authority(con, draft, value, message, src, route, now):
+    latest = con.execute('SELECT MAX(version) FROM intake_drafts WHERE draft_id=?', (draft['draft_id'],)).fetchone()[0]
+    if latest != draft['version'] or now.timestamp() >= draft['expires_at']:
+        raise ValueError('stale or expired approval')
+    if (not src['enabled'] or route is None or not route['active'] or route['mode'] != 'respond'
+            or route['source_id'] != src['id'] or route['responder_source_id'] != src['id']
+            or src['authority_epoch'] != value['authority_epoch'] or route['authority_epoch'] != value['authority_epoch']
+            or route['owner_orch'] != message['owner_orch']):
+        raise ValueError('source or route authority changed')
+    matched = _matching_route(con, src['id'], message['external_ref'], message['sender_ref'])
+    if matched is None or (matched['id'], matched['version']) != (route['id'], route['version']):
+        raise ValueError('route scope changed')
+
+
+def approve_outbound(con, draft_id, version, payload_hash, answer_ref, now):
+    import uuid
+    from .models import canonical
+    with store.immediate(con):
+        draft, value, message, src, route = outbound_draft(con, draft_id, version)
+        if draft['payload_hash'] != payload_hash:
+            raise ValueError('approval payload hash mismatch')
+        _outbound_authority(con, draft, value, message, src, route, now)
+        _entry_approval_chain(con, draft, value, message, answer_ref)
+        old = con.execute('SELECT * FROM intake_approvals WHERE draft_id=? AND version=?', (draft_id, version)).fetchone()
+        if old:
+            if draft['state'] in ('cancelled','superseded','failed'):
+                raise ValueError('approval no longer active')
+            if old['payload_hash'] != payload_hash or old['entry_answer_ref'] != answer_ref:
+                raise ValueError('approval conflict')
+            delivery = con.execute("SELECT id FROM channel_deliveries WHERE kind='outbound' AND draft_id=? AND draft_version=?", (draft_id, version)).fetchone()
+            if delivery is None:
+                raise ValueError('approval missing delivery')
+            return {'status': 'approved', 'approval_id': old['approval_id'], 'delivery_id': delivery[0]}
+        if draft['state'] != 'pending_approval':
+            raise ValueError('draft is not pending approval')
+        if value['reply_kind'] == 'no_reply':
+            raise ValueError('no_reply is never outbound')
+        approval_id, delivery_id = 'ap_'+uuid.uuid4().hex, 'cd_'+uuid.uuid4().hex
+        key = 'outbound:'+draft_id+':'+str(version)
+        con.execute('INSERT INTO intake_approvals(approval_id,draft_id,version,body_sha256,sender,target,source_ref,expires_at,idempotency_key,actor,created_at,payload_hash,entry_answer_ref) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (approval_id,draft_id,version,draft['body_sha256'],draft['sender'],draft['target'],draft['source_ref'],draft['expires_at'],key,'operator:entry',now.timestamp(),payload_hash,answer_ref))
+        con.execute("UPDATE intake_drafts SET state='approved',updated_at=? WHERE draft_id=? AND version=?", (now.timestamp(),draft_id,version))
+        con.execute("INSERT INTO channel_deliveries(id,kind,source_id,message_id,draft_id,draft_version,reply_kind,route_id,route_version,authority_epoch,target_snapshot,payload_hash,state,idempotency_key,created_at,updated_at) VALUES(?,'outbound',?,?,?,?,?,?,?,?,?,?,'queued',?,?,?)",
+                    (delivery_id,src['id'],message['id'],draft_id,version,value['reply_kind'],route['id'],route['version'],value['authority_epoch'],canonical({'account':value['account'],'sender':value['sender'],'target':value['target'],'thread':value['thread']}),payload_hash,key,now.isoformat(),now.isoformat()))
+        return {'status':'approved','approval_id':approval_id,'delivery_id':delivery_id}
+
+
+def claim_outbound(con, source_id, adapter_id, now, limit, check_enabled):
+    from .models import canonical
+    results = []
+    with store.immediate(con):
+        check_enabled()
+        src = source(con, source_id)
+        if not src['enabled'] or src['adapter_id'] != adapter_id:
+            raise PermissionError('adapter not authorized for source')
+        rows = con.execute("SELECT * FROM channel_deliveries WHERE kind='outbound' AND source_id=? AND state='queued' ORDER BY created_at,id LIMIT ?", (source_id,limit)).fetchall()
+        for delivery in rows:
+            try:
+                draft,value,message,src,route = outbound_draft(con, delivery['draft_id'], delivery['draft_version'])
+                if draft['state'] != 'approved':
+                    raise ValueError('draft approval revoked')
+                _outbound_authority(con,draft,value,message,src,route,now)
+                approval = con.execute('SELECT * FROM intake_approvals WHERE draft_id=? AND version=?', (draft['draft_id'],draft['version'])).fetchone()
+                if approval is None or approval['payload_hash'] != draft['payload_hash']:
+                    raise ValueError('exact approval missing')
+                if any(approval[k] != draft[k] for k in ('body_sha256','sender','target','source_ref','expires_at')):
+                    raise ValueError('approval fields changed')
+                _entry_approval_chain(con,draft,value,message,approval['entry_answer_ref'])
+                target = canonical({'account':value['account'],'sender':value['sender'],'target':value['target'],'thread':value['thread']})
+                if (delivery['source_id'] != value['source_id'] or delivery['message_id'] != message['id']
+                        or delivery['payload_hash'] != approval['payload_hash'] or delivery['target_snapshot'] != target
+                        or delivery['route_id'] != value['route_id'] or delivery['route_version'] != value['route_version']
+                        or delivery['authority_epoch'] != value['authority_epoch'] or delivery['reply_kind'] != value['reply_kind']):
+                    raise ValueError('delivery snapshot changed')
+            except (ValueError, PermissionError):
+                con.execute("UPDATE channel_deliveries SET state='cancelled',updated_at=? WHERE id=? AND state='queued'", (now.isoformat(),delivery['id']))
+                continue
+            won = con.execute("UPDATE channel_deliveries SET state='claimed',updated_at=? WHERE id=? AND state='queued'", (now.isoformat(),delivery['id'])).rowcount
+            if not won:
+                continue
+            con.execute("UPDATE intake_drafts SET state='sending',updated_at=? WHERE draft_id=? AND version=? AND state='approved'", (now.timestamp(),draft['draft_id'],draft['version']))
+            con.execute("INSERT INTO channel_delivery_attempts(delivery_id,attempt_no,state,started_at) VALUES(?,1,'started',?)", (delivery['id'],now.isoformat()))
+            results.append(dict(delivery, state='claimed', attempt_no=1, payload=value))
+    return results
+
+
+def outbound_delivery(con, delivery_id):
+    row = con.execute("SELECT * FROM channel_deliveries WHERE id=? AND kind='outbound'", (delivery_id,)).fetchone()
+    if row is None:
+        raise ValueError('outbound delivery not found')
+    return dict(row)
+
+
+def delivery_attempts(con, delivery_id):
+    return [dict(row) for row in con.execute('SELECT * FROM channel_delivery_attempts WHERE delivery_id=? ORDER BY attempt_no', (delivery_id,))]
+
+
+def _validate_outcome(outcome, receipt):
+    if outcome not in ('provider_accepted', 'failed', 'uncertain'):
+        raise ValueError('invalid outbound outcome')
+    if outcome == 'provider_accepted' and (not isinstance(receipt,str) or not receipt or len(receipt)>2000):
+        raise ValueError('provider receipt required')
+    if outcome != 'provider_accepted' and receipt is not None:
+        raise ValueError('receipt belongs only to provider_accepted')
+
+
+def _finish_outbound(con, delivery, outcome, receipt, now):
+    state = {'provider_accepted':'sent', 'failed':'failed', 'uncertain':'uncertain'}[outcome]
+    con.execute('UPDATE channel_deliveries SET state=?,updated_at=? WHERE id=?', (outcome,now.isoformat(),delivery['id']))
+    con.execute('UPDATE intake_drafts SET state=?,connector_receipt_id=?,updated_at=? WHERE draft_id=? AND version=?',
+                (state,receipt,now.timestamp(),delivery['draft_id'],delivery['draft_version']))
+    return {'id':delivery['id'], 'state':outcome}
+
+
+def record_outbound_outcome(con, delivery_id, attempt_no, outcome, receipt, adapter_id, now):
+    _validate_outcome(outcome, receipt)
+    if type(attempt_no) is not int or attempt_no < 1:
+        raise ValueError('invalid attempt')
+    with store.immediate(con):
+        delivery = outbound_delivery(con,delivery_id)
+        src = source(con,delivery['source_id'])
+        if src['adapter_id'] != adapter_id:
+            raise PermissionError('adapter identity mismatch')
+        attempt = con.execute('SELECT * FROM channel_delivery_attempts WHERE delivery_id=? AND attempt_no=?', (delivery_id,attempt_no)).fetchone()
+        if attempt is None:
+            raise ValueError('unknown attempt')
+        if delivery['state'] == outcome and attempt['state'] == outcome and attempt['provider_receipt'] == receipt:
+            return {'id':delivery_id,'state':outcome}
+        if delivery['state'] != 'claimed' or attempt['state'] != 'started':
+            raise ValueError('attempt already ended; automatic resend refused')
+        con.execute('UPDATE channel_delivery_attempts SET state=?,finished_at=?,provider_receipt=? WHERE delivery_id=? AND attempt_no=? AND state=\'started\'',
+                    (outcome,now.isoformat(),receipt,delivery_id,attempt_no))
+        return _finish_outbound(con,delivery,outcome,receipt,now)
+
+
+def recover_outbound(con, now):
+    with store.immediate(con):
+        rows = con.execute("SELECT * FROM channel_deliveries WHERE kind='outbound' AND state='claimed'").fetchall()
+        for row in rows:
+            con.execute("UPDATE channel_delivery_attempts SET state='uncertain',finished_at=?,error_code='abandoned_claim' WHERE delivery_id=? AND state='started'", (now.isoformat(),row['id']))
+            _finish_outbound(con,row,'uncertain',None,now)
+    return {'uncertain':len(rows)}
+
+
+def reconcile_outbound(con, delivery_id, outcome, receipt, evidence, now):
+    _validate_outcome(outcome,receipt)
+    if not isinstance(evidence,str) or not evidence.strip() or len(evidence)>2000:
+        raise ValueError('investigation evidence required')
+    with store.immediate(con):
+        delivery = outbound_delivery(con,delivery_id)
+        if delivery['state'] != 'uncertain':
+            raise ValueError('only uncertain may be reconciled')
+        number = con.execute('SELECT COALESCE(MAX(attempt_no),0)+1 FROM channel_delivery_attempts WHERE delivery_id=?', (delivery_id,)).fetchone()[0]
+        # Append an investigation record; never erase the unknown send attempt.
+        con.execute('INSERT INTO channel_delivery_attempts(delivery_id,attempt_no,state,started_at,finished_at,provider_receipt,error_code) VALUES(?,?,?,?,?,?,?)',
+                    (delivery_id,number,outcome,now.isoformat(),now.isoformat(),receipt,'reconcile:'+evidence))
+        return _finish_outbound(con,delivery,outcome,receipt,now)
+
+
+def cancel_outbound(con, draft_id, now):
+    with store.immediate(con):
+        row = con.execute('SELECT * FROM intake_drafts WHERE draft_id=? ORDER BY version DESC LIMIT 1', (draft_id,)).fetchone()
+        if row is None or row['state'] not in ('pending_approval','approved','cancelled'):
+            raise ValueError('draft cannot be cancelled after claim')
+        con.execute("UPDATE intake_drafts SET state='cancelled',updated_at=? WHERE draft_id=? AND version=?", (now.timestamp(),draft_id,row['version']))
+        con.execute("UPDATE channel_deliveries SET state='cancelled',updated_at=? WHERE draft_id=? AND state='queued' AND kind='outbound'", (now.isoformat(),draft_id))
+    return {'status':'cancelled','draft_id':draft_id}
+
+
 def _matching_route(con, source_id, conversation_ref, sender):
     import json
     candidates = con.execute("SELECT * FROM channel_routes WHERE source_id=? AND active=1 AND conversation_ref IN (?, '*')", (source_id, conversation_ref)).fetchall()
@@ -385,14 +621,23 @@ def conversation_messages(con, conversation_id, cursor, limit, owner=None):
     return [r[0] for r in con.execute('SELECT m.id FROM channel_messages m LEFT JOIN intake_events e ON e.receipt_id=m.intake_receipt_id WHERE m.conversation_id=? AND m.id>? AND (? IS NULL OR e.owner_orch IS NULL OR e.owner_orch=?) ORDER BY m.id LIMIT ?', (conversation_id, cursor, owner, owner, limit))]
 
 
-def draft(con, message, payload):
+def draft(con, message, payload, clock):
+    import json
     from orchd import intake
+    from .delivery import normalize_payload
     source_row=source(con,message['source_id'])
-    return intake.draft(con,{'receipt_id':message['intake_receipt_id'],
+    conversation = con.execute('SELECT thread_key FROM channel_conversations WHERE id=?', (message['conversation_id'],)).fetchone()
+    route = _matching_route(con, source_row['id'], message['external_ref'], message['sender_ref'])
+    exact = normalize_payload(payload, source_row, message, route, conversation['thread_key'])
+    if exact['reply_kind'] == 'no_reply':
+        return {'status': 'no_reply', 'message_id': message['id']}
+    result = intake.draft(con,{'draft_id':payload.get('draft_id'), 'receipt_id':message['intake_receipt_id'],
                              'provider':'email' if source_row['provider']=='gmail' else source_row['provider'],
-                             'sender':payload['sender'],'target':payload['target'],
+                             'sender':payload['sender'],'target':json.dumps(exact['target'], sort_keys=True) if isinstance(exact['target'],dict) else exact['target'],
                              'source_ref':message['external_ref'],'body':payload['body'],
-                             'summary':'Channel reply draft','expires_at':payload['expires_at']},actor='orch')
+                             'summary':'Channel reply draft','expires_at':payload['expires_at']},actor='orch', _channel_payload=exact, _now=clock().timestamp())
+    result['payload_hash'] = intake._draft_row(con, result['draft_id'], result['version'])['payload_hash']
+    return result
 
 
 def routes(con):

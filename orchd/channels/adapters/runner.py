@@ -2,13 +2,14 @@
 import random
 
 class AdapterRunner:
-    def __init__(self, adapter, *, interval=60, max_backoff=900, jitter=None):
+    def __init__(self, adapter, *, interval=60, max_backoff=900, jitter=None, outbound=None):
         if interval <= 0 or max_backoff < interval:
             raise ValueError('invalid runner intervals')
         self.adapter = adapter
         self.interval = interval
         self.max_backoff = max_backoff
         self.jitter = jitter or random.random
+        self.outbound = outbound
 
     def run(self, stop_event):
         delay = self.interval
@@ -18,6 +19,8 @@ class AdapterRunner:
                 result = self.adapter.run_pending()
                 if result['status'] == 'idle':
                     self.adapter.poll()
+                if self.outbound is not None:
+                    self.outbound.sweep()
                 delay = self.interval
             except Exception as error:
                 delay = min(self.max_backoff, delay * 2)

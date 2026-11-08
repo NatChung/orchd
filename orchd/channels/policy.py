@@ -20,6 +20,35 @@ def require_operator(caller):
         raise PermissionError('operator authority required')
 
 
+def require_outbound_enabled(channel_home):
+    """Read local control-plane settings at every claim; absence fails closed."""
+    import tomllib
+    from pathlib import Path
+    path = Path(channel_home) / 'channels.toml'
+    try:
+        if path.is_symlink() or Path(channel_home).is_symlink():
+            raise PermissionError('unsafe outbound configuration')
+        with path.open('rb') as stream:
+            settings = tomllib.load(stream).get('channels', {})
+    except (OSError, ValueError):
+        raise PermissionError('outbound disabled') from None
+    if settings.get('outbound_enabled') is not True or settings.get('paused', False) is not False:
+        raise PermissionError('outbound disabled or paused')
+
+
+def require_gmail_send_enabled(channel_home, source_id):
+    import tomllib
+    from pathlib import Path
+    try:
+        with (Path(channel_home) / 'email' / 'config.toml').open('rb') as stream:
+            sources = tomllib.load(stream).get('sources', [])
+        matches = [s for s in sources if s.get('id') == source_id]
+    except (OSError, ValueError, TypeError):
+        raise PermissionError('Gmail send disabled') from None
+    if len(matches) != 1 or matches[0].get('send_enabled') is not True:
+        raise PermissionError('Gmail send disabled')
+
+
 def require_message(caller, row):
     require_source(caller, row['source_id'])
     owner = row.get('owner_orch')
