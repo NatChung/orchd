@@ -761,7 +761,7 @@ def ensure_runner(con, rt):
     # Concurrent starters may create short-lived children, but serve owns a single lifetime lock.
     env = dict(os.environ)
     env['PYTHONPATH'] = str(Path(__file__).resolve().parents[1]) + os.pathsep + env.get('PYTHONPATH', '')
-    command = [background_python(), '-P', '-m', 'orchd', 'workflow', 'run', 'serve', '--database', str(database)]
+    command = [background_python(), '-P', '-m', 'orchd.cli', 'workflow', 'run', 'serve', '--database', str(database)]
     with database.with_suffix('.workflow-runner.log').open('ab') as log:
         child = subprocess.Popen(command, cwd=database.parent, env=env, stdin=subprocess.DEVNULL,
                                  stdout=log, stderr=log, **detached_options())

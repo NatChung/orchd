@@ -382,7 +382,7 @@ class WorkflowRunTests(unittest.TestCase):
             result = runs.ensure_runner(self.con, self.rt)
         self.assertEqual(result['state'], 'starting')
         argv = spawn.call_args.args[0]
-        self.assertEqual(argv[1:5], ['-P', '-m', 'orchd', 'workflow'])
+        self.assertEqual(argv[1:5], ['-P', '-m', 'orchd.cli', 'workflow'])
         self.assertEqual(spawn.call_args.kwargs['env']['ORCHD_CONFIG_DIR'], str(self.folder / 'config'))
         self.assertIn(str(self.db), argv)
 
