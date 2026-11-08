@@ -380,7 +380,7 @@ def connect(path=None):
         for column in TASK_COLUMNS:
             if column.split()[0] not in have:
                 con.execute(f"ALTER TABLE tasks ADD COLUMN {column}")
-        for table, columns in (("intake_content", ("unavailable_reason TEXT",)),
+        for table, columns in (("intake_content", ("unavailable_reason TEXT", "channel_metadata TEXT NOT NULL DEFAULT '{}'")),
                                ("messages", MESSAGE_COLUMNS), ("entry_messages", ENTRY_MESSAGE_COLUMNS),
                                ("entry_question_history", ("original_orch_id TEXT",)),
                                ("interface_requests", ("interim TEXT", "interim_ack_at REAL", "dismissed_at REAL", "dismiss_reason TEXT", "dismiss_ack_at REAL")),

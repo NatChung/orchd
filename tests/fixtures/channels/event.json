@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "transport_event_key": "demo-event-001",
+  "origin": {"provider": "slack", "tenant_ref": "demo-tenant", "conversation_ref": "demo-room", "message_id": "demo-message"},
+  "revision_key": "initial",
+  "conversation": {"kind": "channel", "thread_key": "demo-root"},
+  "sender_ref": "demo-sender",
+  "source_time": "2026-01-01T00:00:00Z",
+  "content": {"status": "complete", "text": "Synthetic message", "attachments": []}
+}

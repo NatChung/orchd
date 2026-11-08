@@ -19,4 +19,4 @@ packages = ["orchd", "orchd.channels"]
 
 [tool.setuptools.package-data]
 # `**/*` skips dot-directories, so the .codex templates are named explicitly.
-orchd = ["templates/*/*.md", "templates/*/*/*.md", "templates/*/.codex/*.toml", "worker_bin/gh", "templates/channel/*.toml", "templates/channel/*/*.toml"]
+orchd = ["templates/*/*.md", "templates/*/*/*.md", "templates/*/.codex/*.toml", "worker_bin/gh", "templates/channel/*.toml", "templates/channel/*/*.toml", "channels/migrations/*.sql"]

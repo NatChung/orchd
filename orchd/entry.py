@@ -214,8 +214,16 @@ def _pending_strays(con):
 def _backup(con, backup_dir, label="pre-question-reconcile"):
     if backup_dir is None:
         raise ValueError("reconcile --apply needs a backup directory")
+    channel_schema = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='channel_messages'").fetchone()
+    if channel_schema:
+        database_path = con.execute('PRAGMA database_list').fetchone()[2]
+        if not database_path or Path(backup_dir).resolve() != (Path(database_path).parent / 'backups').resolve():
+            raise ValueError('channel backups require the managed backup directory')
+        if Path(backup_dir).is_symlink():
+            raise ValueError('channel backup directory cannot be a symlink')
     Path(backup_dir).mkdir(parents=True, exist_ok=True)
-    backup = Path(backup_dir) / f"orchd-{time.strftime('%Y%m%d-%H%M%S')}-{label}.db"
+    marker = 'channel-' if channel_schema else ''
+    backup = Path(backup_dir) / f"orchd-{time.strftime('%Y%m%d-%H%M%S')}-{marker}{label}.db"
     dest = sqlite3.connect(backup)
     try:
         con.backup(dest)
