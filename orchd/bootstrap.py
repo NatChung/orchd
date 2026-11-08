@@ -167,13 +167,20 @@ def planned_files(home, env, orchd_bin=None):
                   ENTRY_APPROVALS=_approvals("orchd_entry", [t["name"] for t in mcp_server.ENTRY_TOOLS]),
                   EXTRA_READ="".join(f"{_toml_string(p)} = \"read\"\n" for p in reads),
                   DISABLED_APPS="".join(f"\n[apps.{_toml_string(a)}]\nenabled = false\n" for a in apps))
+    try:  # PROJECTS.md records the effective projects directory at init; a bad setting must not block init
+        projects = str(paths.projects_dir(home, env))
+    except ValueError as error:
+        projects = f"無法判定（{error}）"
+    rendered = {Path("home/PROJECTS.md"): dict(PROJECTS_DIR=projects)}
     files = {}
     for base, target in (("home", orch), ("interface", interface),
                          ("gpt-computer-use-worker", paths.computer_use_home(home, env))):
         for source in sorted((TEMPLATES / base).rglob("*")):
             if source.is_file():
                 relative = source.relative_to(TEMPLATES)
-                text = render(relative, values) if source.name == "config.toml" else source.read_text(encoding="utf-8")
+                text = (render(relative, values) if source.name == "config.toml" else
+                        render(relative, rendered[relative]) if relative in rendered else
+                        source.read_text(encoding="utf-8"))
                 files[target / source.relative_to(TEMPLATES / base)] = text
     files[orch / ".codex" / "config.toml"] += _approvals("orchd", [t["name"] for t in mcp_server.TOOLS])
     # Desktop MCP servers do not inherit the shell that ran init.

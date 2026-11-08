@@ -233,11 +233,12 @@ class WizardTest(unittest.TestCase):
         for bad in ("login --web", "auth login", "auth token", "ssh-keygen", "brew", "clone", "mcp add", "--help --bg"):
             self.assertFalse([c for c in flat if bad in c], bad)
 
-    def test_plan_includes_receipt_checklist_and_issue_stays_open(self):
+    def test_plan_includes_receipt_checklist_without_stale_issue_reference(self):
         env = make_env(self.tmp.name, Fake())
         text = sw.render(sw.build_plan(env, "generic"), env)
-        for must in ("doctor", "ack", "progress", "report", "independent reviewer", "issue #3 stays"):
+        for must in ("doctor", "ack", "progress", "report", "independent reviewer", "not ready until", "CONTRIBUTING.md"):
             self.assertIn(must, text)
+        self.assertNotIn("issue #3", text)
 
     def test_required_step_coverage(self):
         env = make_env(self.tmp.name, Fake())

@@ -92,7 +92,7 @@ Compare the commit reported by `orchd upgrade` with public `main`; the package v
 
 ## Issues and contributions
 
-Use [public issues](https://github.com/NatChung/orchd/issues) for general bugs and improvements, with synthetic examples and redacted logs. Keep customer details, personal information, internal URLs, and sensitive configuration in an access-controlled private tracker (for existing private users, orchd-archive). Never post secrets in any issue. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Use [public issues](https://github.com/NatChung/orchd/issues) for general bugs and improvements, with synthetic examples and redacted logs. Keep customer details, personal information, internal URLs, and sensitive configuration in an access-controlled private tracker (for existing private users, orchd-archive). Never post secrets in any issue. Work you hand to orchd stays in your local task records, not in public issues. [CONTRIBUTING.md](CONTRIBUTING.md) gives the report format, the five triage labels, and the review and pull request flow.
 
 ## Configuration
 
@@ -105,6 +105,8 @@ Use [public issues](https://github.com/NatChung/orchd/issues) for general bugs a
 | Desktop entry | `~/orch/interface` | `ORCHD_INTERFACE_HOME` |
 | Computer-use session home | `~/orch/gpt-computer-use-worker` | under `ORCHD_ROOT` |
 | Projects directory | parent of a checkout under HOME, else `~/projects` | `projects_dir` in `config.toml`, `ORCHD_PROJECTS` |
+
+These are defaults. Wherever this README, the Orch home's `AGENTS.md` and `PROJECTS.md`, or the [runbooks](docs/runbooks/) name `~/projects`, `~/orch/home`, `~/orch/interface` or `~/.local/share/orchd`, read the effective value of the matching override. `orchd config show` prints the effective projects directory and its source; worker worktrees go under `<projects directory>/.orchd-worktrees/`. Set overrides before `orchd init`: init creates the homes at the effective paths, records them for later home-rule migrations, and passes `ORCHD_HOME`, `ORCHD_CONFIG_DIR` and `ORCHD_PROJECTS` to the Desktop MCP servers, which do not inherit your shell.
 
 `orchd init` also creates the computer-use session home with managed `AGENTS.md` rules and a `reports/` evidence folder. Re-running init refreshes that managed block with backups and preserves user content outside it. The package manager does not provision homes automatically: run `orchd install` after a bare package install. The official installer wrappers run it after installation. Desktop dispatch is design-only; see [the proposed backend](docs/design/computer-use-worker.md).
 
@@ -146,7 +148,7 @@ orchd binding
 orchd list
 ```
 
-Accept Claude trust manually in `~/orch/home`, then open `~/orch/interface` in Codex Desktop, select the interface permissions created by init, request status first, and describe your work.
+Accept Claude trust manually in the Orch home (default `~/orch/home`; `init` prints the actual path), then open the Desktop entry (default `~/orch/interface`) in Codex Desktop, select the interface permissions created by init, request status first, and describe your work.
 
 `binding` requires `init` first. It starts an Orch when no binding exists; an offline bound Orch causes an error and requires `orchd binding --new` to start a replacement and rebind. A session retired by Claude for idling can resume in place.
 

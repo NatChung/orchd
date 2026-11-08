@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Setup wizard for moving orchd to a new machine (issue #3, part B).
+"""Setup wizard for moving orchd to a new machine.
 
 Read-only. It checks the machine, prints the steps that are still open, says who runs each command and which
 receipt proves it worked. It never installs, logs in, trusts, writes config, copies tokens or runs the commands it
@@ -29,7 +29,7 @@ except ImportError:  # depends on interpreter (system python3 is 3.9 on macOS)
 
 PASS, MISSING, UNKNOWN, MANUAL = "pass", "missing", "unknown", "manual"
 
-# Fictional example accounts: gh account -> (ssh host alias, key file, remote host form). Only used by the `nat` profile.
+# Fictional example accounts: gh account -> (ssh host alias, key file). Only used by the example profile.
 EXAMPLE_ACCOUNTS = {
     "ExampleOrg": (None, "id_ed25519"),
     "ExampleOwner": ("github-personal", "id_ed25519_personal"),
@@ -338,7 +338,7 @@ def git_identity(env):
     return Step("git-identity", "generic", "git global author identity set", who, st, d,
                 f"`git config --global user.name/user.email` with HOME={env.home} (set or unset only)",
                 ["git config --global user.name '<your name>'", "git config --global user.email '<your email>'"],
-                "`git config --global user.email` prints your address. Per-repo emails are separate (see nat profile).")
+                "`git config --global user.email` prints your address. Per-repo emails are separate (see the example profile).")
 
 
 # -- generic steps ----------------------------------------------------------------------------------------------
@@ -597,14 +597,15 @@ def build_plan(env, profile="all"):
 
 
 RECEIPTS = """\
-Pilot receipts (the pilot is run by Operator on the target machine, or by a worker Operator authorised there; issue #3 stays
-open until these exist):
+Pilot receipts (the pilot is run by Operator on the target machine, or by a worker Operator authorised there; the machine
+is not ready until these exist):
   1. {orchd} doctor                 -> exit 0 (exit 1 = required fail, exit 2 = required unknown; neither is a pass)
   2. dispatch a throwaway task to a scratch repo, with ORCHD_HOME set to a temp dir
   3. worker: orchd ack, orchd progress, orchd report --status done   -> each shows in `orchd list` / `orchd watch`
   4. an independent reviewer (not the author) reads the diff and writes a review receipt
   5. close the task; the temp ORCHD_HOME and scratch repo are deleted by Operator
-Paste the command output of 1-4 into issue #3. A printed plan is not a receipt."""
+Keep the command output of 1-4 in your own records; report orchd problems as described in CONTRIBUTING.md.
+A printed plan is not a receipt."""
 
 
 def render(steps, env):

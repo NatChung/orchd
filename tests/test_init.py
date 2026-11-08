@@ -110,6 +110,54 @@ class InitTest(unittest.TestCase):
         self.addCleanup(con.close)
         self.assertEqual(home_migrations.targets(self.home, {}, con)["gpt-computer-use-worker"], worker)
 
+    def test_custom_projects_and_homes_yield_consistent_instructions(self):
+        """Issue #5: with non-default paths, the generated text names the effective projects dir, not ~/projects."""
+        projects = self.home / "work" / "repos"
+        orch, interface = self.home / "custom" / "orch-home", self.home / "custom" / "entry"
+        self.env = {"ORCHD_PROJECTS": str(projects), "ORCHD_ORCH_HOME": str(orch),
+                    "ORCHD_INTERFACE_HOME": str(interface), "ORCHD_HOME": str(self.home / "state")}
+        result = self.init(trust=False)
+        self.assertEqual((Path(result["orch_home"]), Path(result["interface"])), (orch, interface))
+        self.assertFalse((self.home / "orch" / "home").exists())
+        listing = (orch / "PROJECTS.md").read_text(encoding="utf-8")
+        self.assertIn(f"`{projects}`", listing)
+        self.assertEqual(str(paths.projects_dir(self.home, self.env)), str(projects))
+        self.assertNotIn("$", listing)
+        rules = (orch / "AGENTS.md").read_text(encoding="utf-8")
+        for needle in ("ORCHD_PROJECTS", "projects_dir", "ORCHD_CONFIG_DIR"):
+            self.assertIn(needle, rules)
+        mcp_env = tomllib.loads((orch / ".codex" / "config.toml").read_text(encoding="utf-8"))["mcp_servers"]["orchd"]["env"]
+        self.assertEqual(mcp_env["ORCHD_PROJECTS"], str(projects))
+        con = home_migrations.connect(self.home, self.env, readonly=True)
+        try:
+            self.assertEqual(dict(con.execute("SELECT role, path FROM homes"))["home"], str(orch.absolute()))
+        finally:
+            con.close()
+        listing_edit = listing + "| example-repo | edited by Operator |\n"
+        (orch / "PROJECTS.md").write_text(listing_edit, encoding="utf-8")
+        self.env["ORCHD_PROJECTS"] = str(self.home / "elsewhere")
+        again = self.init(trust=False)
+        self.assertTrue(again["files"][str(orch / "PROJECTS.md")].startswith("kept"))
+        self.assertEqual((orch / "PROJECTS.md").read_text(encoding="utf-8"), listing_edit)
+
+    def test_projects_md_uses_config_file_projects_dir(self):
+        config_dir = self.home / "settings"
+        config_dir.mkdir()
+        (config_dir / "config.toml").write_text('projects_dir = "~/GitProjects"\n', encoding="utf-8")
+        self.env = {"ORCHD_CONFIG_DIR": str(config_dir)}
+        self.init(trust=False)
+        listing = (self.home / "orch" / "home" / "PROJECTS.md").read_text(encoding="utf-8")
+        self.assertIn(f"`{self.home / 'GitProjects'}`", listing)
+
+    def test_invalid_projects_setting_does_not_block_init(self):
+        config_dir = self.home / "settings"
+        config_dir.mkdir()
+        (config_dir / "config.toml").write_text('projects_dir = "relative/path"\n', encoding="utf-8")
+        self.env = {"ORCHD_CONFIG_DIR": str(config_dir)}
+        self.init(trust=False)
+        listing = (self.home / "orch" / "home" / "PROJECTS.md").read_text(encoding="utf-8")
+        self.assertIn("無法判定", listing)
+
     def test_edited_files_are_kept(self):
         self.init()
         agents = self.home / "orch" / "home" / "AGENTS.md"

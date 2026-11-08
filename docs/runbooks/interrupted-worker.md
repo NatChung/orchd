@@ -2,7 +2,14 @@
 
 What to do when `list_open` shows `worker_health: "orphan"`: the task is `running`, `acked` or `question`, its worker is
 confirmed dead (the Claude daemon lists the job as `failed` with no evidence of a live process, or no longer
-lists it; a Codex turn exited), and it never sent `report`. See issue #17.
+lists it; a Codex turn exited), and it never sent `report`.
+
+Paths here use the defaults. Worker worktrees live under `<projects directory>/.orchd-worktrees/`, where the projects
+directory is `ORCHD_PROJECTS`, else `projects_dir` in the personal `config.toml` (`~/.config/orchd/` unless
+`ORCHD_CONFIG_DIR` is set), else the parent of an orchd checkout under HOME, else `~/projects`; `orchd config show`
+prints the effective value. Task state lives in `ORCHD_HOME` (default `~/.local/share/orchd`), the Orch home in
+`ORCHD_ORCH_HOME` (default `~/orch/home`) and the Desktop entry in `ORCHD_INTERFACE_HOME` (default `~/orch/interface`).
+The `list_open` row and `recovery_hint` always carry the actual worktree path; prefer them over any default.
 
 orchd only labels the task. It does not change the task's status, stop anything, retry, adopt, or remove a
 worktree. Every step below is manual, and the Orch decides what follows.
@@ -57,8 +64,8 @@ look the same. Do not run `git checkout .`, `git clean`, `git stash`, or `git wo
 **Missing**: the worktree directory is gone (`git worktree list` may still show it as prunable). Whatever was not
 pushed is lost; check the branch on origin and the task's messages for what the worker had reached.
 
-**Interrupted in the middle of a destructive step**: many tracked deletions or a partly removed tree (seen once on
-a `chasr` worktree, cause not verified) means something stopped halfway. Record what `git status` shows, keep the
+**Interrupted in the middle of a destructive step**: many tracked deletions or a partly removed tree (seen once in
+a worker worktree, cause not verified) means something stopped halfway. Record what `git status` shows, keep the
 directory, and tell Operator before anyone touches it.
 
 ## 2. Decide how to continue
@@ -71,8 +78,8 @@ The Orch decides, or asks Operator:
 - **Ask Operator** when the worktree is dirty, unpushed, or interrupted mid-deletion, or when the task touched anything
   outward (email, Slack, deploys) and it is unclear what was already sent.
 
-Same-worker continuation and model escalation on the same worktree are issue #5 (followup / retry), not part of
-this runbook.
+Same-worker continuation (`followup`) and model escalation on the same worktree (`retry`) are described in the
+[command reference](../commands.md), not in this runbook.
 
 ## 3. Closing the orphan and removing its worktree
 
@@ -83,4 +90,4 @@ it needs.
 Removing a kept worktree by hand (`git worktree remove`, `--force`, `rm -rf`, deleting the branch) destroys the
 only copy of that work. It needs Operator's explicit confirmation for that specific worktree, every time. orchd does not
 do it, and an Orch or worker must not do it on its own, including batch cleanup of old worktrees under
-`~/projects/.orchd-worktrees/`.
+`<projects directory>/.orchd-worktrees/` (default `~/projects/.orchd-worktrees/`).
