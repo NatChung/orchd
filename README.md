@@ -39,6 +39,10 @@ For pinned, declarative instructions and per-instance workflow bindings, see [wo
 For committed local instructions, project inventory and drift-checked profile setup, see [instance recipes](docs/instances.md).
 To create and maintain your own method and configuration repositories, follow [user-owned workflows](docs/user-owned-workflows.md) and its [reusable agent prompt](docs/prompts/create-user-workflow.md).
 
+## Channels
+
+orchd includes receive-only channels for Slack Socket Mode, LINE webhooks, and Gmail polling. Outbound delivery is disabled by default and requires approval for each message. Incoming messages reach Orch as third-party `[orchd intake]` data; the existing intake handling rules still apply. See [channel documentation](docs/channels.md) and `docs/channels*.md`. Check status with `orchd channels status`, `orchd channels doctor`, and `orchd channels layout plan`. Deployment capabilities (Windows secret provider, persistent `channels serve`, and source/route CLI) are tracked in [#207](https://github.com/NatChung/orchd/issues/207).
+
 ## Native Windows and PowerShell
 
 Install uv and Git, then install and sign in to the provider CLIs listed above. Use a PowerShell terminal for these commands:
