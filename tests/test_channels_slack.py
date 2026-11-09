@@ -14,6 +14,7 @@ from orchd.channels import policy
 class FakeSlack:
     def __init__(self):
         self.acks=[]; self.calls=[]; self.sent=[]; self.failure=None; self.callback=None
+    def auth_test(self, credential): return {'ok': True, 'team_id': 't', 'user_id': 'account'}
     def connect(self,credentials,callback): self.callback=callback; self.calls.append('connect')
     def ack(self,key): self.acks.append(key)
     def history(self,conversation,oldest,end,*,thread=None,cursor=None):
@@ -117,3 +118,14 @@ class SocketTest(ChannelCase):
         deleted['payload']['event']=dict(type='message',subtype='message_deleted',channel='c',deleted_ts='1767225600.000001',previous_message={'user':'human','files':[{'id':'synthetic-file'}]})
         receipt=adapter.on_envelope(deleted)
         self.assertIsNone(self.svc.message(receipt['message_id'],caller=self.caller)['content']['text'])
+
+    def test_auth_identity_and_activation_bound(self):
+        adapter=self.adapter()
+        self.fake.auth_test=lambda credential: {'ok': True, 'team_id': 't', 'user_id': 'self', 'bot_id': 'bot'}
+        adapter.connect(); self.addCleanup(adapter.close)
+        payload=envelope(); payload['payload']['event']['user']='self'
+        self.assertEqual(adapter.on_envelope(payload)['loop_status'], 'sent_echo')
+        calls=[]
+        self.fake.history=lambda conversation,oldest,end,**kwargs: calls.append((conversation,oldest)) or {'messages': []}
+        adapter.poll()
+        self.assertEqual(calls, [('c','1767225600')])

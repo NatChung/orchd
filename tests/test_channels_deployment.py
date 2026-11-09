@@ -80,11 +80,12 @@ class ServeSmokeTests(ChannelCase):
         self.svc.apply_routes([dict(id='rs', source_id='slack', conversation_ref='c', owner_orch='orch'), dict(id='rl', source_id='line', conversation_ref='c', owner_orch='orch')], caller=self.op)
         home = self.svc.channel_home
         home.mkdir(parents=True)
-        (home / 'channels.toml').write_text('[channels]\nschema_version = 1\n', encoding='utf-8')
+        (home / 'channels.toml').write_text('[channels]\nschema_version = 1\n[channels.slack.slack]\nactivation = "1767225600"\n', encoding='utf-8')
         secrets = FakeSecretStore({('slack','slack','os-store:slack/app'):b'fake', ('slack','slack','os-store:slack/api'):b'fake', ('line','line','os-store:line/signing'):b'fake'})
         stop = threading.Event()
         errors = []
         class FakeTransport:
+            def auth_test(self, credential): return {'ok': True, 'team_id': 't', 'user_id': 'account'}
             def connect(self, credentials, callback): callback(envelope())
             def ack(self, key): pass
             def close(self): pass
@@ -106,8 +107,10 @@ class ServeSmokeTests(ChannelCase):
             except Exception as error: errors.append(error)
             finally: stop.set()
         thread = threading.Thread(target=request); thread.start()
-        with mock.patch('orchd.channels.adapters.slack.SlackTransport', FakeTransport):
+        real_adapter = serve.SlackAdapter
+        with mock.patch('orchd.channels.adapters.slack.SlackTransport', FakeTransport), mock.patch.object(serve, 'SlackAdapter', wraps=real_adapter) as factory:
             serve.run(self.svc, port=port, stop=stop, provider=secrets)
+        self.assertEqual(factory.call_args.kwargs, dict(conversations=('c',), self_identities=(), activation='1767225600'))
         thread.join()
         if errors: raise errors[0]
         rows = self.svc.con.execute('SELECT intake_receipt_id FROM channel_messages ORDER BY intake_receipt_id').fetchall()
@@ -147,3 +150,12 @@ class CliExecutionTests(ChannelCase):
         self.assertEqual(invoke(['route','list']), 0)
         self.assertEqual(invoke(['route','remove','r']), 0)
         self.assertEqual(invoke(['source','disable','s']), 0)
+
+class SlackServeConfigurationTests(unittest.TestCase):
+    def test_source_settings_and_routes(self):
+        from orchd.channels.serve import slack_options
+        layout = {'slack': {'s': {'activation': '1767225600', 'self_identities': ['extra']}}}
+        routes = [dict(source_id='s', conversation_ref='c'), dict(source_id='other', conversation_ref='d')]
+        self.assertEqual(slack_options(layout, 's', routes), dict(conversations=('c',), self_identities=('extra',), activation='1767225600'))
+        with self.assertRaises(ValueError): slack_options({}, 's', routes)
+        with self.assertRaises(ValueError): slack_options(layout, 's', [dict(source_id='s', conversation_ref='*')])
