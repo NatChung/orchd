@@ -49,10 +49,15 @@ def command(action, home, *, con=None, platform=None, runner=None, executable=No
             ns = 'http://schemas.microsoft.com/windows/2004/02/mit/task'
             ET.register_namespace('', ns)
             task = ET.Element(f'{{{ns}}}Task', version='1.2')
-            triggers = ET.SubElement(task, 'Triggers'); ET.SubElement(triggers, 'LogonTrigger')
+            user = getpass.getuser()
+            if os.environ.get('USERDOMAIN'):
+                user = os.environ['USERDOMAIN'] + '\\' + user
+            triggers = ET.SubElement(task, 'Triggers'); trigger = ET.SubElement(triggers, 'LogonTrigger')
+            ET.SubElement(trigger, 'UserId').text = user
             principals = ET.SubElement(task, 'Principals'); principal = ET.SubElement(principals, 'Principal', id='Author')
-            ET.SubElement(principal, 'UserId').text = getpass.getuser()
+            ET.SubElement(principal, 'UserId').text = user
             ET.SubElement(principal, 'LogonType').text = 'InteractiveToken'
+            ET.SubElement(principal, 'RunLevel').text = 'LeastPrivilege'
             settings = ET.SubElement(task, 'Settings'); ET.SubElement(settings, 'MultipleInstancesPolicy').text = 'IgnoreNew'
             actions = ET.SubElement(task, 'Actions', Context='Author'); execute = ET.SubElement(actions, 'Exec')
             ET.SubElement(execute, 'Command').text = executable

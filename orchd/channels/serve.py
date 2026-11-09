@@ -85,6 +85,7 @@ def _run(svc, *, host='127.0.0.1', port=8080, stop=None, provider=None):
                         result = adapter.connect()
                         if result and result.get('status') == 'busy':
                             raise RuntimeError('Slack source lease unavailable')
+                        print('Slack auth.test and Socket Mode connected:', row['id'], flush=True)
                         AdapterRunner(adapter).run(stop)
                     except Exception as error:
                         failures.append(row['id'] + ' (' + failure_description(error) + ')')

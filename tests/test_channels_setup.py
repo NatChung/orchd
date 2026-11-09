@@ -95,6 +95,13 @@ class ServiceTests(unittest.TestCase):
             runner = mock.Mock(return_value=mock.Mock(returncode=0, stdout='Ready', stderr=''))
             system_service.command('install', Path(tmp), platform='win32', runner=runner, executable='C:/orchd.exe')
             self.assertEqual([c.args[0][1] for c in runner.call_args_list], ['/Create', '/Run'])
+            from xml.etree import ElementTree as ET
+            task = ET.parse(Path(tmp) / 'service-task.xml')
+            ns = {'t': 'http://schemas.microsoft.com/windows/2004/02/mit/task'}
+            user = task.findtext('t:Principals/t:Principal/t:UserId', namespaces=ns)
+            self.assertTrue(user)
+            self.assertEqual(task.findtext('t:Triggers/t:LogonTrigger/t:UserId', namespaces=ns), user)
+            self.assertEqual(task.findtext('t:Principals/t:Principal/t:RunLevel', namespaces=ns), 'LeastPrivilege')
             state = system_service.command('status', Path(tmp), platform='win32', runner=runner)
             self.assertTrue(state['registered'])
             system_service.command('stop', Path(tmp), platform='win32', runner=runner)
