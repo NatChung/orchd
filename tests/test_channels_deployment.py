@@ -152,6 +152,14 @@ class CliExecutionTests(ChannelCase):
         self.assertEqual(invoke(['source','disable','s']), 0)
 
 class SlackServeConfigurationTests(unittest.TestCase):
+    def test_failure_description_excludes_sensitive_exception_details(self):
+        from orchd.channels.serve import failure_description
+        from orchd.channels.adapters.slack import SlackError
+        from urllib.error import URLError
+        self.assertEqual(failure_description(URLError('secret')), 'URLError')
+        self.assertEqual(failure_description(SlackError('missing_scope')), 'SlackError/missing_scope')
+        self.assertEqual(failure_description(SlackError('secret')), 'SlackError')
+
     def test_source_settings_and_routes(self):
         from orchd.channels.serve import slack_options
         layout = {'slack': {'s': {'activation': '1767225600', 'self_identities': ['extra']}}}

@@ -12,6 +12,20 @@ from .secret_store import default_store
 from .spool import Spool
 
 
+def failure_description(error):
+    """Expose useful diagnostics without including exception or response text."""
+    from .adapters.slack import SlackError
+    allowed_codes = {'invalid_auth', 'not_authed', 'account_inactive', 'token_revoked',
+                     'missing_scope', 'not_allowed_token_type', 'invalid_app_token',
+                     'not_allowed', 'ratelimited', 'transport_error'}
+    name = type(error).__name__ if type(error).__module__ in ('builtins', 'urllib.error',
+            'orchd.channels.adapters.slack', 'slack_sdk.errors') else 'Exception'
+    response = getattr(error, 'response', None)
+    code = error.code if isinstance(error, SlackError) else (
+        response.get('error') if type(error).__module__ == 'slack_sdk.errors' and response is not None else None)
+    return name + ('/' + code if isinstance(code, str) and code in allowed_codes else '')
+
+
 def run_loop(http, receivers, stop):
     try:
         while not stop.is_set():
@@ -71,9 +85,10 @@ def _run(svc, *, host='127.0.0.1', port=8080, stop=None, provider=None):
                         result = adapter.connect()
                         if result and result.get('status') == 'busy':
                             raise RuntimeError('Slack source lease unavailable')
+                        print('Slack auth.test and Socket Mode connected:', row['id'], flush=True)
                         AdapterRunner(adapter).run(stop)
-                    except Exception:
-                        failures.append(row['id'])
+                    except Exception as error:
+                        failures.append(row['id'] + ' (' + failure_description(error) + ')')
                         stop.set()
                     finally:
                         try:
