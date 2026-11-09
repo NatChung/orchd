@@ -32,9 +32,10 @@ def command(action, home, *, con=None, platform=None, runner=None, executable=No
     executable = executable or shutil.which('orchd')
     user_home = Path(user_home or Path.home())
     uid = uid if uid is not None else (os.getuid() if hasattr(os, 'getuid') else None)
-    def invoke(argv, *, allow_missing=False):
+    def invoke(argv, *, allow_missing=False, ignored_errors=()):
         result = runner(argv, capture_output=True, text=True)
-        if result.returncode and not allow_missing:
+        error = (result.stderr or '').lower()
+        if result.returncode and not allow_missing and not any(message in error for message in ignored_errors):
             raise OSError('service command failed: ' + (result.stderr or '').strip())
         return result
     last_received = None
@@ -64,8 +65,8 @@ def command(action, home, *, con=None, platform=None, runner=None, executable=No
             if result.returncode and 'cannot find' not in (result.stderr or '').lower():
                 raise OSError('service query failed: ' + (result.stderr or '').strip())
             return dict(registered=result.returncode == 0, running=_running(home), last_received=last_received, log=str(home / 'serve.log'))
-        elif action == 'stop': invoke(['schtasks', '/End', '/TN', NAME])
-        elif action == 'uninstall': invoke(['schtasks', '/Delete', '/TN', NAME, '/F'])
+        elif action == 'stop': invoke(['schtasks', '/End', '/TN', NAME], ignored_errors=('cannot find', 'not running'))
+        elif action == 'uninstall': invoke(['schtasks', '/Delete', '/TN', NAME, '/F'], ignored_errors=('cannot find',))
         else: raise ValueError('unknown service action')
     elif platform == 'darwin':
         plist = user_home / 'Library' / 'LaunchAgents' / (LABEL + '.plist')
@@ -73,6 +74,7 @@ def command(action, home, *, con=None, platform=None, runner=None, executable=No
         if action == 'install':
             if not executable: raise OSError('orchd executable not found')
             home.mkdir(parents=True, exist_ok=True); plist.parent.mkdir(parents=True, exist_ok=True)
+            invoke(['launchctl', 'bootout', domain, str(plist)], ignored_errors=('could not find', 'no such process'))
             with plist.open('wb') as stream:
                 plistlib.dump(dict(Label=LABEL, ProgramArguments=[executable] + serve_args, RunAtLoad=True, StandardOutPath=str(home / 'serve.log'), StandardErrorPath=str(home / 'serve.log')), stream)
             invoke(['launchctl', 'bootstrap', domain, str(plist)])
@@ -81,9 +83,9 @@ def command(action, home, *, con=None, platform=None, runner=None, executable=No
             if result.returncode and not any(x in (result.stderr or '').lower() for x in ('could not find', 'no such process')):
                 raise OSError('service query failed: ' + (result.stderr or '').strip())
             return dict(registered=result.returncode == 0, running=_running(home), last_received=last_received, log=str(home / 'serve.log'))
-        elif action == 'stop': invoke(['launchctl', 'kill', 'SIGTERM', domain + '/' + LABEL])
+        elif action == 'stop': invoke(['launchctl', 'kill', 'SIGTERM', domain + '/' + LABEL], ignored_errors=('could not find', 'no such process'))
         elif action == 'uninstall':
-            invoke(['launchctl', 'bootout', domain, str(plist)]); plist.unlink()
+            invoke(['launchctl', 'bootout', domain, str(plist)], ignored_errors=('could not find', 'no such process')); plist.unlink(missing_ok=True)
         else: raise ValueError('unknown service action')
     else: raise OSError('service supported only on Windows and macOS')
     return dict(status='ok', action=action)

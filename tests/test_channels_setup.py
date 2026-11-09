@@ -45,6 +45,47 @@ class MacStoreTests(unittest.TestCase):
         self.assertIn('orchd/channel/slack/demo/os-store:demo/app', runner.call_args.args[0])
 
 class ServiceTests(unittest.TestCase):
+    def test_repeated_service_actions_and_unexpected_errors(self):
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+        from orchd.channels import system_service
+
+        for platform in ('win32', 'darwin'):
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as tmp:
+                registered = False
+                running = False
+                def runner(argv, **kwargs):
+                    nonlocal registered, running
+                    operation = argv[1]
+                    error = ''
+                    if operation in ('/Create', 'bootstrap'):
+                        if operation == 'bootstrap' and registered:
+                            error = 'service already loaded'
+                        registered = True
+                    elif operation == '/Run':
+                        running = True
+                    elif operation in ('/End', 'kill'):
+                        if not running:
+                            error = 'The task is not running' if platform == 'win32' else 'No such process'
+                        running = False
+                    elif operation in ('/Delete', 'bootout'):
+                        if not registered:
+                            error = 'The system cannot find the file specified' if platform == 'win32' else 'Could not find service'
+                        registered = False
+                        running = False
+                    return SimpleNamespace(returncode=int(bool(error)), stdout='', stderr=error)
+                kwargs = dict(platform=platform, runner=runner, executable='/orchd', user_home=Path(tmp), uid=501)
+                for action in ('install', 'stop', 'uninstall'):
+                    for _ in range(2):
+                        system_service.command(action, Path(tmp)/'channel', **kwargs)
+                def denied(argv, **kwargs):
+                    return SimpleNamespace(returncode=1, stdout='', stderr='Access denied')
+                kwargs['runner'] = denied
+                for action in ('install', 'stop', 'uninstall'):
+                    with self.subTest(action=action), self.assertRaisesRegex(OSError, 'Access denied'):
+                        system_service.command(action, Path(tmp)/'channel', **kwargs)
+
     def test_windows_install_status_stop_and_uninstall(self):
         import tempfile
         from pathlib import Path
