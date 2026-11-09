@@ -145,7 +145,12 @@ def _entry_approval_chain(con, draft, value, message, answer_ref):
             or question['question_state'] != 'answered' or question['delivery'] != 'delivered'):
         raise ValueError('Entry binding or question no longer matches')
     expected = preview(draft)
-    if question['body'] != expected['preview'] or answer['body'] != expected['answer']:
+    answer_body = answer['body']
+    if answer_body.endswith('\r\n'):
+        answer_body = answer_body[:-2]
+    elif answer_body.endswith('\n'):
+        answer_body = answer_body[:-1]
+    if question['body'] != expected['preview'] or answer_body != expected['answer']:
         raise ValueError('Entry answer does not approve this exact preview')
     for row in (question, answer):
         size, sha = entry.digest(row['body'])
