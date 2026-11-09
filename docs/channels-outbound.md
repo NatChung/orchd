@@ -42,8 +42,10 @@ Only a provisioned adapter can claim and record outcomes. The common
 `OutboundAdapter` resolves source-scoped secret references and uses a separately
 injected send transport factory. Existing receive adapters' `send()` methods
 accept that factory, never a raw message. Normal runners do not enable an
-outbound transport implicitly. The cooperative runner can explicitly receive
-an outbound sweeper. Gmail additionally needs its source's `send_enabled = true`
+outbound transport implicitly. For Slack, explicitly set `outbound_enabled = true`
+in `[channels.slack."SOURCE_ID"]` and the global `[channels]` setting, then
+restart serve. Only routes in `respond` mode with that source as responder can
+send. The cooperative runner sweeps approved deliveries for each enabled source. Gmail additionally needs its source's `send_enabled = true`
 in `email/config.toml`, a distinct `send` credential reference, and `gmail.send`;
 the read client is never reused. Credentials are never in claims or receipts.
 

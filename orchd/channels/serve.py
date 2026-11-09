@@ -7,7 +7,8 @@ from pathlib import Path
 from . import management, policy
 from .adapters.line import LineReceiver, MAX_WEBHOOK_BYTES
 from .adapters.runner import AdapterRunner
-from .adapters.slack import SlackAdapter
+from .adapters.slack import SlackAdapter, SlackSendTransport
+from .adapters.base import OutboundAdapter
 from .secret_store import default_store
 from .spool import Spool
 
@@ -53,6 +54,16 @@ def slack_options(layout, source_id, routes):
     return dict(conversations=tuple(conversations), self_identities=tuple(identities), activation=activation)
 
 
+def slack_outbound(layout, source, session, caller, provider):
+    """Opt in each Slack source independently; the global claim gate still applies."""
+    enabled = layout.get('slack', {}).get(source['id'], {}).get('outbound_enabled', False)
+    if type(enabled) is not bool:
+        raise ValueError('invalid Slack outbound setting')
+    if not enabled:
+        return None
+    return OutboundAdapter(session, source['id'], caller, provider, SlackSendTransport.from_credential)
+
+
 def _run(svc, *, host='127.0.0.1', port=8080, stop=None, provider=None):
     home = Path(svc.channel_home)
     with (home / 'channels.toml').open('rb') as stream:
@@ -86,7 +97,8 @@ def _run(svc, *, host='127.0.0.1', port=8080, stop=None, provider=None):
                         if result and result.get('status') == 'busy':
                             raise RuntimeError('Slack source lease unavailable')
                         print('Slack auth.test and Socket Mode connected:', row['id'], flush=True)
-                        AdapterRunner(adapter).run(stop)
+                        outbound = slack_outbound(layout, row, session, caller, provider)
+                        AdapterRunner(adapter, outbound=outbound).run(stop)
                     except Exception as error:
                         failures.append(row['id'] + ' (' + failure_description(error) + ')')
                         stop.set()
