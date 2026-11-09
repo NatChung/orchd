@@ -62,7 +62,7 @@ class SlackAdapter:
         else:
             raw=payload['event'].get('message',payload['event'])
             bot=raw.get('bot_id') or raw.get('app_id') or raw.get('subtype')=='bot_message'
-            echo=event['sender_ref'] in self.self_identities or raw.get('app_id') in self.self_identities
+            echo=any(raw.get(key) in self.self_identities for key in ('user', 'bot_id', 'app_id')) or event['sender_ref'] in self.self_identities
             # Platform metadata never supplies verified causation or a budget reset.
             context=Automation(app_ref=raw.get('app_id') or raw.get('bot_id') or ('unknown-bot' if bot else ''),self_echo=echo)
         if self._connection_lease:
@@ -94,6 +94,10 @@ class SlackAdapter:
         self._connection_lease=(holder,generation)
         try:
             if self.transport is None: self.transport=SlackTransport()
+            identity=self.transport.auth_test(credentials['api'])
+            if not identity.get('ok') or not identity.get('user_id') or identity.get('team_id') != source['tenant_ref']:
+                raise ValueError('Slack authentication identity mismatch')
+            self.self_identities = self.self_identities | frozenset(identity[k] for k in ('user_id', 'bot_id') if identity.get(k))
             self.transport.connect(credentials,self.on_envelope)
         except Exception:
             self.close()
@@ -153,7 +157,7 @@ class SlackAdapter:
         scope='thread:'+conversation+':'+thread if thread else 'history:'+conversation
         previous=self.service.checkpoint(self.source_id,scope,caller=self.caller)
         oldest=previous['committed_cursor'] if previous else self.activation
-        oldest=str(max(Decimal('0'),Decimal(oldest)-Decimal('300')))
+        oldest=str(max(Decimal(self.activation),Decimal(oldest)-Decimal('300')))
         end=str(int(self.clock().timestamp()))
         token=None; seen=set(); receipts=[]; threads=set()
         for _ in range(1000):
@@ -198,6 +202,9 @@ class SlackTransport:
     def configure(self, credential):
         from slack_sdk.web import WebClient
         self.web=WebClient(token=credential.decode(),timeout=30)
+    def auth_test(self, credential):
+        self.configure(credential)
+        return self.web.auth_test()
     def connect(self, credentials, callback):
         from slack_sdk.socket_mode import SocketModeClient
         self.configure(credentials['api'])

@@ -140,3 +140,21 @@ path publicly for LINE; configure its public HTTPS URL in LINE. orchd does not
 create the tunnel or provide TLS. Slack uses Socket Mode and needs no inbound
 public port. Ctrl+C or SIGTERM stops the receiver and closes its resources.
 An offline LINE receiver cannot recover events that were never accepted.
+
+Before starting an enabled Slack source, add a source-specific section to the
+operator-controlled `channels.toml` in the channel home (replace `slack-source`
+with the source ID). Set activation to the intended earliest Unix timestamp in
+seconds; it must be a positive decimal string. Keep it stable across restarts.
+
+```toml
+[channels.slack."slack-source"]
+activation = "1767225600"
+self_identities = ["A0123456789"] # optional additional user, bot or app IDs
+```
+
+Serve derives history conversations from the source's active routes at startup;
+restart serve after changing routes. Slack wildcard routes cannot be enumerated
+for history and cause startup to fail. `auth.test` identifies the API credential's
+user and optional bot before the socket opens; a workspace mismatch fails closed.
+The account needs access to the routed conversations. History starts at activation,
+including after the normal checkpoint overlap; existing checkpoints remain in use.

@@ -22,6 +22,23 @@ def run_loop(http, receivers, stop):
         http.server_close()
 
 
+def slack_options(layout, source_id, routes):
+    from decimal import Decimal, InvalidOperation
+    config = layout.get('slack', {}).get(source_id, {})
+    activation = config.get('activation')
+    identities = config.get('self_identities', [])
+    try:
+        value = Decimal(activation) if isinstance(activation, str) else Decimal(0)
+        if not value.is_finite() or value <= 0: raise ValueError()
+    except (InvalidOperation, ValueError):
+        raise ValueError('Slack source requires a positive activation timestamp') from None
+    if not isinstance(identities, list) or any(not isinstance(x, str) or not x for x in identities):
+        raise ValueError('invalid Slack self identities')
+    conversations = sorted({r['conversation_ref'] for r in routes if r['source_id'] == source_id})
+    if '*' in conversations: raise ValueError('Slack history requires explicit route conversations')
+    return dict(conversations=tuple(conversations), self_identities=tuple(identities), activation=activation)
+
+
 def run(svc, *, host='127.0.0.1', port=8080, stop=None, provider=None):
     home = Path(svc.channel_home)
     with (home / 'channels.toml').open('rb') as stream:
@@ -31,6 +48,8 @@ def run(svc, *, host='127.0.0.1', port=8080, stop=None, provider=None):
     stop = stop or threading.Event()
     op = policy.Caller(role='operator')
     source_rows = [row for row in management.sources(svc, op) if row['enabled'] and row['provider'] in ('slack', 'line')]
+    routes = svc.routes(caller=op)
+    options = {row['id']: slack_options(layout, row['id'], routes) for row in source_rows if row['provider'] == 'slack'}
     receivers, spools, threads = {}, [], []
     old_handlers = {}
     failures = []
@@ -48,7 +67,7 @@ def run(svc, *, host='127.0.0.1', port=8080, stop=None, provider=None):
                     session = adapter = None
                     try:
                         session = factory()
-                        adapter = SlackAdapter(session, row['id'], caller, None, provider)
+                        adapter = SlackAdapter(session, row['id'], caller, None, provider, **options[row['id']])
                         result = adapter.connect()
                         if result and result.get('status') == 'busy':
                             raise RuntimeError('Slack source lease unavailable')
