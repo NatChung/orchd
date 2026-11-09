@@ -36,3 +36,6 @@ retry results derive from those acceptance assertions. Failure returns nonzero;
 duplicate/retry counters are unknown on a failed rehearsal. This is engineering
 evidence, not evidence of a real platform rollout. See [the rollout
 runbook](channels-rollout.md) for the separately approved deployment procedure.
+
+For Windows receive-only deployment, Credential Manager setup, source and route
+commands, and HTTPS tunnel guidance, see [Slack and LINE deployment](channels-slack-line.md#deployment-on-windows).
