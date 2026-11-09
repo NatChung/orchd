@@ -123,3 +123,52 @@ class _WindowsCredentials:
             return [items[i].contents.TargetName for i in range(count.value)]
         finally:
             self.api.CredFree(items)
+
+
+class MacOSSecretStore(WindowsSecretStore):
+    """Source-scoped generic Keychain items operated by the security tool."""
+    def __init__(self, *, runner=None):
+        import subprocess
+        self.runner = runner or subprocess.run
+
+    def _run(self, args, **kwargs):
+        result = self.runner(args, stdout=__import__('subprocess').PIPE,
+                             stderr=__import__('subprocess').PIPE, **kwargs)
+        if result.returncode:
+            raise OSError('Keychain operation failed')
+        return result.stdout
+
+    def put(self, adapter, source, reference, value):
+        import base64
+        if not isinstance(value, bytes) or not value:
+            raise ValueError('secret must be non-empty bytes')
+        target = self._target(adapter, source, reference)
+        encoded = base64.b64encode(value).decode('ascii')
+        # security -i reads one command from a pipe: secret material never appears
+        # in process argv. Base64 also prevents command parsing/injection.
+        command = f'add-generic-password -U -s orchd.channels -a {target} -w {encoded}\n'
+        if len(command) > 3500: raise ValueError('secret too long')
+        self._run(['/usr/bin/security', '-i'], input=command.encode('ascii'))
+
+    def get(self, adapter, source, reference):
+        import base64
+        target = self._target(adapter, source, reference)
+        data = self._run(['/usr/bin/security', 'find-generic-password', '-s', 'orchd.channels', '-a', target, '-w'])
+        return base64.b64decode(data.strip(), validate=True)
+
+    def delete(self, adapter, source, reference):
+        target = self._target(adapter, source, reference)
+        self._run(['/usr/bin/security', 'delete-generic-password', '-s', 'orchd.channels', '-a', target])
+
+    def list(self, adapter, source):
+        prefix = self._prefix(adapter, source)
+        data = self._run(['/usr/bin/security', 'dump-keychain']).decode('utf-8', 'replace')
+        # Only metadata is dumped: -d (which exposes secret data) is not used.
+        accounts = re.findall(r'"acct"<blob>="([^"\r\n]+)"', data)
+        return sorted(a[len(prefix):] for a in accounts if a.startswith(prefix))
+
+
+def default_store():
+    import sys
+    if sys.platform == 'darwin': return MacOSSecretStore()
+    return WindowsSecretStore()

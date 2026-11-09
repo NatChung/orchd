@@ -125,7 +125,7 @@ Store each value in Windows Credential Manager under its adapter and source:
 Enter the secret at the hidden prompt, or pipe exact bytes to standard input;
 never put it in command arguments or a configuration file. Use `secret list`
 with the same adapter and source to list references, and `secret delete` with
-`--ref` to remove one. The provider is Windows-only and fails explicitly elsewhere.
+`--ref` to remove one. macOS uses Keychain; see [new-machine setup](channels-setup.md). Other platforms fail explicitly.
 
 Add a route with `orchd channels route add --file route.json`, containing
 `id`, `source_id`, `conversation_ref`, and `owner_orch`; optional route fields

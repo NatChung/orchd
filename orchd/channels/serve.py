@@ -8,7 +8,7 @@ from . import management, policy
 from .adapters.line import LineReceiver, MAX_WEBHOOK_BYTES
 from .adapters.runner import AdapterRunner
 from .adapters.slack import SlackAdapter
-from .secret_store import WindowsSecretStore
+from .secret_store import default_store
 from .spool import Spool
 
 
@@ -39,12 +39,12 @@ def slack_options(layout, source_id, routes):
     return dict(conversations=tuple(conversations), self_identities=tuple(identities), activation=activation)
 
 
-def run(svc, *, host='127.0.0.1', port=8080, stop=None, provider=None):
+def _run(svc, *, host='127.0.0.1', port=8080, stop=None, provider=None):
     home = Path(svc.channel_home)
     with (home / 'channels.toml').open('rb') as stream:
         layout = tomllib.load(stream)['channels']
     if layout.get('schema_version') != 1: raise ValueError('unsupported channel layout')
-    provider = provider or WindowsSecretStore()
+    provider = provider or default_store()
     stop = stop or threading.Event()
     op = policy.Caller(role='operator')
     source_rows = [row for row in management.sources(svc, op) if row['enabled'] and row['provider'] in ('slack', 'line')]
@@ -111,3 +111,12 @@ def run(svc, *, host='127.0.0.1', port=8080, stop=None, provider=None):
         for thread in threads: thread.join()
         for spool in spools: spool.close()
         for sig, handler in old_handlers.items(): signal.signal(sig, handler)
+
+
+def run(svc, *, host='127.0.0.1', port=8080, stop=None, provider=None):
+    from orchd import file_lock
+    home = Path(svc.channel_home)
+    home.mkdir(parents=True, exist_ok=True)
+    with (home / 'serve.lock').open('a+b') as lock:
+        file_lock.try_lock(lock)
+        return _run(svc, host=host, port=port, stop=stop, provider=provider)
