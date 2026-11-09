@@ -23,7 +23,49 @@ def run(args):
         else:
             caller=policy.Caller(role='operator',sources=repository.source_ids(svc.con),identity='operator')
         action=args.channel_action
-        if action == 'cutover':
+        if action == 'secret':
+            policy.require_operator(caller)
+            import getpass
+            from .secret_store import WindowsSecretStore
+            provider = WindowsSecretStore()
+            if args.secret_action == 'list':
+                result = provider.list(args.adapter, args.source)
+            else:
+                if not args.ref: raise ValueError('secret ref required')
+                if args.secret_action == 'put':
+                    value = getpass.getpass('Secret: ').encode() if sys.stdin.isatty() else sys.stdin.buffer.read()
+                    provider.put(args.adapter, args.source, args.ref, value)
+                else:
+                    provider.delete(args.adapter, args.source, args.ref)
+                result = {'status': 'ok', 'ref': args.ref}
+            print(json.dumps(result))
+            return 0
+        if action == 'serve':
+            policy.require_operator(caller)
+            from .serve import run as serve
+            serve(svc, host=args.host, port=args.port)
+            return 0
+        if action in ('source', 'route'):
+            from . import management
+            policy.require_operator(caller)
+            subaction = getattr(args, action + '_action')
+            if subaction == 'list':
+                result = management.sources(svc, caller) if action == 'source' else svc.routes(caller=caller)
+            elif subaction in ('enable', 'disable'):
+                if not args.id: raise ValueError('source id required')
+                result = management.set_enabled(svc, caller, args.id, subaction == 'enable')
+            elif subaction == 'remove':
+                if not args.id: raise ValueError('route id required')
+                result = management.change_route(svc, caller, 'remove', args.id)
+            else:
+                if args.file == '-': payload = json.load(sys.stdin)
+                else:
+                    with open(args.file, encoding='utf-8') as handle: payload = json.load(handle)
+                if action == 'source':
+                    svc.provision_source(payload, caller=caller)
+                    result = {'status': 'provisioned', 'id': payload['id']}
+                else: result = management.change_route(svc, caller, 'add', payload)
+        elif action == 'cutover':
             result = svc.cutover(args.source, args.mode, backfill=args.backfill_digest, caller=caller)
         elif action == 'ledger':
             result = svc.cutover_ledger(args.source, after=args.after, through=args.through, caller=caller)
@@ -74,7 +116,7 @@ def run(args):
             raise ValueError('unknown channel command')
         print(json.dumps(result,ensure_ascii=False))
         return 0
-    except (ValueError, PermissionError, sqlite3.Error, OSError) as error:
+    except (ValueError, PermissionError, sqlite3.Error, OSError, RuntimeError) as error:
         print(json.dumps({'status':'failed','error':str(error)},ensure_ascii=False),file=sys.stderr)
         return 1
     finally:

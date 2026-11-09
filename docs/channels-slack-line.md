@@ -1,8 +1,8 @@
 # Slack and LINE receive-only ingress
 
 PR4 adds `SlackAdapter` / `SlackTransport`, `LineReceiver`, a private source-bound
-`Spool`, and a persistent loop guard in the unified receive transaction. No new
-CLI or MCP tools are registered. Outbound approval, claim and adapter sends stay
+`Spool`, and a persistent loop guard in the unified receive transaction. The
+channel CLI provides deployment and configuration commands. Outbound approval, claim and adapter sends stay
 hard-disabled, including `no_reply` (zero platform calls).
 
 ## Deployment boundary
@@ -11,8 +11,7 @@ The proposed defaults are pending NatChung's confirmation: single host, LINE
 **direct receiver**, outbound disabled, and PR2 retention (unsend immediately).
 The optional cloud edge receiver is **DEFERRED**. An offline direct host does
 not receive webhooks; platform redelivery cannot guarantee recovery. Only events
-already durably accepted into the local spool can be replayed. This PR does not
-provision accounts, listeners, TLS certificates or a public endpoint.
+already durably accepted into the local spool can be replayed. The deployment does not provision accounts, TLS certificates or a public endpoint.
 
 Provision sources and routes through the existing operator control plane. Resolve
 credentials only through the adapter's source-scoped OS secret provider. Slack
@@ -110,3 +109,34 @@ DB, origin/observation/claim/loop ledger and unacknowledged spool. Revert the co
 only with readers stopped and a format compatibility check; do not drop additive
 tables or restore an old DB over newly received messages. Do not enable a second
 receiver while the new one still runs. Unsend bodies stay unavailable on replay.
+
+## Deployment on Windows
+
+Install the optional Slack dependency with `uv sync --extra channels-slack`, then
+run `orchd channels layout apply`. Provision each source with `orchd channels
+source provision --file source.json`; the JSON fields are `id`, `host_id`,
+`provider`, `tenant_ref`, `account_ref`, `adapter_id`, `credential_refs`, and
+`enabled`. Only opaque references belong in this file. Use `app` and `api` refs
+for Slack, and `signing` for LINE. List sources with `orchd channels source list`;
+use `orchd channels source enable ID` and `disable ID` to change admission.
+
+Store each value in Windows Credential Manager under its adapter and source:
+`orchd channels secret put --adapter ADAPTER --source SOURCE --ref os-store:example/key`.
+Enter the secret at the hidden prompt, or pipe exact bytes to standard input;
+never put it in command arguments or a configuration file. Use `secret list`
+with the same adapter and source to list references, and `secret delete` with
+`--ref` to remove one. The provider is Windows-only and fails explicitly elsewhere.
+
+Add a route with `orchd channels route add --file route.json`, containing
+`id`, `source_id`, `conversation_ref`, and `owner_orch`; optional route fields
+follow the service route contract. `route list` shows active routes and `route
+remove ID` removes one while preserving the others. Configure the source and
+route before enabling it.
+
+Run `orchd channels serve --port 8080`; it binds to `127.0.0.1` by default.
+LINE posts to `/webhook` with one LINE source, or `/webhook/SOURCE` for multiple
+sources. A deployment-managed HTTPS tunnel or reverse proxy must expose that
+path publicly for LINE; configure its public HTTPS URL in LINE. orchd does not
+create the tunnel or provide TLS. Slack uses Socket Mode and needs no inbound
+public port. Ctrl+C or SIGTERM stops the receiver and closes its resources.
+An offline LINE receiver cannot recover events that were never accepted.

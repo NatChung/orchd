@@ -916,3 +916,11 @@ def reject_attachment(con, attachment_id, source_id, reason, now, holder, genera
                 break
         con.execute('UPDATE intake_content SET attachments=? WHERE receipt_id=?', (canonical(items),row['intake_receipt_id']))
         con.execute("UPDATE channel_attachments SET status='unavailable',updated_at=? WHERE id=?", (now,attachment_id))
+
+
+def set_source_enabled(con, source_id, enabled):
+    if type(enabled) is not bool:
+        raise ValueError('invalid enabled state')
+    with store.immediate(con):
+        if con.execute('UPDATE channel_sources SET enabled=? WHERE id=?', (int(enabled), source_id)).rowcount != 1:
+            raise ValueError('unknown source')
