@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -77,6 +78,32 @@ class EntryTest(unittest.TestCase):
         self.assertEqual(got["messages"][0]["body_sha256"], result["body_sha256"])
         self.assertEqual(entry.inbox(self.con, self.orch)["messages"], [])  # read once
 
+    def test_saved_failed_wake_is_clear_and_retry_deduplicates(self):
+        self.rt.nat_says("desk-1", "saved message")
+        self.rt.uds_fails = True
+        result = self.relay()
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("已收到並保存", result["note"])
+        self.assertIn("不需要重傳", result["note"])
+        again = self.relay()
+        self.assertEqual(again["message_id"], result["message_id"])
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM entry_messages WHERE direction='in'").fetchone()[0], 1)
+
+    def test_queue_failure_preserves_redacted_bounded_stderr_and_exit_code(self):
+        self.relay_thread_seen()
+        with patch.object(self.rt, "wake_orch", side_effect=subprocess.CalledProcessError(
+                17, ["codex"], stderr="fatal https://user:secret@example.test/ " + "x" * 1000)):
+            result = entry.send_to_nat(self.con, self.rt, self.orch, "hello")
+        error = entry._row(self.con, result["message_id"])["delivery_error"]
+        self.assertIn("17", error)
+        self.assertIn("fatal", error)
+        self.assertNotIn("secret", error)
+        self.assertLessEqual(len(error), 500)
+
+    def test_entry_instructions_distinguish_storage_and_queue_receipts(self):
+        self.assertIn("不需要重傳", mcp_server.ENTRY_INSTRUCTIONS)
+        self.assertIn("not that it appeared on screen", next(t["description"] for t in mcp_server.TOOLS if t["name"] == "send_to_nat"))
+
     def test_same_source_item_is_relayed_once(self):
         self.rt.nat_says("desk-1", "hi")
         first = self.relay()
@@ -148,7 +175,7 @@ class EntryTest(unittest.TestCase):
         self.rt.nat_says("desk-1", BODY)
         result = self.relay()
         self.assertEqual(result["status"], "not_delivered")
-        self.assertIn("offline", result["note"])
+        self.assertIn("不需要重傳", result["note"])
         self.assertEqual(self.rt.sent, [])
         self.assertIsNone(self.rt.orch_started)
         self.assertEqual(store.get_orch(self.con, self.orch)["stopped_at"], None)
