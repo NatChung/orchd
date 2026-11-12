@@ -417,6 +417,8 @@ class ChannelService:
     def enforce_retention(self, *, caller):
         from datetime import datetime, timedelta
         policy.require_operator(caller)
+        from .media import MediaLimits, purge_all
+        purge_all(self.channel_home, MediaLimits().retention_s, self.clock().timestamp())
         removed=0
         for row in repository.retention_candidates(self.con):
             days=self.retention.get(row['source_id'],{}).get('body_days',policy.DEFAULT_BODY_DAYS)
