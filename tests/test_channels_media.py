@@ -11,21 +11,29 @@ from orchd.channels import media
 from orchd.channels.media import MediaLimits, process_media
 
 
-def fake_runner(duration=10.0, calls=None, timeout_on=None):
+def fake_runner(duration=10.0, calls=None, timeout_on=None, audio=True, fail_on=None, frames=3):
+    seen = []
+
     def run(argv, timeout):
         if calls is not None:
             calls.append(argv)
         if timeout_on and timeout_on in argv[0]:
             raise subprocess.TimeoutExpired(argv, timeout)
+        seen.append(timeout)
         if 'ffprobe' in argv[0]:
-            return SimpleNamespace(returncode=0, stdout=json.dumps({'format': {'duration': str(duration)}}).encode())
+            streams = [{'codec_type': 'video'}] + ([{'codec_type': 'audio'}] if audio else [])
+            return SimpleNamespace(returncode=0, stdout=json.dumps(
+                {'format': {'duration': str(duration)}, 'streams': streams}).encode())
         out = Path(argv[-1])
+        if fail_on and fail_on in out.name:
+            return SimpleNamespace(returncode=1, stdout=b'')
         if '%03d' in out.name:
-            for i in (1, 2, 3):
+            for i in range(1, frames + 1):
                 (out.parent / f'frame_{i:03d}.png').write_bytes(b'png')
         else:
             out.write_bytes(b'wav')
         return SimpleNamespace(returncode=0, stdout=b'')
+    run.seen = seen
     return run
 
 
@@ -101,3 +109,142 @@ class MediaTest(unittest.TestCase):
         self.assertTrue(r.ok, r.reason)
         self.assertTrue(r.frames)
         self.assertTrue(Path(r.audio).is_file())
+
+
+    # --- review rework (#228) ---
+    def test_symlinked_ancestor_output_rejected(self):
+        target = Path(self.tmp.name) / 'elsewhere'
+        target.mkdir()
+        link = Path(self.tmp.name) / 'link'
+        try:
+            os.symlink(target, link, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest('symlinks unavailable')
+        calls = []
+        r = process_media(self.src, link / 'out', ffmpeg='ffmpeg', ffprobe='ffprobe', runner=fake_runner(10, calls),
+                          allowed_root=Path(self.tmp.name) / 'safe')
+        self.assertEqual(r.reason, 'unsafe_output_dir')
+        self.assertEqual(calls, [])
+        self.assertEqual(list(target.iterdir()), [])
+
+    def test_output_outside_allowed_root_rejected(self):
+        safe = Path(self.tmp.name) / 'safe'
+        safe.mkdir()
+        r = process_media(self.src, self.out, ffmpeg='ffmpeg', ffprobe='ffprobe', runner=fake_runner(10), allowed_root=safe)
+        self.assertEqual(r.reason, 'unsafe_output_dir')
+        r = process_media(self.src, safe / 'o', ffmpeg='ffmpeg', ffprobe='ffprobe', runner=fake_runner(10), allowed_root=safe)
+        self.assertTrue(r.ok, r.reason)
+
+    def test_existing_symlinked_output_file_removed_not_followed(self):
+        victim = Path(self.tmp.name) / 'victim.txt'
+        victim.write_bytes(b'keep')
+        self.out.mkdir()
+        try:
+            os.symlink(victim, self.out / 'audio.wav')
+        except (OSError, NotImplementedError):
+            self.skipTest('symlinks unavailable')
+        calls = []
+        r = process_media(self.src, self.out, ffmpeg='ffmpeg', ffprobe='ffprobe', runner=fake_runner(10, calls))
+        self.assertTrue(r.ok, r.reason)
+        self.assertEqual(victim.read_bytes(), b'keep')
+        self.assertFalse((self.out / 'audio.wav').is_symlink())
+        for c in calls[1:]:
+            self.assertIn('-n', c)
+            self.assertNotIn('-y', c)
+
+    def test_extraction_has_hard_duration_cap(self):
+        calls = []
+        r = process_media(self.src, self.out, MediaLimits(max_duration_s=30), ffmpeg='ffmpeg', ffprobe='ffprobe',
+                          runner=fake_runner(10, calls))
+        self.assertTrue(r.ok, r.reason)
+        for c in calls[1:]:
+            i = c.index('-t')
+            self.assertLess(i, c.index('-i'))  # input option: limits what is read
+            self.assertEqual(float(c[i + 1]), 30.0)
+
+    def test_probe_and_extraction_share_one_budget(self):
+        run = fake_runner(10)
+        process_media(self.src, self.out, MediaLimits(timeout_s=50), ffmpeg='ffmpeg', ffprobe='ffprobe', runner=run)
+        self.assertEqual(len(run.seen), 3)
+        self.assertTrue(all(b <= a for a, b in zip(run.seen, run.seen[1:])))
+        self.assertTrue(all(t <= 50 for t in run.seen))
+
+    def test_purge_all_without_ffmpeg(self):
+        home = Path(self.tmp.name) / 'home'
+        d1 = media.derived_dir(home, 's1', 'a' * 64)
+        d2 = media.derived_dir(home, 's2', 'b' * 64)
+        for d in (d1, d2):
+            d.mkdir(parents=True)
+        old, new = d1 / 'frame_001.png', d2 / 'audio.wav'
+        old.write_bytes(b'x')
+        new.write_bytes(b'x')
+        os.utime(old, (1, 1))
+        orig = media._find
+        media._find = lambda name: None  # ffmpeg unavailable must not matter
+        try:
+            self.assertEqual(media.purge_all(home, 60), 1)
+        finally:
+            media._find = orig
+        self.assertFalse(old.exists())
+        self.assertFalse(d1.exists())  # emptied dir pruned
+        self.assertTrue(new.exists())
+        self.assertEqual(media.purge_all(Path(self.tmp.name) / 'missing', 60), 0)
+
+    def test_scale_bounds_width_height_and_pixels(self):
+        calls = []
+        process_media(self.src, self.out, MediaLimits(max_width=640, max_height=360, max_pixels=100000), ffmpeg='ffmpeg',
+                      ffprobe='ffprobe', runner=fake_runner(10, calls))
+        vf = calls[1][calls[1].index('-vf') + 1]
+        for token in ('640/iw', '360/ih', '100000/(iw*ih)', 'sqrt', 'trunc'):
+            self.assertIn(token, vf)
+        import math
+        iw, ih = 1000, 4000  # tall source
+        f = min(1, min(640 / iw, min(360 / ih, math.sqrt(100000 / (iw * ih)))))
+        w, h = max(2, int(iw * f / 2) * 2), max(2, int(ih * f / 2) * 2)
+        self.assertLessEqual(w, 640)
+        self.assertLessEqual(h, 360)
+        self.assertLessEqual(w * h, 100000)
+
+    def test_invalid_resolution_limits(self):
+        with self.assertRaises(ValueError):
+            MediaLimits(max_height=1).validate()
+        with self.assertRaises(ValueError):
+            MediaLimits(max_pixels=1).validate()
+
+    def test_no_audio_stream_is_not_an_error(self):
+        calls = []
+        r = process_media(self.src, self.out, ffmpeg='ffmpeg', ffprobe='ffprobe', runner=fake_runner(10, calls, audio=False))
+        self.assertTrue(r.ok, r.reason)
+        self.assertEqual(r.audio, '')
+        self.assertEqual(len(calls), 2)  # probe + frames only
+
+    def test_audio_failure_is_error_and_leaves_no_stale_output(self):
+        self.out.mkdir()
+        (self.out / 'audio.wav').write_bytes(b'stale')
+        (self.out / 'frame_009.png').write_bytes(b'stale')
+        r = process_media(self.src, self.out, ffmpeg='ffmpeg', ffprobe='ffprobe', runner=fake_runner(10, fail_on='audio'))
+        self.assertFalse(r.ok)
+        self.assertEqual((r.reason, r.detail), ('ffmpeg_failed', 'audio'))
+        self.assertEqual(list(self.out.iterdir()), [])
+
+    def test_stale_frames_not_returned_after_partial_run(self):
+        self.out.mkdir()
+        (self.out / 'frame_009.png').write_bytes(b'stale')
+        r = process_media(self.src, self.out, MediaLimits(max_frames=8), ffmpeg='ffmpeg', ffprobe='ffprobe',
+                          runner=fake_runner(10, frames=2))
+        self.assertTrue(r.ok, r.reason)
+        self.assertEqual(len(r.frames), 2)
+        self.assertFalse((self.out / 'frame_009.png').exists())
+        r = process_media(self.src, self.out, ffmpeg='ffmpeg', ffprobe='ffprobe', runner=fake_runner(10, frames=0))
+        self.assertEqual(r.reason, 'ffmpeg_failed')
+        self.assertEqual(r.frames, [])
+
+    def test_missing_audio_file_after_success_code_is_error(self):
+        base = fake_runner(10)
+
+        def run(argv, timeout):
+            if 'ffprobe' in argv[0] or '%03d' in argv[-1]:
+                return base(argv, timeout)
+            return SimpleNamespace(returncode=0, stdout=b'')  # claims success, writes nothing
+        r = process_media(self.src, self.out, ffmpeg='ffmpeg', ffprobe='ffprobe', runner=run)
+        self.assertEqual((r.reason, r.detail), ('ffmpeg_failed', 'audio'))

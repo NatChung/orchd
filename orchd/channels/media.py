@@ -22,6 +22,8 @@ class MediaLimits:
     max_duration_s: float = 600.0
     max_frames: int = 8
     max_width: int = 1280
+    max_height: int = 720
+    max_pixels: int = 1280 * 720
     timeout_s: float = 60.0
     frame_mode: str = 'interval'  # 'interval' (equal spacing) or 'scene'
     audio_format: str = 'wav'  # 'wav' or 'm4a'
@@ -30,7 +32,7 @@ class MediaLimits:
     def validate(self):
         if self.frame_mode not in ('interval', 'scene') or self.audio_format not in ('wav', 'm4a'):
             raise ValueError('invalid media limits')
-        if self.max_frames < 1 or self.max_width < 16 or self.timeout_s <= 0 or self.max_duration_s <= 0:
+        if self.max_frames < 1 or self.max_width < 16 or self.max_height < 16 or self.max_pixels < 256 or self.timeout_s <= 0 or self.max_duration_s <= 0:
             raise ValueError('invalid media limits')
 
 
@@ -83,6 +85,37 @@ def purge_expired(directory, retention_s, now=None):
     return removed
 
 
+def purge_all(channel_home, retention_s, now=None):
+    """Purge expired derived files under every <digest>.derived dir of a channel home.
+
+    Independent of ffmpeg availability; callable from any periodic job. Symlinked
+    directories are never followed. Returns the number of files removed.
+    """
+    state = Path(channel_home).absolute() / 'email' / 'state'
+    removed = 0
+    try:
+        if state.is_symlink() or not state.is_dir():
+            return 0
+        sources = [d for d in state.iterdir() if d.is_dir() and not d.is_symlink()]
+    except OSError:
+        return 0
+    for source in sources:
+        content = source / 'content'
+        try:
+            if content.is_symlink() or not content.is_dir():
+                continue
+            derived = [d for d in content.iterdir() if d.name.endswith('.derived') and d.is_dir() and not d.is_symlink()]
+        except OSError:
+            continue
+        for d in derived:
+            removed += purge_expired(d, retention_s, now)
+            try:
+                d.rmdir()  # only succeeds when empty
+            except OSError:
+                pass
+    return removed
+
+
 def _find(name):
     return shutil.which(name)
 
@@ -91,7 +124,44 @@ def _run(argv, timeout_s):
     return subprocess.run(argv, capture_output=True, timeout=timeout_s, shell=False, check=False)
 
 
-def process_media(input_path, out_dir, limits=None, *, ffmpeg=None, ffprobe=None, runner=None, now=None):
+def _safe_out_dir(out_dir, allowed_root):
+    """Resolve out_dir fully (all ancestors) and confine it to allowed_root.
+
+    allowed_root defaults to the resolved parent of out_dir, so out_dir itself
+    must not be a link leaving that parent. Returns the resolved Path or None.
+    """
+    out = Path(out_dir)
+    try:
+        if out.is_symlink():
+            return None
+        resolved = out.resolve()
+        root = Path(allowed_root).resolve() if allowed_root is not None else out.parent.resolve()
+        resolved.relative_to(root)
+    except (OSError, ValueError, RuntimeError):
+        return None
+    if allowed_root is None and resolved.parent != root:
+        return None
+    return resolved
+
+
+def _clear_outputs(out):
+    """Remove prior frame/audio outputs (never following links) so none can be reused or overwritten through."""
+    for pattern in ('frame_*.png', 'audio.*'):
+        for p in out.glob(pattern):
+            if p.is_dir() and not p.is_symlink():
+                raise OSError('unexpected directory in output dir')
+            p.unlink()
+
+
+def _scale_filter(limits):
+    # factor <= 1 satisfying width, height and total-pixel caps; keep even dims.
+    f = (f'min(1,min({limits.max_width}/iw,min({limits.max_height}/ih,'
+         f'sqrt({limits.max_pixels}/(iw*ih)))))')
+    return f"scale=w='max(2,trunc(iw*{f}/2)*2)':h='max(2,trunc(ih*{f}/2)*2)'"
+
+
+def process_media(input_path, out_dir, limits=None, *, ffmpeg=None, ffprobe=None, runner=None, now=None,
+                  allowed_root=None):
     limits = limits or MediaLimits()
     limits.validate()
     runner = runner or _run
@@ -102,12 +172,19 @@ def process_media(input_path, out_dir, limits=None, *, ffmpeg=None, ffprobe=None
     src = Path(input_path)
     if src.is_symlink() or not src.is_file():
         return MediaResult(False, 'input_missing')
-    out = Path(out_dir)
-    if out.is_symlink():
+    out = _safe_out_dir(out_dir, allowed_root)
+    if out is None:
         return MediaResult(False, 'unsafe_output_dir')
     purge_expired(out, limits.retention_s, now)
+    # One budget shared by the probe and both extractions.
+    deadline = time.monotonic() + limits.timeout_s
+
+    def remaining():
+        return max(0.1, deadline - time.monotonic())
+
     try:
-        probe = runner([ffprobe, '-v', 'error', '-print_format', 'json', '-show_format', '--', str(src)], limits.timeout_s)
+        probe = runner([ffprobe, '-v', 'error', '-print_format', 'json', '-show_format', '-show_streams',
+                        '--', str(src)], remaining())
     except subprocess.TimeoutExpired:
         return MediaResult(False, 'timeout', 'ffprobe')
     except OSError:
@@ -115,38 +192,58 @@ def process_media(input_path, out_dir, limits=None, *, ffmpeg=None, ffprobe=None
     try:
         if probe.returncode != 0:
             raise ValueError
-        duration = float(json.loads(probe.stdout)['format']['duration'])
+        info = json.loads(probe.stdout)
+        duration = float(info['format']['duration'])
         if not duration > 0 or duration == float('inf'):
             raise ValueError
-    except (ValueError, KeyError, TypeError):
+        has_audio = any(isinstance(s, dict) and s.get('codec_type') == 'audio' for s in info.get('streams') or [])
+    except (ValueError, KeyError, TypeError, AttributeError):
         return MediaResult(False, 'probe_failed')
     if duration > limits.max_duration_s:
         return MediaResult(False, 'duration_exceeded', f'{duration:.1f}s > {limits.max_duration_s:.1f}s', duration)
-    out.mkdir(parents=True, exist_ok=True)
-    scale = f'scale=min({limits.max_width}\\,iw):-2'
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        out = out.resolve()
+        _clear_outputs(out)
+    except OSError:
+        return MediaResult(False, 'unsafe_output_dir')
+    scale = _scale_filter(limits)
     if limits.frame_mode == 'scene':
         vf = f"select='gt(scene,0.3)',{scale}"
-        vsync = ['-vsync', 'vfr']
+        vsync = ['-fps_mode', 'vfr']
     else:
         vf = f'fps={limits.max_frames / duration:.6f},{scale}'
         vsync = []
     pattern = out / 'frame_%03d.png'
     audio = out / f'audio.{limits.audio_format}'
     codec = ['-c:a', 'pcm_s16le', '-ar', '16000', '-ac', '1'] if limits.audio_format == 'wav' else ['-c:a', 'aac']
-    frame_cmd = [ffmpeg, '-nostdin', '-y', '-v', 'error', '-i', str(src), '-an', '-vf', vf, *vsync,
+    # -t before -i caps the input read time regardless of container metadata; -n never overwrites.
+    cap = ['-t', f'{limits.max_duration_s:.3f}']
+    frame_cmd = [ffmpeg, '-nostdin', '-n', '-v', 'error', *cap, '-i', str(src), '-an', '-vf', vf, *vsync,
                  '-frames:v', str(limits.max_frames), str(pattern)]
-    audio_cmd = [ffmpeg, '-nostdin', '-y', '-v', 'error', '-i', str(src), '-vn', *codec, str(audio)]
-    deadline = time.monotonic() + limits.timeout_s
-    for label, cmd in (('frames', frame_cmd), ('audio', audio_cmd)):
+    audio_cmd = [ffmpeg, '-nostdin', '-n', '-v', 'error', *cap, '-i', str(src), '-vn', *codec, str(audio)]
+    jobs = [('frames', frame_cmd)] + ([('audio', audio_cmd)] if has_audio else [])
+
+    def fail(reason, label):
         try:
-            res = runner(cmd, max(0.1, deadline - time.monotonic()))
+            _clear_outputs(out)
+        except OSError:
+            pass
+        return MediaResult(False, reason, label, duration, output_dir=str(out))
+
+    for label, cmd in jobs:
+        try:
+            res = runner(cmd, remaining())
         except subprocess.TimeoutExpired:
-            return MediaResult(False, 'timeout', label, duration, output_dir=str(out))
+            return fail('timeout', label)
         except OSError:
             return MediaResult(False, 'ffmpeg_unavailable', WINGET_HINT)
-        # A missing audio stream is tolerated; a frame-extraction failure is not.
-        if res.returncode != 0 and label == 'frames':
-            return MediaResult(False, 'ffmpeg_failed', label, duration, output_dir=str(out))
+        if res.returncode != 0:
+            return fail('ffmpeg_failed', label)
+        if label == 'audio' and (not audio.is_file() or audio.stat().st_size == 0):
+            return fail('ffmpeg_failed', label)
     frames = sorted(str(p) for p in out.glob('frame_*.png'))[:limits.max_frames]
+    if not frames and limits.frame_mode == 'interval':
+        return fail('ffmpeg_failed', 'frames')
     return MediaResult(True, duration_s=duration, frames=frames,
-                       audio=str(audio) if audio.is_file() else '', output_dir=str(out))
+                       audio=str(audio) if has_audio else '', output_dir=str(out))
