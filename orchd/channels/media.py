@@ -164,7 +164,7 @@ def _scale_filter(limits):
 
 
 def process_media(input_path, out_dir, limits=None, *, ffmpeg=None, ffprobe=None, runner=None, now=None,
-                  allowed_root):
+                  allowed_root, extract_frames=True):
     """Extract inside a caller-supplied trusted root.
 
     The root and all output ancestors must be owned by the caller and must not
@@ -238,7 +238,7 @@ def process_media(input_path, out_dir, limits=None, *, ffmpeg=None, ffprobe=None
     frame_cmd = [ffmpeg, '-nostdin', '-n', '-v', 'error', *cap, '-i', str(src), '-an', '-vf', vf, *vsync,
                  '-frames:v', str(limits.max_frames), str(pattern)]
     audio_cmd = [ffmpeg, '-nostdin', '-n', '-v', 'error', *cap, '-i', str(src), '-vn', *codec, str(audio)]
-    jobs = [('frames', frame_cmd)] + ([('audio', audio_cmd)] if has_audio else [])
+    jobs = ([('frames', frame_cmd)] if extract_frames else []) + ([('audio', audio_cmd)] if has_audio else [])
 
     def fail(reason, label):
         try:
@@ -265,7 +265,7 @@ def process_media(input_path, out_dir, limits=None, *, ffmpeg=None, ffprobe=None
         frames = sorted(str(p) for p in out.glob('frame_*.png'))[:limits.max_frames]
     except OSError:
         return fail('ffmpeg_failed', 'frames')
-    if not frames and limits.frame_mode == 'interval':
+    if extract_frames and not frames and limits.frame_mode == 'interval':
         return fail('ffmpeg_failed', 'frames')
     return MediaResult(True, duration_s=duration, frames=frames,
                        audio=str(audio) if has_audio else '', output_dir=str(out))

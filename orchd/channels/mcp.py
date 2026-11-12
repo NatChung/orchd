@@ -11,6 +11,7 @@ def call(name, args, thread, con):
         'channels_sync': ({'source_id','request_key'}, {'source_id','request_key'}),
         'channels_sync_status': ({'job_id'}, {'job_id'}),
         'channels_attachment_request': ({'attachment_id'}, {'attachment_id'}),
+        'channels_attachment_media': ({'attachment_id'}, {'attachment_id'}),
         'channels_attachment_read': ({'attachment_id'}, {'attachment_id'}),
         'channels_approve': ({'draft_id','version','payload_hash'}, {'draft_id','version','payload_hash'}),
         'channels_draft': ({'message_id','payload'}, {'message_id','payload'}),
@@ -42,6 +43,8 @@ def call(name, args, thread, con):
             return svc.approve(**args,caller=caller)
         if name == 'channels_draft':
             return svc.draft_reply(args['message_id'],args['payload'],caller=caller)
+        if name == 'channels_attachment_media':
+            return svc.attachment_media(args['attachment_id'],caller=caller)
         return svc.read_attachment(args['attachment_id'],caller=caller)
     finally:
         svc.close()
