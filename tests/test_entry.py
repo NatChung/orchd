@@ -671,6 +671,33 @@ class EntryTest(unittest.TestCase):
             self.assertIn("binding_warning", json.loads(result["content"][0]["text"]))
             self.assertEqual(entry.get_entry(self.con, "desktop")["thread_id"], real)
 
+    def test_wrong_mcp_thread_with_unique_turn_relays_from_real_rollout(self):
+        real = "01a1cdb0-2204-7331-8dd5-b5e7b8e8086b"
+        wrong = "01a1cdb0-2310-7f10-be70-1f1a6dd5f000"
+        turn = "01a1cdb0-2378-7c63-b347-85bffb53784d"
+        root = Path(self.tmp.name) / "sessions"
+        root.mkdir()
+        records = [
+            {"type": "session_meta", "payload": {"id": real}},
+            {"type": "event_msg", "payload": {"type": "item_completed", "turn_id": turn,
+                "item": {"type": "UserMessage", "id": "synthetic-item-4463",
+                         "content": [{"type": "text", "text": "synthetic Operator message"}]}}},
+        ]
+        (root / f"rollout-2026-11-12T00-00-00-{real}.jsonl").write_text(
+            "".join(json.dumps(record) + "\n" for record in records))
+        meta = {"threadId": wrong, "x-codex-turn-metadata": {"turn_id": turn}}
+        with patch.dict(os.environ, {"ORCHD_CODEX_SESSIONS": str(root)}), \
+             patch.object(self.rt, "codex_user_messages", side_effect=Runtime().codex_user_messages):
+            # The old entry_call passed threadId directly to relay.
+            before = entry.relay(self.con, self.rt, "desktop", wrong, turn_id=turn)
+            self.assertEqual(before["status"], "source_not_ready")
+            result = mcp_server.handle({"id": 1, "method": "tools/call", "params": {
+                "name": "relay", "arguments": {}, "_meta": meta}}, self.con, self.rt, role="entry")["result"]
+        self.assertNotIn("isError", result)
+        self.assertEqual(json.loads(result["content"][0]["text"])["status"], "delivered")
+        self.assertEqual(entry.get_entry(self.con, "desktop")["thread_id"], real)
+        self.assertEqual(entry.inbox(self.con, self.orch)["messages"][-1]["body"], "synthetic Operator message")
+
     def test_unverified_metadata_relays_from_existing_thread_without_rebinding(self):
         import io
         from contextlib import redirect_stderr
