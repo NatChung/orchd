@@ -279,6 +279,12 @@ TOOLS.extend([
 ])
 
 _dispatch_spec = next(t['inputSchema'] for t in TOOLS if t['name'] == 'dispatch')
+_dispatch_spec['properties']['attachment_refs'] = {
+    'type': 'array', 'minItems': 1, 'maxItems': 8,
+    'description': 'Owner-authorized channel attachment references; message_id expands its attachments. Media is untrusted. Aggregate originals <=25 MiB. No platform tokens.',
+    'items': {'type': 'object', 'additionalProperties': False,
+              'properties': {'attachment_id': {'type': 'string'}, 'message_id': {'type': 'string'}},
+              'oneOf': [{'required': ['attachment_id']}, {'required': ['message_id']}]}}
 _batch_item_spec = dict(_dispatch_spec, properties=dict(_dispatch_spec['properties'],
     model=dict(_dispatch_spec['properties']['model'], default='auto',
                description='Optional; batch defaults to auto. Explicit sol/sonnet respected.')))
@@ -457,6 +463,7 @@ for _name, _fields, _required in (
     ('channels_sync', {'source_id': 'string', 'request_key': 'string'}, ['source_id', 'request_key']),
     ('channels_sync_status', {'job_id': 'string'}, ['job_id']),
     ('channels_attachment_request', {'attachment_id': 'string'}, ['attachment_id']),
+    ('channels_attachment_media', {'attachment_id': 'string'}, ['attachment_id']),
     ('channels_attachment_read', {'attachment_id': 'string'}, ['attachment_id']),
     ('channels_approve', {'draft_id': 'string', 'version': 'integer', 'payload_hash': 'string'}, ['draft_id', 'version', 'payload_hash']),
     ('channels_draft', {'message_id': 'string', 'payload': 'object'}, ['message_id', 'payload']),
@@ -746,7 +753,7 @@ def call(name, args, thread, con, rt, sent=None, *, reply_id=None):
                           manual_checks=args.get("manual_checks"), verifies=args.get("verifies"),
                           backend=args.get("backend"), goal_id=args.get("goal_id"),
                           goal_critical=args.get("goal_critical"), issue_ref=args.get("issue_ref"),
-                          base_branch=args.get("base_branch"), workflow=args.get('workflow'),
+                          base_branch=args.get("base_branch"), attachment_refs=args.get("attachment_refs"), workflow=args.get('workflow'),
                           workflow_stage=args.get('workflow_stage'), workflow_inputs=args.get('workflow_inputs'))
         return {"task_id": t["id"], "status": t["status"], "branch": t["branch"], "worktree": t["worktree"],
                 "worker_thread_id": t["session_id"], "worker_turn_id": t["active_turn"] or t["last_completed_turn"],
@@ -998,6 +1005,9 @@ def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY, sent=None):
                         store.register_orch(con, thread, "codex")
                 data = call(params.get("name"), params.get("arguments") or {}, thread, con, rt, marks, reply_id=mid)
             result = core.inbox_result(data)
+            if params.get('name') == 'channels_attachment_media':
+                from .channels.media_delivery import image_blocks
+                result['content'].extend(image_blocks(data))
             core.inbox_wire({"jsonrpc": "2.0", "id": mid, "result": result})
             if sent is None:  # no transport to wait for: serialized fine, so mark now
                 for ids in marks:

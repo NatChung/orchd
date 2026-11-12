@@ -175,7 +175,7 @@ def _choice(name, value, valid):
 def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, model=None,
              model_reason=None, task_type=None, rework_of=None, found_by=None, verify=None, manual_checks=None,
              verifies=None, backend=None, goal_id=None, goal_critical=None, issue_ref=None, group_id=None,
-             base_branch=None, workflow=None, workflow_stage=None, workflow_inputs=None, _run_attempt=None):
+             base_branch=None, workflow=None, workflow_stage=None, workflow_inputs=None, _run_attempt=None, attachment_refs=None):
     from . import issue_links
     if issue_ref is not None:
         issue_links.validate_ref(issue_ref)
@@ -239,6 +239,11 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
                          "the trust prompt, then dispatch again.")
     if base_branch is not None:  # explicit PR target (#121 prerequisite); checked on origin before a task exists
         rt.verify_base_branch(repo_path, base_branch)
+    attachment_images = []
+    attachment_text = ''
+    if attachment_refs is not None:
+        from .channels.media_delivery import prepare_dispatch
+        attachment_text, attachment_images = prepare_dispatch(con, attachment_refs, orch_thread, kind, backend)
     task_id = run_task_id or store.new_task_id()
     remote_branch = remote_repo = None
     with store.immediate(con) if goal_id is not None else contextlib.nullcontext():
@@ -253,6 +258,8 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
     spec = {k: v for k, v in dict(verify=verify, manual_checks=manual_checks, verifies=verifies).items() if v}
     if workflow_record is not None:
         spec['workflow'] = workflow_record
+    if attachment_refs is not None:
+        spec['attachment_refs'] = attachment_refs
     from .quota import dispatch_shadow
     if quota_shadow is None:
         quota_shadow = dispatch_shadow(backend=backend, task_type='review' if verifies else task_type,
@@ -270,12 +277,12 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
             store.update_task(con, task_id, base_branch=base_branch)
         if backend == "app-server":
             task = store.get_task(con, task_id)
-            app_worker.start(con, rt, task, task_message(task), WORKER_MODELS[model], brief=app_brief(worktree, task["repo"], paths.projects_dir()))
+            app_worker.start(con, rt, task, task_message(task) + attachment_text, WORKER_MODELS[model], brief=app_brief(worktree, task["repo"], paths.projects_dir()), **({"images": attachment_images} if attachment_images else {}))
             con.execute("UPDATE tasks SET status='running' WHERE id=? AND status='starting'", (task_id,))
         elif kind == "codex":  # no system-prompt flag and no socket: the brief leads the first turn's prompt
             task = store.get_task(con, task_id)
             job, session = rt.start_codex_worker(worktree, rt.codex_log(task_id),
-                                                 worker_brief(worker_cli(), kind, worktree, task["repo"], paths.projects_dir()) + "\n\n" + task_message(task),
+                                                 worker_brief(worker_cli(), kind, worktree, task["repo"], paths.projects_dir()) + "\n\n" + task_message(task) + attachment_text,
                                                  WORKER_MODELS[model])
             store.update_task(con, task_id, job_id=job, session_id=session)
             con.execute("UPDATE tasks SET status='running' WHERE id=? AND status='starting'", (task_id,))
@@ -285,7 +292,7 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
             store.update_task(con, task_id, socket=sock, job_id=job, session_id=session)
             con.execute("UPDATE tasks SET status='running' WHERE id=? AND status='starting'", (task_id,))
             task = store.get_task(con, task_id)
-            rt.send_uds(sock, session, task_message(task))
+            rt.send_uds(sock, session, task_message(task) + attachment_text)
     except Exception as error:
         store.update_task(con, task_id, status="failed", note=f"{type(error).__name__}: {error}"[:1000])
         worktree = store.get_task(con, task_id)["worktree"]

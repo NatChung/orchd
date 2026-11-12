@@ -3,9 +3,13 @@ from . import models, policy, repository
 
 
 class ChannelService:
-    def __init__(self, path, *, clock=None, retention=None, channel_home=None):
+    def __init__(self, path, *, clock=None, retention=None, channel_home=None, media_limits=None, transcriber=None):
         from datetime import datetime, timezone
         from orchd import paths
+        from .media import MediaLimits
+        self.media_limits = media_limits or MediaLimits()
+        self.media_limits.validate()
+        self.transcriber = transcriber
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.retention = policy.retention_policies() if retention is None else policy.retention_policies({'retention': retention})
         self.channel_home = channel_home or paths.channel_home()
@@ -20,7 +24,8 @@ class ChannelService:
         """Capture a factory on the owning thread; each callback owns its connection."""
         path = repository.database_path(self.con)
         clock, retention, home = self.clock, self.retention, self.channel_home
-        return lambda: ChannelService(path, clock=clock, retention=retention, channel_home=home)
+        return lambda: ChannelService(path, clock=clock, retention=retention, channel_home=home,
+                                      media_limits=self.media_limits, transcriber=self.transcriber)
 
     def close(self):
         self.con.close()
@@ -290,6 +295,10 @@ class ChannelService:
                 **self._freshness(source_id),'next_cursor':ids[limit-1] if len(ids)>limit else None,
                 'messages':[self.message(mid,caller=caller) for mid in ids[:limit]]}
 
+    def attachment_media(self, attachment_id, *, caller):
+        from .media_delivery import read
+        return read(self, attachment_id, caller=caller)
+
     def read_attachment(self, attachment_id, *, caller):
         item=repository.attachment(self.con,attachment_id)
         policy.require_message(caller,item)
@@ -417,8 +426,8 @@ class ChannelService:
     def enforce_retention(self, *, caller):
         from datetime import datetime, timedelta
         policy.require_operator(caller)
-        from .media import MediaLimits, purge_all
-        purge_all(self.channel_home, MediaLimits().retention_s, self.clock().timestamp())
+        from .media import purge_all
+        purge_all(self.channel_home, self.media_limits.retention_s, self.clock().timestamp())
         removed=0
         for row in repository.retention_candidates(self.con):
             days=self.retention.get(row['source_id'],{}).get('body_days',policy.DEFAULT_BODY_DAYS)
@@ -458,7 +467,18 @@ class ChannelService:
                 continue
             try:
                 target.unlink(missing_ok=True)
-            except OSError:
+                # Shared attachment storage (including Slack) is canonical under email/state.
+                from .attachments import content_path
+                from .media import derived_dir, _safe_out_dir
+                import shutil
+                canonical = content_path(self.channel_home, source_id, key)
+                derived = derived_dir(self.channel_home, source_id, key)
+                if _safe_out_dir(derived, self.channel_home) is None:
+                    continue
+                canonical.unlink(missing_ok=True)
+                if derived.exists():
+                    shutil.rmtree(derived)
+            except (OSError, ValueError):
                 continue
             repository.clear_deleted_storage(self.con, item['id'], key)
 
