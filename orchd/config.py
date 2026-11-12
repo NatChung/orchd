@@ -169,6 +169,24 @@ def intake_producers(env=None, home=None):
     return out
 
 
+
+def channel_notify_window(source_id, env=None, home=None):
+    """Validated notification window in seconds for a channel source."""
+    from .intake_notify import DEFAULT_WINDOW
+    file = path(env, home)
+    channels = _read(env, home)[1].get("channels", {})
+    if not isinstance(channels, dict) or not isinstance(channels.get("notify", {}), dict):
+        raise ValueError(f"{file}: [channels.notify] must be tables")
+    windows = {}
+    for name, section in channels.get("notify", {}).items():
+        if not isinstance(section, dict):
+            raise ValueError(f"{file}: [channels.notify.{name}] must be a table")
+        value = section.get("window_seconds")
+        if type(value) is not int or value < 0:
+            raise ValueError(f"{file}: [channels.notify.{name}] window_seconds must be a non-negative integer")
+        windows[name] = value
+    return windows.get(source_id, DEFAULT_WINDOW)
+
 def _edit(text, table, name, value):
     """Set (str) or remove (None) one key by editing lines in place; table None is the top level."""
     eol = "\r\n" if "\r\n" in text else "\n"  # inserted lines follow the file's own style
