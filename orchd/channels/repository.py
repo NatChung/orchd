@@ -426,7 +426,7 @@ def receive(con, source_id, event, adapter, clock, *, in_transaction=False, auto
             if owner and previous_owner and owner != previous_owner:
                 raise ValueError('origin owner conflict')
             if owner and not previous_owner:
-                from orchd import intake_notify
+                from orchd import config, intake_notify
                 conversation_id = 'cc_' + uuid.uuid4().hex
                 con.execute('INSERT OR IGNORE INTO channel_conversations(id,source_id,external_ref,kind,thread_key) VALUES(?,?,?,?,?)',
                             (conversation_id,source_id,origin['conversation_ref'],event['conversation']['kind'],event['conversation']['thread_key']))
@@ -435,7 +435,7 @@ def receive(con, source_id, event, adapter, clock, *, in_transaction=False, auto
                 con.execute('UPDATE channel_messages SET conversation_id=? WHERE id=?', (conversation_id, existing['id']))
                 con.execute('UPDATE intake_events SET owner_orch=? WHERE receipt_id=?', (owner, existing['intake_receipt_id']))
                 con.execute("INSERT INTO channel_processing_claims VALUES(?,?,?,?,?,'claimed',?)", (origin_key,event['revision_key'],'default',owner,route['authority_epoch'],now))
-                intake_notify.enqueue(con, existing['intake_receipt_id'], owner)
+                intake_notify.enqueue(con, existing['intake_receipt_id'], owner, window=config.channel_notify_window(source_id))
                 con.execute("INSERT INTO channel_deliveries(id,kind,source_id,message_id,route_id,route_version,authority_epoch,target_snapshot,payload_hash,state,idempotency_key,created_at,updated_at) VALUES(?,'wake',?,?,?,?,?,?,?,'queued',?,?,?)",
                             ('cd_'+uuid.uuid4().hex,source_id,existing['id'],route['id'],route['version'],route['authority_epoch'],canonical({'owner_orch':owner}),content_hash,'wake:'+existing['id'],now,now))
             con.execute('INSERT OR IGNORE INTO channel_observations VALUES(?,?,?,?,?,?)',(source_id,event['transport_event_key'],origin_key,existing['id'],event_hash,now))
@@ -469,9 +469,9 @@ def receive(con, source_id, event, adapter, clock, *, in_transaction=False, auto
             con.execute('INSERT INTO channel_attachments(id,message_id,provider_attachment_ref,original_name,sha256,byte_size,status,updated_at) VALUES(?,?,?,?,?,?,?,?)',
                         ('ca_'+uuid.uuid4().hex, message_id, ref, attachment['name'], attachment.get('sha256'), attachment.get('bytes'), attachment['status'], now))
         if owner:
-            from orchd import intake_notify
+            from orchd import config, intake_notify
             con.execute("INSERT INTO channel_processing_claims(origin_key,revision_key,lane,owner_orch,authority_epoch,state,created_at) VALUES(?,?,?,?,?,'claimed',?)", (origin_key,event['revision_key'],'default',owner,route['authority_epoch'],now))
-            intake_notify.enqueue(con,receipt_id,owner,intake_bridge._suggestion_urgency(suggestion))
+            intake_notify.enqueue(con,receipt_id,owner,intake_bridge._suggestion_urgency(suggestion), window=config.channel_notify_window(source_id))
             con.execute('INSERT INTO channel_deliveries(id,kind,source_id,message_id,route_id,route_version,authority_epoch,target_snapshot,payload_hash,state,idempotency_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',('cd_'+uuid.uuid4().hex,'wake',source_id,message_id,route['id'],route['version'],route['authority_epoch'],canonical({'owner_orch':owner}),event_hash,'queued','wake:'+message_id,now,now))
         if event['content'].get('unavailable_reason') == 'deleted':
             tombstone(con,message_id,source_id,in_transaction=True)
@@ -774,11 +774,11 @@ def link_legacy_intake(con, source_id, receipt_id, *, in_transaction=False):
         if route and event['owner_orch'] not in (None, route['owner_orch']):
             raise ValueError('legacy owner conflicts with route')
         if route and event['state'] == 'received':
-            from orchd import intake_notify
+            from orchd import config, intake_notify
             owner=route['owner_orch']
             con.execute('UPDATE intake_events SET owner_orch=? WHERE receipt_id=?', (owner,receipt_id))
             con.execute("INSERT INTO channel_processing_claims VALUES(?,?,?, ?,?,'claimed',?)",(origin_key,'initial','default',owner,route['authority_epoch'],now))
-            intake_notify.enqueue(con,receipt_id,owner)
+            intake_notify.enqueue(con,receipt_id,owner, window=config.channel_notify_window(source_id))
             con.execute("INSERT INTO channel_deliveries(id,kind,source_id,message_id,route_id,route_version,authority_epoch,target_snapshot,payload_hash,state,idempotency_key,created_at,updated_at) VALUES(?, 'wake',?,?,?,?,?,?,?,'queued',?,?,?)", ('cd_'+uuid.uuid4().hex,source_id,mid,route['id'],route['version'],route['authority_epoch'],json.dumps({'owner_orch':owner},sort_keys=True),event['content_sha256'],'wake:'+mid,now,now))
         return {'status':'linked','message_id':mid,'receipt_id':receipt_id}
 
