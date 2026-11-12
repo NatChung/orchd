@@ -1,6 +1,7 @@
 import datetime
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -107,3 +108,24 @@ class ClaudeUsageRecoveryTest(unittest.TestCase):
             self.assertNotIn('bob', text)
             self.assertNotIn('secret', text)
 
+
+
+class ClaudeUsageDecodingTest(unittest.TestCase):
+    """Windows cp950 locale decodes the UTF-8 middle dot as U+7E5A unless encoding is explicit (#226 follow-up)."""
+
+    def test_probe_requests_utf8_decoding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = quota.Cache(Path(tmp) / 'quota.db')
+            with patch.object(quota, '_run', return_value=result_for(SESSION + '\n' + WEEK)) as run, \
+                    patch.object(quota.time, 'time', return_value=NOW):
+                self.assertTrue(quota.probe(cache, 'sonnet'))
+            self.assertEqual(run.call_args.kwargs['encoding'], 'utf-8')
+            self.assertEqual(run.call_args.kwargs['errors'], 'replace')
+            self.assertEqual(cache.status(now=NOW)['sonnet']['state'], 'known')
+
+    def test_run_decodes_utf8_bytes_with_middle_dot_independent_of_locale(self):
+        script = "import sys; sys.stdout.buffer.write('5% used \u00b7 resets'.encode('utf-8'))"
+        done = quota._run([sys.executable, '-c', script], 30, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          text=True, encoding='utf-8', errors='replace')
+        self.assertEqual(done.stdout, '5% used · resets')
+        self.assertNotIn('繚', done.stdout)

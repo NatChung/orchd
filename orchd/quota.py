@@ -423,7 +423,8 @@ def _probe(cache, provider, binary=None):
                 '--tools', '', '--no-session-persistence', '--setting-sources', '',
                 '--settings', '{"disableAllHooks":true}', '--strict-mcp-config',
                 '--mcp-config', '{"mcpServers":{}}'], env=launch_env(),
-                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15)
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                encoding='utf-8', errors='replace', timeout=15)
             if _stopping():
                 return  # Shutting down: a killed probe is not an observation.
             if result.returncode:
