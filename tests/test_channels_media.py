@@ -6,9 +6,26 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from orchd.channels import media
-from orchd.channels.media import MediaLimits, process_media
+from orchd.channels.media import MediaLimits, process_media as _process_media
+
+def process_media(input_path, out_dir, *args, **kwargs):
+    kwargs.setdefault("allowed_root", Path(input_path).parent)
+    return _process_media(input_path, out_dir, *args, **kwargs)
+
+def symlinks_available():
+    if os.name != "nt":
+        return True  # Linux must execute these tests; creation failure is a failure.
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            os.symlink(Path(tmp) / "target", Path(tmp) / "link")
+            return True
+        except (OSError, NotImplementedError):
+            return False
+
+SYMLINKS = symlinks_available()
 
 
 def fake_runner(duration=10.0, calls=None, timeout_on=None, audio=True, fail_on=None, frames=3):
@@ -112,14 +129,12 @@ class MediaTest(unittest.TestCase):
 
 
     # --- review rework (#228) ---
+    @unittest.skipUnless(SYMLINKS, "symlinks unavailable")
     def test_symlinked_ancestor_output_rejected(self):
         target = Path(self.tmp.name) / 'elsewhere'
         target.mkdir()
         link = Path(self.tmp.name) / 'link'
-        try:
-            os.symlink(target, link, target_is_directory=True)
-        except (OSError, NotImplementedError):
-            self.skipTest('symlinks unavailable')
+        os.symlink(target, link, target_is_directory=True)
         calls = []
         r = process_media(self.src, link / 'out', ffmpeg='ffmpeg', ffprobe='ffprobe', runner=fake_runner(10, calls),
                           allowed_root=Path(self.tmp.name) / 'safe')
@@ -135,14 +150,12 @@ class MediaTest(unittest.TestCase):
         r = process_media(self.src, safe / 'o', ffmpeg='ffmpeg', ffprobe='ffprobe', runner=fake_runner(10), allowed_root=safe)
         self.assertTrue(r.ok, r.reason)
 
+    @unittest.skipUnless(SYMLINKS, "symlinks unavailable")
     def test_existing_symlinked_output_file_removed_not_followed(self):
         victim = Path(self.tmp.name) / 'victim.txt'
         victim.write_bytes(b'keep')
         self.out.mkdir()
-        try:
-            os.symlink(victim, self.out / 'audio.wav')
-        except (OSError, NotImplementedError):
-            self.skipTest('symlinks unavailable')
+        os.symlink(victim, self.out / 'audio.wav')
         calls = []
         r = process_media(self.src, self.out, ffmpeg='ffmpeg', ffprobe='ffprobe', runner=fake_runner(10, calls))
         self.assertTrue(r.ok, r.reason)
@@ -248,3 +261,80 @@ class MediaTest(unittest.TestCase):
             return SimpleNamespace(returncode=0, stdout=b'')  # claims success, writes nothing
         r = process_media(self.src, self.out, ffmpeg='ffmpeg', ffprobe='ffprobe', runner=run)
         self.assertEqual((r.reason, r.detail), ('ffmpeg_failed', 'audio'))
+
+    def test_exhausted_shared_deadline_stops_next_process(self):
+        for ticks, expected in (([0, 60], 0), ([0, 0, 60], 1), ([0, 0, 1, 60], 2)):
+            calls = []
+            with patch.object(media.time, 'monotonic', side_effect=ticks):
+                r = process_media(self.src, self.out, ffmpeg='ffmpeg', ffprobe='ffprobe',
+                                  runner=fake_runner(calls=calls))
+            self.assertEqual(r.reason, 'timeout')
+            self.assertEqual(len(calls), expected)
+            self.assertFalse(list(self.out.glob('frame_*.png')))
+
+    def test_audio_oserror_cleans_partial_frames(self):
+        base = fake_runner()
+        def run(argv, timeout):
+            if argv[-1].endswith('audio.wav'):
+                raise OSError('cannot launch')
+            return base(argv, timeout)
+        r = process_media(self.src, self.out, ffmpeg='ffmpeg', ffprobe='ffprobe', runner=run)
+        self.assertEqual(r.reason, 'ffmpeg_unavailable')
+        self.assertEqual(list(self.out.iterdir()), [])
+
+    def test_trusted_root_is_required(self):
+        with self.assertRaises(TypeError):
+            _process_media(self.src, self.out)
+        r = process_media(self.src, self.out, allowed_root=None, ffmpeg='ffmpeg', ffprobe='ffprobe')
+        self.assertEqual(r.reason, 'unsafe_output_dir')
+
+    @unittest.skipUnless(SYMLINKS, 'symlinks unavailable')
+    def test_directory_swap_after_mkdir_is_rejected(self):
+        target = Path(self.tmp.name) / 'outside'
+        target.mkdir()
+        safe = Path(self.tmp.name) / 'safe'
+        safe.mkdir()
+        out = safe / 'out'
+        original = Path.mkdir
+        def mkdir(path, *args, **kwargs):
+            if path == out:
+                os.symlink(target, out, target_is_directory=True)
+            else:
+                original(path, *args, **kwargs)
+        calls = []
+        with patch.object(Path, 'mkdir', mkdir):
+            r = process_media(self.src, out, allowed_root=safe, ffmpeg='ffmpeg', ffprobe='ffprobe',
+                              runner=fake_runner(calls=calls))
+        self.assertEqual(r.reason, 'unsafe_output_dir')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(list(target.iterdir()), [])
+
+    def test_service_startup_purges_idle_media_without_ffmpeg(self):
+        from orchd.channels.service import ChannelService
+        home = Path(self.tmp.name) / 'home'
+        old = media.derived_dir(home, 'idle', 'a' * 64) / 'frame_001.png'
+        old.parent.mkdir(parents=True)
+        old.write_bytes(b'expired')
+        os.utime(old, (1, 1))
+        with patch.object(media, '_find', return_value=None):
+            svc = ChannelService(Path(self.tmp.name) / 'channels.db', channel_home=home)
+            svc.close()
+        self.assertFalse(old.exists())
+
+    def test_extreme_aspect_ratio_pixel_cap_after_rounding(self):
+        import math
+        expression = media._scale_filter(MediaLimits(max_pixels=256))
+        for iw, ih in ((1, 10000), (10000, 1), (10000, 10000)):
+            parts = expression.split("scale=w='")[1:]
+            for part in parts:
+                wexpr, rest = part.split("':h=", 1)
+                hexpr = rest.rstrip(",").strip("'")
+                scope = dict(iw=iw, ih=ih, trunc=math.trunc, sqrt=math.sqrt, min=min, max=max)
+                w = eval(wexpr, {'__builtins__': {}}, scope)
+                h = eval(hexpr, {'__builtins__': {}}, scope)
+                iw, ih = w, h
+            self.assertGreaterEqual(iw, 2)
+            self.assertGreaterEqual(ih, 2)
+            self.assertLessEqual(iw, 1280)
+            self.assertLessEqual(ih, 720)
+            self.assertLessEqual(iw * ih, 256)

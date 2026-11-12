@@ -127,19 +127,18 @@ def _run(argv, timeout_s):
 def _safe_out_dir(out_dir, allowed_root):
     """Resolve out_dir fully (all ancestors) and confine it to allowed_root.
 
-    allowed_root defaults to the resolved parent of out_dir, so out_dir itself
-    must not be a link leaving that parent. Returns the resolved Path or None.
+    allowed_root must be supplied by the caller. Returns the resolved Path or None.
     """
+    if allowed_root is None:
+        return None
     out = Path(out_dir)
     try:
         if out.is_symlink():
             return None
         resolved = out.resolve()
-        root = Path(allowed_root).resolve() if allowed_root is not None else out.parent.resolve()
+        root = Path(allowed_root).resolve()
         resolved.relative_to(root)
     except (OSError, ValueError, RuntimeError):
-        return None
-    if allowed_root is None and resolved.parent != root:
         return None
     return resolved
 
@@ -157,11 +156,24 @@ def _scale_filter(limits):
     # factor <= 1 satisfying width, height and total-pixel caps; keep even dims.
     f = (f'min(1,min({limits.max_width}/iw,min({limits.max_height}/ih,'
          f'sqrt({limits.max_pixels}/(iw*ih)))))')
-    return f"scale=w='max(2,trunc(iw*{f}/2)*2)':h='max(2,trunc(ih*{f}/2)*2)'"
+    w = f'max(2,trunc(iw*{f}/2)*2)'
+    h = f'min({limits.max_pixels // 4 * 2},max(2,trunc(ih*{f}/2)*2))'
+    # Clamp again after the minimum even dimension: a 1-pixel side becomes 2.
+    return (f"scale=w='{w}':h='{h}',"
+            f"scale=w='min(iw,trunc({limits.max_pixels}/ih/2)*2)':h=ih")
 
 
 def process_media(input_path, out_dir, limits=None, *, ffmpeg=None, ffprobe=None, runner=None, now=None,
-                  allowed_root=None):
+                  allowed_root):
+    """Extract inside a caller-supplied trusted root.
+
+    The root and all output ancestors must be owned by the caller and must not
+    be writable/replaced by untrusted users or concurrent tasks during this call.
+    Resolve checks before cleanup and each subprocess catch accidental swaps;
+    they do not close the OS-level TOCTOU window. ffmpeg opens paths itself, so
+    hostile concurrent directory replacement is outside this API's threat model.
+    Callers must serialize processing of the same output directory.
+    """
     limits = limits or MediaLimits()
     limits.validate()
     runner = runner or _run
@@ -180,7 +192,10 @@ def process_media(input_path, out_dir, limits=None, *, ffmpeg=None, ffprobe=None
     deadline = time.monotonic() + limits.timeout_s
 
     def remaining():
-        return max(0.1, deadline - time.monotonic())
+        budget = deadline - time.monotonic()
+        if budget <= 0:
+            raise subprocess.TimeoutExpired('media', limits.timeout_s)
+        return budget
 
     try:
         probe = runner([ffprobe, '-v', 'error', '-print_format', 'json', '-show_format', '-show_streams',
@@ -203,7 +218,8 @@ def process_media(input_path, out_dir, limits=None, *, ffmpeg=None, ffprobe=None
         return MediaResult(False, 'duration_exceeded', f'{duration:.1f}s > {limits.max_duration_s:.1f}s', duration)
     try:
         out.mkdir(parents=True, exist_ok=True)
-        out = out.resolve()
+        if _safe_out_dir(out_dir, allowed_root) != out:
+            return MediaResult(False, 'unsafe_output_dir')
         _clear_outputs(out)
     except OSError:
         return MediaResult(False, 'unsafe_output_dir')
@@ -226,23 +242,29 @@ def process_media(input_path, out_dir, limits=None, *, ffmpeg=None, ffprobe=None
 
     def fail(reason, label):
         try:
-            _clear_outputs(out)
+            if _safe_out_dir(out_dir, allowed_root) == out:
+                _clear_outputs(out)
         except OSError:
             pass
         return MediaResult(False, reason, label, duration, output_dir=str(out))
 
     for label, cmd in jobs:
         try:
+            if _safe_out_dir(out_dir, allowed_root) != out:
+                return fail('unsafe_output_dir', label)
             res = runner(cmd, remaining())
+            if label == 'audio' and (not audio.is_file() or audio.stat().st_size == 0):
+                return fail('ffmpeg_failed', label)
         except subprocess.TimeoutExpired:
             return fail('timeout', label)
         except OSError:
-            return MediaResult(False, 'ffmpeg_unavailable', WINGET_HINT)
+            return fail('ffmpeg_unavailable', WINGET_HINT)
         if res.returncode != 0:
             return fail('ffmpeg_failed', label)
-        if label == 'audio' and (not audio.is_file() or audio.stat().st_size == 0):
-            return fail('ffmpeg_failed', label)
-    frames = sorted(str(p) for p in out.glob('frame_*.png'))[:limits.max_frames]
+    try:
+        frames = sorted(str(p) for p in out.glob('frame_*.png'))[:limits.max_frames]
+    except OSError:
+        return fail('ffmpeg_failed', 'frames')
     if not frames and limits.frame_mode == 'interval':
         return fail('ffmpeg_failed', 'frames')
     return MediaResult(True, duration_s=duration, frames=frames,
