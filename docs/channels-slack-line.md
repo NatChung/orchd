@@ -27,7 +27,7 @@ Configure explicit conversation IDs, an activation timestamp, and known self
 user/app/bot identities from trusted configuration. Choose the intended user or
 bot Web API account; there is no fallback to another account. Configure the app's
 Socket Mode `connections:write`, event subscriptions and conversation-type read
-scopes in Slack, separately from orchd. Missing scopes fail reconciliation.
+scopes in Slack, separately from orchd. Grant `files:read` for on-demand attachment downloads; existing installations need reauthorization after adding the scope. Missing scopes fail reconciliation.
 
 Call `connect()` explicitly, then run the existing `AdapterRunner` with that
 adapter. Call `close()` on shutdown. SDK callbacks create their own service
@@ -158,3 +158,5 @@ for history and cause startup to fail. `auth.test` identifies the API credential
 user and optional bot before the socket opens; a workspace mismatch fails closed.
 The account needs access to the routed conversations. History starts at activation,
 including after the normal checkpoint overlap; existing checkpoints remain in use.
+
+Slack file metadata is retained with the message under the existing source ACL and retention policy. Downloads occur only after an attachment request and use the shared 25 MiB limit and MIME policy in [channel-attachment-policy.md](channel-attachment-policy.md). Failures are terminal and recorded with a reason. Only the adapter accesses Slack. Media processing and worker attachment delivery are not implemented.

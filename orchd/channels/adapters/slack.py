@@ -16,9 +16,16 @@ def timestamp(value):
     value=Decimal(str(value))
     return (datetime.fromtimestamp(int(value),timezone.utc)+timedelta(microseconds=int((value%1)*1000000))).isoformat()
 
+def _safe_file_url(url):
+    from urllib.parse import urlsplit
+    try:
+        p = urlsplit(url)
+        return p.scheme == 'https' and p.hostname == 'files.slack.com' and not (p.username or p.password or p.port or p.query or p.fragment)
+    except (ValueError, TypeError): return False
+
 def normalize_slack(payload):
     raw=payload['event']; subtype=raw.get('subtype')
-    if raw.get('type')!='message' or subtype not in (None,'bot_message','message_changed','message_deleted'):
+    if raw.get('type')!='message' or subtype not in (None,'bot_message','file_share','message_changed','message_deleted'):
         return None
     message=raw.get('message',raw) if subtype=='message_changed' else raw
     mid=raw['deleted_ts'] if subtype=='message_deleted' else message['ts']
@@ -29,8 +36,17 @@ def normalize_slack(payload):
         revision='deleted'
         content={'status':'unavailable','text':None,'attachments':[],'unavailable_reason':'deleted'}
         message=raw.get('previous_message',raw)
-    if subtype!='message_deleted' and (message.get('files') or message.get('attachments')):
-        content['status']='truncated'
+    if subtype != 'message_deleted':
+        for file in message.get('files', []):
+            url = file.get('url_private', '')
+            item = dict(name=file.get('name') or file['id'], status='referenced', provider_attachment_ref=file['id'])
+            if _safe_file_url(url): item['source_url_ref'] = url
+            else: item.update(status='unavailable', note='download_failed')
+            if file.get('mimetype'): item['mime_type'] = file['mimetype']
+            if type(file.get('size')) is int: item['bytes'] = file['size']
+            if type(file.get('duration')) in (int, float): item['duration'] = file['duration']
+            content['attachments'].append(item)
+        if message.get('attachments'): content['status']='truncated'
     return models.validate_event(dict(schema_version=1,transport_event_key=payload['event_id'],
         origin=dict(provider='slack',tenant_ref=payload['team_id'],conversation_ref=raw['channel'],message_id=mid),
         revision_key=revision,conversation=dict(kind='channel',thread_key=message.get('thread_ts') or mid),
@@ -57,7 +73,7 @@ class SlackAdapter:
         event=normalize_slack(payload)
         if event is None:
             # Durable diagnostic only; unknown events never enter the processing lane.
-            event=models.validate_event(dict(schema_version=1,transport_event_key=payload['event_id'],origin=dict(provider='slack',tenant_ref=source['tenant_ref'],conversation_ref=payload['event'].get('channel','diagnostic'),message_id='diagnostic:'+payload['event_id']),revision_key='initial',conversation=dict(kind='channel',thread_key=''),sender_ref='unknown',source_time=timestamp(payload.get('event_time',0)),content=dict(status='unavailable',text=None,attachments=[],unavailable_reason='unsupported_event')))
+            event=models.validate_event(dict(schema_version=1,transport_event_key=payload['event_id'],origin=dict(provider='slack',tenant_ref=source['tenant_ref'],conversation_ref=payload['event'].get('channel','diagnostic'),message_id='diagnostic:'+payload['event_id']),revision_key='initial',conversation=dict(kind='channel',thread_key=''),sender_ref='unknown',source_time=timestamp(payload.get('event_time',0)),content=dict(status='unavailable',text=None,attachments=[],unavailable_reason='unsupported_event',diagnostic={'type':payload['event'].get('type'), 'subtype':payload['event'].get('subtype')})))
             context=Automation(app_ref='unsupported')
         else:
             raw=payload['event'].get('message',payload['event'])
@@ -120,11 +136,13 @@ class SlackAdapter:
             self.service.renew_source_lease(self.source_id,holder,generation,caller=self.caller,seconds=900)
             if pending:
                 job=self.service.claim_sync_job(self.source_id,holder,generation,caller=self.caller)
-                if job is None: return {'status':'idle'}
+                # Attachment requests are independent of sync jobs.
             credential=resolve(source['credential_refs'].get('api'),adapter=self.caller.identity,source=self.source_id,provider=self.secret_store)
             if self.transport is None:
                 self.transport=SlackTransport()
                 self.transport.configure(credential)
+            self._download_queued(holder, generation)
+            if pending and job is None: return {'status':'idle'}
             for conversation in self.conversations:
                 self._history(source,conversation,None,holder,generation)
             if job: self.service.finish_sync_job(self.source_id,job,holder,generation,caller=self.caller)
@@ -153,6 +171,23 @@ class SlackAdapter:
                 except PermissionError:
                     if not failed:
                         raise
+    def _download_queued(self, holder, generation):
+        from ..attachments import MAX_ATTACHMENT_BYTES, rejection_reason
+        for item in self.service.queued_attachments(self.source_id, caller=self.caller):
+            descriptor = self.service.attachment_descriptor(item['id'], caller=self.caller)
+            reason = None
+            if item['byte_size'] is not None and item['byte_size'] > MAX_ATTACHMENT_BYTES: reason = 'too_large'
+            elif rejection_reason(self.service.channel_home, self.source_id, descriptor.get('mime_type', 'application/octet-stream'), b'') == 'mime_rejected': reason = 'mime_not_allowed'
+            else:
+                try:
+                    data = self.transport.get_attachment(descriptor['source_url_ref'])
+                    if len(data) > MAX_ATTACHMENT_BYTES: reason = 'too_large'
+                    elif item['byte_size'] is not None and len(data) != item['byte_size']: reason = 'size_mismatch'
+                    else: self.service.store_attachment(item['id'], data, holder, generation, caller=self.caller)
+                except SlackError as error: reason = error.code if error.code in ('missing_scope', 'too_large') else 'download_failed'
+                except (OSError, KeyError): reason = 'download_failed'
+            if reason: self.service.reject_attachment(item['id'], reason, holder, generation, caller=self.caller)
+
     def _history(self,source,conversation,thread,holder,generation):
         scope='thread:'+conversation+':'+thread if thread else 'history:'+conversation
         previous=self.service.checkpoint(self.source_id,scope,caller=self.caller)
@@ -224,6 +259,27 @@ class SlackTransport:
             response=getattr(error,'response',None)
             if response is None: raise SlackError('transport_error') from None
             raise SlackError(response.get('error','transport_error'),getattr(response,'headers',{}).get('Retry-After',0)) from None
+    def get_attachment(self, url):
+        from urllib.request import Request, build_opener, HTTPRedirectHandler
+        from urllib.error import HTTPError, URLError
+        from ..attachments import MAX_ATTACHMENT_BYTES
+        if not _safe_file_url(url): raise SlackError('download_failed')
+        class NoRedirect(HTTPRedirectHandler):
+            def redirect_request(self, *args, **kwargs): return None
+        try:
+            request = Request(url, headers={'Authorization': 'Bearer ' + self.web.token})
+            with build_opener(NoRedirect).open(request, timeout=30) as response:
+                scopes = response.headers.get('x-oauth-scopes')
+                if scopes is not None and 'files:read' not in [s.strip() for s in scopes.split(',')]: raise SlackError('missing_scope')
+                data = response.read(MAX_ATTACHMENT_BYTES + 1)
+                if len(data) > MAX_ATTACHMENT_BYTES: raise SlackError('too_large')
+                return data
+        except HTTPError as error:
+            scopes = error.headers.get('x-oauth-scopes')
+            if error.code == 403 and scopes is not None and 'files:read' not in [s.strip() for s in scopes.split(',')]: raise SlackError('missing_scope') from None
+            raise SlackError('download_failed') from None
+        except (URLError, OSError): raise SlackError('download_failed') from None
+
     def close(self):
         if hasattr(self,'socket'): self.socket.close()
 
