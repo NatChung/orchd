@@ -697,6 +697,18 @@ class EntryTest(unittest.TestCase):
         self.assertEqual(json.loads(result["content"][0]["text"])["status"], "delivered")
         self.assertEqual(entry.get_entry(self.con, "desktop")["thread_id"], real)
         self.assertEqual(entry.inbox(self.con, self.orch)["messages"][-1]["body"], "synthetic Operator message")
+        meta["x-codex-turn-metadata"]["turn_id"] = "01a1cdb0-1111-7111-8111-111111111111"
+        with patch.dict(os.environ, {"CODEX_HOME": self.tmp.name}), \
+             patch.object(self.rt, "codex_user_messages", side_effect=Runtime().codex_user_messages):
+            missing = mcp_server.handle({"id": 2, "method": "tools/call", "params": {
+                "name": "relay", "arguments": {}, "_meta": meta}}, self.con, self.rt, role="entry")["result"]
+        self.assertNotIn("isError", missing)
+        data = json.loads(missing["content"][0]["text"])
+        self.assertEqual(data["status"], "source_not_ready")
+        self.assertIn("nothing was relayed", data["note"])
+        self.assertIn("binding_warning", data)
+        self.assertEqual(entry.get_entry(self.con, "desktop")["thread_id"], real)
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM entry_messages WHERE direction='in'").fetchone()[0], 1)
 
     def test_unverified_metadata_relays_from_existing_thread_without_rebinding(self):
         import io
