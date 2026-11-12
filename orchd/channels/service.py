@@ -334,6 +334,20 @@ class ChannelService:
         self._require_adapter(source_id, caller)
         return repository.queued_attachments(self.con, source_id)
 
+    def reject_attachment(self, attachment_id, reason, holder, generation, *, caller):
+        item = repository.attachment(self.con, attachment_id)
+        self._require_adapter(item['source_id'], caller)
+        if reason not in ('missing_scope', 'download_failed', 'too_large', 'mime_not_allowed', 'size_mismatch'): raise ValueError('invalid rejection reason')
+        repository.reject_attachment(self.con, attachment_id, item['source_id'], reason, self.clock().isoformat(), holder, generation)
+
+    def attachment_descriptor(self, attachment_id, *, caller):
+        import json
+        item = repository.attachment(self.con, attachment_id)
+        self._require_adapter(item['source_id'], caller)
+        message = repository.get_message(self.con, item['message_id'])
+        content = repository.content(self.con, message['intake_receipt_id'])
+        return next(entry for entry in json.loads(content['attachments']) if entry.get('provider_attachment_ref') == item['provider_attachment_ref'])
+
     def store_attachment(self, attachment_id, data, holder, generation, *, caller):
         import hashlib, mimetypes, os, tempfile
         from .attachments import content_path, MAX_ATTACHMENT_BYTES

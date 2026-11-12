@@ -7,7 +7,7 @@ import sys
 SLACK_MANIFEST = '''{
   "display_information": {"name": "orchd"},
   "features": {"bot_user": {"display_name": "orchd"}},
-  "oauth_config": {"scopes": {"bot": ["channels:history", "groups:history", "im:history", "mpim:history"]}},
+  "oauth_config": {"scopes": {"bot": ["channels:history", "groups:history", "im:history", "mpim:history", "files:read"]}},
   "settings": {"event_subscriptions": {"bot_events": ["message.channels", "message.groups", "message.im", "message.mpim"]}, "socket_mode_enabled": true}
 }'''
 

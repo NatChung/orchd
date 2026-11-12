@@ -129,3 +129,88 @@ class SocketTest(ChannelCase):
         self.fake.history=lambda conversation,oldest,end,**kwargs: calls.append((conversation,oldest)) or {'messages': []}
         adapter.poll()
         self.assertEqual(calls, [('c','1767225600')])
+
+class SlackFileTest(ChannelCase):
+    def test_file_share_metadata_and_text(self):
+        payload=envelope(subtype='file_share', files=[dict(id='F1', name='photo.png', mimetype='image/png', size=4, duration=3, url_private='https://files.slack.com/files-pri/T/F1/photo.png')])['payload']
+        item=normalize_slack(payload)['content']['attachments'][0]
+        self.assertEqual(item['provider_attachment_ref'], 'F1')
+        self.assertEqual(item['source_url_ref'], payload['event']['files'][0]['url_private'])
+        self.assertEqual(item['duration'], 3)
+        self.assertNotIn('token', str(item))
+        self.assertEqual(normalize_slack(payload)['content']['text'], 'synthetic')
+    def test_regular_message_files(self):
+        payload=envelope(files=[dict(id='F',name='x.mp4',mimetype='video/mp4',size=4,url_private='https://files.slack.com/files-pri/T/F/x')])['payload']
+        self.assertEqual(normalize_slack(payload)['content']['attachments'][0]['mime_type'],'video/mp4')
+
+    def test_request_download_read_and_failures(self):
+        from unittest.mock import patch
+        adapter=SocketTest.adapter(self)
+        reader=policy.Caller(role='orch',sources=frozenset({'s'}),identity='orch')
+        for index, reason in enumerate((None,'missing_scope','download_failed','too_large','mime_not_allowed')):
+            file=dict(id='F'+str(index),name='x.png',mimetype='image/png' if reason!='mime_not_allowed' else 'application/x-bad',size=4 if reason!='too_large' else 30*1024*1024,url_private='https://files.slack.com/files-pri/T/F/x')
+            receipt=adapter.on_envelope(envelope(str(1767225600+index)+'.1','file'+str(index),files=[file]))
+            aid=self.svc.message(receipt['message_id'],caller=reader)['content']['attachments'][0]['attachment_id']
+            self.svc.request_attachment(aid,caller=reader)
+            self.fake.get_attachment=lambda url: (_ for _ in ()).throw(SlackError(reason)) if reason in ('missing_scope','download_failed') else b'data'
+            adapter.poll()
+            result=self.svc.read_attachment(aid,caller=reader)
+            if reason is None: self.assertEqual(result['content_base64'],'ZGF0YQ==')
+            else:
+                self.assertEqual(result['status'],'unavailable')
+                self.assertEqual(self.svc.message(receipt['message_id'],caller=reader)['content']['attachments'][0]['note'],reason)
+
+class SlackHttpTest(ChannelCase):
+    def test_http_download_bounded_and_scope(self):
+        from unittest.mock import patch
+        from io import BytesIO
+        from types import SimpleNamespace
+        from orchd.channels.adapters.slack import SlackTransport, SlackError
+        class Response(BytesIO):
+            headers={'x-oauth-scopes':'files:read'}
+        class Opener:
+            def open(self, request, timeout):
+                self.request=request
+                return Response(b'data')
+        opener=Opener(); transport=SlackTransport(); transport.web=SimpleNamespace(token='secret')
+        with patch('urllib.request.build_opener',return_value=opener):
+            self.assertEqual(transport.get_attachment('https://files.slack.com/files-pri/T/F/x'),b'data')
+            self.assertEqual(opener.request.get_header('Authorization'),'Bearer secret')
+            with self.assertRaises(SlackError): transport.get_attachment('https://example.com/x')
+            Response.headers={'x-oauth-scopes':'channels:history'}
+            with self.assertRaises(SlackError) as caught: transport.get_attachment('https://files.slack.com/files-pri/T/F/x')
+            self.assertEqual(caught.exception.code,'missing_scope')
+
+    def test_unsupported_diagnostic_only_type_and_subtype(self):
+        adapter=SocketTest.adapter(self)
+        payload=envelope(key='unsupported'); payload['payload']['event'].update(type='reaction_added',subtype='example',text='private')
+        receipt=adapter.on_envelope(payload)
+        content=self.svc.message(receipt['message_id'],caller=self.caller)['content']
+        self.assertEqual(content['metadata']['diagnostic'],{'type':'reaction_added','subtype':'example'})
+        self.assertNotIn('private',str(content))
+    def test_request_through_fake_http_to_read(self):
+        from unittest.mock import patch
+        from io import BytesIO
+        from types import SimpleNamespace
+        from orchd.channels.adapters.slack import SlackTransport
+        adapter=SocketTest.adapter(self)
+        adapter.conversations=()
+        http=SlackTransport(); http.web=SimpleNamespace(token='fake')
+        self.fake.get_attachment=http.get_attachment
+        class Response(BytesIO):
+            headers={'x-oauth-scopes':'files:read'}
+        class Opener:
+            def open(self, request, timeout): return Response(b'data')
+        reader=policy.Caller(role='orch',sources=frozenset({'s'}),identity='orch')
+        file=dict(id='F',name='x.png',mimetype='image/png',size=4,url_private='https://files.slack.com/files-pri/T/F/x')
+        receipt=adapter.on_envelope(envelope(files=[file]))
+        aid=self.svc.message(receipt['message_id'],caller=reader)['content']['attachments'][0]['attachment_id']
+        self.svc.request_attachment(aid,caller=reader)
+        with patch('urllib.request.build_opener',return_value=Opener()): adapter.poll()
+        self.assertEqual(self.svc.read_attachment(aid,caller=reader)['content_base64'],'ZGF0YQ==')
+
+    def test_default_media_allowlist_and_reject_other(self):
+        from orchd.channels.attachments import rejection_reason
+        for mime in ('image/png','image/jpeg','image/gif','image/webp','image/heic','video/mp4','video/quicktime','video/webm','audio/mp4','audio/mpeg','audio/wav','audio/ogg','audio/webm'):
+            with self.subTest(mime=mime): self.assertIsNone(rejection_reason(self.svc.channel_home,'s',mime,b'data'))
+        self.assertEqual(rejection_reason(self.svc.channel_home,'s','application/x-bad',b'data'),'mime_rejected')

@@ -455,6 +455,7 @@ def receive(con, source_id, event, adapter, clock, *, in_transaction=False, auto
         provider='email' if source['provider']=='gmail' else source['provider']
         con.execute('INSERT INTO intake_events(receipt_id,version,provider,account,company,event_id,source_ref,thread_ref,source_time,received_at,producer,summary,content_sha256,owner_orch) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(receipt_id,2,provider,source['account_ref'],source['tenant_ref'] or source['account_ref'],event['transport_event_key'],origin['conversation_ref'],event['conversation']['thread_key'] or None,source_time,time.time(),adapter,'Channel message',event_hash,owner))
         metadata = {'mentions':content.get('mentions', []), 'format':content.get('format'), 'target':event.get('target')}
+        if 'diagnostic' in content: metadata['diagnostic'] = content['diagnostic']
         con.execute('INSERT INTO intake_content(receipt_id,status,text,unavailable_reason,text_sha256,text_bytes,attachments,created_at,channel_metadata) VALUES(?,?,?,?,?,?,?,?,?)',(receipt_id,content['status'],text,content.get('unavailable_reason'),intake._sha(text) if text is not None else None,len(text.encode()) if text else 0,canonical(content.get('attachments',[])),time.time(),canonical(metadata)))
         intake._log(con,'event',receipt_id)
         if suggestion:
