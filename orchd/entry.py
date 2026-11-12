@@ -22,7 +22,7 @@ from pathlib import Path
 
 from . import entry_attachments, issue_links, orch_revive, paths, question_summary, store
 from .orch_health import owner_health
-from .runtime import error_detail
+from .runtime import error_detail, redact
 
 DEFAULT_ENTRY = "desktop"
 RETRYABLE = ("pending", "failed")
@@ -489,13 +489,28 @@ def _send(con, rows, recipient, transport):
             transport(row)
         except Exception as error:
             try:
-                held = row["direction"] == "out" and row["attempts"] + 1 >= MAX_SEND_ATTEMPTS
+                if isinstance(error, subprocess.CalledProcessError):
+                    stderr = error.stderr or ""
+                    stderr = stderr.decode(errors="replace") if isinstance(stderr, bytes) else stderr
+                    detail = redact(stderr.strip()) or "no stderr"
+                else:
+                    detail = error_detail(error)
+                permanent = (row["direction"] == "out" and isinstance(error, subprocess.CalledProcessError)
+                             and "no rollout found for thread id" in detail.lower())
+                held = row["direction"] == "out" and (permanent or row["attempts"] + 1 >= MAX_SEND_ATTEMPTS)
+                for text in (row["wire_text"], row["body"]):
+                    if text:
+                        detail = detail.replace(text, "[message redacted]")
+                detail = re.sub(r"(?i)(token|password|secret|api[_-]?key)([\s=:]+)[^\s,;]+", r"\1\2[redacted]", detail)
                 with store.immediate(con):
+                    if permanent:
+                        con.execute("UPDATE entry_messages SET attempts=? WHERE id=? AND read_at IS NULL",
+                                    (MAX_SEND_ATTEMPTS, row["id"]))
                     read = not con.execute("UPDATE entry_messages SET delivery=?, delivery_error=? "
                                            "WHERE id=? AND read_at IS NULL",
-                                           ("held" if held else "failed", (f"{type(error).__name__} (exit code {error.returncode}): {error_detail(error)}"
+                                           ("held" if held else "failed", (f"{type(error).__name__} (exit code {error.returncode}): {detail}"
                                             if isinstance(error, subprocess.CalledProcessError) else
-                                            f"{type(error).__name__}: {error_detail(error)}")[:500],
+                                            f"{type(error).__name__}: {detail}")[:500],
                                             row["id"])).rowcount
                     if held and not read and row["question_state"] == "current":
                         _park_failed_question(con, row)
@@ -687,11 +702,13 @@ def _state(row):
     return "uncertain" if row["delivery"] == "sending" else row["delivery"]
 
 
-def relay(con, rt, entry_id, thread, turn_id=None, reply_to=None):
+def relay(con, rt, entry_id, thread, turn_id=None, reply_to=None, *, bind_thread=True):
     """Entry tool: relay Operator's latest message in this thread, read from the rollout, to the bound Orch."""
     entry_attachments.cleanup()
-    entry, resumed = touch(con, entry_id, thread)
+    entry, resumed = touch(con, entry_id, thread) if bind_thread else (get_entry(con, entry_id), False)
     try:
+        if not thread or (not bind_thread and not turn_id):
+            raise SourceNotReady
         source = _source(rt, thread, turn_id)
     except SourceNotReady:
         return dict(status="source_not_ready", resumed=resumed,
@@ -791,9 +808,9 @@ def relay(con, rt, entry_id, thread, turn_id=None, reply_to=None):
     return result
 
 
-def status(con, rt, entry_id, thread):
+def status(con, rt, entry_id, thread, *, bind_thread=True):
     """Entry tool: binding, the current question in full, anything not yet handed over, and retries."""
-    entry, resumed = touch(con, entry_id, thread)
+    entry, resumed = touch(con, entry_id, thread) if bind_thread else (get_entry(con, entry_id), False)
     deliver_inbound(con, rt, entry_id)
     deliver_outbound(con, rt, entry_id)
     entry = get_entry(con, entry_id)

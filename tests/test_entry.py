@@ -634,6 +634,122 @@ class EntryTest(unittest.TestCase):
             "name": name, "arguments": args or {}, "_meta": {"threadId": thread}}},
             self.con, self.rt, role="entry")["result"]
 
+    def test_metadata_resolves_unique_turn_and_preserves_unverified_binding(self):
+        import io
+        from contextlib import redirect_stderr
+        real = "01a1cdb0-2204-7331-8dd5-b5e7b8e8086b"
+        wrong = "01a1cdb0-2310-7f10-be70-1f1a6dd5f000"
+        turn = "01a1cdb0-2378-7c63-b347-85bffb53784d"
+        root = Path(self.tmp.name) / "sessions"
+        root.mkdir()
+        rollout = root / f"rollout-2026-11-12T00-00-00-{real}.jsonl"
+        rollout.write_text(json.dumps({"type": "session_meta", "payload": {"id": real}}) + "\n" +
+                           json.dumps({"type": "event_msg", "payload": {"type": "task_started", "turn_id": turn}}) + "\n")
+        meta = {"threadId": wrong, "x-codex-turn-metadata": {"thread_id": wrong, "turn_id": turn}}
+        def call():
+            return mcp_server.handle({"id": 1, "method": "tools/call", "params": {
+                "name": "status", "arguments": {}, "_meta": meta}}, self.con, self.rt, role="entry")["result"]
+        log = io.StringIO()
+        with patch.dict(os.environ, {"ORCHD_CODEX_SESSIONS": str(root)}), redirect_stderr(log):
+            self.assertNotIn("isError", call())
+            self.assertEqual(entry.get_entry(self.con, "desktop")["thread_id"], real)
+            self.assertIn(wrong, log.getvalue())
+            self.assertIn(turn, log.getvalue())
+            self.assertEqual(mcp_server._entry_thread({"threadId": real}), (real, None))
+            meta["x-codex-turn-metadata"]["turn_id"] = "01a1cdb0-1111-7111-8111-111111111111"
+            result = call()
+            self.assertNotIn("isError", result)
+            self.assertIn("binding_warning", json.loads(result["content"][0]["text"]))
+            self.assertEqual(entry.get_entry(self.con, "desktop")["thread_id"], real)
+            other = "01a1cdb0-3333-7333-8333-333333333333"
+            (root / f"rollout-2026-11-12T00-00-00-{other}.jsonl").write_text(
+                json.dumps({"type": "session_meta", "payload": {"id": other}}) + "\n" +
+                json.dumps({"type": "event_msg", "payload": {"turn_id": turn}}) + "\n")
+            meta["x-codex-turn-metadata"]["turn_id"] = turn
+            result = call()
+            self.assertNotIn("isError", result)
+            self.assertIn("binding_warning", json.loads(result["content"][0]["text"]))
+            self.assertEqual(entry.get_entry(self.con, "desktop")["thread_id"], real)
+
+    def test_wrong_mcp_thread_with_unique_turn_relays_from_real_rollout(self):
+        real = "01a1cdb0-2204-7331-8dd5-b5e7b8e8086b"
+        wrong = "01a1cdb0-2310-7f10-be70-1f1a6dd5f000"
+        turn = "01a1cdb0-2378-7c63-b347-85bffb53784d"
+        root = Path(self.tmp.name) / "sessions"
+        root.mkdir()
+        records = [
+            {"type": "session_meta", "payload": {"id": real}},
+            {"type": "event_msg", "payload": {"type": "item_completed", "turn_id": turn,
+                "item": {"type": "UserMessage", "id": "synthetic-item-4463",
+                         "content": [{"type": "text", "text": "synthetic Operator message"}]}}},
+        ]
+        (root / f"rollout-2026-11-12T00-00-00-{real}.jsonl").write_text(
+            "".join(json.dumps(record) + "\n" for record in records))
+        meta = {"threadId": wrong, "x-codex-turn-metadata": {"turn_id": turn}}
+        with patch.dict(os.environ, {"CODEX_HOME": self.tmp.name}), \
+             patch.object(self.rt, "codex_user_messages", side_effect=Runtime().codex_user_messages):
+            # The old entry_call passed threadId directly to relay.
+            before = entry.relay(self.con, self.rt, "desktop", wrong, turn_id=turn)
+            self.assertEqual(before["status"], "source_not_ready")
+            result = mcp_server.handle({"id": 1, "method": "tools/call", "params": {
+                "name": "relay", "arguments": {}, "_meta": meta}}, self.con, self.rt, role="entry")["result"]
+        self.assertNotIn("isError", result)
+        self.assertEqual(json.loads(result["content"][0]["text"])["status"], "delivered")
+        self.assertEqual(entry.get_entry(self.con, "desktop")["thread_id"], real)
+        self.assertEqual(entry.inbox(self.con, self.orch)["messages"][-1]["body"], "synthetic Operator message")
+        meta["x-codex-turn-metadata"]["turn_id"] = "01a1cdb0-1111-7111-8111-111111111111"
+        with patch.dict(os.environ, {"CODEX_HOME": self.tmp.name}), \
+             patch.object(self.rt, "codex_user_messages", side_effect=Runtime().codex_user_messages):
+            missing = mcp_server.handle({"id": 2, "method": "tools/call", "params": {
+                "name": "relay", "arguments": {}, "_meta": meta}}, self.con, self.rt, role="entry")["result"]
+        self.assertNotIn("isError", missing)
+        data = json.loads(missing["content"][0]["text"])
+        self.assertEqual(data["status"], "source_not_ready")
+        self.assertIn("nothing was relayed", data["note"])
+        self.assertIn("binding_warning", data)
+        self.assertEqual(entry.get_entry(self.con, "desktop")["thread_id"], real)
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM entry_messages WHERE direction='in'").fetchone()[0], 1)
+
+    def test_unverified_metadata_relays_from_existing_thread_without_rebinding(self):
+        import io
+        from contextlib import redirect_stderr
+        real = "01a1cdb0-2204-7331-8dd5-b5e7b8e8086b"
+        wrong = "01a1cdb0-2310-7f10-be70-1f1a6dd5f000"
+        turn = "01a1cdb0-2378-7c63-b347-85bffb53784d"
+        entry.touch(self.con, "desktop", real)
+        self.rt.nat_says(real, "hello from Operator", turn=turn)
+        meta = {"threadId": wrong, "x-codex-turn-metadata": {"thread_id": wrong, "turn_id": turn}}
+        log = io.StringIO()
+        with patch.dict(os.environ, {"ORCHD_CODEX_SESSIONS": str(Path(self.tmp.name) / "missing")}), redirect_stderr(log):
+            result = mcp_server.handle({"id": 1, "method": "tools/call", "params": {
+                "name": "relay", "arguments": {}, "_meta": meta}}, self.con, self.rt, role="entry")["result"]
+        self.assertNotIn("isError", result)
+        data = json.loads(result["content"][0]["text"])
+        self.assertEqual(data["status"], "delivered")
+        self.assertIn("binding_warning", data)
+        self.assertEqual(entry.get_entry(self.con, "desktop")["thread_id"], real)
+        self.assertEqual(entry.inbox(self.con, self.orch)["messages"][-1]["body"], "hello from Operator")
+        self.assertIn(wrong, log.getvalue())
+        self.assertIn(turn, log.getvalue())
+
+    def test_missing_rollout_is_held_with_safe_stderr_and_next_message_delivers(self):
+        entry.touch(self.con, "desktop", "invalid-thread")
+        def fail(*args):
+            raise subprocess.CalledProcessError(1, ["codex", "queue"], stderr=
+                "no rollout found for thread id invalid-thread token=secret https://u:p@example.org")
+        with patch.object(self.rt, "wake_orch", side_effect=fail):
+            first = entry.send_to_nat(self.con, self.rt, self.orch, "first")
+        row = entry._row(self.con, first["message_id"])
+        self.assertEqual(row["delivery"], "held")
+        self.assertIn("exit code 1", row["delivery_error"])
+        self.assertIn("no rollout found", row["delivery_error"])
+        self.assertNotIn("secret", row["delivery_error"])
+        self.assertNotIn("u:p", row["delivery_error"])
+        entry.touch(self.con, "desktop", "repaired-thread")
+        second = entry.send_to_nat(self.con, self.rt, self.orch, "second")
+        self.assertEqual(second["delivery"], "delivered")
+        self.assertEqual(entry._row(self.con, first["message_id"])["delivery"], "held")
+
     def test_entry_role_lists_and_runs_only_entry_tools_and_never_registers(self):
         listed = mcp_server.handle({"id": 1, "method": "tools/list"}, self.con, self.rt, role="entry")
         self.assertEqual({t["name"] for t in listed["result"]["tools"]},
@@ -651,7 +767,8 @@ class EntryTest(unittest.TestCase):
             self.assertTrue(self.entry_call("dispatch")["isError"])
         self.assertTrue(self.entry_call("relay", {"text": "typed by the model"})["isError"])
         self.rt.nat_says("desk-1", "hello")
-        ok = self.entry_call("relay")
+        with patch.object(mcp_server, "_entry_thread", return_value=("desk-1", None)):
+            ok = self.entry_call("relay")
         self.assertNotIn("isError", ok)
         self.assertEqual(json.loads(ok["content"][0]["text"])["status"], "delivered")
         self.assertEqual(self.con.execute("SELECT COUNT(*) FROM orchs").fetchone()[0], before)
