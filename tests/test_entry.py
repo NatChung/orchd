@@ -686,7 +686,7 @@ class EntryTest(unittest.TestCase):
         (root / f"rollout-2026-11-12T00-00-00-{real}.jsonl").write_text(
             "".join(json.dumps(record) + "\n" for record in records))
         meta = {"threadId": wrong, "x-codex-turn-metadata": {"turn_id": turn}}
-        with patch.dict(os.environ, {"ORCHD_CODEX_SESSIONS": str(root)}), \
+        with patch.dict(os.environ, {"CODEX_HOME": self.tmp.name}), \
              patch.object(self.rt, "codex_user_messages", side_effect=Runtime().codex_user_messages):
             # The old entry_call passed threadId directly to relay.
             before = entry.relay(self.con, self.rt, "desktop", wrong, turn_id=turn)
