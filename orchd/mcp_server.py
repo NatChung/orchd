@@ -919,12 +919,24 @@ def entry_call(name, args, meta, con, rt, entry_id):
     if not isinstance(turn, dict):
         turn = {}
     thread = meta.get("threadId") or turn.get("thread_id")
+    binding_warning = None
     if name in ("relay", "status"):
-        thread, turn_id = _entry_thread(meta)
+        try:
+            thread, turn_id = _entry_thread(meta)
+        except ValueError as error:
+            binding_warning = str(error)
+            print("orchd entry binding warning: " + binding_warning, file=sys.stderr)
+            thread = entry.get_entry(con, entry_id)["thread_id"]
+            turn_id = turn.get("turn_id")
+
     if name == "foreground":
         return entry_foreground(args, con, rt, entry_id)
     if name == "relay":
-        return entry.relay(con, rt, entry_id, thread, turn_id=turn_id, reply_to=args.get("reply_to"))
+        result = entry.relay(con, rt, entry_id, thread, turn_id=turn_id, reply_to=args.get("reply_to"),
+                             bind_thread=binding_warning is None)
+        if binding_warning:
+            result["binding_warning"] = binding_warning
+        return result
     if name in ("orch_restart", "orch_upgrade", "orch_op_status", "instance_check", "instance_apply"):
         from . import entry_ops
         if entry_id != entry.DEFAULT_ENTRY:
@@ -939,7 +951,10 @@ def entry_call(name, args, meta, con, rt, entry_id):
             raise ValueError("restart must be true or false")
         return entry_ops.start("restart" if name == "orch_restart" else "upgrade", entry_id=entry_id,
                                thread=thread, restart=restart)
-    return entry.status(con, rt, entry_id, thread)
+    result = entry.status(con, rt, entry_id, thread, bind_thread=binding_warning is None)
+    if binding_warning:
+        result["binding_warning"] = binding_warning
+    return result
 
 
 # ordinary Orch tools; the Desktop Entry role remains unchanged.
