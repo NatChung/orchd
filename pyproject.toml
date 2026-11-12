@@ -9,7 +9,8 @@ description = "Orch dispatches, workers execute: run many agent tasks in paralle
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.11"
-dependencies = ["psutil>=6.0,<8", "websocket-client>=1.8,<2"]
+dependencies = ["psutil>=6.0,<8", "websocket-client>=1.8,<2",
+                "tzdata>=2024.1; sys_platform == 'win32'"]
 
 [project.optional-dependencies]
 channels-slack = ["slack-sdk>=3,<4"]
