@@ -40,6 +40,24 @@ def run(args):
         else:
             caller=policy.Caller(role='operator',sources=repository.source_ids(svc.con),identity='operator')
         action=args.channel_action
+        if action == 'grant':
+            if args.grant_action == 'create':
+                policy.require_operator(caller)
+                if args.file == '-':
+                    payload = json.load(sys.stdin)
+                else:
+                    with open(args.file, encoding='utf-8') as handle:
+                        payload = json.load(handle)
+                accepted = {'source_id','reason','provenance','route_id','target','expires_at'}
+                if not isinstance(payload,dict) or not {'source_id','reason','provenance'} <= set(payload) or set(payload) - accepted:
+                    raise ValueError('invalid grant fields')
+                result = svc.create_grant(**payload,caller=caller)
+            elif args.grant_action == 'revoke':
+                result = svc.revoke_grant(args.grant_id,args.reason,caller=caller)
+            else:
+                result = (svc.list_grants if args.grant_action == 'list' else svc.grant_audit)(args.source,caller=caller)
+            print(json.dumps(result,ensure_ascii=False))
+            return 0
         if action == 'setup':
             policy.require_operator(caller)
             from . import setup, management
@@ -149,7 +167,8 @@ def run(args):
                 raise ValueError('draft expects message_id and payload')
             result=svc.draft_reply(payload['message_id'],payload['payload'],caller=caller)
         elif action in ('approve', 'reconcile'):
-            policy.require_operator(caller)
+            if action == 'reconcile':
+                policy.require_operator(caller)
             if args.file == '-':
                 payload = json.load(sys.stdin)
             else:
@@ -157,7 +176,7 @@ def run(args):
                     payload = json.load(handle)
             required = ({'draft_id','version','payload_hash','entry_answer_ref'} if action == 'approve'
                         else {'delivery_id','outcome','provider_receipt','evidence'})
-            if not isinstance(payload, dict) or set(payload) != required:
+            if not isinstance(payload, dict) or (set(payload) != required and not (action == 'approve' and set(payload) == required - {'entry_answer_ref'})):
                 raise ValueError('invalid '+action+' fields')
             result = (svc.approve if action == 'approve' else svc.reconcile_outbound)(**payload, caller=caller)
         elif action == 'approval-preview':

@@ -205,9 +205,14 @@ class ChannelService:
         return preview(draft)
 
     def approve(self, draft_id=None, version=None, payload_hash=None, entry_answer_ref=None, *, caller):
-        policy.require_operator(caller)
+        if not isinstance(caller,policy.Caller) or caller.role not in ('operator','orch'):
+            raise PermissionError('Orch or Operator required')
+        draft, value, message, src, route = repository.outbound_draft(self.con, draft_id, version)
+        policy.require_message(caller, message)
+        if entry_answer_ref is not None:
+            policy.require_operator(caller)
         # Approval itself is harmless with outbound disabled; sending still requires
-        # the separately configured enablement and a current exact Entry answer.
+        # the separately configured enablement and current approval evidence.
         return repository.approve_outbound(self.con, draft_id, version, payload_hash, entry_answer_ref, self.clock())
 
     def claim_outbound(self, source_id=None, *, caller, limit=100):
@@ -375,7 +380,7 @@ class ChannelService:
             raise ValueError('cannot draft from deleted message')
         if caller.role not in ('operator', 'orch', 'worker'):
             raise PermissionError('adapter cannot draft or widen sender grants')
-        return repository.draft(self.con,row,payload,self.clock)
+        return repository.draft(self.con,row,payload,self.clock,caller)
 
     def routes(self, *, caller):
         policy.require_operator(caller)
@@ -465,6 +470,46 @@ class ChannelService:
             except OSError:
                 pending += 1
         return pending
+
+
+    def create_grant(self, source_id, reason, provenance, *, caller, route_id=None, target=None, expires_at=None):
+        import math, uuid
+        policy.require_operator(caller)
+        repository.source(self.con, source_id)
+        if not all(isinstance(x,str) and x.strip() for x in (reason,provenance)):
+            raise ValueError('reason and original provenance required')
+        if route_id is not None and (not isinstance(route_id,str) or not self.con.execute('SELECT 1 FROM channel_routes WHERE id=? AND source_id=? AND active=1', (route_id,source_id)).fetchone()):
+            raise ValueError('grant route outside source')
+        if target is not None and not isinstance(target,(str,dict)):
+            raise ValueError('invalid grant target')
+        if expires_at is not None and (type(expires_at) not in (int,float) or not math.isfinite(expires_at) or expires_at <= self.clock().timestamp()):
+            raise ValueError('future finite expires_at required')
+        grant_id = 'cg_' + uuid.uuid4().hex
+        self.con.execute("INSERT INTO channel_outbound_grants(grant_id,source_id,route_id,target_json,created_by,created_at,expires_at,state,reason,provenance) VALUES(?,?,?,?,?,?,?,'active',?,?)",
+                         (grant_id,source_id,route_id,models.canonical(target) if target is not None else None,caller.identity or 'operator',self.clock().timestamp(),expires_at,reason,provenance))
+        return dict(self.con.execute('SELECT * FROM channel_outbound_grants WHERE grant_id=?',(grant_id,)).fetchone())
+
+    def list_grants(self, source_id, *, caller):
+        policy.require_source(caller,source_id)
+        return [dict(r) for r in self.con.execute('SELECT * FROM channel_outbound_grants WHERE source_id=? ORDER BY created_at,grant_id',(source_id,))]
+
+    def revoke_grant(self, grant_id, reason, *, caller):
+        policy.require_operator(caller)
+        if not isinstance(reason,str) or not reason.strip():
+            raise ValueError('revocation reason required')
+        if not self.con.execute('SELECT 1 FROM channel_outbound_grants WHERE grant_id=?',(grant_id,)).fetchone():
+            raise ValueError('unknown grant')
+        self.con.execute("UPDATE channel_outbound_grants SET state='revoked',revoked_at=?,revoked_by=?,revoke_reason=? WHERE grant_id=? AND state='active'",(self.clock().timestamp(),caller.identity or 'operator',reason,grant_id))
+        return {'grant_id':grant_id,'state':'revoked'}
+
+    def grant_audit(self, source_id, *, caller):
+        policy.require_source(caller,source_id)
+        rows = self.con.execute('SELECT a.*, d.state, d.source_id, d.target_snapshot, d.updated_at, p.actor AS current_approval_actor FROM channel_grant_approvals a JOIN channel_deliveries d ON d.id=a.delivery_id LEFT JOIN intake_approvals p ON p.draft_id=a.draft_id AND p.version=a.version WHERE d.source_id=? ORDER BY a.created_at,a.approval_id',(source_id,)).fetchall()
+        result = []
+        for row in rows:
+            delivery = self.delivery(row['delivery_id'],caller=caller)
+            result.append(dict(row,attempts=delivery['attempts']))
+        return result
 
 
 def legacy_interface(con, operation, *, runtime=None, actor=None, payload=None):

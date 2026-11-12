@@ -197,6 +197,19 @@ def build_parser():
     channel_actions = channels.add_subparsers(dest="channel_action", required=True)
     for action in ('status', 'doctor'):
         channel_actions.add_parser(action).add_argument('--json', action='store_true')
+    grant = channel_actions.add_parser('grant', help='manage revocable outbound standing grants')
+    grant_actions = grant.add_subparsers(dest='grant_action', required=True)
+    create_grant = grant_actions.add_parser('create')
+    create_grant.add_argument('--file', default='-')
+    create_grant.add_argument('--json', action='store_true')
+    for action in ('list','audit'):
+        command = grant_actions.add_parser(action)
+        command.add_argument('--source', required=True)
+        command.add_argument('--json', action='store_true')
+    revoke_grant = grant_actions.add_parser('revoke')
+    revoke_grant.add_argument('grant_id')
+    revoke_grant.add_argument('--reason', required=True)
+    revoke_grant.add_argument('--json', action='store_true')
     setup = channel_actions.add_parser('setup')
     setup.add_argument('--dry-run', action='store_true')
     secret = channel_actions.add_parser('secret')
@@ -708,6 +721,7 @@ HOME_POLICY = {
     ("orch", "list"): "write", ("orch", "attach"): "write",
     ("orch", "register-codex-probe"): "write",
     ("init",): "skip", ("install",): "skip", ("upgrade",): "skip",
+    **{("channels", "grant", action): "skip" for action in ("create", "list", "revoke", "audit")},
     **{("channels", "layout", action): "skip" for action in ("plan", "apply", "rollback")}, ("quota",): "skip", ("doctor",): "skip",
     **{("channels", action): "skip" for action in ("messages", "search", "message", "conversation", "sync", "sync-status", "attachment", "draft", "retention", "approve", "approval-preview", "delivery", "recover-outbound", "reconcile")},
     ("_entry-op",): "skip",  # its `orchd upgrade` / `orchd orch restart` children apply the policy themselves
@@ -742,6 +756,8 @@ def _home_policy(args):
     if cmd == 'workflow' and args.workflow_action == 'run':
         return HOME_POLICY[(cmd, 'run', args.run_action)]
     if cmd == "channels":
+        if args.channel_action == "grant":
+            return HOME_POLICY[(cmd, args.channel_action, args.grant_action)]
         if args.channel_action == "layout":
             return HOME_POLICY[(cmd, args.channel_action, args.layout_action)]
         return HOME_POLICY[(cmd, args.channel_action)]
