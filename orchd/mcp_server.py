@@ -16,6 +16,7 @@ import os
 import re
 import sys
 import traceback
+from pathlib import Path
 
 from . import core, entry, goals, inventory, issue_links, limits, question_summary, quota, store, verify as verification
 from .runtime import WORKER_MODELS, Runtime
@@ -857,6 +858,54 @@ def entry_foreground(args, con, rt, entry_id):
             "launch_status": "launch_requested", "window_opened": None}
 
 
+def _entry_thread(meta):
+    """Resolve the caller from rollout evidence, never from a UUID prefix."""
+    turn = meta.get("x-codex-turn-metadata") or {}
+    if not isinstance(turn, dict):
+        turn = {}
+    def identifier(value):
+        return value if isinstance(value, str) and re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", value) else None
+    direct, nested, turn_id = (identifier(meta.get("threadId")), identifier(turn.get("thread_id")),
+                               identifier(turn.get("turn_id")))
+    print("orchd entry binding metadata: " + json.dumps(
+        {"threadId": direct, "thread_id": nested, "turn_id": turn_id}), file=sys.stderr)
+    root = Path(os.environ.get("ORCHD_CODEX_SESSIONS", Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "sessions"))
+    matches, present = set(), set()
+    for directory in (root, root.parent / "archived_sessions"):
+        for path in directory.glob("**/rollout-*.jsonl"):
+            try:
+                with path.open(encoding="utf-8") as stream:
+                    header = json.loads(next(stream))
+                    thread = identifier((header.get("payload") or {}).get("id")) if header.get("type") == "session_meta" else None
+                    if not thread or not (path.name.endswith(f"-{thread}.jsonl") or
+                                          f"-{thread}_" in path.name):
+                        continue
+                    if thread in (direct, nested):
+                        present.add(thread)
+                    if turn_id:
+                        for line in stream:
+                            if turn_id not in line:
+                                continue
+                            try:
+                                record = json.loads(line)
+                            except ValueError:
+                                continue
+                            payload = record.get("payload") or {}
+                            if isinstance(payload, dict) and payload.get("turn_id") == turn_id:
+                                matches.add(thread)
+                                break
+            except OSError as error:
+                raise ValueError("Desktop rollout could not be read; existing binding retained") from error
+            except (ValueError, StopIteration, AttributeError):
+                continue
+    if turn_id:
+        if len(matches) == 1:
+            return matches.pop(), turn_id
+    elif len(present) == 1:
+        return present.pop(), None
+    raise ValueError("Desktop thread could not be verified against a unique rollout; existing binding retained")
+
+
 def entry_call(name, args, meta, con, rt, entry_id):
     tool = next((t for t in ENTRY_TOOLS if t["name"] == name), None)
     if tool is None:
@@ -867,11 +916,15 @@ def entry_call(name, args, meta, con, rt, entry_id):
     if extra:
         raise PermissionError(f"unexpected argument(s) {', '.join(sorted(extra))}; the entry passes ids only")
     turn = meta.get("x-codex-turn-metadata") or {}
+    if not isinstance(turn, dict):
+        turn = {}
     thread = meta.get("threadId") or turn.get("thread_id")
+    if name in ("relay", "status"):
+        thread, turn_id = _entry_thread(meta)
     if name == "foreground":
         return entry_foreground(args, con, rt, entry_id)
     if name == "relay":
-        return entry.relay(con, rt, entry_id, thread, turn_id=turn.get("turn_id"), reply_to=args.get("reply_to"))
+        return entry.relay(con, rt, entry_id, thread, turn_id=turn_id, reply_to=args.get("reply_to"))
     if name in ("orch_restart", "orch_upgrade", "orch_op_status", "instance_check", "instance_apply"):
         from . import entry_ops
         if entry_id != entry.DEFAULT_ENTRY:
