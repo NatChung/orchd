@@ -1091,7 +1091,7 @@ FOLLOWUP_HEAD = ("[followup] New instruction for this same task, not an answer t
                  "and finish with a new `report`.")
 
 
-def followup(con, rt, task_id, message):
+def followup(con, rt, task_id, message, *, expected=None):
     """Add an instruction to an open task: same worker, worktree and session, no model change.
 
     Rides on `answer` for delivery (Codex FIFO queue and resume, Claude send under the task lock); a busy Codex
@@ -1111,11 +1111,20 @@ def followup(con, rt, task_id, message):
         raise ValueError(f"task {task_id} is closed; open a new task instead")
     if not isinstance(message, str) or not message.strip():
         raise ValueError("followup needs a non-empty message")
+    if expected is not None:
+        if (not isinstance(expected, dict) or set(expected) != set(store.ANSWER_TARGET_FIELDS)
+                or not expected.get("session_id")):
+            raise ValueError("expected followup target must contain the complete worker identity")
+        expected = dict(expected)
     event = dict(message=message, from_status=task["status"], model=task["model"], session_id=task["session_id"],
                  token=uuid.uuid4().hex)
     accepted = {}  # id and exact body of the acceptance row as written; it counts only once committed
 
     def accept(locked_task):
+        if expected is not None:
+            if any(locked_task[k] != v for k, v in expected.items()):
+                raise ValueError("followup target changed before acceptance")
+            event["target"] = expected
         if accepted:  # a timeout fallback after the lock section already accepted it
             return accepted["id"]
         event.update(from_status=locked_task["status"], model=locked_task["model"],
@@ -1525,6 +1534,8 @@ def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT, backend=No
             raise ValueError(f"task {task_id} is closed")
         if task["status"] == "starting":
             raise ValueError(f"task {task_id} is still starting its first worker")
+        if any(store.answer_target(con, row) is not None for row in store.pending_answers(con, task_id)):
+            raise ValueError("task has session-bound followups pending; deliver or reconcile them before retry")
         target_backend = backend or (task["backend"] if worker_kind(WORKER_MODELS[model]) == "codex" else "exec")
         _choice("backend", target_backend, ("exec", "app-server"))
         if target_backend == "app-server" and worker_kind(WORKER_MODELS[model]) != "codex":
