@@ -2,6 +2,7 @@
 import os
 import hashlib
 import sqlite3
+import json
 import time
 import uuid
 from contextlib import contextmanager
@@ -696,9 +697,43 @@ def immediate(con):
     con.execute("COMMIT")
 
 
+ANSWER_TARGET_FIELDS = ("session_id", "branch", "worktree", "generation", "model", "orch_thread")
+
+
+def answer_target(con, row):
+    """Optional immutable target of an explicitly bound followup queue entry."""
+    try:
+        evidence = json.loads(row["evidence"] or "null")
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(evidence, dict) or not isinstance(evidence.get("followup_id"), int):
+        return None
+    event = con.execute("SELECT body FROM messages WHERE id=? AND task_id=? AND kind='followup'",
+                        (evidence["followup_id"], row["task_id"])).fetchone()
+    if event is None:
+        return None
+    try:
+        body = json.loads(event["body"])
+        if not isinstance(body, dict):
+            raise ValueError("followup record is not an object")
+    except (ValueError, TypeError) as error:
+        raise ValueError("invalid followup queue target record") from error
+    target = body.get("target")
+    if target is not None and (not isinstance(target, dict) or set(target) != set(ANSWER_TARGET_FIELDS)
+                               or not target.get("session_id")):
+        raise ValueError("invalid followup queue target")
+    return target
+
+
 def pending_answers(con, task_id):
-    return con.execute("SELECT * FROM messages WHERE task_id=? AND kind=? AND read_at IS NULL ORDER BY id",
+    rows = con.execute("SELECT * FROM messages WHERE task_id=? AND kind=? AND read_at IS NULL ORDER BY id",
                        (task_id, QUEUED)).fetchall()
+    task = get_task(con, task_id) if rows else None
+    for row in rows:
+        target = answer_target(con, row)
+        if target is not None and any(task[k] != v for k, v in target.items()):
+            raise ValueError("queued followup target changed; reconcile the original worker before delivery")
+    return rows
 
 
 def pending_answer_count(con, task_id):
