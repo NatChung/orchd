@@ -185,13 +185,13 @@ def stop(con, task):
     return receipt
 
 
-def start(con, rt, task, prompt, model, pending=(), brief=None):
+def start(con, rt, task, prompt, model, pending=(), brief=None, images=()):
     from .runtime import worker_env
     generation = uuid.uuid4().hex
     directory = Path(tempfile.mkdtemp(prefix='oa-', dir=None if os.name == 'nt' else '/tmp'))
     make_private(directory)
     database = con.execute('PRAGMA database_list').fetchone()[2]
-    spec = dict(prompt=prompt, model=model, brief=brief, pending=[r['id'] for r in pending])
+    spec = dict(prompt=prompt, model=model, brief=brief, images=list(images), pending=[r['id'] for r in pending])
     (directory/'start.json').write_text(json.dumps(spec), encoding='utf-8')
     (directory/'start.json').chmod(0o600)
     store.update_task(con, task['id'], backend=BACKEND, generation=generation,
@@ -421,7 +421,7 @@ class Supervisor:
             "AND state IN ('sending','uncertain') LIMIT 1",
             (self.task_id, self.generation)).fetchone())
 
-    def send(self, text, ids):
+    def send(self, text, ids, images=()):
         task = self.task()
         delivery_id = uuid.uuid4().hex
         self.con.execute('INSERT INTO worker_deliveries VALUES(?,?,?,?,?,?,?,?,?)',
@@ -429,7 +429,8 @@ class Supervisor:
                           'sending',None,time.time()))  # journal before bytes leave
         try:
             result = self.rpc.call('turn/start', {'threadId': task['session_id'],
-                       'input': [{'type':'text','text':text,'text_elements':[]}],
+                       'input': [{'type':'text','text':text,'text_elements':[]},
+                                 *[{'type':'localImage','path':path} for path in images]],
                        'clientUserMessageId': delivery_id, 'model': task['model'],
                        'approvalPolicy':'never', 'sandboxPolicy': {'type':'dangerFullAccess'}})
             self.receipt(delivery_id, result['turn']['id'], ids)
@@ -578,7 +579,7 @@ class Supervisor:
                 if os.name != 'nt':
                     os.chmod(task['control_endpoint'],0o600)
                 listener.listen(8);listener.settimeout(.2)
-                result=self.send(spec['prompt'],spec['pending'])
+                result=self.send(spec['prompt'],spec['pending'], spec.get('images', ()))
                 if result['status']!='delivered':
                     raise RuntimeError(str(result))
                 while not self.stopping and self.current():

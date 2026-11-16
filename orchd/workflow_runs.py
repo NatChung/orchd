@@ -396,7 +396,9 @@ def guard_desktop_route(con, orch_id, task_id=None):
             raise ValueError('Workflow task replies are fixed to their authenticated request origin; Desktop routing is refused')
         return
     if con.execute("SELECT 1 FROM workflow_runs WHERE orch_thread=? AND state NOT IN ('done','needs_adoption','cancelled') LIMIT 1", (orch_id,)).fetchone():
-        raise ValueError('This Orch has an external workflow run; unscoped Desktop routing is refused. Use the fixed request origin or an explicit unrelated task')
+        raise ValueError('This Orch has an external workflow run; unscoped Desktop routing is refused. '
+                         'Use interface_reply for an ordinary request at its fixed source, '
+                         'or workflow_run_show for a workflow-owned request')
 
 
 def observe_question(con, *, task_id, message_id):

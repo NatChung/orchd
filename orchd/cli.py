@@ -197,6 +197,42 @@ def build_parser():
     channel_actions = channels.add_subparsers(dest="channel_action", required=True)
     for action in ('status', 'doctor'):
         channel_actions.add_parser(action).add_argument('--json', action='store_true')
+    grant = channel_actions.add_parser('grant', help='manage revocable outbound standing grants')
+    grant_actions = grant.add_subparsers(dest='grant_action', required=True)
+    create_grant = grant_actions.add_parser('create')
+    create_grant.add_argument('--file', default='-')
+    create_grant.add_argument('--json', action='store_true')
+    for action in ('list','audit'):
+        command = grant_actions.add_parser(action)
+        command.add_argument('--source', required=True)
+        command.add_argument('--json', action='store_true')
+    revoke_grant = grant_actions.add_parser('revoke')
+    revoke_grant.add_argument('grant_id')
+    revoke_grant.add_argument('--reason', required=True)
+    revoke_grant.add_argument('--json', action='store_true')
+    setup = channel_actions.add_parser('setup')
+    setup.add_argument('--dry-run', action='store_true')
+    secret = channel_actions.add_parser('secret')
+    secret.add_argument('secret_action', choices=('put', 'delete', 'list'))
+    secret.add_argument('--adapter', required=True)
+    secret.add_argument('--source', required=True)
+    secret.add_argument('--ref')
+    source = channel_actions.add_parser('source')
+    source.add_argument('source_action', choices=('provision', 'list', 'enable', 'disable'))
+    source.add_argument('id', nargs='?')
+    source.add_argument('--file', default='-')
+    route = channel_actions.add_parser('route')
+    route.add_argument('route_action', choices=('add', 'remove', 'list'))
+    route.add_argument('id', nargs='?')
+    route.add_argument('--file', default='-')
+    service = channel_actions.add_parser('service')
+    service.add_argument('service_action', choices=('install','status','stop','uninstall'))
+    serve = channel_actions.add_parser('serve')
+    serve.add_argument('--host', default='127.0.0.1')
+    serve.add_argument('--port', type=int, default=8080)
+    serve.add_argument('--service-log', action='store_true', help=argparse.SUPPRESS)
+    serve.add_argument('--service-channel-home', help=argparse.SUPPRESS)
+    serve.add_argument('--service-store-home', help=argparse.SUPPRESS)
     cutover = channel_actions.add_parser('cutover')
     cutover.add_argument('--source', required=True)
     cutover.add_argument('--mode', required=True, choices=('frozen','shadow','adapter','legacy'))
@@ -678,13 +714,14 @@ def _intake_main(args):
 #   skip  - does not touch the Orch home rules (init/upgrade manage them; the rest never read the home)
 # Plain `list` is warn: core.list_open only reads.
 HOME_POLICY = {
-    **{('channels', action): 'skip' for action in ('status','doctor','cutover','ledger')},
+    **{('channels', action): 'skip' for action in ('status','doctor','cutover','ledger','secret','source','route','serve','setup','service')},
     ("mcp",): "write", ("pr-watch",): "skip", ("review-feedback",): "skip",
     **{("interface", a): "skip" for a in ("register", "submit", "fetch", "ack", "deregister", "list", "rebind")},
     ("orch", "start"): "write", ("orch", "stop"): "write", ("orch", "restart"): "write",  # --dry-run -> warn
     ("orch", "list"): "write", ("orch", "attach"): "write",
     ("orch", "register-codex-probe"): "write",
     ("init",): "skip", ("install",): "skip", ("upgrade",): "skip",
+    **{("channels", "grant", action): "skip" for action in ("create", "list", "revoke", "audit")},
     **{("channels", "layout", action): "skip" for action in ("plan", "apply", "rollback")}, ("quota",): "skip", ("doctor",): "skip",
     **{("channels", action): "skip" for action in ("messages", "search", "message", "conversation", "sync", "sync-status", "attachment", "draft", "retention", "approve", "approval-preview", "delivery", "recover-outbound", "reconcile")},
     ("_entry-op",): "skip",  # its `orchd upgrade` / `orchd orch restart` children apply the policy themselves
@@ -719,6 +756,8 @@ def _home_policy(args):
     if cmd == 'workflow' and args.workflow_action == 'run':
         return HOME_POLICY[(cmd, 'run', args.run_action)]
     if cmd == "channels":
+        if args.channel_action == "grant":
+            return HOME_POLICY[(cmd, args.channel_action, args.grant_action)]
         if args.channel_action == "layout":
             return HOME_POLICY[(cmd, args.channel_action, args.layout_action)]
         return HOME_POLICY[(cmd, args.channel_action)]

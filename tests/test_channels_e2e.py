@@ -84,6 +84,6 @@ class E2ETest(unittest.TestCase):
             from orchd import store
             con = store.connect_readonly(root / 'state/orchd.db')
             try:
-                self.assertEqual([r[0] for r in con.execute('SELECT version FROM orchd_channel_migrations ORDER BY version')], [1,2])
+                self.assertEqual([r[0] for r in con.execute('SELECT version FROM orchd_channel_migrations ORDER BY version')], [1,2,3])
             finally:
                 con.close()

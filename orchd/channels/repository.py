@@ -7,7 +7,7 @@ from orchd import store
 
 def _statements():
     sql = '\n'.join(files('orchd.channels').joinpath('migrations/' + name).read_text(encoding='utf-8')
-                    for name in ('0001.sql', '0002.sql'))
+                    for name in ('0001.sql', '0002.sql', '0003.sql'))
     statement = ''
     for line in sql.splitlines(keepends=True):
         statement += line
@@ -24,7 +24,7 @@ def schema_plan(path):
     from pathlib import Path
     from orchd.stats import open_snapshot
     path = Path(path)
-    result = dict(version=2, status='pending', rollback='retain additive tables')
+    result = dict(version=3, status='pending', rollback='retain additive tables')
     if not path.is_file():
         return result
     expected = sqlite3.connect(':memory:')
@@ -41,9 +41,9 @@ def schema_plan(path):
                 raise ValueError('incompatible channel schema: ' + name)
         if snap.con.execute("SELECT 1 FROM sqlite_master WHERE name='orchd_channel_migrations'").fetchone():
             versions = {r[0] for r in snap.con.execute('SELECT version FROM orchd_channel_migrations')}
-            if versions - {1,2}:
+            if versions - {1,2,3}:
                 raise ValueError('unsupported channel migration version')
-            if 2 in versions:
+            if 3 in versions:
                 result['status'] = 'current'
     return result
 
@@ -72,7 +72,7 @@ def connect(path=None):
         with store.immediate(con):
             con.execute('CREATE TABLE IF NOT EXISTS orchd_channel_migrations(version INTEGER PRIMARY KEY)')
             versions = {row[0] for row in con.execute('SELECT version FROM orchd_channel_migrations')}
-            if versions - {1, 2}:
+            if versions - {1, 2, 3}:
                 raise ValueError('unsupported channel migration version')
             for statement in _statements():
                 con.execute(statement)
@@ -82,6 +82,7 @@ def connect(path=None):
                     raise ValueError(f'incompatible channel schema: {name}')
             con.execute('INSERT OR IGNORE INTO orchd_channel_migrations VALUES (1)')
             con.execute('INSERT OR IGNORE INTO orchd_channel_migrations VALUES (2)')
+            con.execute('INSERT OR IGNORE INTO orchd_channel_migrations VALUES (3)')
         return con
     except BaseException:
         con.close()
@@ -145,7 +146,12 @@ def _entry_approval_chain(con, draft, value, message, answer_ref):
             or question['question_state'] != 'answered' or question['delivery'] != 'delivered'):
         raise ValueError('Entry binding or question no longer matches')
     expected = preview(draft)
-    if question['body'] != expected['preview'] or answer['body'] != expected['answer']:
+    answer_body = answer['body']
+    if answer_body.endswith('\r\n'):
+        answer_body = answer_body[:-2]
+    elif answer_body.endswith('\n'):
+        answer_body = answer_body[:-1]
+    if question['body'] != expected['preview'] or answer_body != expected['answer']:
         raise ValueError('Entry answer does not approve this exact preview')
     for row in (question, answer):
         size, sha = entry.digest(row['body'])
@@ -186,8 +192,18 @@ def approve_outbound(con, draft_id, version, payload_hash, answer_ref, now):
         if draft['payload_hash'] != payload_hash:
             raise ValueError('approval payload hash mismatch')
         _outbound_authority(con, draft, value, message, src, route, now)
-        _entry_approval_chain(con, draft, value, message, answer_ref)
+        grant = matching_grant(con, draft, value, message, now) if answer_ref is None else None
+        if grant is None:
+            _entry_approval_chain(con, draft, value, message, answer_ref)
         old = con.execute('SELECT * FROM intake_approvals WHERE draft_id=? AND version=?', (draft_id, version)).fetchone()
+        if old and old['actor'] == 'operator:grant' and answer_ref is not None:
+            delivery = con.execute("SELECT * FROM channel_deliveries WHERE kind='outbound' AND draft_id=? AND draft_version=?", (draft_id,version)).fetchone()
+            if draft['state'] != 'approved' or delivery is None or delivery['state'] not in ('queued','cancelled'):
+                raise ValueError('approval no longer active')
+            approval_id = 'ap_' + uuid.uuid4().hex
+            con.execute("UPDATE intake_approvals SET approval_id=?,actor='operator:entry',entry_answer_ref=?,created_at=? WHERE approval_id=?", (approval_id,answer_ref,now.timestamp(),old['approval_id']))
+            con.execute("UPDATE channel_deliveries SET state='queued',updated_at=? WHERE id=?", (now.isoformat(),delivery['id']))
+            return {'status':'approved','approval_id':approval_id,'delivery_id':delivery['id']}
         if old:
             if draft['state'] in ('cancelled','superseded','failed'):
                 raise ValueError('approval no longer active')
@@ -204,10 +220,12 @@ def approve_outbound(con, draft_id, version, payload_hash, answer_ref, now):
         approval_id, delivery_id = 'ap_'+uuid.uuid4().hex, 'cd_'+uuid.uuid4().hex
         key = 'outbound:'+draft_id+':'+str(version)
         con.execute('INSERT INTO intake_approvals(approval_id,draft_id,version,body_sha256,sender,target,source_ref,expires_at,idempotency_key,actor,created_at,payload_hash,entry_answer_ref) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
-                    (approval_id,draft_id,version,draft['body_sha256'],draft['sender'],draft['target'],draft['source_ref'],draft['expires_at'],key,'operator:entry',now.timestamp(),payload_hash,answer_ref))
+                    (approval_id,draft_id,version,draft['body_sha256'],draft['sender'],draft['target'],draft['source_ref'],draft['expires_at'],key,'operator:grant' if grant else 'operator:entry',now.timestamp(),payload_hash,answer_ref))
         con.execute("UPDATE intake_drafts SET state='approved',updated_at=? WHERE draft_id=? AND version=?", (now.timestamp(),draft_id,version))
         con.execute("INSERT INTO channel_deliveries(id,kind,source_id,message_id,draft_id,draft_version,reply_kind,route_id,route_version,authority_epoch,target_snapshot,payload_hash,state,idempotency_key,created_at,updated_at) VALUES(?,'outbound',?,?,?,?,?,?,?,?,?,?,'queued',?,?,?)",
                     (delivery_id,src['id'],message['id'],draft_id,version,value['reply_kind'],route['id'],route['version'],value['authority_epoch'],canonical({'account':value['account'],'sender':value['sender'],'target':value['target'],'thread':value['thread']}),payload_hash,key,now.isoformat(),now.isoformat()))
+        if grant:
+            con.execute('INSERT INTO channel_grant_approvals VALUES(?,?,?,?,?,?,?,?,?)', (approval_id,grant['grant_id'],draft_id,version,payload_hash,draft['sender'],draft['target'],now.timestamp(),delivery_id))
         return {'status':'approved','approval_id':approval_id,'delivery_id':delivery_id}
 
 
@@ -232,7 +250,12 @@ def claim_outbound(con, source_id, adapter_id, now, limit, check_enabled):
                     raise ValueError('exact approval missing')
                 if any(approval[k] != draft[k] for k in ('body_sha256','sender','target','source_ref','expires_at')):
                     raise ValueError('approval fields changed')
-                _entry_approval_chain(con,draft,value,message,approval['entry_answer_ref'])
+                evidence = con.execute('SELECT grant_id FROM channel_grant_approvals WHERE approval_id=?', (approval['approval_id'],)).fetchone()
+                if evidence:
+                    if matching_grant(con,draft,value,message,now,grant_id=evidence[0]) is None:
+                        raise ValueError('standing grant no longer valid')
+                else:
+                    _entry_approval_chain(con,draft,value,message,approval['entry_answer_ref'])
                 target = canonical({'account':value['account'],'sender':value['sender'],'target':value['target'],'thread':value['thread']})
                 if (delivery['source_id'] != value['source_id'] or delivery['message_id'] != message['id']
                         or delivery['payload_hash'] != approval['payload_hash'] or delivery['target_snapshot'] != target
@@ -403,7 +426,7 @@ def receive(con, source_id, event, adapter, clock, *, in_transaction=False, auto
             if owner and previous_owner and owner != previous_owner:
                 raise ValueError('origin owner conflict')
             if owner and not previous_owner:
-                from orchd import intake_notify
+                from orchd import config, intake_notify
                 conversation_id = 'cc_' + uuid.uuid4().hex
                 con.execute('INSERT OR IGNORE INTO channel_conversations(id,source_id,external_ref,kind,thread_key) VALUES(?,?,?,?,?)',
                             (conversation_id,source_id,origin['conversation_ref'],event['conversation']['kind'],event['conversation']['thread_key']))
@@ -412,7 +435,7 @@ def receive(con, source_id, event, adapter, clock, *, in_transaction=False, auto
                 con.execute('UPDATE channel_messages SET conversation_id=? WHERE id=?', (conversation_id, existing['id']))
                 con.execute('UPDATE intake_events SET owner_orch=? WHERE receipt_id=?', (owner, existing['intake_receipt_id']))
                 con.execute("INSERT INTO channel_processing_claims VALUES(?,?,?,?,?,'claimed',?)", (origin_key,event['revision_key'],'default',owner,route['authority_epoch'],now))
-                intake_notify.enqueue(con, existing['intake_receipt_id'], owner)
+                intake_notify.enqueue(con, existing['intake_receipt_id'], owner, window=config.channel_notify_window(source_id))
                 con.execute("INSERT INTO channel_deliveries(id,kind,source_id,message_id,route_id,route_version,authority_epoch,target_snapshot,payload_hash,state,idempotency_key,created_at,updated_at) VALUES(?,'wake',?,?,?,?,?,?,?,'queued',?,?,?)",
                             ('cd_'+uuid.uuid4().hex,source_id,existing['id'],route['id'],route['version'],route['authority_epoch'],canonical({'owner_orch':owner}),content_hash,'wake:'+existing['id'],now,now))
             con.execute('INSERT OR IGNORE INTO channel_observations VALUES(?,?,?,?,?,?)',(source_id,event['transport_event_key'],origin_key,existing['id'],event_hash,now))
@@ -432,6 +455,7 @@ def receive(con, source_id, event, adapter, clock, *, in_transaction=False, auto
         provider='email' if source['provider']=='gmail' else source['provider']
         con.execute('INSERT INTO intake_events(receipt_id,version,provider,account,company,event_id,source_ref,thread_ref,source_time,received_at,producer,summary,content_sha256,owner_orch) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(receipt_id,2,provider,source['account_ref'],source['tenant_ref'] or source['account_ref'],event['transport_event_key'],origin['conversation_ref'],event['conversation']['thread_key'] or None,source_time,time.time(),adapter,'Channel message',event_hash,owner))
         metadata = {'mentions':content.get('mentions', []), 'format':content.get('format'), 'target':event.get('target')}
+        if 'diagnostic' in content: metadata['diagnostic'] = content['diagnostic']
         con.execute('INSERT INTO intake_content(receipt_id,status,text,unavailable_reason,text_sha256,text_bytes,attachments,created_at,channel_metadata) VALUES(?,?,?,?,?,?,?,?,?)',(receipt_id,content['status'],text,content.get('unavailable_reason'),intake._sha(text) if text is not None else None,len(text.encode()) if text else 0,canonical(content.get('attachments',[])),time.time(),canonical(metadata)))
         intake._log(con,'event',receipt_id)
         if suggestion:
@@ -446,9 +470,9 @@ def receive(con, source_id, event, adapter, clock, *, in_transaction=False, auto
             con.execute('INSERT INTO channel_attachments(id,message_id,provider_attachment_ref,original_name,sha256,byte_size,status,updated_at) VALUES(?,?,?,?,?,?,?,?)',
                         ('ca_'+uuid.uuid4().hex, message_id, ref, attachment['name'], attachment.get('sha256'), attachment.get('bytes'), attachment['status'], now))
         if owner:
-            from orchd import intake_notify
+            from orchd import config, intake_notify
             con.execute("INSERT INTO channel_processing_claims(origin_key,revision_key,lane,owner_orch,authority_epoch,state,created_at) VALUES(?,?,?,?,?,'claimed',?)", (origin_key,event['revision_key'],'default',owner,route['authority_epoch'],now))
-            intake_notify.enqueue(con,receipt_id,owner,intake_bridge._suggestion_urgency(suggestion))
+            intake_notify.enqueue(con,receipt_id,owner,intake_bridge._suggestion_urgency(suggestion), window=config.channel_notify_window(source_id))
             con.execute('INSERT INTO channel_deliveries(id,kind,source_id,message_id,route_id,route_version,authority_epoch,target_snapshot,payload_hash,state,idempotency_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',('cd_'+uuid.uuid4().hex,'wake',source_id,message_id,route['id'],route['version'],route['authority_epoch'],canonical({'owner_orch':owner}),event_hash,'queued','wake:'+message_id,now,now))
         if event['content'].get('unavailable_reason') == 'deleted':
             tombstone(con,message_id,source_id,in_transaction=True)
@@ -666,7 +690,7 @@ def conversation_messages(con, conversation_id, cursor, limit, owner=None):
     return [r[0] for r in con.execute('SELECT m.id FROM channel_messages m LEFT JOIN intake_events e ON e.receipt_id=m.intake_receipt_id WHERE m.conversation_id=? AND m.id>? AND (? IS NULL OR e.owner_orch IS NULL OR e.owner_orch=?) ORDER BY m.id LIMIT ?', (conversation_id, cursor, owner, owner, limit))]
 
 
-def draft(con, message, payload, clock):
+def draft(con, message, payload, clock, caller):
     import json
     from orchd import intake
     from .delivery import normalize_payload
@@ -682,6 +706,7 @@ def draft(con, message, payload, clock):
                              'source_ref':message['external_ref'],'body':payload['body'],
                              'summary':'Channel reply draft','expires_at':payload['expires_at']},actor='orch', _channel_payload=exact, _now=clock().timestamp())
     result['payload_hash'] = intake._draft_row(con, result['draft_id'], result['version'])['payload_hash']
+    con.execute('INSERT INTO channel_draft_authors VALUES(?,?,?,?,?)', (result['draft_id'],result['version'],caller.role,caller.identity,result['payload_hash']))
     return result
 
 
@@ -750,11 +775,11 @@ def link_legacy_intake(con, source_id, receipt_id, *, in_transaction=False):
         if route and event['owner_orch'] not in (None, route['owner_orch']):
             raise ValueError('legacy owner conflicts with route')
         if route and event['state'] == 'received':
-            from orchd import intake_notify
+            from orchd import config, intake_notify
             owner=route['owner_orch']
             con.execute('UPDATE intake_events SET owner_orch=? WHERE receipt_id=?', (owner,receipt_id))
             con.execute("INSERT INTO channel_processing_claims VALUES(?,?,?, ?,?,'claimed',?)",(origin_key,'initial','default',owner,route['authority_epoch'],now))
-            intake_notify.enqueue(con,receipt_id,owner)
+            intake_notify.enqueue(con,receipt_id,owner, window=config.channel_notify_window(source_id))
             con.execute("INSERT INTO channel_deliveries(id,kind,source_id,message_id,route_id,route_version,authority_epoch,target_snapshot,payload_hash,state,idempotency_key,created_at,updated_at) VALUES(?, 'wake',?,?,?,?,?,?,?,'queued',?,?,?)", ('cd_'+uuid.uuid4().hex,source_id,mid,route['id'],route['version'],route['authority_epoch'],json.dumps({'owner_orch':owner},sort_keys=True),event['content_sha256'],'wake:'+mid,now,now))
         return {'status':'linked','message_id':mid,'receipt_id':receipt_id}
 
@@ -916,3 +941,28 @@ def reject_attachment(con, attachment_id, source_id, reason, now, holder, genera
                 break
         con.execute('UPDATE intake_content SET attachments=? WHERE receipt_id=?', (canonical(items),row['intake_receipt_id']))
         con.execute("UPDATE channel_attachments SET status='unavailable',updated_at=? WHERE id=?", (now,attachment_id))
+
+
+def set_source_enabled(con, source_id, enabled):
+    if type(enabled) is not bool:
+        raise ValueError('invalid enabled state')
+    with store.immediate(con):
+        if con.execute('UPDATE channel_sources SET enabled=? WHERE id=?', (int(enabled), source_id)).rowcount != 1:
+            raise ValueError('unknown source')
+
+
+def matching_grant(con, draft, value, message, now, grant_id=None):
+    from .models import canonical
+    author = con.execute('SELECT * FROM channel_draft_authors WHERE draft_id=? AND version=?', (draft['draft_id'],draft['version'])).fetchone()
+    if (author is None or author['role'] != 'orch' or author['identity'] != message['owner_orch']
+            or author['payload_hash'] != draft['payload_hash']):
+        return None
+    rows = con.execute("SELECT * FROM channel_outbound_grants WHERE source_id=? AND state='active' ORDER BY created_at,grant_id", (value['source_id'],))
+    for grant in rows:
+        if (grant_id is not None and grant['grant_id'] != grant_id
+                or grant['expires_at'] is not None and now.timestamp() >= grant['expires_at']
+                or grant['route_id'] is not None and grant['route_id'] != value['route_id']
+                or grant['target_json'] is not None and grant['target_json'] != canonical(value['target'])):
+            continue
+        return dict(grant)
+    return None

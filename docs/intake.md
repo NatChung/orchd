@@ -313,3 +313,19 @@ reply, did the source change) belong to the connector before `claim`.
 - MCP `intake_take_unassigned {receipt_ids}` binds unassigned receipts to the caller only (same compare-and-set;
   another owner rejects the batch with `not_owner`). `intake_backlog` adds `unassigned` and lists queues whose owner is
   `owner_stopped` / `owner_dead`.
+
+### Per-source notification windows
+
+In the personal `config.toml` (under `ORCHD_CONFIG_DIR`, or the file named by
+`ORCHD_CONFIG_FILE`), set a notification batching window for a channel source:
+
+```toml
+[channels.notify."slack-main"]
+window_seconds = 0
+```
+
+`window_seconds` must be a non-negative integer. Sources without an entry use
+1800 seconds. A zero window makes normal notifications due immediately; the
+next scheduled intake delivery can wake the owning Orch. Urgent notifications
+remain due immediately regardless of the window. Changes apply when a new
+notification is enqueued; existing pending notifications retain their due time.

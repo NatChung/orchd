@@ -964,7 +964,8 @@ class Runtime:
         `codex queue` writes the same records. [] when the rollout is missing. An archived thread's rollout moves to
         the sibling archived_sessions/ (Desktop archives a conversation when it is closed), so look there too.
         Merge timestamped continuation segments and deduplicate their overlapping item IDs."""
-        root = Path(os.environ.get("ORCHD_CODEX_SESSIONS", Path.home() / ".codex" / "sessions"))
+        root = Path(os.environ.get("ORCHD_CODEX_SESSIONS",
+                                   Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "sessions"))
         # Desktop may continue a thread in timestamped THREAD_SEGMENT rollouts.
         # Include archived bases even when active segments exist; keep event item IDs
         # stable so relay's (source_thread, source_item_id) uniqueness still applies.

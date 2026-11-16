@@ -18,3 +18,7 @@ Use the five default triage labels, each named after its canonical role. See `do
 ### Domain docs
 
 Single-context: `GLOSSARY.md` points to the existing vocabulary in `CONTEXT.md`; decisions live in `docs/adr/`. See `docs/agents/domain.md`.
+
+## Session entry
+
+For new-machine installation or channel setup, read the README installation section and `docs/channels-setup.md`. Explain the human steps, the state after each step, and the remaining limitations.

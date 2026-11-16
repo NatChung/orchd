@@ -20,7 +20,7 @@ def content_path(channel_home, source_id, digest):
 
 
 # Defaults exclude executable and opaque content. ZIP is inspected before caching.
-DEFAULT_MIME_ALLOWLIST = frozenset({'text/plain', 'text/csv', 'application/pdf', 'application/zip', 'image/png', 'image/jpeg', 'image/gif'})
+DEFAULT_MIME_ALLOWLIST = frozenset({'text/plain', 'text/csv', 'application/pdf', 'application/zip', 'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/heic', 'video/mp4', 'video/quicktime', 'video/webm', 'audio/mp4', 'audio/m4a', 'audio/x-m4a', 'audio/mp3', 'audio/mpeg', 'audio/wav', 'audio/x-wav', 'audio/ogg', 'audio/webm'})
 MAX_EXPANDED_BYTES = 20 * 1024 * 1024
 MAX_COMPRESSION_RATIO = 100
 

@@ -3,9 +3,13 @@ from . import models, policy, repository
 
 
 class ChannelService:
-    def __init__(self, path, *, clock=None, retention=None, channel_home=None):
+    def __init__(self, path, *, clock=None, retention=None, channel_home=None, media_limits=None, transcriber=None):
         from datetime import datetime, timezone
         from orchd import paths
+        from .media import MediaLimits
+        self.media_limits = media_limits or MediaLimits()
+        self.media_limits.validate()
+        self.transcriber = transcriber
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.retention = policy.retention_policies() if retention is None else policy.retention_policies({'retention': retention})
         self.channel_home = channel_home or paths.channel_home()
@@ -20,7 +24,8 @@ class ChannelService:
         """Capture a factory on the owning thread; each callback owns its connection."""
         path = repository.database_path(self.con)
         clock, retention, home = self.clock, self.retention, self.channel_home
-        return lambda: ChannelService(path, clock=clock, retention=retention, channel_home=home)
+        return lambda: ChannelService(path, clock=clock, retention=retention, channel_home=home,
+                                      media_limits=self.media_limits, transcriber=self.transcriber)
 
     def close(self):
         self.con.close()
@@ -205,9 +210,14 @@ class ChannelService:
         return preview(draft)
 
     def approve(self, draft_id=None, version=None, payload_hash=None, entry_answer_ref=None, *, caller):
-        policy.require_operator(caller)
+        if not isinstance(caller,policy.Caller) or caller.role not in ('operator','orch'):
+            raise PermissionError('Orch or Operator required')
+        draft, value, message, src, route = repository.outbound_draft(self.con, draft_id, version)
+        policy.require_message(caller, message)
+        if entry_answer_ref is not None:
+            policy.require_operator(caller)
         # Approval itself is harmless with outbound disabled; sending still requires
-        # the separately configured enablement and a current exact Entry answer.
+        # the separately configured enablement and current approval evidence.
         return repository.approve_outbound(self.con, draft_id, version, payload_hash, entry_answer_ref, self.clock())
 
     def claim_outbound(self, source_id=None, *, caller, limit=100):
@@ -285,6 +295,10 @@ class ChannelService:
                 **self._freshness(source_id),'next_cursor':ids[limit-1] if len(ids)>limit else None,
                 'messages':[self.message(mid,caller=caller) for mid in ids[:limit]]}
 
+    def attachment_media(self, attachment_id, *, caller):
+        from .media_delivery import read
+        return read(self, attachment_id, caller=caller)
+
     def read_attachment(self, attachment_id, *, caller):
         item=repository.attachment(self.con,attachment_id)
         policy.require_message(caller,item)
@@ -328,6 +342,20 @@ class ChannelService:
     def queued_attachments(self, source_id, *, caller):
         self._require_adapter(source_id, caller)
         return repository.queued_attachments(self.con, source_id)
+
+    def reject_attachment(self, attachment_id, reason, holder, generation, *, caller):
+        item = repository.attachment(self.con, attachment_id)
+        self._require_adapter(item['source_id'], caller)
+        if reason not in ('missing_scope', 'download_failed', 'too_large', 'mime_not_allowed', 'size_mismatch'): raise ValueError('invalid rejection reason')
+        repository.reject_attachment(self.con, attachment_id, item['source_id'], reason, self.clock().isoformat(), holder, generation)
+
+    def attachment_descriptor(self, attachment_id, *, caller):
+        import json
+        item = repository.attachment(self.con, attachment_id)
+        self._require_adapter(item['source_id'], caller)
+        message = repository.get_message(self.con, item['message_id'])
+        content = repository.content(self.con, message['intake_receipt_id'])
+        return next(entry for entry in json.loads(content['attachments']) if entry.get('provider_attachment_ref') == item['provider_attachment_ref'])
 
     def store_attachment(self, attachment_id, data, holder, generation, *, caller):
         import hashlib, mimetypes, os, tempfile
@@ -375,7 +403,7 @@ class ChannelService:
             raise ValueError('cannot draft from deleted message')
         if caller.role not in ('operator', 'orch', 'worker'):
             raise PermissionError('adapter cannot draft or widen sender grants')
-        return repository.draft(self.con,row,payload,self.clock)
+        return repository.draft(self.con,row,payload,self.clock,caller)
 
     def routes(self, *, caller):
         policy.require_operator(caller)
@@ -398,6 +426,8 @@ class ChannelService:
     def enforce_retention(self, *, caller):
         from datetime import datetime, timedelta
         policy.require_operator(caller)
+        from .media import purge_all
+        purge_all(self.channel_home, self.media_limits.retention_s, self.clock().timestamp())
         removed=0
         for row in repository.retention_candidates(self.con):
             days=self.retention.get(row['source_id'],{}).get('body_days',policy.DEFAULT_BODY_DAYS)
@@ -437,7 +467,18 @@ class ChannelService:
                 continue
             try:
                 target.unlink(missing_ok=True)
-            except OSError:
+                # Shared attachment storage (including Slack) is canonical under email/state.
+                from .attachments import content_path
+                from .media import derived_dir, _safe_out_dir
+                import shutil
+                canonical = content_path(self.channel_home, source_id, key)
+                derived = derived_dir(self.channel_home, source_id, key)
+                if _safe_out_dir(derived, self.channel_home) is None:
+                    continue
+                canonical.unlink(missing_ok=True)
+                if derived.exists():
+                    shutil.rmtree(derived)
+            except (OSError, ValueError):
                 continue
             repository.clear_deleted_storage(self.con, item['id'], key)
 
@@ -465,6 +506,46 @@ class ChannelService:
             except OSError:
                 pending += 1
         return pending
+
+
+    def create_grant(self, source_id, reason, provenance, *, caller, route_id=None, target=None, expires_at=None):
+        import math, uuid
+        policy.require_operator(caller)
+        repository.source(self.con, source_id)
+        if not all(isinstance(x,str) and x.strip() for x in (reason,provenance)):
+            raise ValueError('reason and original provenance required')
+        if route_id is not None and (not isinstance(route_id,str) or not self.con.execute('SELECT 1 FROM channel_routes WHERE id=? AND source_id=? AND active=1', (route_id,source_id)).fetchone()):
+            raise ValueError('grant route outside source')
+        if target is not None and not isinstance(target,(str,dict)):
+            raise ValueError('invalid grant target')
+        if expires_at is not None and (type(expires_at) not in (int,float) or not math.isfinite(expires_at) or expires_at <= self.clock().timestamp()):
+            raise ValueError('future finite expires_at required')
+        grant_id = 'cg_' + uuid.uuid4().hex
+        self.con.execute("INSERT INTO channel_outbound_grants(grant_id,source_id,route_id,target_json,created_by,created_at,expires_at,state,reason,provenance) VALUES(?,?,?,?,?,?,?,'active',?,?)",
+                         (grant_id,source_id,route_id,models.canonical(target) if target is not None else None,caller.identity or 'operator',self.clock().timestamp(),expires_at,reason,provenance))
+        return dict(self.con.execute('SELECT * FROM channel_outbound_grants WHERE grant_id=?',(grant_id,)).fetchone())
+
+    def list_grants(self, source_id, *, caller):
+        policy.require_source(caller,source_id)
+        return [dict(r) for r in self.con.execute('SELECT * FROM channel_outbound_grants WHERE source_id=? ORDER BY created_at,grant_id',(source_id,))]
+
+    def revoke_grant(self, grant_id, reason, *, caller):
+        policy.require_operator(caller)
+        if not isinstance(reason,str) or not reason.strip():
+            raise ValueError('revocation reason required')
+        if not self.con.execute('SELECT 1 FROM channel_outbound_grants WHERE grant_id=?',(grant_id,)).fetchone():
+            raise ValueError('unknown grant')
+        self.con.execute("UPDATE channel_outbound_grants SET state='revoked',revoked_at=?,revoked_by=?,revoke_reason=? WHERE grant_id=? AND state='active'",(self.clock().timestamp(),caller.identity or 'operator',reason,grant_id))
+        return {'grant_id':grant_id,'state':'revoked'}
+
+    def grant_audit(self, source_id, *, caller):
+        policy.require_source(caller,source_id)
+        rows = self.con.execute('SELECT a.*, d.state, d.source_id, d.target_snapshot, d.updated_at, p.actor AS current_approval_actor FROM channel_grant_approvals a JOIN channel_deliveries d ON d.id=a.delivery_id LEFT JOIN intake_approvals p ON p.draft_id=a.draft_id AND p.version=a.version WHERE d.source_id=? ORDER BY a.created_at,a.approval_id',(source_id,)).fetchall()
+        result = []
+        for row in rows:
+            delivery = self.delivery(row['delivery_id'],caller=caller)
+            result.append(dict(row,attempts=delivery['attempts']))
+        return result
 
 
 def legacy_interface(con, operation, *, runtime=None, actor=None, payload=None):
