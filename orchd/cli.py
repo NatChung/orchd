@@ -361,8 +361,10 @@ def build_parser():
         if action == "supersede":
             command.add_argument("--text", required=True, help="new question; old answers are not reused")
             command.add_argument("--task-id", help="explicit task link for the new question")
-    task = sub.add_parser("task", help="link or unlink a task's parent issue reference")
+    task = sub.add_parser("task", help="manage task issue links or export scoped task evidence")
     task_actions = task.add_subparsers(dest="task_action", required=True)
+    from . import task_export
+    task_export.add_parser(task_actions)
     for action in ("link", "unlink"):
         command = task_actions.add_parser(action, description="Always prints a JSON receipt; no tracker writes.")
         command.add_argument("--task", required=True)
@@ -739,7 +741,7 @@ HOME_POLICY = {
     **{("intake", a): "write" for a in ("submit", "draft", "approve", "receipt", "classify", "suggest", "deliver",
                                         "notify-reconcile", "decide", "resolve", "exclude", "bind", "ack", "claim", "cancel")},
     **{("intake", a): "warn" for a in ("show", "decisions", "backlog", "pending", "draft-show")},
-    ("task", "link"): "write", ("task", "unlink"): "write",
+    ("task", "link"): "write", ("task", "unlink"): "write", ("task", "export"): "skip",
     ("dispatch",): "write", ("inbox",): "write",
     ("ack",): "write", ("report",): "write", ("progress",): "write", ("flush",): "write",
     ("watch",): "warn", ("summary",): "warn", ("_auto-retry",): "write", ("_claude-limit",): "write", ("ask",): "write", ("verify",): "write", ("close",): "write", ("adopt",): "write",
@@ -1206,6 +1208,9 @@ def main(argv=None):
     if args.cmd == "intake":
         return _intake_main(args)
     if args.cmd == "task":
+        if args.task_action == 'export':
+            from . import task_export
+            return task_export.run(args)
         import sqlite3
         from orchd import issue_links
         con = None

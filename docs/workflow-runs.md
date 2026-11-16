@@ -72,4 +72,6 @@ orchd workflow run export --task-id TASK_ID --output <new-ignored-directory>
 
 The export contains the frozen plan identity, real task mappings, scoped message rows, captured output values and a hash receipt. Worker identity and output location are checked before writing. It does not read other chats or invent the audit task's not-yet-reported result.
 
+For a standalone stage dispatch without an ordered run, use [task evidence export](task-evidence-export.md). It can compare an explicitly selected original interface request with the dispatch-time workflow input.
+
 The legacy offline audit format models dependencies through close events. This engine defers close until the end, so the exporter keeps typed transition edges in `run.json` rather than fabricating close dependencies in the legacy plan. An external auditor must state which evidence kinds it actually supports. Export success is not workflow acceptance.
