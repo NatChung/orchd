@@ -164,7 +164,8 @@ STEPS = (("orch-rules-v1", update_rules), ("orch-rules-v2", update_rules),
          ("orch-rules-v4", update_rules), ("orch-rules-v5", update_rules),
          ("orch-rules-v6", update_rules), ("interface-entry-tools-v1", update_entry_tools),
          ("orch-rules-v7", update_rules), ("channel-layout-v1", channel_layout_step),
-         ("orch-rules-v8", update_rules), ("channel-schema-v2", channel_schema_step))
+         ("orch-rules-v8", update_rules), ("channel-schema-v2", channel_schema_step),
+         ("orch-rules-v9", update_rules))
 
 
 def run(*, home=None, env=None, dry_run=False):

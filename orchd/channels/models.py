@@ -28,8 +28,10 @@ def validate_event(event):
         raise ValueError('invalid conversation')
     if not isinstance(origin['tenant_ref'], str):
         raise ValueError('invalid tenant')
-    if not isinstance(content, dict) or set(content) - {'status','text','attachments','unavailable_reason','mentions','format'}:
+    if not isinstance(content, dict) or set(content) - {'status','text','attachments','unavailable_reason','mentions','format','diagnostic'}:
         raise ValueError('invalid content')
+    diagnostic = content.get('diagnostic')
+    if diagnostic is not None and (not isinstance(diagnostic, dict) or set(diagnostic) != {'type', 'subtype'} or any(v is not None and (not isinstance(v, str) or len(v) > 100) for v in diagnostic.values())): raise ValueError('invalid diagnostic')
     metadata = {'mentions': content.get('mentions', []), 'format': content.get('format'), 'target': event.get('target')}
     if not isinstance(metadata['mentions'], list) or not all(isinstance(m, str) for m in metadata['mentions']):
         raise ValueError('invalid mentions')
@@ -55,12 +57,14 @@ def validate_event(event):
     if not isinstance(content.get('attachments', []), list) or len(content.get('attachments', [])) > 20:
         raise ValueError('invalid attachments')
     for item in content.get('attachments', []):
-        if not isinstance(item, dict) or set(item) - {'name', 'status', 'sha256', 'bytes', 'note', 'provider_attachment_ref', 'mime_type'}:
+        if not isinstance(item, dict) or set(item) - {'name', 'status', 'sha256', 'bytes', 'note', 'provider_attachment_ref', 'mime_type', 'source_url_ref', 'duration'}:
             raise ValueError('invalid attachment')
         if not isinstance(item.get('name'), str) or not item['name'] or item.get('status') not in ('referenced', 'unavailable'):
             raise ValueError('invalid attachment metadata')
         if 'provider_attachment_ref' in item and (not isinstance(item['provider_attachment_ref'], str) or not item['provider_attachment_ref']):
             raise ValueError('invalid attachment reference')
+        if 'source_url_ref' in item and (not isinstance(item['source_url_ref'], str) or len(item['source_url_ref']) > 2048): raise ValueError('invalid URL')
+        if 'duration' in item and (type(item['duration']) not in (int, float) or item['duration'] < 0): raise ValueError('invalid duration')
         if 'mime_type' in item and (not isinstance(item['mime_type'], str) or len(item['mime_type']) > 200 or '/' not in item['mime_type']):
             raise ValueError('invalid attachment MIME type')
         if 'bytes' in item and (type(item['bytes']) is not int or item['bytes'] < 0):

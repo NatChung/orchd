@@ -257,7 +257,7 @@ def claude_usage(cache, text, now=None):
     for label, name, duration in [('Current session', 'five_hour', 18000),
                                   ('Current week (all models)', 'seven_day', 604800)]:
         match = re.search(re.escape(label) + r': ([\d.]+)% used · resets '
-                          r'([A-Z][a-z]{2}) (\d{1,2}) at (\d{1,2})(?::(\d{2}))?(am|pm) '
+                          r'([A-Z][a-z]{2}) (\d{1,2})(?: at|,) (\d{1,2})(?::(\d{2}))?(am|pm) '
                           r'\(([^)]+)\)', text)
         if not match:
             reason = ('invalid' if label + ':' in text else 'missing') + f' {label} window'
@@ -423,7 +423,8 @@ def _probe(cache, provider, binary=None):
                 '--tools', '', '--no-session-persistence', '--setting-sources', '',
                 '--settings', '{"disableAllHooks":true}', '--strict-mcp-config',
                 '--mcp-config', '{"mcpServers":{}}'], env=launch_env(),
-                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15)
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                encoding='utf-8', errors='replace', timeout=15)
             if _stopping():
                 return  # Shutting down: a killed probe is not an observation.
             if result.returncode:
@@ -440,7 +441,8 @@ def _probe(cache, provider, binary=None):
             if cache.status()['sonnet']['windows']:
                 return error
             cache.unknown('sonnet', f'Claude /usage unavailable: {type(error).__name__}: {sanitized_error(error)["message"]}'
-                          if isinstance(error, ValueError) else f'Claude /usage unavailable: {type(error).__name__}',
+                          if isinstance(error, ValueError) else f'Claude /usage unavailable: {type(error).__name__}: executable not found'
+                          if isinstance(error, FileNotFoundError) else f'Claude /usage unavailable: {type(error).__name__}',
                           'claude.cli.usage')
             return error
         return

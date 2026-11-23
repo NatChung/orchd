@@ -2,7 +2,7 @@
 from unittest.mock import patch
 import unittest
 
-from orchd import core, entry, interface, store, workflow_runs as runs
+from orchd import core, entry, interface, mcp_server, store, workflow_runs as runs
 from tests import test_workflow_runs as fixtures
 
 
@@ -88,6 +88,40 @@ class WorkflowRunRouteTests(unittest.TestCase):
         rows = self.desktop_rows()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]['body'], 'Unrelated local Operator message')
+
+    def test_old_blocked_run_refusal_explains_source_reply_without_task_workaround(self):
+        run_id, _ = self.author()
+        self.f.con.execute("UPDATE workflow_runs SET state='blocked' WHERE id=?", (run_id,))
+        interface.reply(self.f.con, 'example-orch', request_id=self.f.request_id,
+                        text='Historical blocked run notice')
+        self.f.con.execute('UPDATE interface_requests SET ack_at=1 WHERE id=?', (self.f.request_id,))
+        for operation in (entry.send_to_nat, entry.ask_nat):
+            with self.subTest(operation=operation.__name__):
+                with self.assertRaises(ValueError) as refusal:
+                    operation(self.f.con, self.f.rt, 'example-orch', 'Ordinary source receipt')
+                self.assertIn('interface_reply', str(refusal.exception))
+                self.assertIn('workflow_run_show', str(refusal.exception))
+                self.assertNotIn('unrelated task', str(refusal.exception))
+        self.assertEqual(self.desktop_rows(), [])
+        self.assertEqual(runs.show(self.f.con, run_id)['state'], 'blocked')
+
+    def test_old_blocked_run_does_not_block_ordinary_source_receipt(self):
+        run_id, _ = self.author()
+        self.f.con.execute("UPDATE workflow_runs SET state='blocked' WHERE id=?", (run_id,))
+        registration = interface.register(self.f.con, name='ordinary-intake', orch_id='example-orch')
+        ordinary = interface.submit(self.f.con, self.f.rt, name='ordinary-intake',
+                                   token=registration['token'], conversation='ordinary-chat',
+                                   request_key='ordinary-request', text='Synthetic intake')
+        mcp_server.call('interface_reply', {'request_id': ordinary['request_id'],
+                        'text': 'Received; execution approval is pending', 'kind': 'interim'},
+                        'example-orch', self.f.con, self.f.rt)
+        row = self.f.con.execute('SELECT conversation,interim,reply FROM interface_requests WHERE id=?',
+                                 (ordinary['request_id'],)).fetchone()
+        self.assertEqual(row['conversation'], 'ordinary-chat')
+        self.assertEqual(row['interim'], 'Received; execution approval is pending')
+        self.assertIsNone(row['reply'])
+        self.assertEqual(self.desktop_rows(), [])
+        self.assertEqual(runs.show(self.f.con, run_id)['state'], 'blocked')
 
     def test_needs_recovery_records_one_honest_final_on_the_original_request(self):
         self.f.rt.start_error = True

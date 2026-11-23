@@ -176,7 +176,7 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
              model_reason=None, task_type=None, rework_of=None, found_by=None, verify=None, manual_checks=None,
              verifies=None, backend=None, goal_id=None, goal_critical=None, issue_ref=None, group_id=None,
              base_branch=None, workflow=None, workflow_stage=None, workflow_inputs=None, _run_attempt=None,
-             origin_request_id=None, dispatch_key=None):
+             origin_request_id=None, dispatch_key=None, attachment_refs=None):
     from . import issue_links, task_origins, task_continuations
     if not orch_thread:
         raise ValueError("dispatch needs the caller's thread id")
@@ -192,11 +192,15 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
             origin_request_id = run['request_id'] if run else None
             dispatch_key = dispatch_key or ('workflow-attempt:' + _run_attempt.attempt_id)
     origin = None
-    dispatch_digest = task_origins.digest(dict(repo=repo,title=title,instructions=instructions,done_when=done_when,
+    dispatch_intent = dict(repo=repo,title=title,instructions=instructions,done_when=done_when,
         model=model,model_reason=model_reason,task_type=task_type,rework_of=rework_of,found_by=found_by,
         verify=verify,manual_checks=manual_checks,verifies=verifies,backend=backend,goal_id=goal_id,
         goal_critical=goal_critical,issue_ref=issue_ref,group_id=group_id,base_branch=base_branch,
-        workflow=workflow,workflow_stage=workflow_stage,workflow_inputs=workflow_inputs))
+        workflow=workflow,workflow_stage=workflow_stage,workflow_inputs=workflow_inputs)
+    # Keep pre-media receipts replayable: absent attachments retain their original digest.
+    if attachment_refs is not None:
+        dispatch_intent["attachment_refs"] = attachment_refs
+    dispatch_digest = task_origins.digest(dispatch_intent)
     def origin_error(code):
         task_origins.record_dispatch_incident(con,orch_thread=orch_thread,repo=repo,args_digest=dispatch_digest,
             dispatch_key=dispatch_key if isinstance(dispatch_key,str) else None,
@@ -282,6 +286,11 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
                          "the trust prompt, then dispatch again.")
     if base_branch is not None:  # explicit PR target (#121 prerequisite); checked on origin before a task exists
         rt.verify_base_branch(repo_path, base_branch)
+    attachment_images = []
+    attachment_text = ''
+    if attachment_refs is not None:
+        from .channels.media_delivery import prepare_dispatch
+        attachment_text, attachment_images = prepare_dispatch(con, attachment_refs, orch_thread, kind, backend)
     task_id = run_task_id or store.new_task_id()
     remote_branch = remote_repo = None
     with store.immediate(con) if goal_id is not None or origin is not None else contextlib.nullcontext():
@@ -305,6 +314,8 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
     spec = {k: v for k, v in dict(verify=verify, manual_checks=manual_checks, verifies=verifies).items() if v}
     if workflow_record is not None:
         spec['workflow'] = workflow_record
+    if attachment_refs is not None:
+        spec['attachment_refs'] = attachment_refs
     from .quota import dispatch_shadow
     if quota_shadow is None:
         quota_shadow = dispatch_shadow(backend=backend, task_type='review' if verifies else task_type,
@@ -322,12 +333,12 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
             store.update_task(con, task_id, base_branch=base_branch)
         if backend == "app-server":
             task = store.get_task(con, task_id)
-            app_worker.start(con, rt, task, task_message(task), WORKER_MODELS[model], brief=app_brief(worktree, task["repo"], paths.projects_dir()))
+            app_worker.start(con, rt, task, task_message(task) + attachment_text, WORKER_MODELS[model], brief=app_brief(worktree, task["repo"], paths.projects_dir()), **({"images": attachment_images} if attachment_images else {}))
             con.execute("UPDATE tasks SET status='running' WHERE id=? AND status='starting'", (task_id,))
         elif kind == "codex":  # no system-prompt flag and no socket: the brief leads the first turn's prompt
             task = store.get_task(con, task_id)
             job, session = rt.start_codex_worker(worktree, rt.codex_log(task_id),
-                                                 worker_brief(worker_cli(), kind, worktree, task["repo"], paths.projects_dir()) + "\n\n" + task_message(task),
+                                                 worker_brief(worker_cli(), kind, worktree, task["repo"], paths.projects_dir()) + "\n\n" + task_message(task) + attachment_text,
                                                  WORKER_MODELS[model])
             store.update_task(con, task_id, job_id=job, session_id=session)
             con.execute("UPDATE tasks SET status='running' WHERE id=? AND status='starting'", (task_id,))
@@ -339,7 +350,7 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
             task = store.get_task(con, task_id)
             if task_continuations.get(con,task_id):
                 task_continuations.seed_worker(con,task_id)
-                initial = task_continuations.reserve_initial_input(con,task,task_message(task))
+                initial = task_continuations.reserve_initial_input(con,task,task_message(task) + attachment_text)
                 try:
                     rt.send_uds(sock,session,initial['wrapped_input'],message_uuid=initial['id'])
                 except UDSWriteUncertain:
@@ -351,7 +362,7 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
                 else:
                     task_continuations.provider_state(con,initial['id'],'submitted')
             else:
-                rt.send_uds(sock, session, task_message(task))
+                rt.send_uds(sock, session, task_message(task) + attachment_text)
     except Exception as error:
         store.update_task(con, task_id, status="failed", note=f"{type(error).__name__}: {error}"[:1000])
         worktree = store.get_task(con, task_id)["worktree"]
@@ -388,7 +399,9 @@ def dispatch_batch(con, rt, *, orch_thread, tasks):
         raise ValueError("each batch item needs the dispatch required fields")
     if all(t.get('origin_request_id') is not None and t.get('dispatch_key') for t in tasks):
         from .task_origins import digest
-        group_id = 'b' + digest(dict(orch_thread=orch_thread,tasks=tasks))[:12]
+        intents = [{k: v for k, v in task.items() if k != 'attachment_refs' or v is not None}
+                   for task in tasks]
+        group_id = 'b' + digest(dict(orch_thread=orch_thread,tasks=intents))[:12]
     else:
         group_id = "b" + uuid.uuid4().hex[:12]
     results = []

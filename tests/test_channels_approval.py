@@ -28,6 +28,30 @@ class ApprovalTest(OutboundCase):
         reply = entry.relay(self.svc.con,self.rt,'desktop','synthetic-desktop',reply_to=question)
         self.assertEqual(self.svc.approve(draft['draft_id'],draft['version'],draft['payload_hash'],reply['message_id'],caller=self.op)['status'],'approved')
 
+    def test_entry_answer_allows_only_one_terminal_line_ending(self):
+        from orchd import entry
+        for suffix, accepted in [('\n', True), ('\r\n', True), ('\n\n', False),
+                                 (' ', False), ('\t', False)]:
+            with self.subTest(suffix=repr(suffix)):
+                draft = self.draft()
+                shown = self.svc.approval_preview(draft['draft_id'], draft['version'], caller=self.op)
+                question = entry.ask_nat(self.svc.con, self.rt, self.owner, shown['preview'])['question_id']
+                self.rt.nat_says('synthetic-desktop', shown['answer'] + suffix)
+                reply = entry.relay(self.svc.con, self.rt, 'desktop', 'synthetic-desktop', reply_to=question)
+                args = (draft['draft_id'], draft['version'], draft['payload_hash'], reply['message_id'])
+                if accepted:
+                    self.assertEqual(self.svc.approve(*args, caller=self.op)['status'], 'approved')
+                else:
+                    with self.assertRaisesRegex(ValueError, 'does not approve this exact preview'):
+                        self.svc.approve(*args, caller=self.op)
+
+    def test_changed_answer_character_is_rejected(self):
+        draft = self.draft()
+        shown = self.svc.approval_preview(draft['draft_id'], draft['version'], caller=self.op)
+        answer = self.answer(draft, text=('X' if shown['answer'][0] != 'X' else 'Y') + shown['answer'][1:])
+        with self.assertRaisesRegex(ValueError, 'does not approve this exact preview'):
+            self.svc.approve(draft['draft_id'], draft['version'], draft['payload_hash'], answer, caller=self.op)
+
     def test_exact_entry_answer_required_and_legacy_gate_cannot_bypass(self):
         draft = self.draft()
         for ref in (99999, self.answer(draft, text='can handle it')):

@@ -79,6 +79,114 @@ class ContinuationTests(unittest.TestCase):
         self.assertTrue(leases.release(self.con, self.rt, lease['id'], lease['worker_digest'], reason='pr_closed')['released'])
         self.assertEqual(self.rt.stopped, stopped)
 
+    def test_pre_media_origin_receipt_replays_with_absent_or_null_attachments(self):
+        self.policy()
+        task = self.dispatch(origin_request_id=self.request, dispatch_key='legacy-author')
+        # Persisted intent digest from the pre-media dispatch contract, not the new implementation.
+        legacy_digest = 'b81151b750e3154ad025159bda97e4920ad8ff069fb449f18f5f54bf4b2add8c'
+        self.assertEqual(self.con.execute('SELECT args_digest FROM task_origins').fetchone()[0], legacy_digest)
+        self.con.execute('UPDATE task_origins SET args_digest=?', (legacy_digest,))
+        with patch('orchd.channels.media_delivery.prepare_dispatch') as prepare, patch.object(self.rt, 'start_worker') as start:
+            for options in ({}, {'attachment_refs': None}):
+                replay = self.dispatch(origin_request_id=self.request, dispatch_key='legacy-author', **options)
+                self.assertEqual(replay['id'], task['id'])
+        prepare.assert_not_called()
+        start.assert_not_called()
+
+    def test_media_origin_replay_keeps_exact_initial_receipt_and_rejects_changed_refs(self):
+        self.policy()
+        suffix = '\n\nUNTRUSTED CHANNEL ATTACHMENTS\nsynthetic attachment\n'
+        refs = [{'attachment_id': 'attachment-one'}]
+        sent = []
+
+        def send(path, session, text, *, message_uuid):
+            row = self.con.execute('SELECT * FROM native_provider_deliveries WHERE id=?', (message_uuid,)).fetchone()
+            self.assertIsNotNone(row)  # Durable reservation exists before bytes leave.
+            self.assertEqual(row['wrapped_input'], text)
+            sent.append((path, session, text, message_uuid))
+
+        self.rt.send_uds = send
+        with patch('orchd.channels.media_delivery.prepare_dispatch', return_value=(suffix, [])) as prepare, patch.object(self.rt, 'start_worker', wraps=self.rt.start_worker) as start:
+            task = self.dispatch(origin_request_id=self.request, dispatch_key='media-author', attachment_refs=refs)
+            replay = self.dispatch(origin_request_id=self.request, dispatch_key='media-author', attachment_refs=refs)
+            self.assertEqual(replay['id'], task['id'])
+            for changed in ([{'attachment_id': 'attachment-two'}], None):
+                with self.assertRaisesRegex(ValueError, 'conflict'):
+                    self.dispatch(origin_request_id=self.request, dispatch_key='media-author', attachment_refs=changed)
+        prepare.assert_called_once()
+        start.assert_called_once()
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][1], task['session_id'])
+        self.assertEqual(sent[0][2], core.task_message(task) + suffix)
+        self.assertEqual(task['instructions'], 'Scoped work')
+
+    def test_pre_media_managed_batch_replays_with_absent_or_null_attachments(self):
+        self.policy()
+        options = dict(repo='demo', title='Original batch', instructions='Scoped work', done_when='Report',
+                       model='sonnet', model_reason='fixture', task_type='code', backend='exec',
+                       origin_request_id=self.request, dispatch_key='legacy-batch')
+        with patch.object(self.rt, 'start_worker', wraps=self.rt.start_worker) as start:
+            batch = core.dispatch_batch(self.con, self.rt, orch_thread='example-orch', tasks=[options])
+            for item in (dict(options, attachment_refs=None), options):
+                replay = core.dispatch_batch(self.con, self.rt, orch_thread='example-orch', tasks=[item])
+                self.assertEqual(replay['group_id'], batch['group_id'])
+                self.assertEqual(replay['tasks'][0]['task_id'], batch['tasks'][0]['task_id'])
+                self.assertEqual(replay['tasks'][0]['status'], 'running')
+        start.assert_called_once()
+        self.assertEqual(self.con.execute('SELECT count(*) FROM tasks').fetchone()[0], 1)
+
+    def test_uncertain_media_initial_dispatch_replay_keeps_original_worker_and_input(self):
+        from orchd.runtime import UDSWriteUncertain
+        self.policy()
+        suffix = '\nUNTRUSTED synthetic media\n'
+        refs = [{'message_id': 'media-message'}]
+        sent = []
+
+        def uncertain(path, session, text, *, message_uuid):
+            sent.append((session, text, message_uuid))
+            raise UDSWriteUncertain('synthetic initial interruption')
+
+        self.rt.send_uds = uncertain
+        with patch('orchd.channels.media_delivery.prepare_dispatch', return_value=(suffix, [])) as prepare, patch.object(self.rt, 'start_worker', wraps=self.rt.start_worker) as start:
+            with self.assertRaises(UDSWriteUncertain):
+                self.dispatch(origin_request_id=self.request, dispatch_key='uncertain-media', attachment_refs=refs)
+            original = dict(self.con.execute('SELECT * FROM tasks').fetchone())
+            replay = self.dispatch(origin_request_id=self.request, dispatch_key='uncertain-media', attachment_refs=refs)
+        self.assertEqual(replay['id'], original['id'])
+        self.assertEqual(replay['session_id'], sent[0][0])
+        self.assertEqual(replay['worktree'], original['worktree'])
+        self.assertEqual(sent[0][1], core.task_message(original) + suffix)
+        self.assertEqual(self.rt.removed, [])
+        self.assertEqual(len(sent), 1)
+        prepare.assert_called_once()
+        start.assert_called_once()
+        row = self.con.execute('SELECT * FROM native_provider_deliveries').fetchone()
+        self.assertEqual((row['id'], row['state'], row['wrapped_input']), (sent[0][2], 'unknown', sent[0][1]))
+
+    def test_mcp_and_managed_batch_preserve_media_and_origin_on_replay(self):
+        from orchd import mcp_server
+        self.policy()
+        refs = [{'attachment_id': 'batch-attachment'}]
+        options = dict(repo='demo', title='Media batch', instructions='Scoped work', done_when='Report',
+                       model='sonnet', model_reason='fixture', task_type='code', backend='exec',
+                       origin_request_id=self.request, dispatch_key='batch-media', attachment_refs=refs)
+        for name in ('dispatch', 'dispatch_batch'):
+            tool = next(t for t in mcp_server.TOOLS if t['name'] == name)
+            spec = tool['inputSchema'] if name == 'dispatch' else tool['inputSchema']['properties']['tasks']['items']
+            self.assertTrue({'origin_request_id', 'dispatch_key', 'attachment_refs'} <= set(spec['properties']))
+        with patch('orchd.channels.media_delivery.prepare_dispatch', return_value=('\nUNTRUSTED media\n', [])) as prepare, patch.object(self.rt, 'start_worker', wraps=self.rt.start_worker) as start:
+            first = mcp_server.call('dispatch', options, 'example-orch', self.con, self.rt)
+            replay = mcp_server.call('dispatch', options, 'example-orch', self.con, self.rt)
+            self.assertEqual(first['task_id'], replay['task_id'])
+            batch_options = dict(options, dispatch_key='second-media')
+            batch = mcp_server.call('dispatch_batch', {'tasks': [batch_options]}, 'example-orch', self.con, self.rt)
+            batch_replay = mcp_server.call('dispatch_batch', {'tasks': [batch_options]}, 'example-orch', self.con, self.rt)
+        self.assertEqual(batch['group_id'], batch_replay['group_id'])
+        self.assertEqual(batch['tasks'][0]['task_id'], batch_replay['tasks'][0]['task_id'])
+        self.assertEqual(prepare.call_count, 2)
+        self.assertEqual(start.call_count, 2)
+        self.assertEqual(self.con.execute('SELECT count(*) FROM tasks').fetchone()[0], 2)
+
     def test_followup_key_reuses_acceptance_and_original_session(self):
         t = self.dispatch()
         self.rt.sent.clear()

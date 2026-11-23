@@ -199,3 +199,26 @@ class ConnectTraceTest(unittest.TestCase):
             statements.clear()
             store.connect(path).close()
             self.assertFalse([sql for sql in statements if 'ALTER TABLE intake_content' in sql and 'channel_metadata' in sql])
+
+
+class GrantMigrationTest(unittest.TestCase):
+    def test_v2_database_adds_grant_tables_and_preserves_existing_data(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d)/'db'
+            con = repository.connect(path)
+            con.execute("INSERT INTO channel_sources(id,host_id,provider,account_ref,adapter_id,manifest_hash,created_at) VALUES('s','h','slack','a','adapter','hash','now')")
+            for table in ('channel_grant_approvals','channel_draft_authors','channel_outbound_grants'):
+                con.execute('DROP TABLE '+table)
+            con.execute('DELETE FROM orchd_channel_migrations WHERE version=3')
+            con.close()
+            before = path.read_bytes()
+            self.assertEqual(repository.schema_plan(path)['status'],'pending')
+            self.assertEqual(path.read_bytes(),before)
+            con = repository.connect(path)
+            self.assertEqual(con.execute('SELECT account_ref FROM channel_sources').fetchone()[0],'a')
+            self.assertEqual([r[0] for r in con.execute('SELECT version FROM orchd_channel_migrations ORDER BY version')],[1,2,3])
+            with self.assertRaises(sqlite3.IntegrityError):
+                con.execute("INSERT INTO channel_outbound_grants(grant_id,source_id,created_by,created_at,state,reason,provenance) VALUES('g','missing','operator',0,'active','Reason','Original')")
+            con.close()
+            repository.connect(path).close()
+            self.assertEqual(repository.schema_plan(path)['status'],'current')
