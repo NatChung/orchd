@@ -4,11 +4,16 @@ No author task or ownership records are changed. An uncertain spawn remains
 quiesced until a fresh provider receipt identifies its exact original session.
 """
 import argparse
+import hashlib
 import json
+import math
 import os
+import stat
 import time
 import uuid
 from pathlib import Path
+
+import psutil
 
 from . import paths, store
 from .orch_health import owner_health
@@ -25,6 +30,10 @@ def _schema(con):
         old_job TEXT NOT NULL, model TEXT NOT NULL, home TEXT NOT NULL,
         marker REAL NOT NULL, phase TEXT NOT NULL, baseline TEXT NOT NULL,
         receipt TEXT, error TEXT, created_at REAL NOT NULL)""")
+    columns = {r["name"] for r in con.execute("PRAGMA table_info(orch_reload_operations)")}
+    for column in ("preflight", "stop_evidence"):
+        if column not in columns:
+            con.execute(f"ALTER TABLE orch_reload_operations ADD COLUMN {column} TEXT")
 
 
 def status(con, operation_id):
@@ -36,7 +45,103 @@ def status(con, operation_id):
     result = dict(row)
     result["baseline"] = json.loads(result["baseline"])
     result["receipt"] = json.loads(result["receipt"]) if result["receipt"] else None
+    for key in ("preflight", "stop_evidence"):
+        result[key] = json.loads(result[key]) if result[key] else None
     return result
+
+
+def _process_birth(pid):
+    return psutil.Process(pid).create_time()
+
+
+def _provider(rt):
+    return {"command": str(Path(rt.claude).resolve()),
+            "config": str(Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude"))).resolve())}
+
+
+def _descriptor(row, item):
+    if (not isinstance(item, dict) or item.get("id") != row["old_job"] or
+            item.get("sessionId") != row["session_id"] or not item.get("cwd") or
+            str(Path(item["cwd"]).resolve()) != row["home"] or
+            not isinstance(item.get("pid"), int) or isinstance(item.get("pid"), bool) or item["pid"] <= 0 or
+            not isinstance(item.get("startedAt"), (int, float)) or isinstance(item.get("startedAt"), bool) or
+            not math.isfinite(item["startedAt"]) or item["startedAt"] <= 0):
+        raise ValueError("preflight job descriptor does not identify the original process")
+
+
+def attach_stop_preflight(con, rt, operation_id, file, sha256):
+    """Attach an Operator-protected, pre-stop snapshot to an older pending operation.
+
+    The Operator supplies its exact SHA; this imports evidence, never stops or
+    spawns. Without a saved OS birth, only NoSuchProcess can prove that PID gone.
+    """
+    _operator()
+    row = status(con, operation_id)
+    with store.task_delivery(con, [f"orch:{row['orch_id']}"]):
+        row = status(con, operation_id)
+        _current(con, row)
+        if row["phase"] != "stop_pending":
+            raise ValueError("preflight attachment requires stop_pending")
+        fd = os.open(file, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
+                    info.st_mode & 0o022 or info.st_mtime > row["created_at"]):
+                raise ValueError("preflight must be an owned protected regular file saved before stop")
+            raw = stream.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024 or hashlib.sha256(raw).hexdigest() != sha256:
+            raise ValueError("preflight SHA does not match")
+        snapshot = json.loads(raw)
+        old = snapshot["orch"]
+        if any(old.get(k) != row[v] for k, v in (("id", "orch_id"), ("job_id", "old_job"),
+                                                ("session_id", "session_id"), ("model", "model"))):
+            raise ValueError("preflight Orch identity does not match operation")
+        item = snapshot["job"]
+        _descriptor(row, item)
+        evidence = {"job": item, "provider": _provider(rt), "process_birth": None,
+                    "source_sha256": sha256, "source_mtime": info.st_mtime,
+                    "source": "operator_pre_stop_snapshot"}
+        if row["preflight"] is not None and row["preflight"] != evidence:
+            raise ValueError("preflight evidence is immutable once attached")
+        with store.immediate(con):
+            con.execute("UPDATE orch_reload_operations SET preflight=? WHERE operation_id=?",
+                        (json.dumps(evidence), operation_id))
+        return status(con, operation_id)
+
+
+def _stop_proof(row, rt, jobs, listening):
+    if listening is not False or not isinstance(jobs, dict) or any(
+            not isinstance(k, str) or not isinstance(v, dict) for k, v in jobs.items()):
+        return None
+    saved = row["preflight"]
+    if saved and saved["provider"] != _provider(rt):
+        return None
+    # A listed original session with any process evidence, or an unidentified
+    # live job, prevents claiming that the provider has no original process.
+    for item in jobs.values():
+        retired = item.get("pid") is None and item.get("status") is None
+        if not retired and (item.get("sessionId") == row["session_id"] or
+                            (not isinstance(item.get("sessionId"), str) or not item["sessionId"].strip())):
+            return None
+    old = jobs.get(row["old_job"])
+    if isinstance(old, dict) and old.get("pid") is None and old.get("status") is None:
+        return {"kind": "provider_retired_and_socket_closed"}
+    if not saved:
+        return None
+    item = saved["job"]
+    _descriptor(row, item)
+    try:
+        birth = _process_birth(item["pid"])
+    except psutil.NoSuchProcess:
+        return {"kind": "original_pid_absent", "pid": item["pid"],
+                "provider_started_at": item["startedAt"], "checked_at": time.time()}
+    except (psutil.AccessDenied, OSError, RuntimeError):
+        return None
+    original_birth = saved.get("process_birth")
+    if original_birth is not None and birth != original_birth:
+        return {"kind": "original_pid_reused", "pid": item["pid"], "original_birth": original_birth,
+                "current_birth": birth, "checked_at": time.time()}
+    return None
 
 
 def _update(con, op, phase, *, error=None, receipt=None):
@@ -133,12 +238,20 @@ def reload(con, rt, orch_id, operation_id, expected_session, expected_job, expec
                     item.get("state") != "blocked" or item.get("sessionId") != expected_session or
                     not item.get("cwd") or Path(item["cwd"]).resolve() != paths.orch_home().resolve()):
                 raise ValueError("original Orch is not positively identified and idle/blocked")
+            descriptor_row = {"old_job": expected_job, "session_id": expected_session,
+                              "home": str(paths.orch_home().resolve())}
+            _descriptor(descriptor_row, item)
+            birth = _process_birth(item["pid"])
+            evidence = {"job": item, "provider": _provider(rt), "process_birth": birth,
+                        "source": "native_pre_stop_probe"}
             marker = time.time()
             with store.immediate(con):
-                con.execute("INSERT INTO orch_reload_operations VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                con.execute("INSERT INTO orch_reload_operations "
+                            "(operation_id,orch_id,session_id,old_job,model,home,marker,phase,baseline,"
+                            "receipt,error,created_at,preflight) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                             (operation_id, orch_id, expected_session, expected_job, expected_model,
                              str(paths.orch_home().resolve()), marker, "stop_pending", json.dumps(list(jobs)),
-                             None, None, marker))
+                             None, None, marker, json.dumps(evidence)))
                 changed = con.execute("UPDATE orchs SET stopped_at=? WHERE id=? AND stopped_at IS NULL "
                                       "AND job_id=? AND session_id=? AND model=?",
                                       (marker, orch_id, expected_job, expected_session, expected_model)).rowcount
@@ -146,6 +259,8 @@ def reload(con, rt, orch_id, operation_id, expected_session, expected_job, expec
                     raise ValueError("original Orch changed before quiescing")
             row = status(con, operation_id)
         orch = _current(con, row)
+        if row["preflight"] and row["preflight"]["provider"] != _provider(rt):
+            raise ValueError("reload provider profile changed; no stop requested")
         try:
             rt.stop_worker(expected_job)
             jobs = rt.live_jobs()
@@ -153,14 +268,14 @@ def reload(con, rt, orch_id, operation_id, expected_session, expected_job, expec
         except Exception:
             _update(con, operation_id, "stop_pending", error="old_stop_confirmation_unknown")
             return status(con, operation_id)
-        # An absent job is insufficient evidence after a stop request.
-        old = jobs.get(expected_job) if isinstance(jobs, dict) else None
-        if (not isinstance(old, dict) or old.get("pid") is not None or old.get("status") is not None or
-                listening is not False):
+        proof = _stop_proof(row, rt, jobs, listening)
+        if proof is None:
             _update(con, operation_id, "stop_pending", error="old_job_not_confirmed_stopped")
             return status(con, operation_id)
         _current(con, row)
-        _update(con, operation_id, "spawn_pending")
+        with store.immediate(con):
+            con.execute("UPDATE orch_reload_operations SET stop_evidence=?,phase='spawn_pending',error=NULL "
+                        "WHERE operation_id=?", (json.dumps(proof), operation_id))
         try:
             sock, job, session = rt.start_orch(orch_id, expected_model, Path(row["home"]), resume=expected_session)
         except Exception:
@@ -203,7 +318,7 @@ def reconcile(con, rt, operation_id, candidate_job=None):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("reload", "status", "reconcile"))
+    parser.add_argument("command", choices=("reload", "status", "reconcile", "attach-stop-preflight"))
     parser.add_argument("--state", required=True)
     parser.add_argument("--operation", required=True)
     parser.add_argument("--orch")
@@ -211,6 +326,8 @@ def main(argv=None):
     parser.add_argument("--expected-job")
     parser.add_argument("--expected-model")
     parser.add_argument("--candidate-job")
+    parser.add_argument("--preflight-file")
+    parser.add_argument("--preflight-sha256")
     args = parser.parse_args(argv)
     _operator()
     from .runtime import Runtime
@@ -219,12 +336,15 @@ def main(argv=None):
         if args.command == "reload":
             result = reload(con, Runtime(), args.orch, args.operation, args.expected_session,
                             args.expected_job, args.expected_model)
+        elif args.command == "attach-stop-preflight":
+            result = attach_stop_preflight(con, Runtime(), args.operation, args.preflight_file,
+                                           args.preflight_sha256)
         elif args.command == "reconcile":
             result = reconcile(con, Runtime(), args.operation, args.candidate_job)
         else:
             result = status(con, args.operation)
         print(json.dumps(result, sort_keys=True))
-        return 0 if result["phase"] == "complete" or args.command == "status" else 2
+        return 0 if result["phase"] == "complete" or args.command in ("status", "attach-stop-preflight") else 2
     finally:
         con.close()
 

@@ -32,8 +32,9 @@ paths before calling; this command does not rewrite global configuration.
 Inspect an operation with `status --state DB --operation UUID`. A noncomplete
 reload exits 2. `stop_pending` can be repeated with the same exact identity and
 operation ID; it requests the same old job stop again. It needs positively retired
-old-job metadata plus a nonlistening socket. Provider absence alone does not prove
-this stop or a spawn outcome. No SQLite write transaction spans process calls.
+old-job metadata or the saved process identity proof described below, together
+with a nonlistening socket and no surviving original session. Provider absence
+alone does not prove this stop or a spawn outcome. No SQLite write transaction spans process calls.
 
 `spawn_pending` means acceptance might be unknown (including a process crash).
 Repeating reload **never starts another process** in this phase. Inspect the
@@ -53,3 +54,37 @@ concurrent author even if it was absent from the initial provider snapshot.
 There is intentionally no automatic cancellation or blind retry after uncertain
 spawn acceptance: preserve the operation and inspect provider evidence. Never
 clear the marker by hand to force progress.
+
+## Providers that remove stopped jobs
+
+New operations persist the provider's complete pre-stop job descriptor and its
+PID's actual OS creation time before the stop. A removed provider job is never
+sufficient by itself. Stop confirmation additionally requires a fresh successful
+job listing from the same executable/profile with no live or unidentified
+original-session process, a nonlistening original socket, and OS evidence that
+the recorded PID is absent or its creation time differs from the saved OS birth.
+Permission errors and unchanged birth remain held. The stop proof is committed
+with `spawn_pending` before launch.
+
+`startedAt` in the provider descriptor is a provider timestamp in milliseconds;
+it is preserved as provenance and is **never compared with OS creation time**.
+OS birth is captured separately in seconds. An older operation without that OS
+birth can only use positive `NoSuchProcess`, never inferred PID reuse.
+
+For an already pending older operation, an Operator may attach its exact
+pre-stop snapshot, containing `orch` and `job` objects, without editing SQLite:
+
+```sh
+python -m orchd.orch_reload attach-stop-preflight --state /srv/example/state.db \
+  --operation 00000000-0000-4000-8000-000000000001 \
+  --preflight-file /srv/example/pre-stop.json --preflight-sha256 EXACT_RAW_SHA256
+```
+
+The file must be an owned regular file, not a symlink, not writable by group or
+others, saved before the operation, and match the explicit raw SHA. The snapshot
+must match the exact original Orch/session/job/model/cwd and positive PID/provider
+start descriptor. The Operator attests that this protected pre-stop snapshot was
+captured from the same provider profile. Attachment records the provider profile
+and digest immutably; conflicting attachments fail. It neither stops nor spawns.
+After attachment, repeat the original `reload` command with the same operation
+and identity. If any positive evidence is missing, it remains `stop_pending`.

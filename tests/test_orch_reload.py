@@ -1,4 +1,5 @@
 """Reload changes only the Orch process, with durable uncertainty and no author moves."""
+import hashlib
 import json
 import os
 import sys
@@ -6,6 +7,8 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+
+import psutil
 from unittest import mock
 
 from orchd import orch_reload, orch_revive, store
@@ -15,8 +18,9 @@ from orchd.runtime import Runtime
 class FakeRuntime:
     def __init__(self, home):
         self.home = home
+        self.claude = "/srv/bin/example-claude"
         self.jobs = {"old-job": dict(id="old-job", sessionId="original-session", cwd=str(home),
-                                    pid=100, status="idle", state="blocked")}
+                                    pid=100, startedAt=1000000, status="idle", state="blocked")}
         self.starts = []
         self.stops = []
         self.mode = "normal"
@@ -68,8 +72,11 @@ class ReloadTest(unittest.TestCase):
         self.env.start()
         self.paths = mock.patch.object(orch_reload.paths, "orch_home", return_value=self.home)
         self.paths.start()
+        self.birth = mock.patch.object(orch_reload, "_process_birth", return_value=1000.0)
+        self.birth.start()
 
     def tearDown(self):
+        self.birth.stop()
         self.paths.stop()
         self.env.stop()
         self.assertEqual(self.before, [tuple(r) for r in self.con.execute("SELECT * FROM tasks")])
@@ -192,6 +199,125 @@ class ReloadTest(unittest.TestCase):
         with mock.patch.object(self.rt, "stop_worker", side_effect=stop):
             self.assertEqual(self.reload()["phase"], "stop_pending")
         self.assertFalse(self.rt.starts)
+
+    def removed_job(self, mode="normal"):
+        def stop(job):
+            self.rt.stops.append(job)
+            self.rt.jobs.pop(job, None)
+        self.rt.mode = mode
+        return mock.patch.object(self.rt, "stop_worker", side_effect=stop)
+
+    def test_removed_provider_job_requires_positive_pid_absence(self):
+        with self.removed_job(), mock.patch.object(orch_reload, "_process_birth",
+                side_effect=[1000.0, psutil.NoSuchProcess(100)]):
+            result = self.reload()
+        self.assertEqual(result["phase"], "complete")
+        self.assertEqual(result["stop_evidence"]["kind"], "original_pid_absent")
+        self.assertEqual(result["preflight"]["process_birth"], 1000.0)
+        self.assertEqual(len(self.rt.starts), 1)
+
+    def test_exact_saved_birth_can_prove_pid_reuse(self):
+        with self.removed_job(), mock.patch.object(orch_reload, "_process_birth", side_effect=[1000.0, 2000.0]):
+            result = self.reload()
+        self.assertEqual(result["phase"], "complete")
+        self.assertEqual(result["stop_evidence"]["kind"], "original_pid_reused")
+
+    def test_process_unreadable_or_same_birth_cannot_confirm_removed_job(self):
+        saved = {"provider": orch_reload._provider(self.rt), "job": dict(self.rt.jobs["old-job"]),
+                 "process_birth": 1000.0}
+        row = dict(old_job="old-job", session_id="original-session", home=str(self.home), preflight=saved)
+        for probe in (1000.0, psutil.AccessDenied(100)):
+            with self.subTest(probe=probe), mock.patch.object(orch_reload, "_process_birth", side_effect=[probe]):
+                self.assertIsNone(orch_reload._stop_proof(row, self.rt, {}, False))
+
+    def test_provider_unknown_or_original_session_survivor_blocks_stop(self):
+        for jobs in (None, {"survivor": dict(id="survivor", sessionId="original-session", pid=999,
+                                            status="idle", cwd=str(self.home))}):
+            with self.subTest(jobs=jobs):
+                saved = {"provider": orch_reload._provider(self.rt), "job": dict(self.rt.jobs["old-job"]),
+                         "process_birth": 1000.0}
+                row = dict(old_job="old-job", session_id="original-session", home=str(self.home), preflight=saved)
+                with mock.patch.object(orch_reload, "_process_birth", side_effect=psutil.NoSuchProcess(100)):
+                    self.assertIsNone(orch_reload._stop_proof(row, self.rt, jobs, False))
+                    self.assertIsNone(orch_reload._stop_proof(row, self.rt, {}, None))
+
+    def test_unidentified_live_jobs_block_positive_stop_confirmation(self):
+        saved = {"provider": orch_reload._provider(self.rt), "job": dict(self.rt.jobs["old-job"]),
+                 "process_birth": 1000.0}
+        row = dict(old_job="old-job", session_id="original-session", home=str(self.home), preflight=saved)
+        for session in (None, "", "   ", 42):
+            with self.subTest(session=session), mock.patch.object(orch_reload, "_process_birth",
+                    side_effect=psutil.NoSuchProcess(100)):
+                jobs = {"unidentified": dict(pid=999, status="idle", sessionId=session)}
+                self.assertIsNone(orch_reload._stop_proof(row, self.rt, jobs, False))
+
+    def test_retired_old_row_does_not_hide_another_live_original_session(self):
+        saved = {"provider": orch_reload._provider(self.rt), "job": dict(self.rt.jobs["old-job"]),
+                 "process_birth": 1000.0}
+        row = dict(old_job="old-job", session_id="original-session", home=str(self.home), preflight=saved)
+        jobs = {"old-job": dict(pid=None, status=None),
+                "survivor": dict(pid=999, status="idle", sessionId="original-session")}
+        self.assertIsNone(orch_reload._stop_proof(row, self.rt, jobs, False))
+
+    def test_another_provider_profile_cannot_confirm_stop(self):
+        saved = {"provider": dict(command="/srv/other-claude", config="/srv/other-profile"),
+                 "job": dict(self.rt.jobs["old-job"]), "process_birth": 1000.0}
+        row = dict(old_job="old-job", session_id="original-session", home=str(self.home), preflight=saved)
+        with mock.patch.object(orch_reload, "_process_birth", side_effect=psutil.NoSuchProcess(100)):
+            self.assertIsNone(orch_reload._stop_proof(row, self.rt, {}, False))
+
+    def legacy_preflight(self):
+        snapshot = {"orch": dict(store.get_orch(self.con, "owner")), "job": dict(self.rt.jobs["old-job"])}
+        path = self.home / "preflight.json"
+        path.write_text(json.dumps(snapshot))
+        path.chmod(0o600)
+        os.utime(path, (1, 1))
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        with mock.patch.object(self.rt, "stop_worker", side_effect=TimeoutError()):
+            self.reload()
+        # Emulate the already-deployed schema's operation without a descriptor.
+        self.con.execute("UPDATE orch_reload_operations SET preflight=NULL WHERE operation_id=?", (self.op,))
+        return path, digest
+
+    def test_protected_legacy_attachment_then_pid_absent_continues_same_op_once(self):
+        path, digest = self.legacy_preflight()
+        attached = orch_reload.attach_stop_preflight(self.con, self.rt, self.op, path, digest)
+        self.assertIsNone(attached["preflight"]["process_birth"])
+        self.assertEqual(attached["preflight"]["source_sha256"], digest)
+        self.assertFalse(self.rt.starts)
+        orch_reload.attach_stop_preflight(self.con, self.rt, self.op, path, digest)
+        with self.removed_job("unknown"), mock.patch.object(orch_reload, "_process_birth",
+                side_effect=psutil.NoSuchProcess(100)):
+            self.assertEqual(self.reload()["phase"], "spawn_pending")
+            self.assertEqual(self.reload()["phase"], "spawn_pending")
+        self.assertEqual(len(self.rt.starts), 1)
+
+    def test_legacy_birth_cannot_be_inferred_from_provider_started_at(self):
+        path, digest = self.legacy_preflight()
+        orch_reload.attach_stop_preflight(self.con, self.rt, self.op, path, digest)
+        with self.removed_job(), mock.patch.object(orch_reload, "_process_birth", return_value=2000.0):
+            self.assertEqual(self.reload()["phase"], "stop_pending")
+        self.assertFalse(self.rt.starts)
+
+    def test_attachment_refuses_wrong_digest_identity_new_file_and_public_writes(self):
+        path, digest = self.legacy_preflight()
+        with self.assertRaises(ValueError):
+            orch_reload.attach_stop_preflight(self.con, self.rt, self.op, path, "0" * 64)
+        path.chmod(0o666)
+        with self.assertRaises(ValueError):
+            orch_reload.attach_stop_preflight(self.con, self.rt, self.op, path, digest)
+        path.chmod(0o600)
+        os.utime(path, None)
+        with self.assertRaises(ValueError):
+            orch_reload.attach_stop_preflight(self.con, self.rt, self.op, path, digest)
+        os.utime(path, (1, 1))
+        data = json.loads(path.read_text())
+        data["job"]["sessionId"] = "another-session"
+        path.write_text(json.dumps(data))
+        os.utime(path, (1, 1))
+        with self.assertRaises(ValueError):
+            orch_reload.attach_stop_preflight(self.con, self.rt, self.op, path,
+                                             hashlib.sha256(path.read_bytes()).hexdigest())
 
     def test_reconcile_rejects_ambiguous_native_candidates(self):
         self.rt.mode = "unknown"
