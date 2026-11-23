@@ -573,6 +573,8 @@ class Supervisor:
                               'approvalPolicy':'never','sandbox':'danger-full-access',
                               'developerInstructions':spec.get('brief')})['thread']
             self.update(session_id=thread['id'])
+            from . import task_continuations
+            task_continuations.seed_worker(self.con,self.task_id)
             with unix_socket.create() as listener:
                 unix_socket.bind(listener, task['control_endpoint'])
                 if os.name != 'nt':

@@ -96,6 +96,8 @@ def build_parser():
     dispatch.add_argument("--task-type", choices=core.TASK_TYPES, required=True)
     dispatch.add_argument("--model", help="worker model alias, or auto")
     dispatch.add_argument("--backend", choices=("exec", "app-server"))
+    dispatch.add_argument("--origin-request-id",type=int)
+    dispatch.add_argument("--dispatch-key")
     dispatch.add_argument("--base-branch")
     dispatch.add_argument("--workflow")
     dispatch.add_argument("--workflow-stage")

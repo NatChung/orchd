@@ -57,6 +57,8 @@ TOOLS = [
                                   "sol = GPT-6.1 Sol (tier 2), fable = Claude Fable 5.1 and astra = GPT-6 Astra (tier 3); see `orchd config show`"},
          "goal_id": {"type": "string", "description": "Central goal id; must belong to repo"},
          "issue_ref": {"type": "string", "description": "Optional parent ref: github:owner/repo#N or jira:KEY-N; format validation only"},
+         "origin_request_id": {"type":"integer","minimum":1,"description":"Authenticated interface request owned by this Orch; required by origin-enabled repositories."},
+         "dispatch_key": {"type":"string","description":"Stable per-request author dispatch key; replay returns the original task."},
          "base_branch": {"type": "string", "description": "Optional. Branch on origin to cut the worktree from and to target PRs at (e.g. release-1.2.0); must exist on origin. Omitted = the branch origin/HEAD points at."},
          "goal_critical": {"type": "boolean", "description": "Requires goal_id; whether the task is critical to that goal"},
          "backend": {"type": "string", "enum": ["exec", "app-server"],
@@ -232,6 +234,7 @@ TOOLS = [
                     "with a new report, which wakes you as usual.",
      "inputSchema": {"type": "object", "required": ["task_id", "message"], "properties": {
          "task_id": {"type": "string"},
+         "idempotency_key": {"type":"string","description":"Stable operation key; identical replay never queues twice."},
          "message": {"type": "string", "description": "The next instruction, with any new scope or done_when"}}}},
 ]
 
@@ -744,7 +747,8 @@ def call(name, args, thread, con, rt, sent=None, *, reply_id=None):
                           backend=args.get("backend"), goal_id=args.get("goal_id"),
                           goal_critical=args.get("goal_critical"), issue_ref=args.get("issue_ref"),
                           base_branch=args.get("base_branch"), workflow=args.get('workflow'),
-                          workflow_stage=args.get('workflow_stage'), workflow_inputs=args.get('workflow_inputs'))
+                          workflow_stage=args.get('workflow_stage'), workflow_inputs=args.get('workflow_inputs'),
+                          origin_request_id=args.get('origin_request_id'), dispatch_key=args.get('dispatch_key'))
         return {"task_id": t["id"], "status": t["status"], "branch": t["branch"], "worktree": t["worktree"],
                 "worker_thread_id": t["session_id"], "worker_turn_id": t["active_turn"] or t["last_completed_turn"],
                 "orch_id": thread, "model": t["model"], "model_reason": t['model_reason'],
@@ -815,7 +819,7 @@ def call(name, args, thread, con, rt, sent=None, *, reply_id=None):
         return {"task_id": t["id"], "status": t["status"], "model": t["model"], "branch": t["branch"],
                 "worktree": t["worktree"]}
     if name == "followup":
-        return core.followup(con, rt, args["task_id"], args.get("message"))
+        return core.followup(con, rt, args["task_id"], args.get("message"), idempotency_key=args.get("idempotency_key"))
     raise ValueError(f"unknown tool {name}")
 
 

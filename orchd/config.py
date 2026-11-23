@@ -273,3 +273,18 @@ def show(env=None):
             "interface": dict(zip(("model", "effort"), interface_settings(env))),
             "review": "always the other vendor than the author, same tier when possible (terra<->sonnet, "
                       "sol->sonnet, fable<->astra by default); not configurable"}
+
+
+def continuation_policy(repo, task_type, env=None):
+    """Protected instance opt-in; does not retroactively lease existing tasks."""
+    file=path(env)
+    section=_read(env)[1].get('continuation',{})
+    if not isinstance(section,dict) or set(section)-{'repositories','task_types','require_origin','owner'}:
+        raise ValueError(f'{file}: invalid continuation policy')
+    repos=section.get('repositories',[]);types=section.get('task_types',['code','docs','ops'])
+    required=section.get('require_origin',True);owner=section.get('owner','review-feedback')
+    if (not isinstance(repos,list) or any(not isinstance(v,str) or not v for v in repos)
+            or not isinstance(types,list) or any(v not in ('code','docs','ops','review','test') for v in types)
+            or type(required) is not bool or not isinstance(owner,str) or not owner.strip()):
+        raise ValueError(f'{file}: invalid continuation policy')
+    return dict(owner=owner,require_origin=required) if repo in repos and task_type in types else None

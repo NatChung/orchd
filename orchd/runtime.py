@@ -214,8 +214,8 @@ class Runtime:
                               text=True, encoding='utf-8', errors='replace', timeout=timeout, check=check, env=env,
                               **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))
 
-    def send_uds(self, path, session_id, text):
-        frame = {"type": "user", "session_id": session_id, "uuid": str(uuid.uuid4()),
+    def send_uds(self, path, session_id, text, *, message_uuid=None):
+        frame = {"type": "user", "session_id": session_id, "uuid": message_uuid or str(uuid.uuid4()),
                  "from": "orchd", "priority": "next", "message": {"role": "user", "content": text}}
         data = (json.dumps(frame, ensure_ascii=False) + "\n").encode()
         if os.name == "nt":
@@ -226,7 +226,7 @@ class Runtime:
                 raise UDSWriteUncertain(f"{type(error).__name__}: {error}") from error
             if not wait_for_receipt(session_id, frame["uuid"]):
                 raise UDSWriteUncertain("Claude pipe write completed, but transcript receipt was not confirmed")
-            return
+            return frame["uuid"]
         with socket.socket(socket.AF_UNIX) as peer:
             peer.settimeout(5)
             peer.connect(path)
@@ -238,6 +238,7 @@ class Runtime:
                 peer.shutdown(socket.SHUT_WR)
             except OSError:
                 pass  # The complete frame was written; shutdown cannot undo that send.
+        return frame["uuid"]
 
     def sleep(self, seconds):
         time.sleep(seconds)

@@ -175,8 +175,51 @@ def _choice(name, value, valid):
 def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, model=None,
              model_reason=None, task_type=None, rework_of=None, found_by=None, verify=None, manual_checks=None,
              verifies=None, backend=None, goal_id=None, goal_critical=None, issue_ref=None, group_id=None,
-             base_branch=None, workflow=None, workflow_stage=None, workflow_inputs=None, _run_attempt=None):
-    from . import issue_links
+             base_branch=None, workflow=None, workflow_stage=None, workflow_inputs=None, _run_attempt=None,
+             origin_request_id=None, dispatch_key=None):
+    from . import issue_links, task_origins, task_continuations
+    if not orch_thread:
+        raise ValueError("dispatch needs the caller's thread id")
+    from . import config
+    continuation = config.continuation_policy(repo, task_type)
+    if origin_request_id is None and _run_attempt is not None:
+        from . import workflow_runs
+        if not isinstance(_run_attempt, workflow_runs._Reservation):
+            raise ValueError('Workflow reservation is internal, not a dispatch parameter')
+        attempt = con.execute('SELECT run_id FROM workflow_run_attempts WHERE id=?', (_run_attempt.attempt_id,)).fetchone()
+        if attempt:
+            run = con.execute('SELECT request_id FROM workflow_runs WHERE id=?', (attempt['run_id'],)).fetchone()
+            origin_request_id = run['request_id'] if run else None
+            dispatch_key = dispatch_key or ('workflow-attempt:' + _run_attempt.attempt_id)
+    origin = None
+    dispatch_digest = task_origins.digest(dict(repo=repo,title=title,instructions=instructions,done_when=done_when,
+        model=model,model_reason=model_reason,task_type=task_type,rework_of=rework_of,found_by=found_by,
+        verify=verify,manual_checks=manual_checks,verifies=verifies,backend=backend,goal_id=goal_id,
+        goal_critical=goal_critical,issue_ref=issue_ref,group_id=group_id,base_branch=base_branch,
+        workflow=workflow,workflow_stage=workflow_stage,workflow_inputs=workflow_inputs))
+    def origin_error(code):
+        task_origins.record_dispatch_incident(con,orch_thread=orch_thread,repo=repo,args_digest=dispatch_digest,
+            dispatch_key=dispatch_key if isinstance(dispatch_key,str) else None,
+            origin_request_id=origin_request_id if type(origin_request_id) is int else None,code=code)
+    if continuation and continuation['require_origin'] and origin_request_id is None:
+        origin_error('origin_missing')
+        raise ValueError('This repository requires origin_request_id and dispatch_key before dispatch')
+    if (origin_request_id is None) != (dispatch_key is None):
+        origin_error('origin_missing')
+        raise ValueError('origin_request_id and dispatch_key must be supplied together')
+    if dispatch_key is not None and (not isinstance(dispatch_key, str) or not dispatch_key.strip() or len(dispatch_key) > 200):
+        origin_error('origin_invalid')
+        raise ValueError('dispatch_key must be a non-empty stable key of at most 200 characters')
+    if origin_request_id is not None:
+        try:
+            origin = task_origins.request_origin(con,rt,orch_thread,origin_request_id,repo,active=False)
+            old = task_origins.replay(con,origin_request_id,dispatch_key,dispatch_digest)
+            if old is not None:
+                return old
+            origin = task_origins.request_origin(con,rt,orch_thread,origin_request_id,repo)
+        except ValueError:
+            origin_error('origin_invalid')
+            raise
     if issue_ref is not None:
         issue_links.validate_ref(issue_ref)
     if not orch_thread:
@@ -241,7 +284,11 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
         rt.verify_base_branch(repo_path, base_branch)
     task_id = run_task_id or store.new_task_id()
     remote_branch = remote_repo = None
-    with store.immediate(con) if goal_id is not None else contextlib.nullcontext():
+    with store.immediate(con) if goal_id is not None or origin is not None else contextlib.nullcontext():
+        if origin is not None:
+            old = task_origins.replay(con,origin_request_id,dispatch_key,dispatch_digest)
+            if old is not None:
+                return old
         task = store.create_task(con, id=task_id, repo=repo, repo_path=str(repo_path), title=title,
                                  instructions=instructions, done_when=done_when,
                                  orch_thread=orch_thread, codex_bin=rt.codex, model=WORKER_MODELS[model],
@@ -250,6 +297,11 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
                                  goal_id=goal_id, goal_critical=goal_critical, group_id=group_id, auto_model=auto_model,
                                  remote_branch=remote_branch, remote_repo=remote_repo)
         goals.record_dispatch(con, goal_id, task_id, f"orch:{orch_thread}")
+        if origin is not None:
+            task_origins.capture(con,task_id,origin,dispatch_key,dispatch_digest)
+            task_origins.resolve_dispatch_incidents(con,orch_thread,repo,dispatch_digest,task_id)
+            if continuation:
+                task_continuations.prepare(con,task_id,dict(origin,origin_digest=task_origins.digest(origin)),continuation)
     spec = {k: v for k, v in dict(verify=verify, manual_checks=manual_checks, verifies=verifies).items() if v}
     if workflow_record is not None:
         spec['workflow'] = workflow_record
@@ -285,16 +337,40 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
             store.update_task(con, task_id, socket=sock, job_id=job, session_id=session)
             con.execute("UPDATE tasks SET status='running' WHERE id=? AND status='starting'", (task_id,))
             task = store.get_task(con, task_id)
-            rt.send_uds(sock, session, task_message(task))
+            if task_continuations.get(con,task_id):
+                task_continuations.seed_worker(con,task_id)
+                initial = task_continuations.reserve_initial_input(con,task,task_message(task))
+                try:
+                    rt.send_uds(sock,session,initial['wrapped_input'],message_uuid=initial['id'])
+                except UDSWriteUncertain:
+                    task_continuations.provider_state(con,initial['id'],'unknown','initial_write_uncertain')
+                    raise
+                except OSError:
+                    task_continuations.provider_state(con,initial['id'],'not_submitted','initial_connect_failed')
+                    raise
+                else:
+                    task_continuations.provider_state(con,initial['id'],'submitted')
+            else:
+                rt.send_uds(sock, session, task_message(task))
     except Exception as error:
         store.update_task(con, task_id, status="failed", note=f"{type(error).__name__}: {error}"[:1000])
         worktree = store.get_task(con, task_id)["worktree"]
-        if worktree:  # nothing has run in it yet, so it holds no work
+        held = task_continuations.get(con,task_id)
+        if held:
+            # A spawn or initial write may already have reached the original provider.
+            # Retain its original identity/path; dispatch-key replay must not spawn again.
+            try:
+                task_continuations.seed_worker(con,task_id)
+            except Exception:
+                pass
+            store.update_task(con,task_id,note=f"{type(error).__name__}; original continuation held; launch not confirmed")
+        elif worktree:  # legacy dispatch cleanup remains unchanged
             try:
                 rt.remove_worktree(repo_path, worktree)
             except Exception:
                 pass
         raise
+    task_continuations.seed_worker(con,task_id)
     if issue_ref is not None:
         issue_links.link(con, task_id, issue_ref, actor="orch", idempotency_key="dispatch:issue_ref")
     return store.get_task(con, task_id)
@@ -310,7 +386,11 @@ def dispatch_batch(con, rt, *, orch_thread, tasks):
     if any(not isinstance(t, dict) or not all(k in t for k in
            ('repo', 'title', 'instructions', 'done_when', 'model_reason', 'task_type')) for t in tasks):
         raise ValueError("each batch item needs the dispatch required fields")
-    group_id = "b" + uuid.uuid4().hex[:12]
+    if all(t.get('origin_request_id') is not None and t.get('dispatch_key') for t in tasks):
+        from .task_origins import digest
+        group_id = 'b' + digest(dict(orch_thread=orch_thread,tasks=tasks))[:12]
+    else:
+        group_id = "b" + uuid.uuid4().hex[:12]
     results = []
     for index, options in enumerate(tasks):
         before = {row['id'] for row in con.execute('SELECT id FROM tasks WHERE group_id=?', (group_id,))}
@@ -351,6 +431,9 @@ def rate_limit_notice(con, rt, task_id, error, attempt, *, job_id=None, generati
                 return False
         store.add_message(con, task_id, 'rate_limit', json.dumps(dict(provider=models.quota_provider_for(task['model']), attempt=attempt)))
         already_requested = con.execute("SELECT 1 FROM messages WHERE task_id=? AND kind='auto_retry_requested' LIMIT 1", (task_id,)).fetchone()
+        from . import task_continuations
+        held = task_continuations.get(con,task_id)
+        allow_auto = allow_auto and not (held and held['state']!='released')
         automatic = allow_auto and not claude and models.capacity_fallback(task['model']) is not None and task['auto_model'] and task['auto_retry_count'] == 0 and not already_requested
         event_id = None
         if automatic:
@@ -690,15 +773,32 @@ def _deliver_to_claude(con, rt, task, text, keep_sent=False, entry_reply_id=None
     if not task["socket"] or not task["session_id"]:
         raise ValueError(f"task {task_id} has no running worker"
                          + (f"; {len(pending)} queued answer(s) stay pending" if pending else ""))
+    from . import task_continuations
+    followup_ids=[json.loads(row['evidence'] or '{}').get('followup_id') for row in pending]+([followup_id] if followup_id is not None else [])
+    held=task_continuations.get(con,task_id)
+    managed=bool(held and held['state']!='released') or task_continuations.managed_followups(con,followup_ids)
+    provider=None
+    direct_input_id=None
     try:
-        rt.send_uds(task["socket"], task["session_id"], "\n\n".join(f"[orchd answer {task_id}]\n{b}" for b in bodies))
+        if managed:
+            input_ids=[row['id'] for row in pending]
+            if text is not None and followup_id is None:
+                direct_input_id=task_continuations.reserve_direct_input(con,task_id,text,entry_reply_id)
+                input_ids.append(direct_input_id)
+            provider=task_continuations.reserve_provider_delivery(con,task,bodies,input_ids,followup_ids)
+            rt.send_uds(task['socket'],task['session_id'],provider['wrapped_input'],message_uuid=provider['id'])
+            task_continuations.provider_state(con,provider['id'],'submitted')
+        else:
+            rt.send_uds(task["socket"], task["session_id"], "\n\n".join(f"[orchd answer {task_id}]\n{b}" for b in bodies))
     except UDSWriteUncertain as error:
+        if provider:task_continuations.provider_state(con,provider['id'],'unknown',type(error).__name__)
         return dict(status="failed", delivered=0, pending=len(pending), uncertain=True,
                     error=f"task {task_id}: the Claude worker may have received the message "
                           f"({error}); no new text was queued. Check the worker status or read its log before "
                           "deciding whether to resend. Earlier queued answers may also have reached it; "
                           "confirm before flushing them again.")
     except OSError as gone:  # Runtime only propagates ordinary OSError before any frame data is written
+        if provider:task_continuations.provider_state(con,provider['id'],'not_submitted',type(gone).__name__)
         ended = claude_job_alive(_live_jobs(rt), task["job_id"]) is False  # the daemon's job list, never the socket alone
         if interrupt:  # a correction is only valid for this worker: never keep it for a replacement
             raise ValueError(f"task {task_id}: interrupt was not delivered ({type(gone).__name__}: {gone}) and was not "
@@ -721,7 +821,7 @@ def _deliver_to_claude(con, rt, task, text, keep_sent=False, entry_reply_id=None
                          "on this task and the queued text will reach the new worker.") from gone
     try:
         with store.immediate(con):
-            store.mark_read(con, [row["id"] for row in pending])
+            store.mark_read(con, [row["id"] for row in pending] + ([direct_input_id] if direct_input_id is not None else []))
             links = [row["entry_reply_id"] for row in pending] + ([entry_reply_id] if text is not None else [])
             evidence = [row["evidence"] for row in pending] + ([json.dumps(dict(followup_id=followup_id))
                         if followup_id is not None else None] if text is not None else [])
@@ -1091,7 +1191,7 @@ FOLLOWUP_HEAD = ("[followup] New instruction for this same task, not an answer t
                  "and finish with a new `report`.")
 
 
-def followup(con, rt, task_id, message, *, expected=None):
+def followup(con, rt, task_id, message, *, expected=None, idempotency_key=None):
     """Add an instruction to an open task: same worker, worktree and session, no model change.
 
     Rides on `answer` for delivery (Codex FIFO queue and resume, Claude send under the task lock); a busy Codex
@@ -1116,8 +1216,18 @@ def followup(con, rt, task_id, message, *, expected=None):
                 or not expected.get("session_id")):
             raise ValueError("expected followup target must contain the complete worker identity")
         expected = dict(expected)
+    from . import task_continuations
+    if idempotency_key is not None:
+        if not isinstance(idempotency_key,str) or not idempotency_key.strip() or len(idempotency_key)>200:
+            raise ValueError('followup idempotency_key must be a stable non-empty key of at most 200 characters')
+        expected = expected or {k:task[k] for k in store.ANSWER_TARGET_FIELDS}
+        old = task_continuations.followup_for_key(con,task_id,idempotency_key,expected=expected,instruction=message)
+        if old is not None:
+            return old
     event = dict(message=message, from_status=task["status"], model=task["model"], session_id=task["session_id"],
                  token=uuid.uuid4().hex)
+    if idempotency_key is not None:
+        event['idempotency_key']=idempotency_key
     accepted = {}  # id and exact body of the acceptance row as written; it counts only once committed
 
     def accept(locked_task):
@@ -1130,7 +1240,14 @@ def followup(con, rt, task_id, message, *, expected=None):
         event.update(from_status=locked_task["status"], model=locked_task["model"],
                      session_id=locked_task["session_id"], status="accepted")
         body = json.dumps(event, ensure_ascii=False)
-        accepted.update(id=store.add_message(con, task_id, "followup", body), body=body)
+        if idempotency_key is not None:
+            old = task_continuations.followup_for_key(con,task_id,idempotency_key,expected=expected,instruction=message)
+            if old is not None:
+                raise task_continuations.FollowupReplay(old)
+        with contextlib.nullcontext() if con.in_transaction else store.immediate(con):
+            accepted.update(id=store.add_message(con, task_id, "followup", body), body=body)
+            if idempotency_key is not None:
+                task_continuations.capture_followup_key(con,task_id,idempotency_key,message,expected,accepted['id'])
         return accepted["id"]
 
     def record():
@@ -1142,6 +1259,8 @@ def followup(con, rt, task_id, message, *, expected=None):
                            (json.dumps(event, ensure_ascii=False), accepted["id"], task_id, accepted["body"])).rowcount
     try:
         result = _answer(con, rt, task_id, f"{FOLLOWUP_HEAD}\n\n{message}", accept=accept)
+    except task_continuations.FollowupReplay as replay:
+        return replay.receipt
     except Exception as error:
         # No exception text decides this: only a committed acceptance row is marked failed.
         event.update(status="failed", error=f"{type(error).__name__}: {error}"[:500])
@@ -1160,6 +1279,8 @@ def followup(con, rt, task_id, message, *, expected=None):
         problem = f"followup event not updated: {type(error).__name__}: {error}"
         result = dict(result, record_error=(f"{result['record_error']}; {problem}" if result.get("record_error")
                                             else problem)[:600])
+    if idempotency_key is not None:
+        result=dict(result,acceptance_id=accepted['id'],task_id=task_id,session_id=task['session_id'])
     return result
 
 
@@ -1291,6 +1412,10 @@ def _close_locked(con, rt, task_id, outcome, rating):
     workflow_runs.guard_close(con, task_id, outcome)
     if task["status"] == "closed":  # another close finished while we waited for the lock
         return dict(task_id=task_id, closed=True, worktree="already closed")
+    from . import task_continuations
+    deferred = task_continuations.request_close(con,task_id,outcome,rating)
+    if deferred is not None:
+        return deferred
     fields = {k: v for k, v in (("outcome", outcome), ("rating", rating)) if v is not None}
     kept, step = None, f"worker {task['job_id']} not confirmed stopped"
     cleanup, absent = None, None
@@ -1336,6 +1461,7 @@ def _close_locked(con, rt, task_id, outcome, rating):
         store.update_task(con, task_id, status="closed", **fields,
                           note=(f"worktree kept: {kept}" if kept else absent if absent else None if stale else task["note"]))
         affected_entries = entry.cancel_task_questions(con, task_id)
+        task_continuations.finish_native_close(con,task_id)
         con.execute("COMMIT")
     except BaseException:
         con.execute("ROLLBACK")
@@ -1518,6 +1644,10 @@ def retry(con, rt, task_id, model, reason, lock_wait=RETRY_LOCK_WAIT, backend=No
     _choice("model", model, tuple(WORKER_MODELS))
     with store.task_delivery(con, [task_id], lock_wait):
         task = store.get_task(con, task_id)
+        from . import task_continuations
+        held = task_continuations.get(con,task_id)
+        if held and held['state']!='released':
+            raise ValueError('original continuation lease forbids replacement; release the original lease explicitly')
         if auto_event is not None:
             row = con.execute("SELECT body FROM messages WHERE id=? AND task_id=? AND kind='auto_retry_requested'",
                               (auto_event, task_id)).fetchone()
