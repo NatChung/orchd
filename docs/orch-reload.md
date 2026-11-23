@@ -88,3 +88,47 @@ captured from the same provider profile. Attachment records the provider profile
 and digest immutably; conflicting attachments fail. It neither stops nor spawns.
 After attachment, repeat the original `reload` command with the same operation
 and identity. If any positive evidence is missing, it remains `stop_pending`.
+
+## Accept an existing provider resume copy explicitly
+
+Normal reload remains strict: a returned different session stays held. Some
+providers explicitly restore the original transcript into a new controller
+session. If the Operator accepts that controller lineage, recover the **existing
+copy** with `accept-resume-copy`; this entry point never starts or stops a job:
+
+```sh
+python -m orchd.orch_reload accept-resume-copy --state /srv/example/orchd.db \
+  --operation 00000000-0000-4000-8000-000000000001 \
+  --candidate-job RETURNED_JOB --candidate-session RETURNED_SESSION \
+  --roster-file /srv/example/provider-roster.json --roster-sha256 EXACT_RAW_SHA256
+```
+
+This exception requires the original operation to have positive stop evidence
+and be held specifically for its returned session mismatch. The exact candidate
+must already be its persisted spawn receipt. The owned, protected provider roster
+must prove `launch.mode=resume`, original `launch.sessionId`, `fork=true` and
+`restoresTranscript=true`, with the exact returned outer session/job/cwd and a
+launch timestamp after this operation began. Its launch flags must retain the
+original resolved model, socket, strict MCP configuration and MCP file path.
+
+The MCP file must use the intended deployment's interpreter, entry point and
+complete `runtime.mcp_env` profile, including the logical Orch ID. That profile's
+state database must be the database containing the operation. A recovery helper
+may be deployed separately from the running SDK; execute it under the intended
+MCP interpreter and profile. No runtime-wide upgrade is required by this API.
+
+A fresh provider probe must identify the copy alive on the original socket, with
+its PID equal to the roster host or positively identified as that host's child.
+Competing original/copy processes, unidentified live jobs, missing evidence,
+changed controller identity, incorrect configuration or conflicting receipts
+refuse acceptance. The same Orch lock and exact original identity/marker CAS
+protect the update.
+
+Acceptance changes only the logical Orch's controller job/session/socket and
+clears this reload marker. It preserves the operation's original session as
+history and stores an explicit lineage receipt with original/accepted sessions,
+provider evidence digest and MCP digest. Every author task, owner, generation
+and author session is untouched. Repeating the exact acceptance after success
+returns its existing receipt; it never dispatches, retries, adopts or resumes an
+author. Report this as an accepted provider controller copy, not as preservation
+of the controller's original native UUID.

@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -12,7 +13,7 @@ import psutil
 from unittest import mock
 
 from orchd import orch_reload, orch_revive, store
-from orchd.runtime import Runtime
+from orchd.runtime import Runtime, mcp_env
 
 
 class FakeRuntime:
@@ -57,7 +58,7 @@ class ReloadTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.home = Path(self.tmp.name).resolve()
-        self.con = store.connect(self.home / "state.db")
+        self.con = store.connect(self.home / "orchd.db")
         self.con.execute("INSERT INTO orchs(id,kind,model,socket,session_id,job_id,created_at) "
                          "VALUES('owner','claude','example-model','/tmp/example-orch.sock',"
                          "'original-session','old-job',1)")
@@ -68,7 +69,7 @@ class ReloadTest(unittest.TestCase):
         self.before = [tuple(r) for r in self.con.execute("SELECT * FROM tasks")]
         self.rt = FakeRuntime(self.home)
         self.op = str(uuid.uuid4())
-        self.env = mock.patch.dict(os.environ, {}, clear=True)
+        self.env = mock.patch.dict(os.environ, {"ORCHD_HOME": str(self.home)}, clear=True)
         self.env.start()
         self.paths = mock.patch.object(orch_reload.paths, "orch_home", return_value=self.home)
         self.paths.start()
@@ -325,6 +326,122 @@ class ReloadTest(unittest.TestCase):
         self.rt.jobs["other-job"] = dict(self.rt.jobs["new-job"], id="other-job")
         with self.assertRaisesRegex(ValueError, "ambiguous"):
             orch_reload.reconcile(self.con, self.rt, self.op, "new-job")
+
+    def copy_evidence(self):
+        sock = str(self.home / "o.sock")
+        self.con.execute("UPDATE orchs SET socket=? WHERE id='owner'", (sock,))
+        self.rt.orch_socket_path = lambda orch: sock
+        self.rt.mode = "wrong-session"
+        result = self.reload()
+        mcp = self.home / "mcp.json"
+        mcp.write_text(json.dumps({"mcpServers": {"orchd": {"command": sys.executable,
+                "args": [orch_reload.paths.orchd_executable(), "mcp"], "env": mcp_env("owner")}}}))
+        mcp.chmod(0o600)
+        launch = {"mode": "resume", "sessionId": "original-session", "fork": True,
+                  "restoresTranscript": True, "flagArgs": ["--model", "example-model", "--mcp-config", str(mcp),
+                    "--messaging-socket-path", sock, "--strict-mcp-config"]}
+        roster = {"proto": 1, "workers": {"new-job": {"pid": 101, "sessionId": "wrong-session",
+                    "cwd": str(self.home), "dispatch": {"proto": 1, "short": "new-job",
+                    "sessionId": "wrong-session", "createdAt": time.time() * 1000, "cwd": str(self.home),
+                    "launch": launch}}}}
+        path = self.home / "roster.json"
+        self.save_roster(path, roster)
+        return path, roster
+
+    def save_roster(self, path, roster):
+        path.write_text(json.dumps(roster))
+        path.chmod(0o600)
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def accept_copy(self, path, digest=None, job="new-job", session="wrong-session"):
+        return orch_reload.accept_resume_copy(self.con, self.rt, self.op, job, session, path,
+                                              digest or hashlib.sha256(path.read_bytes()).hexdigest())
+
+    def test_accept_copy_changes_only_controller_and_retains_original_operation_session(self):
+        path, roster = self.copy_evidence()
+        result = self.accept_copy(path)
+        self.assertEqual(result["phase"], "complete")
+        self.assertEqual(result["session_id"], "original-session")
+        self.assertEqual(result["lineage"]["original_session"], "original-session")
+        self.assertEqual(result["lineage"]["accepted_session"], "wrong-session")
+        orch = store.get_orch(self.con, "owner")
+        self.assertEqual((orch["id"], orch["session_id"], orch["job_id"], orch["stopped_at"]),
+                         ("owner", "wrong-session", "new-job", None))
+        self.assertEqual(self.accept_copy(path), result)
+        self.assertEqual(self.reload()["phase"], "complete")
+        self.assertEqual(len(self.rt.starts), 1)
+        self.assertEqual(self.rt.stops, ["old-job"])
+
+    def test_copy_acceptance_requires_exact_receipt_job_session_and_digest(self):
+        path, roster = self.copy_evidence()
+        for args in ({"job": "another-job"}, {"session": "another-session"}, {"digest": "0" * 64}):
+            with self.subTest(args=args), self.assertRaises(ValueError):
+                self.accept_copy(path, **args)
+        self.assertIsNotNone(store.get_orch(self.con, "owner")["stopped_at"])
+        self.assertEqual(len(self.rt.starts), 1)
+
+    def test_unproven_copy_lineage_or_original_config_is_rejected(self):
+        path, roster = self.copy_evidence()
+        original = json.loads(json.dumps(roster))
+        cases = (lambda r: r["workers"]["new-job"]["dispatch"]["launch"].update(fork=False),
+                 lambda r: r["workers"]["new-job"]["dispatch"]["launch"].update(sessionId="unrelated"),
+                 lambda r: r["workers"]["new-job"]["dispatch"]["launch"].update(restoresTranscript=False),
+                 lambda r: r["workers"]["new-job"]["dispatch"].update(cwd="/srv/another"),
+                 lambda r: r["workers"]["new-job"]["dispatch"]["launch"]["flagArgs"].__setitem__(1, "another-model"))
+        for change in cases:
+            data = json.loads(json.dumps(original))
+            change(data)
+            self.save_roster(path, data)
+            with self.assertRaises(ValueError):
+                self.accept_copy(path)
+        self.assertEqual(self.rt.stops, ["old-job"])
+        self.assertEqual(len(self.rt.starts), 1)
+
+    def test_copy_acceptance_requires_current_deployment_mcp_entry(self):
+        path, roster = self.copy_evidence()
+        mcp = self.home / "mcp.json"
+        data = json.loads(mcp.read_text())
+        data["mcpServers"]["orchd"]["command"] = "/srv/old-venv/bin/python"
+        mcp.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, "this deployment"):
+            self.accept_copy(path)
+
+    def test_copy_acceptance_rejects_mcp_profile_pointing_at_another_state(self):
+        path, roster = self.copy_evidence()
+        mcp = self.home / "mcp.json"
+        data = json.loads(mcp.read_text())
+        data["mcpServers"]["orchd"]["env"]["ORCHD_HOME"] = "/srv/another-state"
+        mcp.write_text(json.dumps(data))
+        with self.assertRaisesRegex(ValueError, "profile"):
+            self.accept_copy(path)
+        self.assertIsNotNone(store.get_orch(self.con, "owner")["stopped_at"])
+
+    def test_copy_acceptance_requires_fresh_live_socket_and_unambiguous_session(self):
+        path, roster = self.copy_evidence()
+        with mock.patch.object(self.rt, "socket_listening", return_value=False), self.assertRaises(ValueError):
+            self.accept_copy(path)
+        for session in ("original-session", "wrong-session", ""):
+            self.rt.jobs["competitor"] = dict(id="competitor", sessionId=session, pid=999, status="idle")
+            with self.subTest(session=session), self.assertRaisesRegex(ValueError, "ambiguous"):
+                self.accept_copy(path)
+        self.assertEqual(self.rt.stops, ["old-job"])
+        self.assertEqual(len(self.rt.starts), 1)
+
+    def test_controller_change_and_unproven_roster_host_prevent_copy_acceptance(self):
+        path, roster = self.copy_evidence()
+        roster["workers"]["new-job"]["pid"] = 999
+        self.save_roster(path, roster)
+        with mock.patch.object(orch_reload, "_process_parent", return_value=444), self.assertRaises(ValueError):
+            self.accept_copy(path)
+        self.con.execute("UPDATE orchs SET stopped_at=123 WHERE id='owner'")
+        with self.assertRaisesRegex(ValueError, "changed"):
+            self.accept_copy(path)
+
+    def test_malformed_old_row_is_not_positive_retirement(self):
+        row = dict(old_job="old-job", session_id="original-session", home=str(self.home), preflight=None)
+        for old in ({}, {"pid": None, "status": None},
+                    {"id": "old-job", "sessionId": "another", "pid": None, "status": None}):
+            self.assertIsNone(orch_reload._stop_proof(row, self.rt, {"old-job": old}, False))
 
     def test_native_start_writes_mcp_with_current_deployment_python(self):
         sock = str(self.home / "o.sock")
