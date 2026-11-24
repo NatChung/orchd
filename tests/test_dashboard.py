@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -33,11 +34,11 @@ class DashboardTest(unittest.TestCase):
         return subprocess.run([sys.executable, "-m", "orchd.cli", "dashboard", *args],
                               env={**os.environ, **self.env}, capture_output=True, text=True, timeout=20)
 
-    def entry(self, arguments=None):
+    def entry(self, arguments=None, *, name="dashboard", entry_id="desktop"):
         with patch.dict(os.environ, self.env):
             response = mcp_server.handle({"id": 1, "method": "tools/call", "params": {
-                "name": "dashboard", "arguments": arguments or {},
-            }}, None, None, role="entry")
+                "name": name, "arguments": arguments or {},
+            }}, None, None, role="entry", entry_id=entry_id)
         return response["result"]
 
     def test_unconfigured_lookup_creates_no_state(self):
@@ -79,3 +80,39 @@ class DashboardTest(unittest.TestCase):
 
     def test_entry_accepts_no_destination_override(self):
         self.assertTrue(self.entry({"page_url": PAGE})["isError"])
+
+
+    def test_dashboard_actions_only_use_the_local_desktop_binding(self):
+        for name, action in (("dashboard_read", "read"), ("dashboard_refresh", "refresh")):
+            with self.subTest(name=name), patch("orchd.dashboard.run_action", return_value={"page_url": PAGE}) as run:
+                self.assertTrue(self.entry({"page_url": PAGE}, name=name)["isError"])
+                self.assertTrue(self.entry(name=name, entry_id="other")["isError"])
+                run.assert_not_called()
+                self.assertEqual(self.entry(name=name)["structuredContent"], {"page_url": PAGE})
+                run.assert_called_once_with(action)
+
+    def test_missing_pages_publisher_keeps_status_available(self):
+        self.write(self.config / "dashboard.json", {"page_url": PAGE})
+        for name in ("dashboard_read", "dashboard_refresh"):
+            with self.subTest(name=name):
+                result = self.entry(name=name)
+                self.assertTrue(result["isError"])
+                self.assertIn("Pages publisher is not configured", result["content"][0]["text"])
+        self.assertEqual(self.entry()["structuredContent"]["status"], "never_synced")
+
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for the Pages publisher")
+    def test_overlapping_publisher_keeps_newer_page_content(self):
+        fixture = Path(__file__).with_name("fixtures") / "dashboard_publisher_race.cjs"
+        result = subprocess.run(["node", str(fixture)], capture_output=True, encoding="utf-8", timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+    def test_refresh_rejects_uncoordinated_periodic_publisher(self):
+        self.write(self.config / "dashboard.json", {"page_url": PAGE})
+        publisher = self.config / "pages-publisher"
+        self.write(publisher / "config.json", {})
+        (publisher / "orch-dash-pages-sync.js").write_text("// obsolete publisher", encoding="utf-8")
+        result = self.entry(name="dashboard_refresh")
+        self.assertTrue(result["isError"])
+        self.assertIn("Update the periodic Dashboard publisher", result["content"][0]["text"])

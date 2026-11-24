@@ -40,3 +40,28 @@ Fresh `orchd init` pre-approves the read-only tool. Existing Interfaces receive
 the managed rule and tool approval through the home migration in the upgraded
 binary. Reload the Interface chat to pick up the new tool. The publisher has
 its own lifecycle and Pages access.
+
+
+## Read and refresh from Desktop Interface
+
+- Say **讀 Dashboard** to read the current cards from the bound Page.
+- Say **立刻更新 Dashboard** to run the local publisher once, bypassing its
+  schedule. The tool reports whether it updated the Page or verified that it
+  was already current. A status query still reports the last verified receipt.
+- Answer a question in Interface as usual.
+
+Both actions use an authenticated Codex CLI with the Pages plugin and Node.js
+on the Interface MCP host. Put the Pages publisher's profile `config.json`
+under `ORCHD_CONFIG_DIR/pages-publisher/`. Its `pageId`, `state`, and
+`profileConfig` must match the active Page and profile. It also supplies
+`fileReference`, `python`, `orchd`, and `watcher` for the snapshot pipeline.
+Use the Python interpreter from the orchd installation so the receipt helper
+can import orchd's file lock.
+When a periodic sync is enabled, use the same installed
+`orchd/dashboard_publisher.cjs` source and `orchd/dashboard_receipt.py` helper
+for both modes. Let any in-flight run of the old periodic job finish, then
+replace its copies before using on-demand sync. Both modes check the Page
+revision before publishing and coordinate receipt updates. Set `node` and `codex` to executable
+paths if the MCP host cannot find them on its PATH. The actions use the
+account signed in to that Codex CLI. For a write, the Pages API must confirm
+owner-only access.
