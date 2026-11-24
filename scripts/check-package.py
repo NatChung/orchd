@@ -3,7 +3,7 @@
 
   check-package.py DIST_DIR
 
-1. The wheel contains the hidden home/interface `.codex` templates and the worker gh wrapper.
+1. The wheel contains the hidden home/interface `.codex` templates, worker gh wrapper, and Dashboard Pages bridge.
 2. `uv tool install` of that wheel into throwaway HOME, UV_TOOL_DIR, UV_TOOL_BIN_DIR, cache and ORCHD_* dirs.
 3. `orchd --help` resolves through PATH from the isolated bin dir, outside any checkout.
 4. `orchd doctor --json --no-input` before init: valid JSON, Orch home reported as "not set up yet",
@@ -25,6 +25,7 @@ REQUIRED_MEMBERS = (
     "orchd/templates/home/.codex/config.toml",
     "orchd/templates/interface/.codex/config.toml",
     "orchd/worker_bin/gh",
+    "orchd/dashboard_pages.cjs",
 )
 
 
@@ -93,7 +94,7 @@ def main(argv):
                      if p.as_posix().endswith(m)]
         if len(installed) < len(REQUIRED_MEMBERS):
             fail(f"installed tool is missing packaged files: found {installed}")
-        print("ok   installed tool contains the .codex templates and worker gh wrapper")
+        print("ok   installed tool contains the required templates and program assets")
 
         helped = run(["orchd", "--help"] if os.name != "nt" else [on_path, "--help"], env, root)
         if helped.returncode or "dispatch" not in helped.stdout:
