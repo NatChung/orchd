@@ -23,9 +23,25 @@ def _lock(op_id):
         yield
 
 
+def dispatch_contract():
+    from .mcp_server import dispatch_contract as current_contract
+    return current_contract()
+
+
 def dispatch_fields():
-    from .mcp_server import TOOLS
-    return sorted(next(t for t in TOOLS if t["name"] == "dispatch")["inputSchema"]["properties"])
+    return dispatch_contract()["dispatch_fields"]
+
+
+def _validate_contract(value, contract):
+    if any(value.get(key) != expected for key, expected in contract.items()):
+        raise ValueError("Canonical dispatch contract changed; start a new tools-verification operation")
+
+
+def _validate_receipt(receipt, request, op_id, contract):
+    expected = dict(state="verified", op_id=op_id, orch_id=request["orch_id"],
+                    session_id=request["session_id"], challenge=request["challenge"], **contract)
+    if any(receipt.get(key) != value for key, value in expected.items()):
+        raise ValueError("Stored tool receipt differs from the current canonical contract or controller")
 
 
 def require_operator():
@@ -81,6 +97,8 @@ def acknowledge(con, orch_id, op_id, challenge, fields):
         raise PermissionError("Upgrade verification requires the registered Orch MCP identity")
     with _lock(op_id):
         request = json.loads(_path(op_id, ".probe.json").read_text(encoding="utf-8"))
+        contract = dispatch_contract()
+        _validate_contract(request, contract)
         record = entry_ops.read(op_id)
         orch = store.get_orch(con, orch_id)
         if (record["kind"] not in ("upgrade", "session_tools")
@@ -92,14 +110,16 @@ def acknowledge(con, orch_id, op_id, challenge, fields):
                 or challenge != request["challenge"]):
             raise ValueError("Upgrade probe belongs to a different operation or controller")
         if (not isinstance(fields, list) or not all(isinstance(f, str) for f in fields)
-                or sorted(fields) != request["dispatch_fields"] or sorted(fields) != dispatch_fields()):
+                or sorted(fields) != contract["dispatch_fields"]):
             raise ValueError("Observed dispatch schema differs from the installed schema; refresh the session")
         path = _path(op_id, ".probe-ack.json")
         if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+            _validate_receipt(receipt, request, op_id, contract)
+            return receipt
         receipt = dict(state="verified", op_id=op_id, orch_id=orch_id,
                        session_id=orch["session_id"], challenge=challenge,
-                       dispatch_fields=sorted(fields), verified_at=time.time())
+                       **contract, verified_at=time.time())
         _atomic_json(path, receipt)
         return receipt
 
@@ -117,23 +137,28 @@ def verify(con, rt, op_id, *, timeout=60, sleep=time.sleep, clock=time.monotonic
         if orch is None or orch["kind"] != "claude" or orch["stopped_at"] is not None:
             raise ValueError("Upgrade has no active replacement Claude Orch")
         path = _path(op_id, ".probe.json")
+        contract = dispatch_contract()
         if path.exists():
             request = json.loads(path.read_text(encoding="utf-8"))
-            if (request["orch_id"], request["session_id"], request["job_id"], request["socket"],
-                    request["dispatch_fields"]) != (
-                    orch["id"], orch["session_id"], orch["job_id"], orch["socket"], dispatch_fields()):
+            _validate_contract(request, contract)
+            if (request["orch_id"], request["session_id"], request["job_id"], request["socket"]) != (
+                    orch["id"], orch["session_id"], orch["job_id"], orch["socket"]):
                 raise ValueError("Upgrade controller or schema changed; do not reuse the probe")
         else:
             request = dict(orch_id=orch["id"], session_id=orch["session_id"], job_id=orch["job_id"], socket=orch["socket"],
-                           challenge=uuid.uuid4().hex, dispatch_fields=dispatch_fields())
+                           challenge=uuid.uuid4().hex, **contract)
             # Persist before transport: uncertain delivery must not send another prompt.
             _atomic_json(path, request)
-            message = ("[orchd upgrade verification] Load the dispatch tool and inspect its actual input schema. "
+            message = ("[orchd upgrade verification] Use ToolSearch to load exactly "
+                       "select:mcp__orchd__" + request["dispatch_tool"] +
+                       " and inspect that canonical tool's actual input schema, not the cached legacy dispatch schema. "
                        "Call upgrade_probe with op_id=" + op_id + ", challenge=" + request["challenge"] +
-                       ", and dispatch_fields containing every property name you actually see on dispatch. "
+                       ", and dispatch_fields containing every property name you actually see on that canonical tool. "
                        "Do not copy names from history or guess missing fields. This is a local tools check only; "
                        "do not dispatch, retry, adopt, message anyone, or change product/domain data. "
-                       "If a tool or field is missing, report the gap in this session and remain idle.")
+                       "If a tool or field is missing, report the gap in this session and remain idle. "
+                       "After the acknowledgement succeeds, use canonical tools " + request["dispatch_tool"] +
+                       " and " + request["dispatch_batch_tool"] + " for subsequent dispatch and batch calls.")
     # Do not hold the probe lock across delivery: the MCP response writes its receipt under that lock.
     if message is not None:
         try:
@@ -145,6 +170,9 @@ def verify(con, rt, op_id, *, timeout=60, sleep=time.sleep, clock=time.monotonic
         ack = _path(op_id, ".probe-ack.json")
         if ack.exists():
             receipt = json.loads(ack.read_text(encoding="utf-8"))
+            contract = dispatch_contract()
+            _validate_contract(request, contract)
+            _validate_receipt(receipt, request, op_id, contract)
             current = store.get_orch(con, request["orch_id"])
             if (current is None or current["stopped_at"] is not None
                     or (current["session_id"], current["job_id"], current["socket"]) != (
