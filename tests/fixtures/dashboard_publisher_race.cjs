@@ -48,14 +48,16 @@ function clients(snapshot) {
   await started;
   const newer = await sync(clients(async () => data("new")), config);
   assert.equal(newer.status, "updated");
+  const restored = await sync(clients(async () => data("initial")), config);
+  assert.equal(restored.status, "updated");
   const rejected = assert.rejects(older, /changed after the first Page read/);
   releaseSnapshot();
   await rejected;
-  assert.deepEqual(current, data("new"));
-  assert.equal(sequence, 1);
-  const unchanged = await sync(clients(async () => data("new")), config);
+  assert.deepEqual(current, data("initial"));
+  assert.equal(sequence, 2);
+  const unchanged = await sync(clients(async () => data("initial")), config);
   assert.equal(unchanged.status, "unchanged");
-  assert.equal(sequence, 1);
+  assert.equal(sequence, 2);
 })().catch(error => {
   console.error(error);
   process.exitCode = 1;

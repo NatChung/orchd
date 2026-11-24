@@ -64,7 +64,9 @@ async function syncOrchDash(tools, config, onWatching) {
     const actual = canonical(envelope.state.modelContent.orchDash);
     const updated = canonical(snapshot.dashboard);
     if (actual === updated) return {status: "unchanged"};
-    if (actual !== previous) throw Error("ORCH Dash changed after the first Page read; run a new sync");
+    if (page.content.through_sequence !== initial.page.content.through_sequence || actual !== previous) {
+      throw Error("ORCH Dash changed after the first Page read; run a new sync");
+    }
     const newEnvelope = {...envelope, state: {
       ...envelope.state, modelContent: {...envelope.state.modelContent, orchDash: snapshot.dashboard}
     }};
