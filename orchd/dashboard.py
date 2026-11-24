@@ -80,10 +80,18 @@ def run_action(action):
     if not isinstance(node, str) or not node:
         raise ValueError("Pages publisher node must be an executable name or path")
     bridge = Path(__file__).with_name("dashboard_pages.cjs")
+    periodic = config_path.with_name("orch-dash-pages-sync.js")
+    if action == "refresh" and periodic.is_file():
+        receipt_writer = config.get("receiptWriter")
+        if (periodic.read_bytes() != bridge.with_name("dashboard_publisher.cjs").read_bytes()
+                or not isinstance(receipt_writer, str)
+                or not Path(receipt_writer).is_file()
+                or Path(receipt_writer).read_bytes() != bridge.with_name("dashboard_receipt.py").read_bytes()):
+            raise ValueError("Update the periodic Dashboard publisher and receipt helper before requesting a refresh")
     try:
         process = subprocess.run(
             [node, str(bridge), action, url, str(config_path), str(store.home().resolve()), str(config_dir)],
-            capture_output=True, text=True, timeout=55, check=False,
+            capture_output=True, encoding="utf-8", timeout=55, check=False,
         )
     except FileNotFoundError as error:
         raise ValueError("Dashboard Pages publisher requires Node.js") from error

@@ -1,9 +1,9 @@
 const {spawn, spawnSync} = require("node:child_process");
 const {readFileSync, realpathSync} = require("node:fs");
-const {dirname, join} = require("node:path");
+const {join} = require("node:path");
 const {tmpdir} = require("node:os");
 const {createInterface} = require("node:readline");
-const {runInNewContext} = require("node:vm");
+const publish = require("./dashboard_publisher.cjs");
 
 function startPages(codex) {
   const child = spawn(codex, [
@@ -89,8 +89,6 @@ async function main(action, url, configPath, state, profile) {
       return {title: page.metadata.title, dashboard: dashboard[0]};
     }
 
-    const publisherPath = join(dirname(configPath), "orch-dash-pages-sync.js");
-    const publish = runInNewContext(readFileSync(publisherPath, "utf8") + "\n;syncOrchDash");
     return await publish({
       mcp__codex_apps__chatgpt_space_read_page: args => tool("read_page", args),
       async mcp__codex_apps__chatgpt_space_edit_page(args) {
@@ -103,15 +101,14 @@ async function main(action, url, configPath, state, profile) {
         if (result.isError || !privatePage) throw Error("Could not confirm owner-only access to the Dashboard Page");
         return tool("edit_page", args);
       },
-      async exec_command({cmd}) {
-        // The installed publisher quotes each argument for the shell and runs through RTK in Desktop.
-        // This adapter can run the identical command without an RTK dependency.
-        const result = spawnSync(cmd.replace(/^rtk proxy /, ""), {
-          shell: true, encoding: "utf8", timeout: 8_000, maxBuffer: 1024 * 1024,
+      async localCommand([command, ...args]) {
+        const result = spawnSync(command, args, {
+          encoding: "utf8", timeout: 16_000, maxBuffer: 1024 * 1024,
+          env: {...process.env, PYTHONUTF8: "1"},
         });
         return {exit_code: result.status, output: result.stdout || ""};
       },
-    }, {...config, waitSeconds: 0});
+    }, {...config, receiptWriter: join(__dirname, "dashboard_receipt.py"), waitSeconds: 0});
   } finally {
     app.close();
   }

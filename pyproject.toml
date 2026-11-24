@@ -26,4 +26,4 @@ packages = ["orchd", "orchd.channels", "orchd.channels.adapters"]
 
 [tool.setuptools.package-data]
 # `**/*` skips dot-directories, so the .codex templates are named explicitly.
-orchd = ["dashboard_pages.cjs", "templates/*/*.md", "templates/*/*/*.md", "templates/*/.codex/*.toml", "worker_bin/gh", "templates/channel/*.toml", "templates/channel/*/*.toml", "channels/migrations/*.sql"]
+orchd = ["dashboard_pages.cjs", "dashboard_publisher.cjs", "templates/*/*.md", "templates/*/*/*.md", "templates/*/.codex/*.toml", "worker_bin/gh", "templates/channel/*.toml", "templates/channel/*/*.toml", "channels/migrations/*.sql"]

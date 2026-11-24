@@ -26,6 +26,8 @@ REQUIRED_MEMBERS = (
     "orchd/templates/interface/.codex/config.toml",
     "orchd/worker_bin/gh",
     "orchd/dashboard_pages.cjs",
+    "orchd/dashboard_publisher.cjs",
+    "orchd/dashboard_receipt.py",
 )
 
 

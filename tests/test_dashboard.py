@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -98,3 +99,20 @@ class DashboardTest(unittest.TestCase):
                 self.assertTrue(result["isError"])
                 self.assertIn("Pages publisher is not configured", result["content"][0]["text"])
         self.assertEqual(self.entry()["structuredContent"]["status"], "never_synced")
+
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for the Pages publisher")
+    def test_overlapping_publisher_keeps_newer_page_content(self):
+        fixture = Path(__file__).with_name("fixtures") / "dashboard_publisher_race.cjs"
+        result = subprocess.run(["node", str(fixture)], capture_output=True, encoding="utf-8", timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+    def test_refresh_rejects_uncoordinated_periodic_publisher(self):
+        self.write(self.config / "dashboard.json", {"page_url": PAGE})
+        publisher = self.config / "pages-publisher"
+        self.write(publisher / "config.json", {})
+        (publisher / "orch-dash-pages-sync.js").write_text("// obsolete publisher", encoding="utf-8")
+        result = self.entry(name="dashboard_refresh")
+        self.assertTrue(result["isError"])
+        self.assertIn("Update the periodic Dashboard publisher", result["content"][0]["text"])

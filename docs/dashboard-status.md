@@ -51,12 +51,15 @@ its own lifecycle and Pages access.
 - Answer a question in Interface as usual.
 
 Both actions use an authenticated Codex CLI with the Pages plugin and Node.js
-on the Interface MCP host. Install the Pages publisher and its
-`orch-dash-pages-sync.js` and `config.json` under
-`ORCHD_CONFIG_DIR/pages-publisher/`. The publisher config's `pageId`, `state`,
-and `profileConfig` must match the active Page and profile. It also supplies
-`fileReference`, `python`, `orchd`, `watcher`, and `receiptWriter` for the existing
-snapshot, edit, and receipt pipeline. Set `node` and `codex` to executable
+on the Interface MCP host. Put the Pages publisher's profile `config.json`
+under `ORCHD_CONFIG_DIR/pages-publisher/`. Its `pageId`, `state`, and
+`profileConfig` must match the active Page and profile. It also supplies
+`fileReference`, `python`, `orchd`, and `watcher` for the snapshot pipeline.
+When a periodic sync is enabled, use the same installed
+`orchd/dashboard_publisher.cjs` source and `orchd/dashboard_receipt.py` helper
+for both modes. Replace the periodic job's copies before using on-demand
+sync so both modes check the Page revision before publishing and coordinate
+receipt updates. Set `node` and `codex` to executable
 paths if the MCP host cannot find them on its PATH. The actions use the
 account signed in to that Codex CLI. For a write, the Pages API must confirm
 owner-only access.
