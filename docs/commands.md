@@ -12,6 +12,7 @@ Based on argparse in `orchd/cli.py` and dynamic fields in `orchd/goals.py`. All 
 | `orchd list` | Check open tasks and health. |
 | `orchd doctor` | Check machine readiness. |
 | `orchd upgrade` | Update the uv-installed program and managed home rules. |
+| `orchd orch verify-tools --op-id ID --orch-id ORCH --expected-session SESSION --expected-job JOB` | Operator-only verification after an exact controller refresh; no install, restart, adoption or dispatch. |
 
 ## BREAKING CHANGE: upgrade commands
 

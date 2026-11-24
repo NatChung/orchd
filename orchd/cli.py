@@ -171,6 +171,9 @@ def build_parser():
         command.add_argument("--viewer", action="store_true", help="open Ghostty instead of attaching in this terminal")
 
     actions = orch.add_subparsers(dest="orch_action", required=True)
+    check_tools = actions.add_parser("verify-tools", help="verify an exact refreshed controller without restarting")
+    for name in ("op-id", "orch-id", "expected-session", "expected-job"):
+        check_tools.add_argument("--" + name, required=True)
     start = actions.add_parser("start", help="start a Claude Orch, then attach to it")
     start_options(start)
     stop = actions.add_parser("stop", help="stop a Claude Orch")
@@ -473,6 +476,7 @@ def build_parser():
     fl.add_argument("--after-pid", type=int)
     fl.add_argument("--turn-log", help=argparse.SUPPRESS)
     sub.add_parser("_entry-op", help=argparse.SUPPRESS).add_argument("op_id")
+    sub.add_parser("_entry-verify", help=argparse.SUPPRESS).add_argument("op_id")
     ar = sub.add_parser('_auto-retry', help=argparse.SUPPRESS)
     ar.add_argument('task_id')
     ar.add_argument('event_id', type=int)
@@ -727,6 +731,8 @@ HOME_POLICY = {
     **{("channels", "layout", action): "skip" for action in ("plan", "apply", "rollback")}, ("quota",): "skip", ("doctor",): "skip",
     **{("channels", action): "skip" for action in ("messages", "search", "message", "conversation", "sync", "sync-status", "attachment", "draft", "retention", "approve", "approval-preview", "delivery", "recover-outbound", "reconcile")},
     ("_entry-op",): "skip",  # its `orchd upgrade` / `orchd orch restart` children apply the policy themselves
+    ("_entry-verify",): "skip",
+    ("orch", "verify-tools"): "skip",
     ("config", "show"): "skip", ("config", "get"): "skip", ("config", "set"): "skip", ("config", "unset"): "skip",
     ("dashboard",): "skip",
     **{("workflow", action): "skip" for action in ("install", "list", "show", "render", "bind", "bindings", "run-template")},
@@ -797,6 +803,21 @@ def _caller_orch(con, explicit):
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    if args.cmd == "_entry-verify" or (args.cmd == "orch" and args.orch_action == "verify-tools"):
+        from . import upgrade_probe
+        try:
+            upgrade_probe.require_operator()
+            with store.connect() as con:
+                if args.cmd == "_entry-verify":
+                    result = upgrade_probe.verify(con, Runtime(), args.op_id)
+                else:
+                    result = upgrade_probe.verify_current(con, Runtime(), args.op_id, args.orch_id,
+                                                          args.expected_session, args.expected_job)
+            print(json.dumps(result))
+            return 0 if result["state"] == "verified" else 2
+        except (ValueError, OSError, PermissionError) as error:
+            print(f"orchd session verification: {error}", file=sys.stderr)
+            return 2
     policy = _home_policy(args)
     if policy != "skip":  # one gate for every entry point: rules in the Orch home must not lag the installed code (#58)
         from orchd import home_migrations

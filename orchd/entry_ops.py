@@ -147,7 +147,7 @@ def public(record):
         return {"state": "none", "summary": "No entry operation has been requested from the interface yet."}
     keys = ("op_id", "kind", "restart", "state", "requested_at", "started_at", "finished_at", "summary",
             "old_orch", "new_orch", "adopted_tasks", "upgrade_lines", "error", "manual_recovery", "note",
-            "instance", "instance_result")
+            "instance", "instance_result", "session_refresh", "session_probe")
     out = {k: record[k] for k in keys if k in record}
     out["steps"] = [{k: s[k] for k in ("step", "exit_code", "status") if k in s} for s in record.get("steps", [])]
     if record.get("state") in ("queued", "running") and (
@@ -245,13 +245,11 @@ def run(op_id, *, run_command=_run):
                     record.update(state="failed", summary="orchd upgrade failed; the installed orchd is unchanged. "
                                                           + (lines[-1] if lines else ""))
                     return 1
-                unchanged = any("already" in line and "newest" in line for line in lines)
-                if not record.get("restart") or unchanged:
-                    record.update(state="done", summary=("orchd is already up to date; Orch not restarted."
-                                                         if unchanged else
-                                                         "orchd upgraded; Orch not restarted (restart=false)."))
+                if not record.get("restart"):
+                    record.update(state="needs_session_refresh", session_refresh="pending",
+                                  summary="Package update finished; session refresh is pending (restart=false).")
                     record["note"] = "Running Orchs keep the old code until restarted (orch_restart)."
-                    return 0
+                    return 2
             code, out, err = run_command([*command, "orch", "restart"])
             result = _json_object(out)
             state, summary = _restart_outcome(result)
@@ -262,6 +260,24 @@ def run(op_id, *, run_command=_run):
                 if state == "failed":
                     record.update(error=result.get("error"), manual_recovery=result.get("manual_recovery"))
             if record["kind"] == "upgrade" and state != "failed":
+                # A current package does not prove a live session loaded its tools.
+                # Run verification through the updated launcher, not this runner's cached modules.
+                record["restart_state"] = state
+                _write(record)
+                code, out, err = run_command([*command, "_entry-verify", op_id])
+                probe = _json_object(out)
+                verified = (code == 0 and isinstance(probe, dict) and probe.get("state") == "verified"
+                            and probe.get("op_id") == op_id and probe.get("orch_id") == record.get("new_orch")
+                            and isinstance(probe.get("session_id"), str) and bool(probe["session_id"]))
+                record.update(session_refresh="verified" if verified else "pending", session_probe=probe)
+                record["steps"].append(dict(step="verify-session-tools", exit_code=code,
+                                            status="ok" if verified else "pending", output=(out + err)[-OUTPUT_TAIL:]))
+                if not verified:
+                    record.update(state="needs_session_refresh",
+                                  summary="Package update and Orch restart finished; session tools are not verified.",
+                                  manual_recovery=f"Inspect the existing Orch and retry `orchd _entry-verify {op_id}`; "
+                                                  "do not restart again or redispatch tasks.")
+                    return 2
                 summary = "orchd upgraded. " + summary
             record.update(state=state, summary=summary)
             if state != "failed":
