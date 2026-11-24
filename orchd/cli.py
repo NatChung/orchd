@@ -521,6 +521,8 @@ def build_parser():
     export.add_argument("--repo")
     board = sub.add_parser("board", help="render a private static snapshot, without consuming inbox")
     board.add_argument("--html", required=True, type=Path)
+    dashboard = sub.add_parser("dashboard", help="show the dashboard Page link and latest sync status")
+    dashboard.add_argument("--json", action="store_true", help="return the same fields as the Desktop entry tool")
     snapshot = sub.add_parser("snapshot", help="read-only dashboard JSON from a private DB/WAL copy")
     snapshot.add_argument("--json", action="store_true", required=True)
     snapshot.add_argument("--schema-version", type=int, choices=(1, 2), default=1,
@@ -726,6 +728,7 @@ HOME_POLICY = {
     **{("channels", action): "skip" for action in ("messages", "search", "message", "conversation", "sync", "sync-status", "attachment", "draft", "retention", "approve", "approval-preview", "delivery", "recover-outbound", "reconcile")},
     ("_entry-op",): "skip",  # its `orchd upgrade` / `orchd orch restart` children apply the policy themselves
     ("config", "show"): "skip", ("config", "get"): "skip", ("config", "set"): "skip", ("config", "unset"): "skip",
+    ("dashboard",): "skip",
     **{("workflow", action): "skip" for action in ("install", "list", "show", "render", "bind", "bindings", "run-template")},
     **{('workflow', 'run', action): 'skip' for action in ('start', 'show', 'cancel', 'reconcile', 'serve', 'export')},
     **{('instance', action): 'skip' for action in ('apply', 'check')},
@@ -974,6 +977,16 @@ def main(argv=None):
         finally:
             if con is not None:
                 con.close()
+
+    if args.cmd == "dashboard":
+        from orchd import dashboard
+        try:
+            result = dashboard.status()
+            print(json.dumps(result, ensure_ascii=False, indent=2) if args.json else dashboard.render(result))
+        except (ValueError, OSError) as error:
+            print(f"orchd dashboard: {error}", file=sys.stderr)
+            return 1
+        return 0
 
     if args.cmd == "snapshot":
         import sqlite3
