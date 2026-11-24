@@ -18,7 +18,8 @@ not establish that the chat sees new parameters.
 
 For an upgrade requested through the Desktop entry, use `orch_upgrade` with its default
 `restart=true`. The operation restarts the bound Orch even when installation reports
-that the package is already current. The replacement then loads `dispatch` and calls the
+that the package is already current. The replacement then loads the current schema-qualified
+dispatch tool and calls the
 local `upgrade_probe` tool with every property name it actually sees. The MCP checks the
 exact field set, challenge, operation and registered controller identity. This check
 does not launch a worker or send an external message.
@@ -54,7 +55,22 @@ Repeated successful verification returns the same tool receipt after a fresh liv
 check; a dead or changed controller cannot reuse it. Retain the returned receipt with
 the deployment record. It does not replace deployment authorization or review.
 
-The probe checks the names exposed by the actual `dispatch` tool, including parameters
+Dispatch descriptors also have content-addressed names, such as `dispatch_s<digest>` and
+`dispatch_batch_s<digest>`. The digest covers the complete finalized descriptor, including
+nested schemas, descriptions and annotations. A resumed client can therefore hydrate a
+changed descriptor under a new name rather than reuse its historical deferred schema.
+Old content-addressed names are rejected before caller registration or task creation.
+Legacy `dispatch` and `dispatch_batch` remain callable for compatibility.
+
+Probe requests and receipts bind both current names. A descriptor change requires a new
+verification operation; it cannot consume an older ACK, even when property names match.
+The probe retains its original three parameters so its own cached schema stays usable.
+The challenge names the current dispatch tool without supplying the expected property list.
+After verification, use the canonical tools named in the receipt. That choice is
+`prose-only, unenforced`: legacy calls remain supported, and the probe does not authorize
+work or prohibit all dispatch before verification.
+
+The probe checks the names exposed by the actual canonical dispatch tool, including parameters
 added by later versions. It does not prove that the model interprets every type or
 instruction correctly, nor does it grant product or external-write authority.
 
