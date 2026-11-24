@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from orchd import entry_ops, mcp_server, store, upgrade_probe
+from orchd import entry_ops, mcp_server, paths, store, upgrade_probe
 
 
 class UpgradeProbeTest(unittest.TestCase):
@@ -31,8 +31,14 @@ class UpgradeProbeTest(unittest.TestCase):
         entry_ops._write(record)
         self.sent = []
 
+    def runtime(self, send=None, *, jobs=True, listening=True):
+        job = dict(id="new-job", pid=12345, status="idle", sessionId="new-session", cwd=str(paths.orch_home()))
+        return SimpleNamespace(send_uds=send or (lambda *a: self.sent.append(a)),
+                               live_jobs=lambda: {"new-job": job} if jobs else {},
+                               socket_listening=lambda *a: listening)
+
     def create_pending(self):
-        rt = SimpleNamespace(send_uds=lambda *a: self.sent.append(a))
+        rt = self.runtime()
         return upgrade_probe.verify(self.con, rt, self.op, timeout=0)
 
     def ack(self, *, actor="onew0001", fields=None, challenge=None):
@@ -47,7 +53,7 @@ class UpgradeProbeTest(unittest.TestCase):
         def send(*args):
             self.sent.append(args)
             self.assertFalse(self.ack().get("isError"))
-        result = upgrade_probe.verify(self.con, SimpleNamespace(send_uds=send), self.op, timeout=0)
+        result = upgrade_probe.verify(self.con, self.runtime(send), self.op, timeout=0)
         self.assertEqual(result["state"], "verified")
         self.assertEqual(result["session_id"], "new-session")
         self.assertEqual(self.con.execute("SELECT count(*) FROM tasks").fetchone()[0], 0)
@@ -90,9 +96,30 @@ class UpgradeProbeTest(unittest.TestCase):
         def uncertain(*args):
             self.sent.append(args)
             raise OSError("synthetic uncertain delivery")
-        result = upgrade_probe.verify(self.con, SimpleNamespace(send_uds=uncertain), self.op, timeout=0)
+        result = upgrade_probe.verify(self.con, self.runtime(uncertain), self.op, timeout=0)
         self.assertEqual(result["reason"], "probe_delivery_unknown")
         self.create_pending()
+        self.assertEqual(len(self.sent), 1)
+
+    def test_dead_controller_cannot_consume_a_persisted_ack(self):
+        self.create_pending()
+        self.assertFalse(self.ack().get("isError"))
+        record = entry_ops.read(self.op)
+        record["state"] = "needs_session_refresh"
+        entry_ops._write(record)
+        result = upgrade_probe.verify(self.con, self.runtime(jobs=False, listening=False), self.op, timeout=0)
+        self.assertEqual(result["state"], "pending")
+        self.assertEqual(entry_ops.read(self.op)["state"], "needs_session_refresh")
+
+    def test_successful_verification_retry_returns_the_same_receipt(self):
+        self.create_pending()
+        self.assertFalse(self.ack().get("isError"))
+        record = entry_ops.read(self.op)
+        record["state"] = "needs_session_refresh"
+        entry_ops._write(record)
+        first = self.create_pending()
+        second = self.create_pending()
+        self.assertEqual(first, second)
         self.assertEqual(len(self.sent), 1)
 
     def test_fresh_cli_finishes_the_existing_pending_probe(self):
@@ -101,9 +128,46 @@ class UpgradeProbeTest(unittest.TestCase):
         record = entry_ops.read(self.op)
         record["state"] = "needs_session_refresh"
         entry_ops._write(record)
-        result = subprocess.run([sys.executable, "-B", "-m", "orchd.cli", "_entry-verify", self.op],
+        code = ("import sys; from types import SimpleNamespace; from orchd import cli, paths; "
+                "job=dict(id='new-job',pid=12345,status='idle',sessionId='new-session',cwd=str(paths.orch_home())); "
+                "cli.Runtime=lambda: SimpleNamespace(live_jobs=lambda:{'new-job':job},socket_listening=lambda *a:True); "
+                "sys.exit(cli.main(['_entry-verify',sys.argv[1]]))")
+        result = subprocess.run([sys.executable, "-B", "-c", code, self.op],
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)["state"], "verified")
         self.assertEqual(entry_ops.public(entry_ops.read(self.op))["state"], "done")
         self.assertEqual(len(self.sent), 1)
+
+    def test_same_owner_controller_verification_does_not_change_task_or_controller_identity(self):
+        op = "a123456789ab"
+        before = dict(store.get_orch(self.con, "onew0001"))
+        def send(*args):
+            request = json.loads(upgrade_probe._path(op, ".probe.json").read_text(encoding="utf-8"))
+            with patch.dict(os.environ, {"ORCHD_ORCH_ID": "onew0001"}):
+                upgrade_probe.acknowledge(self.con, "onew0001", op, request["challenge"],
+                                          upgrade_probe.dispatch_fields())
+            self.sent.append(args)
+        result = upgrade_probe.verify_current(self.con, self.runtime(send), op, "onew0001",
+                                              "new-session", "new-job", timeout=0)
+        self.assertEqual(result["state"], "verified")
+        self.assertEqual(dict(store.get_orch(self.con, "onew0001")), before)
+        self.assertEqual(self.con.execute("SELECT count(*) FROM tasks").fetchone()[0], 0)
+        replay = upgrade_probe.verify_current(self.con, self.runtime(send), op, "onew0001",
+                                              "new-session", "new-job", timeout=0)
+        self.assertEqual(replay, result)
+        self.assertEqual(len(self.sent), 1)
+        with self.assertRaisesRegex(ValueError, "identity does not match"):
+            upgrade_probe.verify_current(self.con, self.runtime(), op, "onew0001", "wrong", "new-job", timeout=0)
+
+    def test_wrong_provider_session_cwd_or_closed_socket_cannot_verify(self):
+        self.create_pending()
+        self.assertFalse(self.ack().get("isError"))
+        for field, value in (("sessionId", "wrong"), ("cwd", "other-home"), ("pid", None)):
+            rt = self.runtime()
+            job = rt.live_jobs()["new-job"]
+            job[field] = value
+            rt.live_jobs = lambda: {"new-job": job}
+            self.assertEqual(upgrade_probe.verify(self.con, rt, self.op, timeout=0)["state"], "pending")
+        self.assertEqual(upgrade_probe.verify(self.con, self.runtime(listening=False), self.op, timeout=0)["state"],
+                         "pending")

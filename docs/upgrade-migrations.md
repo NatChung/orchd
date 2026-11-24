@@ -23,7 +23,9 @@ local `upgrade_probe` tool with every property name it actually sees. The MCP ch
 exact field set, challenge, operation and registered controller identity. This check
 does not launch a worker or send an external message.
 
-The operation reports `done` only after this receipt. A missing or mismatched receipt
+The operation reports `done` only after this receipt and a fresh provider check of the
+exact job, session, live PID and Orch cwd, plus a listening controller socket. A stored
+receipt cannot establish readiness after the controller dies. A missing or mismatched receipt
 reports `needs_session_refresh` and returns exit 2 from the operation runner. Installation
 and restart receipts remain available. Inspect that existing Orch before proceeding.
 Retry `orchd _entry-verify OP_ID` after the controller answers; this waits for the same
@@ -35,8 +37,22 @@ pending even if installation succeeds. Direct CLI installs and custom profile ro
 also do not establish session readiness. Refresh the intended controller and verify its
 actual tools before applying instructions that require new parameters. Desktop entry
 tools belong to a separate chat; open a new entry conversation to load changes there.
-The custom-rollout instruction is `prose-only, unenforced`: those installers own their
-controller lifecycle outside the Desktop upgrade runner and must retain their own receipt.
+Custom installers own the deployment and controller lifecycle outside the Desktop runner.
+After a controlled refresh, verify the exact controller under the newly deployed
+interpreter and its profile environment:
+
+```sh
+orchd orch verify-tools --op-id 0123456789ab --orch-id ORIGINAL_ORCH \
+  --expected-session CURRENT_NATIVE_SESSION --expected-job CURRENT_PROVIDER_JOB
+```
+
+Choose a unique 12-hex operation ID before the first call; preserve it on retry. This
+Operator-only command verifies the current controller without installing, stopping,
+starting, adopting or dispatching. It uses the same tool and liveness checks as the
+Desktop upgrade gate, so it supports same-owner reloads. A wrong identity is rejected.
+Repeated successful verification returns the same tool receipt after a fresh liveness
+check; a dead or changed controller cannot reuse it. Retain the returned receipt with
+the deployment record. It does not replace deployment authorization or review.
 
 The probe checks the names exposed by the actual `dispatch` tool, including parameters
 added by later versions. It does not prove that the model interprets every type or
