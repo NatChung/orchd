@@ -473,6 +473,7 @@ def build_parser():
     fl.add_argument("--after-pid", type=int)
     fl.add_argument("--turn-log", help=argparse.SUPPRESS)
     sub.add_parser("_entry-op", help=argparse.SUPPRESS).add_argument("op_id")
+    sub.add_parser("_entry-verify", help=argparse.SUPPRESS).add_argument("op_id")
     ar = sub.add_parser('_auto-retry', help=argparse.SUPPRESS)
     ar.add_argument('task_id')
     ar.add_argument('event_id', type=int)
@@ -727,6 +728,7 @@ HOME_POLICY = {
     **{("channels", "layout", action): "skip" for action in ("plan", "apply", "rollback")}, ("quota",): "skip", ("doctor",): "skip",
     **{("channels", action): "skip" for action in ("messages", "search", "message", "conversation", "sync", "sync-status", "attachment", "draft", "retention", "approve", "approval-preview", "delivery", "recover-outbound", "reconcile")},
     ("_entry-op",): "skip",  # its `orchd upgrade` / `orchd orch restart` children apply the policy themselves
+    ("_entry-verify",): "skip",
     ("config", "show"): "skip", ("config", "get"): "skip", ("config", "set"): "skip", ("config", "unset"): "skip",
     ("dashboard",): "skip",
     **{("workflow", action): "skip" for action in ("install", "list", "show", "render", "bind", "bindings", "run-template")},
@@ -797,6 +799,16 @@ def _caller_orch(con, explicit):
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    if args.cmd == "_entry-verify":
+        from . import upgrade_probe
+        try:
+            with store.connect() as con:
+                result = upgrade_probe.verify(con, Runtime(), args.op_id)
+            print(json.dumps(result))
+            return 0 if result["state"] == "verified" else 2
+        except (ValueError, OSError, PermissionError) as error:
+            print(f"orchd session verification: {error}", file=sys.stderr)
+            return 2
     policy = _home_policy(args)
     if policy != "skip":  # one gate for every entry point: rules in the Orch home must not lag the installed code (#58)
         from orchd import home_migrations
