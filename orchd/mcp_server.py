@@ -473,6 +473,11 @@ for _name, _fields, _required in (
                                   'properties': {k: {'type': v} for k, v in _fields.items()}}})
 
 ENTRY_TOOLS = [
+    {"name": "dashboard",
+     "description": "Show the configured ORCH Dash Page link and latest reported sync status. Call only when "
+                    "Operator asks for Dashboard or orchd dashboard. It does not start a sync or contact the Orch.",
+     "annotations": {"readOnlyHint": True},
+     "inputSchema": {"type": "object", "additionalProperties": False, "properties": {}}},
     {"name": "foreground",
      "description": "Open a new Ghostty window for the bound Orch ({target: 'orch'}) or its worker "
                     "({task_id: eight hex digits}). Uses the existing attach/viewer paths; exec Codex refuses "
@@ -546,7 +551,7 @@ ENTRY_TOOLS = [
 ]
 
 ENTRY_INSTRUCTIONS = (
-    "You are Operator's Desktop entry to one orchd Orch. You only pass messages. Call status when the conversation "
+    "You are Operator's Desktop entry to one orchd Orch. You pass messages and answer local status queries. Call status when the conversation "
     "starts or reopens (or when Operator asks) and always tell Operator in one sentence which Orch is bound and whether it is "
     "online, then say any open question in full. When not_yet_delivered_to_orch is nonempty, explain those messages "
     "are saved, awaiting an Orch notification, and do not need resending; report the count. "
@@ -554,7 +559,9 @@ ENTRY_INSTRUCTIONS = (
     "The end-of-voice-session handoff (<source>transcript_tail_flush"
     "</source>) is not a request from Operator: do not relay it and say nothing. When Operator says 叫 Orch 出來 or bring "
     "the Orch to the foreground, call foreground(target='orch'); for 叫 task xxxx 出來 use foreground(task_id=the "
-    "full eight-hex id). Report launch_requested as a request to open a new window, visibility unknown. Otherwise "
+    "full eight-hex id). Report launch_requested as a request to open a new window, visibility unknown. "
+    "When Operator says Dashboard or orchd dashboard, call dashboard with no arguments and show its Page link "
+    "and latest sync state and timestamp. If it is unconfigured, say so. Do not relay that lookup. Otherwise "
     "when Operator writes, call relay (with reply_to=N only if it answers the open [orchd question N]); "
     "orchd reads Operator's text from the thread itself, so never retype it. Messages from the Orch arrive as "
     "[orchd message N] / [orchd question N]: every time one arrives, say its body (below the header) once, word for "
@@ -922,6 +929,9 @@ def entry_call(name, args, meta, con, rt, entry_id):
     extra = set(args) - set(tool["inputSchema"]["properties"])
     if extra:
         raise PermissionError(f"unexpected argument(s) {', '.join(sorted(extra))}; the entry passes ids only")
+    if name == "dashboard":
+        from . import dashboard
+        return dashboard.status()
     turn = meta.get("x-codex-turn-metadata") or {}
     if not isinstance(turn, dict):
         turn = {}
@@ -1013,7 +1023,7 @@ def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY, sent=None):
                 for ids in marks:
                     store.mark_read(con, ids)
             if (role != "entry" and params.get("name") in ("list_orchs", "quota_status", *WORKFLOW_QUERY_TOOLS)) or (
-                    role == "entry" and params.get("name") in ("foreground", "orch_restart", "orch_upgrade", "orch_op_status",
+                    role == "entry" and params.get("name") in ("dashboard", "foreground", "orch_restart", "orch_upgrade", "orch_op_status",
                                                                "instance_check", "instance_apply")):
                 result["structuredContent"] = data
         except Exception as error:
