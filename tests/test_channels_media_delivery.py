@@ -106,6 +106,25 @@ class ChannelMediaDispatchTest(ChannelMediaReadTest):
             self.dispatch(model='sonnet',attachment_refs=[{'attachment_id':aid}])
         self.assertEqual(self.rt.sent,[])
 
+    def test_leased_origin_cannot_bypass_media_acl_or_start_a_worker(self):
+        import os
+        from unittest.mock import patch
+        from orchd import interface
+        from test_orchd import FakeRuntime
+        aid = self.attachment()
+        registration = interface.register(self.svc.con, name='media-origin', orch_id='owner', token='synthetic-token')
+        request = interface.submit(self.svc.con, FakeRuntime(), name='media-origin', token=registration['token'],
+                                   conversation='synthetic-thread', request_key='one', text='Inspect scoped media')['request_id']
+        config = Path(self.tmp.name) / 'continuation.toml'
+        config.write_text('[continuation]\nrepositories=["demo"]\nrequire_origin=true\nowner="review"\n')
+        self.owner = policy.Caller(role='orch', sources=frozenset({'s'}), identity='other')
+        with patch.dict(os.environ, {'ORCHD_CONFIG_FILE': str(config)}), self.assertRaises(PermissionError):
+            self.dispatch(model='sonnet', origin_request_id=request, dispatch_key='media-author',
+                          attachment_refs=[{'attachment_id': aid}])
+        self.assertEqual(self.svc.con.execute('SELECT count(*) FROM tasks').fetchone()[0], 0)
+        self.assertFalse(hasattr(self.rt, 'brief'))
+        self.assertEqual(self.rt.sent, [])
+
     def test_batch_passes_attachment_references_to_each_worker(self):
         from unittest.mock import patch
         from orchd import core

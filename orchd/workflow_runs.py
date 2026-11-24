@@ -616,7 +616,9 @@ def _step(con, rt, run):
         from . import core, interface
         for attempt in con.execute('SELECT task_id FROM workflow_run_attempts WHERE run_id=?', (run['id'],)).fetchall():
             try:
-                core.close(con, rt, attempt['task_id'], outcome='done')
+                cleanup = core.close(con, rt, attempt['task_id'], outcome='done')
+                if cleanup.get('deferred'):
+                    _event(con,run['id'],'cleanup_deferred',dict(lease_id=cleanup['lease_id'],reason=cleanup['deferred']),attempt['task_id'])
             except Exception as error:
                 _event(con, run['id'], 'cleanup_pending', dict(error_type=type(error).__name__), attempt['task_id'])
                 return
