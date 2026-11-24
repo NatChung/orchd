@@ -55,11 +55,13 @@ on the Interface MCP host. Put the Pages publisher's profile `config.json`
 under `ORCHD_CONFIG_DIR/pages-publisher/`. Its `pageId`, `state`, and
 `profileConfig` must match the active Page and profile. It also supplies
 `fileReference`, `python`, `orchd`, and `watcher` for the snapshot pipeline.
+Use the Python interpreter from the orchd installation so the receipt helper
+can import orchd's file lock.
 When a periodic sync is enabled, use the same installed
 `orchd/dashboard_publisher.cjs` source and `orchd/dashboard_receipt.py` helper
-for both modes. Replace the periodic job's copies before using on-demand
-sync so both modes check the Page revision before publishing and coordinate
-receipt updates. Set `node` and `codex` to executable
+for both modes. Let any in-flight run of the old periodic job finish, then
+replace its copies before using on-demand sync. Both modes check the Page
+revision before publishing and coordinate receipt updates. Set `node` and `codex` to executable
 paths if the MCP host cannot find them on its PATH. The actions use the
 account signed in to that Codex CLI. For a write, the Pages API must confirm
 owner-only access.
