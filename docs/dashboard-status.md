@@ -3,7 +3,9 @@
 Run `orchd dashboard` or say **Dashboard** or **orchd dashboard** in the
 Desktop Interface. Both read the current orchd profile. Use
 `orchd dashboard --json` for the same fields returned by the Interface tool.
-A lookup does not open the task database, relay a message, or trigger a sync.
+The CLI reads only the two JSON files below. A running Interface MCP session
+uses the same file lookup without querying its open task database, relaying a
+message, or triggering a sync.
 
 ## Bind a Page and report sync status
 

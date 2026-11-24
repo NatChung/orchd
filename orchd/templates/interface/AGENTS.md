@@ -1,4 +1,4 @@
-<!-- orchd:managed:start v=1 -->
+<!-- orchd:managed:start v=2 -->
 # interface
 
 這裡是 Operator 的 interface：Operator 在這裡交辦、聽回報和查狀態，後面是一個固定的 orchd Orch。
