@@ -2,6 +2,8 @@ import contextlib
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -419,6 +421,34 @@ class RestartTest(unittest.TestCase):
         self.assertEqual(renewed["orch_id"], second["new_orch"])
         self.submit(auth, key="second")
         self.assertEqual(len(interface.requests(self.con, second["new_orch"])), 2)
+
+    def test_restarted_listener_renews_expired_registration_using_original_owner(self):
+        # Reproduce #114 through a fresh CLI process, as a reconnecting listener
+        # still holding its original configuration and registration token would.
+        auth = self.adapter()
+        old_request = self.submit(auth)["request_id"]
+        interface.reply(self.con, "old", request_id=old_request, text="saved before restart")
+        self.con.execute("UPDATE interfaces SET expires_at=0 WHERE name=?", (auth["name"],))
+        restart = self.run_restart()
+        self.assertEqual(restart["status"], "done", restart)
+        env = {**os.environ, "ORCHD_HOME": str(self.path.parent)}
+        for key in ("ORCHD_ORCH_ID", "ORCHD_WORKTREE"):
+            env.pop(key, None)
+        renewed = subprocess.run(
+            [sys.executable, "-m", "orchd.cli", "interface", "register"],
+            input=json.dumps(dict(**auth, orch_id="old")),
+            env=env, capture_output=True, text=True, timeout=20,
+        )
+        self.assertEqual(renewed.returncode, 0, renewed.stdout)
+        self.assertEqual(json.loads(renewed.stdout)["orch_id"], restart["new_orch"])
+        with patch.object(core, "_notify_orch") as notify:
+            new_request = self.submit(auth, key="after-reconnect")
+            self.assertIsNone(new_request["wake_error"])
+            self.assertEqual(notify.call_args.args[2], restart["new_orch"])
+        old_reply, = interface.fetch(self.con, **auth, conversation="thread")
+        self.assertEqual((old_reply["request_id"], old_reply["reply"]), (old_request, "saved before restart"))
+        pending, = interface.requests(self.con, restart["new_orch"])
+        self.assertEqual(pending["id"], new_request["request_id"])
 
     def test_registration_without_successor_still_rejects_stopped_owner(self):
         auth = self.adapter()
