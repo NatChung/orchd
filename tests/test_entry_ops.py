@@ -30,12 +30,16 @@ class Commands:
         self.answers, self.calls = list(answers), []
 
     def __call__(self, argv):
-        self.calls.append(argv[-2:] if argv[-2:] == ["orch", "restart"] else argv[-1:])
+        self.calls.append(argv[-2:] if argv[-2:] == ["orch", "restart"] or "_entry-verify" in argv else argv[-1:])
         return self.answers.pop(0)
 
 
 def restart_out(result):
     return 0 if result["status"] == "done" else 1, json.dumps(result) + "\nNew Orch: x\n", ""
+
+
+def probe_out(op):
+    return 0, json.dumps(dict(state="verified", op_id=op, orch_id="onew0001", session_id="new-session")), ""
 
 
 class EntryOpsTest(unittest.TestCase):
@@ -104,15 +108,17 @@ class EntryOpsTest(unittest.TestCase):
 
     def test_upgrade_then_restart_on_new_code(self):
         op = self.start("upgrade")["op_id"]
-        commands = Commands((0, "orchd abc1234 -> def5678\nWindows upgrade activated\n", ""), restart_out(RESTART_DONE))
+        commands = Commands((0, "orchd abc1234 -> def5678\nWindows upgrade activated\n", ""),
+                            restart_out(RESTART_DONE), probe_out(op))
         self.assertEqual(entry_ops.run(op, run_command=commands), 0)
-        self.assertEqual(commands.calls, [["upgrade"], ["orch", "restart"]])
+        self.assertEqual(commands.calls, [["upgrade"], ["orch", "restart"], ["_entry-verify", op]])
         out = entry_ops.public(entry_ops.read(op))
         self.assertEqual(out["state"], "done")
         self.assertTrue(out["summary"].startswith("orchd upgraded."))
         self.assertIn("orchd abc1234 -> def5678", out["upgrade_lines"])
         self.assertIn("new conversation", out["note"])
-        self.assertEqual([s["step"] for s in out["steps"]], ["upgrade", "restart"])
+        self.assertEqual([s["step"] for s in out["steps"]], ["upgrade", "restart", "verify-session-tools"])
+        self.assertEqual(out["session_refresh"], "verified")
 
     def test_failed_upgrade_never_restarts(self):
         op = self.start("upgrade")["op_id"]
@@ -121,17 +127,33 @@ class EntryOpsTest(unittest.TestCase):
         self.assertEqual(commands.calls, [["upgrade"]])
         self.assertEqual(entry_ops.read(op)["state"], "failed")
 
-    def test_up_to_date_or_restart_false_skips_restart(self):
+    def test_up_to_date_package_still_refreshes_and_verifies_the_session(self):
         op = self.start("upgrade")["op_id"]
-        commands = Commands((0, "orchd is already the newest selected commit (abc1234).\n", ""))
+        commands = Commands((0, "orchd is already the newest selected commit (abc1234).\n", ""),
+                            restart_out(RESTART_DONE), probe_out(op))
         self.assertEqual(entry_ops.run(op, run_command=commands), 0)
-        self.assertEqual(commands.calls, [["upgrade"]])
-        self.assertIn("already up to date", entry_ops.read(op)["summary"])
+        self.assertEqual(commands.calls, [["upgrade"], ["orch", "restart"], ["_entry-verify", op]])
+        self.assertEqual(entry_ops.read(op)["session_refresh"], "verified")
+
+    def test_restart_false_reports_session_refresh_pending(self):
         op = self.start("upgrade", restart=False)["op_id"]
         commands = Commands((0, "orchd abc1234 -> def5678\n", ""))
-        self.assertEqual(entry_ops.run(op, run_command=commands), 0)
+        self.assertEqual(entry_ops.run(op, run_command=commands), 2)
         self.assertEqual(commands.calls, [["upgrade"]])
         self.assertIn("restart=false", entry_ops.read(op)["summary"])
+        self.assertEqual(entry_ops.read(op)["state"], "needs_session_refresh")
+
+    def test_upgrade_cannot_complete_without_the_new_orch_tool_receipt(self):
+        for answer in ((2, '{"state":"pending"}', ""), (0, '{}', ""), (0, 'not json', ""),
+                       (0, '{"state":"verified","op_id":"other","orch_id":"old"}', "")):
+            with self.subTest(answer=answer):
+                op = self.start("upgrade")["op_id"]
+                commands = Commands((0, "orchd abc1234 -> def5678\n", ""), restart_out(RESTART_DONE), answer)
+                self.assertEqual(entry_ops.run(op, run_command=commands), 2)
+                out = entry_ops.public(entry_ops.read(op))
+                self.assertEqual(out["state"], "needs_session_refresh")
+                self.assertEqual(out["session_refresh"], "pending")
+                self.assertEqual(out["new_orch"], "onew0001")
 
     def test_crash_is_recorded_and_runner_that_vanished_reads_as_lost(self):
         op = self.start()["op_id"]

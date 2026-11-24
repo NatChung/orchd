@@ -10,6 +10,54 @@ orchd upgrade --migrations-only  # 只有 migration 失敗時重試，跳過程�
 
 較舊的已安裝版本沒有 post-upgrade runner：第一次用舊程式跑 upgrade 只能安裝新版，需再跑同一個指令才能執行 migration。從這種版本首次套用可直接跑 `orchd upgrade && orchd upgrade`；之後只跑一次 `orchd upgrade`。尚未合併到來源 branch 的 PR 不會被一般 upgrade 安裝。
 
+## Verify session tools before continuing work
+
+Package installation and session readiness are separate results. A running chat can retain
+an older tool schema after its MCP process reconnects. Repeating a tool-name search does
+not establish that the chat sees new parameters.
+
+For an upgrade requested through the Desktop entry, use `orch_upgrade` with its default
+`restart=true`. The operation restarts the bound Orch even when installation reports
+that the package is already current. The replacement then loads `dispatch` and calls the
+local `upgrade_probe` tool with every property name it actually sees. The MCP checks the
+exact field set, challenge, operation and registered controller identity. This check
+does not launch a worker or send an external message.
+
+The operation reports `done` only after this receipt and a fresh provider check of the
+exact job, session, live PID and Orch cwd, plus a listening controller socket. A stored
+receipt cannot establish readiness after the controller dies. A missing or mismatched receipt
+reports `needs_session_refresh` and returns exit 2 from the operation runner. Installation
+and restart receipts remain available. Inspect that existing Orch before proceeding.
+Retry `orchd _entry-verify OP_ID` after the controller answers; this waits for the same
+probe and can finish the pending operation. It does not send a second prompt, restart,
+adopt, or redispatch. An uncertain delivery remains pending for inspection.
+
+Use `restart=false` only when the Operator requests it. This leaves session readiness
+pending even if installation succeeds. Direct CLI installs and custom profile rollouts
+also do not establish session readiness. Refresh the intended controller and verify its
+actual tools before applying instructions that require new parameters. Desktop entry
+tools belong to a separate chat; open a new entry conversation to load changes there.
+Custom installers own the deployment and controller lifecycle outside the Desktop runner.
+After a controlled refresh, verify the exact controller under the newly deployed
+interpreter and its profile environment:
+
+```sh
+orchd orch verify-tools --op-id 0123456789ab --orch-id ORIGINAL_ORCH \
+  --expected-session CURRENT_NATIVE_SESSION --expected-job CURRENT_PROVIDER_JOB
+```
+
+Choose a unique 12-hex operation ID before the first call; preserve it on retry. This
+Operator-only command verifies the current controller without installing, stopping,
+starting, adopting or dispatching. It uses the same tool and liveness checks as the
+Desktop upgrade gate, so it supports same-owner reloads. A wrong identity is rejected.
+Repeated successful verification returns the same tool receipt after a fresh liveness
+check; a dead or changed controller cannot reuse it. Retain the returned receipt with
+the deployment record. It does not replace deployment authorization or review.
+
+The probe checks the names exposed by the actual `dispatch` tool, including parameters
+added by later versions. It does not prove that the model interprets every type or
+instruction correctly, nor does it grant product or external-write authority.
+
 ## 範圍與保存
 
 目前的 `orch-rules-v1`、`orch-rules-v2`、`orch-rules-v3`、`orch-rules-v4`、`orch-rules-v5`、`computer-use-rules-v1` 更新 `home/AGENTS.md`、`interface/AGENTS.md` 與 `gpt-computer-use-worker/AGENTS.md`。每份範本包含一個 `<!-- orchd:managed:start v=N -->` … `<!-- orchd:managed:end -->` 區塊，規則由 orchd 維護；Operator 的自訂規則放在區塊外。區塊外的位元組（包含換行）保持原樣。

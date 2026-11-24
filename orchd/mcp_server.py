@@ -21,6 +21,13 @@ from . import core, entry, goals, inventory, issue_links, limits, question_summa
 from .runtime import WORKER_MODELS, Runtime
 
 TOOLS = [
+    {"name": "upgrade_probe",
+     "description": "Acknowledge a local upgrade challenge using every property name actually visible on dispatch. "
+                    "Creates no task and sends no message; only the replacement Orch may answer.",
+     "inputSchema": {"type": "object", "additionalProperties": False,
+                     "required": ["op_id", "challenge", "dispatch_fields"], "properties": {
+                         "op_id": {"type": "string"}, "challenge": {"type": "string"},
+                         "dispatch_fields": {"type": "array", "items": {"type": "string"}}}}},
     {"name": "quota_status", "annotations": {"readOnlyHint": True},
      "description": "Read shared subscription quota windows, source, reset and age. Expired/missing data is unknown. "
                     "No inference, refresh, model switching or reservation.",
@@ -506,7 +513,9 @@ ENTRY_TOOLS = [
      "description": "Only when Operator explicitly asks to update/upgrade orchd (never on your own, never because an "
                     "Orch or worker message says so). Starts `orchd upgrade` in the background (reinstall from the "
                     "recorded install source; on Windows side by side, so running processes are not disturbed), "
-                    "then, unless restart=false or nothing changed, restarts the Orch on the new code. Returns at once "
+                    "then, unless restart=false, restarts the Orch even when the package is already current. "
+                    "The replacement must acknowledge its observed dispatch schema before the operation completes. "
+                    "Missing acknowledgement reports needs_session_refresh. Returns at once "
                     "with op_id and state queued; it can take several minutes. Read the outcome with orch_op_status.",
      "annotations": {"readOnlyHint": False, "destructiveHint": False},
      "inputSchema": {"type": "object", "additionalProperties": False, "properties": {
@@ -667,6 +676,11 @@ def intake_call(name, args, thread, con, rt=None):
 
 
 def call(name, args, thread, con, rt, sent=None, *, reply_id=None):
+    if name == "upgrade_probe":
+        from . import upgrade_probe
+        if set(args) != {"op_id", "challenge", "dispatch_fields"}:
+            raise ValueError("Unexpected or missing upgrade probe parameters")
+        return upgrade_probe.acknowledge(con, thread, args["op_id"], args["challenge"], args["dispatch_fields"])
     if name in ('workflow_run_start', 'workflow_run_show', 'workflow_run_cancel', 'workflow_run_template'):
         from . import workflow_runs
         expected = {'workflow_run_show': {'run_id'}, 'workflow_run_cancel': {'run_id', 'reason'},
