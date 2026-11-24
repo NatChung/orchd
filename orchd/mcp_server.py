@@ -10,6 +10,8 @@ their arguments are ids (never a body), and the caller is never registered as an
 own tools only; the Codex host's other tools are limited by the entry project's config, not here.
 """
 import contextlib
+import copy
+import hashlib
 import json
 import math
 import os
@@ -676,6 +678,7 @@ def intake_call(name, args, thread, con, rt=None):
 
 
 def call(name, args, thread, con, rt, sent=None, *, reply_id=None):
+    name = normalize_tool_name(name)
     if name == "upgrade_probe":
         from . import upgrade_probe
         if set(args) != {"op_id", "challenge", "dispatch_fields"}:
@@ -919,6 +922,36 @@ TOOLS.extend([
 ])
 
 
+def dispatch_descriptors():
+    """Content-address the finalized descriptors so resumed clients hydrate new schemas."""
+    result = []
+    for descriptor in TOOLS:
+        if descriptor["name"] not in ("dispatch", "dispatch_batch"):
+            continue
+        encoded = json.dumps(descriptor, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+        alias = copy.deepcopy(descriptor)
+        alias["name"] += "_s" + hashlib.sha256(encoded).hexdigest()[:12]
+        result.append(alias)
+    return result
+
+
+def dispatch_contract():
+    aliases = dispatch_descriptors()
+    single = next(tool for tool in aliases if tool["name"].startswith("dispatch_s"))
+    batch = next(tool for tool in aliases if tool["name"].startswith("dispatch_batch_s"))
+    return {"dispatch_tool": single["name"], "dispatch_batch_tool": batch["name"],
+            "dispatch_fields": sorted(single["inputSchema"]["properties"])}
+
+
+def normalize_tool_name(name):
+    aliases = {tool["name"]: tool["name"].rsplit("_s", 1)[0] for tool in dispatch_descriptors()}
+    if name in aliases:
+        return aliases[name]
+    if isinstance(name, str) and name.startswith(("dispatch_s", "dispatch_batch_s")):
+        raise ValueError("Stale dispatch descriptor; hydrate current tools: " + ", ".join(aliases))
+    return name
+
+
 def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY, sent=None):
     method, mid = msg.get("method"), msg.get("id")
     if mid is None:
@@ -929,8 +962,13 @@ def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY, sent=None):
                   "capabilities": {"tools": {}}, "serverInfo": {"name": "orchd", "version": "0.1"}}
         if role == "entry":
             result["instructions"] = ENTRY_INSTRUCTIONS
+        else:
+            contract = dispatch_contract()
+            result["instructions"] = ("Hydrate and use the current schema-qualified dispatch tools: "
+                                      + contract["dispatch_tool"] + ", " + contract["dispatch_batch_tool"]
+                                      + ". Resumed legacy tool schemas may be stale.")
     elif method == "tools/list":
-        result = {"tools": ENTRY_TOOLS if role == "entry" else TOOLS}
+        result = {"tools": ENTRY_TOOLS if role == "entry" else TOOLS + dispatch_descriptors()}
     elif method == "tools/call":
         meta = params.get("_meta") or {}
         marks = sent if sent is not None else []
@@ -939,12 +977,13 @@ def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY, sent=None):
                 print(f"orchd entry meta keys: {sorted(meta)}", file=sys.stderr)
                 data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
             else:
+                name = normalize_tool_name(params.get("name"))
                 thread = os.environ.get("ORCHD_ORCH_ID")
                 if not thread:
                     thread = meta.get("threadId") or (meta.get("x-codex-turn-metadata") or {}).get("thread_id")
-                    if thread and params.get("name") not in ("list_orchs", "quota_status", *WORKFLOW_QUERY_TOOLS):
+                    if thread and name not in ("list_orchs", "quota_status", *WORKFLOW_QUERY_TOOLS):
                         store.register_orch(con, thread, "codex")
-                data = call(params.get("name"), params.get("arguments") or {}, thread, con, rt, marks, reply_id=mid)
+                data = call(name, params.get("arguments") or {}, thread, con, rt, marks, reply_id=mid)
             result = core.inbox_result(data)
             core.inbox_wire({"jsonrpc": "2.0", "id": mid, "result": result})
             if sent is None:  # no transport to wait for: serialized fine, so mark now

@@ -56,7 +56,94 @@ class UpgradeProbeTest(unittest.TestCase):
         result = upgrade_probe.verify(self.con, self.runtime(send), self.op, timeout=0)
         self.assertEqual(result["state"], "verified")
         self.assertEqual(result["session_id"], "new-session")
+        contract = upgrade_probe.dispatch_contract()
+        self.assertEqual(result["dispatch_tool"], contract["dispatch_tool"])
+        self.assertEqual(result["dispatch_batch_tool"], contract["dispatch_batch_tool"])
         self.assertEqual(self.con.execute("SELECT count(*) FROM tasks").fetchone()[0], 0)
+        self.assertEqual(len(self.sent), 1)
+
+    def test_prompt_hydrates_exact_alias_without_supplying_the_field_answers(self):
+        contract = dict(upgrade_probe.dispatch_contract(), dispatch_fields=["synthetic_unseen_field_a", "synthetic_unseen_field_b"])
+        with patch.object(upgrade_probe, "dispatch_contract", return_value=contract):
+            self.create_pending()
+        message = self.sent[0][2]
+        self.assertIn("select:mcp__orchd__" + contract["dispatch_tool"], message)
+        self.assertIn(contract["dispatch_batch_tool"], message)
+        self.assertNotIn("synthetic_unseen_field_a", message)
+        self.assertNotIn("synthetic_unseen_field_b", message)
+        request = json.loads(upgrade_probe._path(self.op, ".probe.json").read_text(encoding="utf-8"))
+        for name, value in contract.items():
+            self.assertEqual(request[name], value)
+
+    def test_descriptor_change_with_the_same_fields_invalidates_request_and_ack(self):
+        self.create_pending()
+        before = upgrade_probe._path(self.op, ".probe.json").read_bytes()
+        for name in ("dispatch_tool", "dispatch_batch_tool"):
+            with self.subTest(name=name):
+                contract = dict(upgrade_probe.dispatch_contract())
+                contract[name] += "_changed"
+                with patch.object(upgrade_probe, "dispatch_contract", return_value=contract):
+                    self.assertTrue(self.ack()["isError"])
+                    with self.assertRaisesRegex(ValueError, "Canonical dispatch contract changed"):
+                        self.create_pending()
+                self.assertEqual(upgrade_probe._path(self.op, ".probe.json").read_bytes(), before)
+                self.assertFalse(upgrade_probe._path(self.op, ".probe-ack.json").exists())
+
+    def test_legacy_request_without_alias_binding_requires_a_new_operation(self):
+        self.create_pending()
+        path = upgrade_probe._path(self.op, ".probe.json")
+        request = json.loads(path.read_text(encoding="utf-8"))
+        request.pop("dispatch_tool")
+        request.pop("dispatch_batch_tool")
+        path.write_text(json.dumps(request), encoding="utf-8")
+        before = path.read_bytes()
+        self.assertTrue(self.ack()["isError"])
+        with self.assertRaisesRegex(ValueError, "Canonical dispatch contract changed"):
+            self.create_pending()
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(len(self.sent), 1)
+
+    def test_successful_replay_cannot_reuse_a_receipt_after_the_contract_changes(self):
+        self.create_pending()
+        self.assertFalse(self.ack().get("isError"))
+        record = entry_ops.read(self.op)
+        record["state"] = "needs_session_refresh"
+        entry_ops._write(record)
+        self.assertEqual(self.create_pending()["state"], "verified")
+        for name in ("dispatch_tool", "dispatch_batch_tool"):
+            contract = dict(upgrade_probe.dispatch_contract())
+            contract[name] += "_changed"
+            with patch.object(upgrade_probe, "dispatch_contract", return_value=contract):
+                with self.assertRaisesRegex(ValueError, "Canonical dispatch contract changed"):
+                    self.create_pending()
+        self.assertEqual(len(self.sent), 1)
+
+    def test_unbound_or_wrong_alias_ack_file_is_not_consumed_or_replayed(self):
+        self.create_pending()
+        self.assertFalse(self.ack().get("isError"))
+        path = upgrade_probe._path(self.op, ".probe-ack.json")
+        valid = json.loads(path.read_text(encoding="utf-8"))
+        for name in ("dispatch_tool", "dispatch_batch_tool"):
+            for value in (None, "wrong_alias"):
+                with self.subTest(name=name, value=value):
+                    receipt = dict(valid)
+                    if value is None:
+                        receipt.pop(name)
+                    else:
+                        receipt[name] = value
+                    path.write_text(json.dumps(receipt), encoding="utf-8")
+                    with self.assertRaisesRegex(ValueError, "Stored tool receipt differs"):
+                        self.create_pending()
+                    self.assertTrue(self.ack()["isError"])
+
+    def test_contract_is_rechecked_when_a_receipt_arrives_during_wait(self):
+        contract = dict(upgrade_probe.dispatch_contract())
+        def delayed_receipt(_):
+            self.assertFalse(self.ack().get("isError"))
+            contract["dispatch_tool"] += "_changed"
+        with patch.object(upgrade_probe, "dispatch_contract", return_value=contract):
+            with self.assertRaisesRegex(ValueError, "Canonical dispatch contract changed"):
+                upgrade_probe.verify(self.con, self.runtime(), self.op, timeout=1, sleep=delayed_receipt)
         self.assertEqual(len(self.sent), 1)
 
     def test_stale_dispatch_fields_cannot_complete_the_probe(self):
