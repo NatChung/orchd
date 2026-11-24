@@ -68,6 +68,46 @@ class RestartTest(unittest.TestCase):
                          ["stop", "confirm-dead", "start", "wait-alive", "adopt", "binding"])
         self.assertEqual(out["first_prompt"], "盤點上次")
 
+    def test_continuation_wakes_replacement_after_rebinding_and_adoption(self):
+        tid = self.task()
+        home = Path(self.tmp.name)
+        (home / "groups").mkdir()
+        (home / "groups" / "old.md").write_text("older entry\n## Restart handoff example\nnewer entry", encoding="utf-8")
+        original = self.rt.send_uds
+
+        def send(path, session, text):
+            if text.startswith("[orchd restart]"):
+                bound = entry.get_entry(self.con, "desktop")["orch_id"]
+                self.assertNotEqual(bound, "old")
+                self.assertEqual(store.get_task(self.con, tid)["orch_thread"], bound)
+            original(path, session, text)
+
+        self.rt.send_uds = send
+        with patch.object(core, "orch_home", return_value=home):
+            result = self.run_restart()
+        self.assertEqual(result["continuation"], {"status": "sent", "notes": "groups/old.md"})
+        wakes = [(path, session, text) for path, session, text in self.rt.sent if text.startswith("[orchd restart]")]
+        self.assertEqual(len(wakes), 1)
+        self.assertEqual(wakes[0][:2], ("/fake/new", "new-session"))
+        self.assertIn("groups/old.md", wakes[0][2])
+        self.assertIn("starts at line 2", wakes[0][2])
+
+    def test_unconfirmed_continuation_keeps_the_replacement_and_reports_recovery(self):
+        original = self.rt.send_uds
+
+        def send(path, session, text):
+            if text.startswith("[orchd restart]"):
+                raise OSError("notification uncertain")
+            original(path, session, text)
+
+        self.rt.send_uds = send
+        result = self.run_restart()
+        self.assertEqual(result["status"], "done")
+        self.assertEqual(result["continuation"]["status"], "unconfirmed")
+        self.assertIn(result["new_orch"], result["continuation"]["recovery"])
+        self.assertEqual(entry.get_entry(self.con, "desktop")["orch_id"], result["new_orch"])
+        self.rt.start_orch.assert_called_once()
+
     def test_no_tasks_skips_adopt_and_model_override(self):
         with patch.object(core, "adopt") as adopt:
             out = self.run_restart(model="opus")
@@ -158,12 +198,12 @@ class RestartTest(unittest.TestCase):
         self.rt.stop_worker.assert_not_called()
         self.rt.start_orch.assert_not_called()
 
-    def test_cli_success_prints_new_id_and_prompt_on_last_line(self):
+    def test_cli_success_prints_new_id_and_continuation_on_last_line(self):
         with patch.dict(os.environ, ORCHD_HOME=self.tmp.name), patch.object(cli, "Runtime", return_value=self.rt), \
                 contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(cli.main(["orch", "restart"]), 0)
         new_id = entry.get_entry(self.con, "desktop")["orch_id"]
-        self.assertEqual(output.getvalue().splitlines()[-1], f"New Orch: {new_id}; first prompt: 盤點上次")
+        self.assertEqual(output.getvalue().splitlines()[-1], f"New Orch: {new_id}; continuation prompt sent")
 
     def test_cli_failed_confirmation_returns_nonzero(self):
         self.rt.stop_worker.side_effect = None

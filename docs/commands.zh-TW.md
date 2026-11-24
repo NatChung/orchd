@@ -170,7 +170,7 @@ orchd orch restart
 
 restart 已包含停舊 Orch、用新的 runtime／socket 查詢確認死亡、開新 Orch、adopt 未結任務，以及重新 bind 原本綁著舊 Orch 的 Desktop，**不用另外執行 binding**。daemon 與任務 worker 繼續執行。預設沿用舊 model；可用 `orchd orch restart OLD_ID --model sonnet` 明確指定。省略 OLD_ID 時，若 Desktop binding 不存在或過時，就列出候選並停止，讓你選擇。
 
-成功後使用輸出的新 Orch ID，第一句提示為 `盤點上次`。任何步驟失敗或無法確認，都依輸出的補救指令處理，重試前核對任務 owner：adopt 可能已提交但通知失敗。若明確指定的 Orch 原本沒有綁 Desktop，Desktop binding 保持原狀，可用 `orchd orch attach NEW_ID` 對話。
+接手與重新綁定後，restart 會主動請新 Orch 讀交接、舊 Orch 筆記（若存在）、目前 inbox 與未結任務。送出只表示通知已交給傳輸。若通知未確認，attach 到輸出的新 Orch ID，再說 `盤點上次`。任何步驟失敗或無法確認，都依輸出的補救指令處理，重試前核對任務 owner：adopt 可能已提交但通知失敗。若明確指定的 Orch 原本沒有綁 Desktop，Desktop binding 保持原狀，可用 `orchd orch attach NEW_ID` 對話。
 
 ### 換新電腦
 
