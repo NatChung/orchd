@@ -381,6 +381,14 @@ def _copy_proof(con, rt, row, orch, receipt, roster, sha256):
         candidate_dispatch = candidate.get("dispatch", {})
         if not isinstance(candidate_dispatch, dict) or not isinstance(candidate_dispatch.get("launch", {}), dict):
             raise ValueError("provider roster launch is malformed")
+        session = candidate.get("sessionId")
+        if not isinstance(session, str) or not session.strip():
+            raise ValueError("provider roster worker session is malformed")
+        if "sessionId" in candidate_dispatch:
+            dispatch_session = candidate_dispatch["sessionId"]
+            if (not isinstance(dispatch_session, str) or not dispatch_session.strip() or
+                    dispatch_session != session):
+                raise ValueError("provider roster dispatch session is malformed or ambiguous")
         cwd = candidate.get("cwd")
         if not isinstance(cwd, str) or not cwd.strip() or not Path(cwd).is_absolute():
             raise ValueError("provider roster worker scope is malformed")
@@ -393,7 +401,8 @@ def _copy_proof(con, rt, row, orch, receipt, roster, sha256):
         parent = candidate_dispatch.get("launch", {})
         same_parent = parent.get("mode") == "resume" and parent.get("sessionId") == row["session_id"]
         same_home = canonical_cwd == row["home"]
-        if job != receipt["job_id"] and (same_parent or (job not in row["baseline"] and same_home)):
+        if job != receipt["job_id"] and (session in (row["session_id"], receipt["session_id"]) or
+                same_parent or (job not in row["baseline"] and same_home)):
             raise ValueError("ambiguous accepted controller or original-session resume copy")
     worker = workers.get(receipt["job_id"], {})
     dispatch = worker.get("dispatch", {})

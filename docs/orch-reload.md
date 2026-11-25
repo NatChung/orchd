@@ -203,8 +203,11 @@ with different outer UUIDs but the same resume parent, live jobs missing session
 and other new active controllers in the same home. Unrelated author jobs are
 preserved. Accepted same-parent copies or new same-home workers in the protected
 native roster also refuse attachment even before they appear in the public jobs
-listing. Every roster worker must have a nonempty absolute cwd; a supplied
-dispatch cwd must be absolute and resolve to the same directory. Unknown scope
+listing. Every roster worker must have a nonempty session ID and absolute cwd. A supplied
+dispatch session ID must be nonempty and match its worker; a supplied dispatch
+cwd must be absolute and resolve to the same directory. A second accepted worker
+with the original or returned session ID is refused regardless of its cwd,
+launch parent or absence from public jobs. Unknown scope
 is refused even if no public job has appeared. Missing, conflicting or ambiguous
 evidence leaves state unchanged.
 
