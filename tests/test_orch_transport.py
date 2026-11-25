@@ -220,6 +220,21 @@ class TransportTest(unittest.TestCase):
                 mock.patch.object(orch_transport,'_peer_pid',return_value=101):
             self.assertTrue(self.rt.orch_listening(self.orch))
 
+    def test_missing_effective_policy_overrides_cannot_select_default_receiver_paths(self):
+        from orchd import orch_transport
+        original=json.loads(json.dumps(self.config))
+        child=dict(self.child.env)
+        for key in ('ORCHD_CONFIG_DIR','ORCHD_CONFIG_FILE','ORCHD_PROJECTS','ORCHD_ORCH_HOME',
+                    'ORCHD_INTERFACE_HOME','ORCHD_CHANNEL_HOME'):
+            with self.subTest(key=key):
+                self.config=json.loads(json.dumps(original));self.child.env=dict(child)
+                expected=str(self.home / ('custom-'+key.lower()))
+                with mock.patch.dict(os.environ,{key:expected}):
+                    self.config['env'].pop(key,None);self.child.env.pop(key,None)
+                    self.mcp.write_text(json.dumps({'mcpServers':{'orchd':self.config}}))
+                    with self.discovery(), self.assertRaises(orch_transport.TransportUnavailable):
+                        orch_transport.discover(self.rt,self.orch)
+
     def test_primary_keeps_existing_transport_and_discards_return_uuid(self):
         with mock.patch.object(self.rt,'send_uds',return_value='native-id') as send:
             self.assertIsNone(self.rt.send_orch(self.orch,'primary'))

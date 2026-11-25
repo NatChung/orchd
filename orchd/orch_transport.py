@@ -84,23 +84,34 @@ def _model(job, orch, home):
     if values != [orch['model']]:raise ValueError('native model is not exact')
 
 
+def _routing(env, *, receiver=False):
+    home=Path(env.get('HOME') or Path.home())
+    if receiver and not env.get('ORCHD_PROJECTS'):
+        # An old receiver's implicit checkout fallback cannot be inferred from
+        # this new client. Native MCP configurations always publish projects.
+        raise ValueError('MCP projects routing is not explicit')
+    return {
+        'ORCHD_HOME':Path(env.get('ORCHD_HOME') or home / '.local/share/orchd'),
+        'ORCHD_ROOT':paths.root(home=home,env=env),
+        'ORCHD_CONFIG_DIR':paths.config_dir(home=home,env=env),
+        'ORCHD_CONFIG_FILE':config.path(home=home,env=env),
+        'ORCHD_PROJECTS':paths.projects_dir(home=home,env=env),
+        'ORCHD_ORCH_HOME':paths.orch_home(home=home,env=env),
+        'ORCHD_INTERFACE_HOME':paths.interface_home(home=home,env=env),
+        'ORCHD_CHANNEL_HOME':paths.channel_home(home=home,env=env),
+    }
+
+
 def _profile(env, orch, entry, *, child=False):
     allowed = set(paths.PROFILE_PATH_VARS) | {'ORCHD_ORCH_ID','ORCHD_PROJECTS'}
     if not child and (not isinstance(env,dict) or set(env) - allowed):
         raise ValueError('MCP environment has unknown policy keys')
-    routing = {
-        'ORCHD_HOME': store.home(), 'ORCHD_ROOT': paths.root(),
-        'ORCHD_CONFIG_DIR': paths.config_dir(), 'ORCHD_CONFIG_FILE': config.path(),
-        'ORCHD_PROJECTS': paths.projects_dir(), 'ORCHD_ORCH_HOME': paths.orch_home(),
-        'ORCHD_INTERFACE_HOME': paths.interface_home(), 'ORCHD_CHANNEL_HOME': paths.channel_home(),
-    }
+    routing, expected = _routing(env,receiver=True), _routing(os.environ)
     if env.get('ORCHD_ORCH_ID') != orch['id']:
         raise ValueError('MCP logical owner changed')
-    for key,target in routing.items():
-        if key in env:
-            value=env[key]
-            if not isinstance(value,str) or not Path(value).is_absolute() or Path(value).resolve()!=target.resolve():
-                raise ValueError('MCP instance policy path changed')
+    for key,value in routing.items():
+        if not value.is_absolute() or value.resolve()!=expected[key].resolve():
+            raise ValueError('MCP effective instance policy path changed')
     if 'ORCHD_EXECUTABLE' in env and env['ORCHD_EXECUTABLE'] != entry:
         raise ValueError('MCP executable does not match its protected entry point')
     # Native may inherit an older reviewed SDK prefix. It is not a routing
