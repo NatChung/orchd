@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import stat
 import sys
 import time
@@ -32,7 +33,7 @@ def _schema(con):
         marker REAL NOT NULL, phase TEXT NOT NULL, baseline TEXT NOT NULL,
         receipt TEXT, error TEXT, created_at REAL NOT NULL)""")
     columns = {r["name"] for r in con.execute("PRAGMA table_info(orch_reload_operations)")}
-    for column in ("preflight", "stop_evidence", "lineage"):
+    for column in ("preflight", "stop_evidence", "lineage", "recovery", "spawn_failure"):
         if column not in columns:
             con.execute(f"ALTER TABLE orch_reload_operations ADD COLUMN {column} TEXT")
 
@@ -46,7 +47,7 @@ def status(con, operation_id):
     result = dict(row)
     result["baseline"] = json.loads(result["baseline"])
     result["receipt"] = json.loads(result["receipt"]) if result["receipt"] else None
-    for key in ("preflight", "stop_evidence", "lineage"):
+    for key in ("preflight", "stop_evidence", "lineage", "recovery", "spawn_failure"):
         result[key] = json.loads(result[key]) if result[key] else None
     return result
 
@@ -281,7 +282,27 @@ def reload(con, rt, orch_id, operation_id, expected_session, expected_job, expec
                         "WHERE operation_id=?", (json.dumps(proof), operation_id))
         try:
             sock, job, session = rt.start_orch(orch_id, expected_model, Path(row["home"]), resume=expected_session)
-        except Exception:
+        except Exception as error:
+            # Exception text/argv can contain prompts, credentials and replies.
+            # Retain only bounded structural diagnostics, never str(error).
+            failure = {"type": type(error).__name__, "recorded_at": time.time()}
+            stage = getattr(error, "launch_stage", None)
+            if isinstance(stage, str) and stage == "native_no_job_receipt":
+                failure["launch_stage"] = stage
+            for key in ("errno", "returncode", "timeout"):
+                value = getattr(error, key, None)
+                if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+                    failure[key] = value
+            for key in ("stdout", "stderr"):
+                value = getattr(error, key, None)
+                if isinstance(value, str):
+                    value = value.encode("utf-8", errors="replace")
+                if isinstance(value, bytes):
+                    failure[key + "_sha256"] = hashlib.sha256(value).hexdigest()
+                    failure[key + "_bytes"] = len(value)
+            with store.immediate(con):
+                con.execute("UPDATE orch_reload_operations SET spawn_failure=? WHERE operation_id=?",
+                            (json.dumps(failure), operation_id))
             _update(con, operation_id, "spawn_pending", error="spawn_acceptance_unknown")
             return status(con, operation_id)
         receipt = dict(socket=sock, job_id=job, session_id=session)
@@ -319,12 +340,15 @@ def reconcile(con, rt, operation_id, candidate_job=None):
         return _finish(con, rt, row, receipt)
 
 
-def _protected_json(file, sha256):
+def _protected_json(file, sha256, *, private=False, newer_than=None):
     fd = os.open(file, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
     with os.fdopen(fd, "rb") as stream:
         info = os.fstat(stream.fileno())
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022 or
+                (private and stat.S_IMODE(info.st_mode) != 0o600)):
             raise ValueError("provider evidence must be an owned protected regular file")
+        if newer_than is not None and info.st_mtime < newer_than:
+            raise ValueError("provider evidence was saved before this recovery launch finished")
         raw = stream.read(1024 * 1024 + 1)
     if len(raw) > 1024 * 1024 or hashlib.sha256(raw).hexdigest() != sha256:
         raise ValueError("provider evidence SHA does not match")
@@ -342,6 +366,118 @@ def _flag(flags, name):
 
 def _process_parent(pid):
     return psutil.Process(pid).ppid()
+
+
+def _valid_token(value):
+    return isinstance(value, str) and bool(value) and not any(char.isspace() for char in value)
+
+
+def _copy_proof(con, rt, row, orch, receipt, roster, sha256):
+    """Full lineage/MCP/process proof, shared by attachment and final acceptance."""
+    if not isinstance(roster, dict) or not isinstance(roster.get("workers"), dict):
+        raise ValueError("provider roster workers are malformed")
+    workers = roster["workers"]
+    # Native acceptance can precede publication in live_jobs. Never treat a
+    # missing public job as evidence that an accepted competitor is absent.
+    for job, candidate in workers.items():
+        if not _valid_token(job) or not isinstance(candidate, dict):
+            raise ValueError("provider roster worker is malformed")
+        candidate_dispatch = candidate.get("dispatch", {})
+        if not isinstance(candidate_dispatch, dict) or not isinstance(candidate_dispatch.get("launch", {}), dict):
+            raise ValueError("provider roster launch is malformed")
+        if "short" in candidate_dispatch and (
+                not _valid_token(candidate_dispatch["short"]) or candidate_dispatch["short"] != job):
+            raise ValueError("provider roster dispatch job identity is malformed or ambiguous")
+        session = candidate.get("sessionId")
+        if not _valid_token(session):
+            raise ValueError("provider roster worker session is malformed")
+        if "sessionId" in candidate_dispatch:
+            dispatch_session = candidate_dispatch["sessionId"]
+            if not _valid_token(dispatch_session) or dispatch_session != session:
+                raise ValueError("provider roster dispatch session is malformed or ambiguous")
+        cwd = candidate.get("cwd")
+        if not isinstance(cwd, str) or not cwd.strip() or not Path(cwd).is_absolute():
+            raise ValueError("provider roster worker scope is malformed")
+        canonical_cwd = str(Path(cwd).resolve())
+        if "cwd" in candidate_dispatch:
+            dispatch_cwd = candidate_dispatch["cwd"]
+            if (not isinstance(dispatch_cwd, str) or not dispatch_cwd.strip() or
+                    not Path(dispatch_cwd).is_absolute() or str(Path(dispatch_cwd).resolve()) != canonical_cwd):
+                raise ValueError("provider roster dispatch scope is malformed or ambiguous")
+        parent = candidate_dispatch.get("launch", {})
+        if parent.get("mode") == "resume" and not _valid_token(parent.get("sessionId")):
+            raise ValueError("provider roster resume parent is malformed")
+        same_parent = parent.get("mode") == "resume" and parent.get("sessionId") == row["session_id"]
+        same_home = canonical_cwd == row["home"]
+        if job != receipt["job_id"] and (session in (row["session_id"], receipt["session_id"]) or
+                same_parent or (job not in row["baseline"] and same_home)):
+            raise ValueError("ambiguous accepted controller or original-session resume copy")
+    worker = workers.get(receipt["job_id"], {})
+    dispatch = worker.get("dispatch", {})
+    launch = dispatch.get("launch", {})
+    if (roster.get("proto") != 1 or dispatch.get("proto") != 1 or
+            worker.get("sessionId") != receipt["session_id"] or dispatch.get("sessionId") != receipt["session_id"] or
+            dispatch.get("short") != receipt["job_id"] or worker.get("cwd") != row["home"] or
+            dispatch.get("cwd") != row["home"] or launch.get("mode") != "resume" or
+            launch.get("sessionId") != row["session_id"] or launch.get("fork") is not True or
+            launch.get("restoresTranscript") is not True or
+            not isinstance(dispatch.get("createdAt"), (int, float)) or
+            isinstance(dispatch.get("createdAt"), bool) or
+            not math.isfinite(dispatch["createdAt"]) or dispatch["createdAt"] < row["created_at"] * 1000):
+        raise ValueError("provider roster does not prove this copy's exact original-session lineage")
+    flags = launch.get("flagArgs")
+    mcp_path = str(Path(orch["socket"]).parent / "mcp.json")
+    if (_flag(flags, "--model") != row["model"] or _flag(flags, "--mcp-config") != mcp_path or
+            _flag(flags, "--messaging-socket-path") != orch["socket"] or
+            "--strict-mcp-config" not in flags or receipt.get("socket") != orch["socket"]):
+        raise ValueError("copy launch does not preserve the original model/socket/MCP configuration")
+    fd = os.open(mcp_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+            raise ValueError("MCP configuration is not protected")
+        mcp_raw = stream.read(1024 * 1024 + 1)
+    if len(mcp_raw) > 1024 * 1024:
+        raise ValueError("MCP configuration exceeds size limit")
+    mcp = json.loads(mcp_raw).get("mcpServers", {}).get("orchd", {})
+    entrypoint = paths.orchd_executable()
+    executable, args = paths.mcp_launch(entrypoint) if os.name == "nt" else (sys.executable, [entrypoint])
+    from .runtime import mcp_env
+    if (mcp.get("command") != executable or mcp.get("args") != [*args, "mcp"] or
+            mcp.get("env") != mcp_env(row["orch_id"])):
+        raise ValueError("copy MCP does not use this deployment and original Orch identity/profile")
+    database = Path(con.execute("PRAGMA database_list").fetchone()[2]).resolve()
+    if database != (Path(store.home()) / "orchd.db").resolve():
+        raise ValueError("copy MCP profile does not address the operation database")
+    jobs = rt.live_jobs()
+    copy_row = dict(row, session_id=receipt["session_id"])
+    if not _verified(copy_row, jobs, receipt["job_id"]) or rt.socket_listening(orch["socket"]) is not True:
+        raise ValueError("copy is not positively alive on the original socket")
+    for job, item in jobs.items():
+        if not _valid_token(job) or not isinstance(item, dict):
+            raise ValueError("provider job evidence is malformed")
+        active = item.get("pid") is not None or item.get("status") is not None
+        session = item.get("sessionId")
+        if active and (not _valid_token(session) or
+                       not isinstance(item.get("cwd"), str) or not item["cwd"].strip() or
+                       not Path(item["cwd"]).is_absolute() or session == row["session_id"] or (session == receipt["session_id"] and job != receipt["job_id"])):
+            raise ValueError("original or copied session has ambiguous competing process evidence")
+        worker_copy = roster.get("workers", {}).get(job, {})
+        parent = worker_copy.get("dispatch", {}).get("launch", {})
+        related_copy = parent.get("mode") == "resume" and parent.get("sessionId") == row["session_id"]
+        if active and job != receipt["job_id"] and (related_copy or
+                (item.get("cwd") and str(Path(item["cwd"]).resolve()) == row["home"] and
+                 job not in row["baseline"])):
+            raise ValueError("ambiguous competing controller or original-session resume copy")
+    pid = jobs[receipt["job_id"]]["pid"]
+    host = worker.get("pid")
+    if not isinstance(host, int) or isinstance(host, bool) or host <= 0 or (host != pid and _process_parent(pid) != host):
+        raise ValueError("fresh copy PID does not belong to the provider roster host")
+    return {"kind": "operator_accepted_provider_resume_copy", "original_session": row["session_id"],
+               "accepted_session": receipt["session_id"], "job_id": receipt["job_id"], "pid": pid,
+               "provider_host_pid": host, "roster_sha256": sha256,
+               "mcp_sha256": hashlib.sha256(mcp_raw).hexdigest(), "provider": _provider(rt),
+               "verified_at": time.time()}
 
 
 def accept_resume_copy(con, rt, operation_id, expected_job, expected_session, file, sha256):
@@ -372,64 +508,7 @@ def accept_resume_copy(con, rt, operation_id, expected_job, expected_session, fi
         if not row["preflight"] or row["preflight"]["provider"] != _provider(rt):
             raise ValueError("reload provider profile changed")
         roster = _protected_json(file, sha256)
-        worker = roster.get("workers", {}).get(expected_job, {})
-        dispatch = worker.get("dispatch", {})
-        launch = dispatch.get("launch", {})
-        if (roster.get("proto") != 1 or dispatch.get("proto") != 1 or
-                worker.get("sessionId") != expected_session or dispatch.get("sessionId") != expected_session or
-                dispatch.get("short") != expected_job or worker.get("cwd") != row["home"] or
-                dispatch.get("cwd") != row["home"] or launch.get("mode") != "resume" or
-                launch.get("sessionId") != row["session_id"] or launch.get("fork") is not True or
-                launch.get("restoresTranscript") is not True or
-                not isinstance(dispatch.get("createdAt"), (int, float)) or
-                isinstance(dispatch.get("createdAt"), bool) or
-                not math.isfinite(dispatch["createdAt"]) or dispatch["createdAt"] < row["created_at"] * 1000):
-            raise ValueError("provider roster does not prove this copy's exact original-session lineage")
-        flags = launch.get("flagArgs")
-        mcp_path = str(Path(orch["socket"]).parent / "mcp.json")
-        if (_flag(flags, "--model") != row["model"] or _flag(flags, "--mcp-config") != mcp_path or
-                _flag(flags, "--messaging-socket-path") != orch["socket"] or
-                "--strict-mcp-config" not in flags or receipt.get("socket") != orch["socket"]):
-            raise ValueError("copy launch does not preserve the original model/socket/MCP configuration")
-        fd = os.open(mcp_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        with os.fdopen(fd, "rb") as stream:
-            info = os.fstat(stream.fileno())
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
-                raise ValueError("MCP configuration is not protected")
-            mcp_raw = stream.read(1024 * 1024 + 1)
-        if len(mcp_raw) > 1024 * 1024:
-            raise ValueError("MCP configuration exceeds size limit")
-        mcp = json.loads(mcp_raw).get("mcpServers", {}).get("orchd", {})
-        entrypoint = paths.orchd_executable()
-        executable, args = paths.mcp_launch(entrypoint) if os.name == "nt" else (sys.executable, [entrypoint])
-        from .runtime import mcp_env
-        if (mcp.get("command") != executable or mcp.get("args") != [*args, "mcp"] or
-                mcp.get("env") != mcp_env(row["orch_id"])):
-            raise ValueError("copy MCP does not use this deployment and original Orch identity/profile")
-        database = Path(con.execute("PRAGMA database_list").fetchone()[2]).resolve()
-        if database != (Path(store.home()) / "orchd.db").resolve():
-            raise ValueError("copy MCP profile does not address the operation database")
-        jobs = rt.live_jobs()
-        copy_row = dict(row, session_id=expected_session)
-        if not _verified(copy_row, jobs, expected_job) or rt.socket_listening(orch["socket"]) is not True:
-            raise ValueError("copy is not positively alive on the original socket")
-        for job, item in jobs.items():
-            if not isinstance(item, dict):
-                raise ValueError("provider job evidence is malformed")
-            active = item.get("pid") is not None or item.get("status") is not None
-            session = item.get("sessionId")
-            if active and (not isinstance(session, str) or not session.strip() or
-                           session == row["session_id"] or (session == expected_session and job != expected_job)):
-                raise ValueError("original or copied session has ambiguous competing process evidence")
-        pid = jobs[expected_job]["pid"]
-        host = worker.get("pid")
-        if not isinstance(host, int) or isinstance(host, bool) or host <= 0 or (host != pid and _process_parent(pid) != host):
-            raise ValueError("fresh copy PID does not belong to the provider roster host")
-        lineage = {"kind": "operator_accepted_provider_resume_copy", "original_session": row["session_id"],
-                   "accepted_session": expected_session, "job_id": expected_job, "pid": pid,
-                   "provider_host_pid": host, "roster_sha256": sha256,
-                   "mcp_sha256": hashlib.sha256(mcp_raw).hexdigest(), "provider": _provider(rt),
-                   "verified_at": time.time()}
+        lineage = _copy_proof(con, rt, row, orch, receipt, roster, sha256)
         _current(con, row)
         with store.immediate(con):
             changed = con.execute("UPDATE orchs SET session_id=?,job_id=?,socket=?,stopped_at=NULL "
@@ -443,9 +522,95 @@ def accept_resume_copy(con, rt, operation_id, expected_job, expected_session, fi
         return status(con, operation_id)
 
 
+def attach_recovery_receipt(con, rt, operation_id, receipt_file, receipt_sha256, roster_file, roster_sha256):
+    """Attach an actual protected recovery launch receipt; never launch or accept.
+
+    The trusted local Operator supplies these artifacts. Digests bind bytes,
+    not authorship: provider lineage and fresh process proof remain mandatory.
+    """
+    _operator()
+    row = status(con, operation_id)
+    with store.task_delivery(con, [f"orch:{row['orch_id']}"]):
+        row = status(con, operation_id)
+        evidence = _protected_json(receipt_file, receipt_sha256, private=True)
+        if not isinstance(evidence, dict) or set(evidence) != {
+                "version", "operation_id", "original", "launcher", "started_at", "finished_at",
+                "exit_code", "native_stdout", "receipt"}:
+            raise ValueError("invalid recovery receipt schema")
+        original = {"orch_id": row["orch_id"], "session_id": row["session_id"], "job_id": row["old_job"],
+                    "model": row["model"], "home": row["home"]}
+        orch = store.get_orch(con, row["orch_id"])
+        if orch is None:
+            raise ValueError("original Orch is missing")
+        original["socket"] = orch["socket"]
+        receipt, launcher = evidence["receipt"], evidence["launcher"]
+        if (type(evidence["version"]) is not int or evidence["version"] != 1 or
+                evidence["operation_id"] != operation_id or evidence["original"] != original or
+                type(evidence["exit_code"]) is not int or evidence["exit_code"] != 0 or
+                not isinstance(receipt, dict) or set(receipt) != {"job_id", "session_id", "socket"} or
+                not all(isinstance(v, str) and v for v in receipt.values()) or
+                receipt["socket"] != orch["socket"] or receipt["job_id"] in row["baseline"] or
+                receipt["session_id"] == row["session_id"] or
+                evidence["native_stdout"] != "claude attach " + receipt["job_id"] or
+                not re.fullmatch(r"[a-zA-Z0-9-]+", receipt["job_id"])):
+            raise ValueError("recovery receipt does not bind the exact operation and returned copy")
+        if (not isinstance(launcher, dict) or set(launcher) != {"command", "config"} or
+                not all(isinstance(v, str) and v for v in launcher.values()) or
+                not Path(launcher["command"]).is_absolute() or
+                str(Path(launcher["command"]).resolve()) != launcher["command"] or
+                not Path(launcher["command"]).is_file() or
+                not os.access(launcher["command"], os.X_OK) or not row["preflight"] or
+                launcher["config"] != row["preflight"]["provider"]["config"] or
+                row["preflight"]["provider"] != _provider(rt)):
+            raise ValueError("recovery launcher or original provider reader/profile is invalid")
+        start, finish = evidence["started_at"], evidence["finished_at"]
+        if (any(not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v)
+                for v in (start, finish)) or not row["created_at"] <= start <= finish <= time.time() or
+                not row["stop_evidence"]):
+            raise ValueError("recovery launch time or original stop evidence is invalid")
+        roster = _protected_json(roster_file, roster_sha256, private=True, newer_than=finish)
+        if not isinstance(roster, dict) or not isinstance(roster.get("workers"), dict):
+            raise ValueError("provider roster workers are malformed")
+        worker = roster["workers"].get(receipt["job_id"], {})
+        if not isinstance(worker, dict) or not isinstance(worker.get("dispatch"), dict):
+            raise ValueError("provider copy dispatch is malformed")
+        dispatch = worker["dispatch"]
+        created = dispatch.get("createdAt")
+        if (not isinstance(created, (int, float)) or isinstance(created, bool) or
+                not math.isfinite(created) or not start * 1000 <= created <= finish * 1000):
+            raise ValueError("provider copy timestamp is outside the actual launch interval")
+        recovery = {"receipt_sha256": receipt_sha256, "roster_sha256": roster_sha256,
+                    "launcher": launcher, "started_at": start, "finished_at": finish,
+                    "previous_error": row["error"] if row["recovery"] is None else row["recovery"]["previous_error"]}
+        if row["recovery"] is not None:
+            if row["recovery"] != recovery or row["receipt"] != receipt:
+                raise ValueError("recovery evidence is immutable once attached")
+            if row["phase"] == "complete":
+                if (orch["session_id"], orch["job_id"], orch["model"], orch["stopped_at"]) != (
+                        receipt["session_id"], receipt["job_id"], row["model"], None):
+                    raise ValueError("accepted recovery controller changed")
+            else:
+                _current(con, row)
+        else:
+            _current(con, row)
+            if row["phase"] != "spawn_pending" or row["receipt"] is not None:
+                raise ValueError("recovery attachment requires an uncertain spawn with no receipt")
+        _copy_proof(con, rt, row, orch, receipt, roster, roster_sha256)
+        if row["recovery"] is not None:
+            return row
+        with store.immediate(con):
+            _current(con, row)
+            changed = con.execute("UPDATE orch_reload_operations SET phase='held',error='returned_session_mismatch',"
+                "receipt=?,recovery=? WHERE operation_id=? AND phase='spawn_pending' AND receipt IS NULL "
+                "AND recovery IS NULL", (json.dumps(receipt), json.dumps(recovery), operation_id)).rowcount
+            if changed != 1:
+                raise ValueError("reload operation changed before recovery attachment")
+        return status(con, operation_id)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("reload", "status", "reconcile", "attach-stop-preflight", "accept-resume-copy"))
+    parser.add_argument("command", choices=("reload", "status", "reconcile", "attach-stop-preflight", "accept-resume-copy", "attach-recovery-receipt"))
     parser.add_argument("--state", required=True)
     parser.add_argument("--operation", required=True)
     parser.add_argument("--orch")
@@ -458,6 +623,8 @@ def main(argv=None):
     parser.add_argument("--roster-sha256")
     parser.add_argument("--preflight-file")
     parser.add_argument("--preflight-sha256")
+    parser.add_argument("--receipt-file")
+    parser.add_argument("--receipt-sha256")
     args = parser.parse_args(argv)
     _operator()
     from .runtime import Runtime
@@ -472,6 +639,9 @@ def main(argv=None):
         elif args.command == "accept-resume-copy":
             result = accept_resume_copy(con, Runtime(), args.operation, args.candidate_job,
                                         args.candidate_session, args.roster_file, args.roster_sha256)
+        elif args.command == "attach-recovery-receipt":
+            result = attach_recovery_receipt(con, Runtime(), args.operation, args.receipt_file,
+                args.receipt_sha256, args.roster_file, args.roster_sha256)
         elif args.command == "reconcile":
             result = reconcile(con, Runtime(), args.operation, args.candidate_job)
         else:

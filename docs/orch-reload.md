@@ -132,3 +132,100 @@ and author session is untouched. Repeating the exact acceptance after success
 returns its existing receipt; it never dispatches, retries, adopts or resumes an
 author. Report this as an accepted provider controller copy, not as preservation
 of the controller's original native UUID.
+
+## Attach an actual recovery receipt after an uncertain launch
+
+An uncertain launch with no persisted receipt remains `spawn_pending`. It is
+never evidence that no process was accepted. A trusted local Operator may supply
+an actual, separately performed recovery launch receipt and native roster to
+`attach-recovery-receipt`. This API does not perform or authorize that launch.
+There is no automatic retry, cancellation, pending-marker clearance or adoption.
+A delayed first launch may still create a competing controller; an empty provider
+listing cannot eliminate this risk.
+
+```sh
+python -m orchd.orch_reload attach-recovery-receipt --state /srv/example/orchd.db \
+  --operation 00000000-0000-4000-8000-000000000001 \
+  --receipt-file /srv/example/recovery-receipt.json --receipt-sha256 EXACT_RAW_SHA256 \
+  --roster-file /srv/example/provider-roster.json --roster-sha256 EXACT_RAW_SHA256
+```
+
+Both files must be owned regular files, not symlinks, with mode `0600`, at most
+1 MiB, and match the supplied raw SHA. Save the roster after the launch finishes;
+its native dispatch timestamp must fall within the receipt's launch interval.
+Receipt times use epoch seconds; native `dispatch.createdAt` uses milliseconds.
+The receipt schema is exact (additional fields are rejected):
+
+```json
+{
+  "version": 1,
+  "operation_id": "00000000-0000-4000-8000-000000000001",
+  "original": {
+    "orch_id": "example-owner",
+    "session_id": "original-session",
+    "job_id": "original-job",
+    "model": "example-model",
+    "home": "/srv/example/home",
+    "socket": "/srv/example/runtime/orch.sock"
+  },
+  "launcher": {
+    "command": "/opt/provider/actual-version/claude",
+    "config": "/srv/example/provider-config"
+  },
+  "started_at": 1800000000.0,
+  "finished_at": 1800000001.0,
+  "exit_code": 0,
+  "native_stdout": "claude attach returned-job",
+  "receipt": {
+    "job_id": "returned-job",
+    "session_id": "returned-copy-session",
+    "socket": "/srv/example/runtime/orch.sock"
+  }
+}
+```
+
+The launcher must produce this file from the actual successful native response,
+using exclusive creation; extract only the real `claude attach JOB` line into
+`native_stdout`. Do not construct a receipt by selecting a roster candidate.
+Do not include full stdout, prompts, tokens, replies, launch argv or credentials.
+`launcher.command` is the resolved actual executable path; the executable must
+still exist. It is saved separately from the immutable original provider reader
+identity. Its config namespace must match the original profile. Continue using
+the original reader executable/profile for fresh verification; do not relabel
+that preflight evidence to match a newer launcher.
+
+The trusted Operator attests to artifact provenance. Ownership/mode and SHA bind
+bytes; they are not cryptographic authentication of who launched the process.
+The API also independently requires every original resume-copy lineage,
+model/socket/MCP/profile/database, positive live PID/parent, and listening-socket
+check described above. It rejects original-session processes, competing copies
+with different outer UUIDs but the same resume parent, live jobs missing session or absolute cwd evidence,
+and other new active controllers in the same home. Unrelated author jobs are
+preserved. Accepted same-parent copies or new same-home workers in the protected
+native roster also refuse attachment even before they appear in the public jobs
+listing. Every roster worker key and session ID must be nonempty strings without
+whitespace. A supplied dispatch short ID must match the worker key. Resume
+launches require a nonempty parent session ID without whitespace. Every worker
+must have an absolute cwd. A supplied
+dispatch session ID must be nonempty and match its worker; a supplied dispatch
+cwd must be absolute and resolve to the same directory. A second accepted worker
+with the original or returned session ID is refused regardless of its cwd,
+launch parent or absence from public jobs. Unknown scope
+is refused even if no public job has appeared. Missing, conflicting or ambiguous
+evidence leaves state unchanged.
+
+A successful attachment only saves an immutable recovery receipt and changes the
+operation to `held/returned_session_mismatch`; it exits 2 and does not change the
+controller or its stopped marker. Original preflight/stop evidence and the
+previous error remain recorded. Invoke the existing `accept-resume-copy` with
+that exact job/session and protected roster to accept the controller, then run
+session tool verification separately. This API handles a new native UUID copy;
+for a genuine original-UUID receipt, use normal `reconcile` instead. Exact
+attachment replay rechecks live evidence; changed evidence is rejected.
+
+Launch failures retain structured `spawn_failure` diagnostics: exception class,
+the allowlisted `native_no_job_receipt` stage for missing native attach receipts,
+finite numeric errno/return code/timeout when supplied, and captured output byte
+counts/digests when supplied. Exception text, command arguments and native output
+contents are never persisted. A diagnostic or an exit-zero launch receipt is not
+proof of controller readiness.
