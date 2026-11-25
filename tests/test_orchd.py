@@ -65,6 +65,15 @@ class FakeRuntime:
     def send_uds(self, path, session_id, text):
         self.sent.append((path, session_id, text))
 
+    def send_orch(self, orch, text):
+        self.send_uds(orch["socket"], orch["session_id"], text)
+
+    def orch_listening(self, orch):
+        return self.socket_listening(orch["socket"])
+
+    def orch_transport_info(self, orch):
+        return {"kind": "configured", "socket": orch["socket"]} if self.orch_listening(orch) else None
+
     def socket_listening(self, path):
         return path not in getattr(self, "dead_sockets", ())
 

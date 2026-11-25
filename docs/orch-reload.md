@@ -243,3 +243,43 @@ finite numeric errno/return code/timeout when supplied, and captured output byte
 counts/digests when supplied. Exception text, command arguments and native output
 contents are never persisted. A diagnostic or an exit-zero launch receipt is not
 proof of controller readiness.
+
+## Native endpoint changes without a controller replacement
+
+Claude can keep a controller alive while a vendor handoff loses its explicit
+messaging socket flag. A missing configured socket does not prove retirement.
+Orch delivery uses `Runtime.send_orch(orch, text)`: the configured channel is
+preferred; otherwise a fresh, read-only resolver may use the native socket
+exported to this controller's unique MCP child. It never changes the canonical
+socket in the database or creates a socket alias.
+
+The fallback requires the exact current active Orch row, native job/session,
+positive same-user process and OS birth, absolute home, exact model, and an owned
+protected current MCP configuration. Its command/arguments and profile routing
+must match the unique direct MCP child; that receiver must not be a task/worker.
+A previously reviewed receiver SDK may remain configured: the client does not
+claim that the receiver runs the client's new interpreter. The sender may be a
+legitimate worker notifying its owner; sender identity and existing Core
+ownership/generation checks are preserved.
+
+On Unix, the exported endpoint must be a real owned mode-0600 socket. The same
+connected socket is attested to the current native PID using Darwin
+`LOCAL_PEERPID` or Linux `SO_PEERCRED`. Process birth, database identity and MCP
+configuration are rechecked before delivery. Unknown or ambiguous evidence
+refuses transport; a live owner is never cloned merely because its old socket
+went away. Only the existing confirmed-dead path may revive a controller.
+
+The native child token stays in memory and is sent as the first JSONL auth
+frame, followed by one session-bound user frame. It is never returned in proof,
+logged or persisted. This native channel mints its own message UUID and supplies
+no synchronous enqueue acknowledgement, so `send_orch` returns no UUID and a
+completed write only means transport-written. Genuine MCP probe acknowledgement
+is still required. A partial write is uncertain and never causes an alternate
+send or automatic restart. Worker `send_uds`, including stable `message_uuid`
+semantics, is unchanged. Windows retains its configured transport without this
+Unix fallback.
+
+For an explicit reviewed same-owner refresh, a positively alive controller with
+`status=idle` and native state `blocked` or `done` is eligible. All trust, exact
+identity, quiescing, stop-proof, receipt and CAS gates above still apply. The
+reported native state is never rewritten to obtain eligibility.

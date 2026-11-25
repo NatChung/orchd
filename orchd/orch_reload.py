@@ -250,9 +250,9 @@ def reload(con, rt, orch_id, operation_id, expected_session, expected_job, expec
             jobs = rt.live_jobs()
             item = jobs.get(expected_job, {}) if isinstance(jobs, dict) else {}
             if (owner_health(orch, jobs)["state"] != "alive" or item.get("status") != "idle" or
-                    item.get("state") != "blocked" or item.get("sessionId") != expected_session or
+                    item.get("state") not in ("blocked", "done") or item.get("sessionId") != expected_session or
                     not item.get("cwd") or Path(item["cwd"]).resolve() != paths.orch_home().resolve()):
-                raise ValueError("original Orch is not positively identified and idle/blocked")
+                raise ValueError("original Orch is not positively identified and idle with blocked/done state")
             descriptor_row = {"old_job": expected_job, "session_id": expected_session,
                               "home": str(paths.orch_home().resolve())}
             _descriptor(descriptor_row, item)

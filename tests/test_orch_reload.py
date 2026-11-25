@@ -163,6 +163,19 @@ class ReloadTest(unittest.TestCase):
             self.assertEqual(self.reload()["phase"], "complete")
             self.assertNotIn("CLAUDE_CONFIG_DIR", os.environ)
 
+    def test_idle_done_controller_reloads_through_the_same_positive_stop_gate(self):
+        self.rt.jobs['old-job']['state'] = 'done'
+        self.assertEqual(self.reload()['phase'],'complete')
+        self.assertEqual(self.rt.stops,['old-job'])
+        self.assertEqual(len(self.rt.starts),1)
+
+    def test_done_without_positive_idle_process_remains_unmodified(self):
+        before = dict(store.get_orch(self.con,'owner'))
+        self.rt.jobs['old-job'].update(state='done',status='working')
+        with self.assertRaises(ValueError):self.reload()
+        self.assertEqual(dict(store.get_orch(self.con,'owner')),before)
+        self.assertEqual((self.rt.stops,self.rt.starts),([],[]))
+
     def test_complete_and_repeat_preserve_identity_and_all_author_bytes(self):
         self.assertEqual(self.reload()["phase"], "complete")
         self.assertEqual(self.reload()["phase"], "complete")

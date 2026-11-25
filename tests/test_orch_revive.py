@@ -50,6 +50,17 @@ class ReviveTest(unittest.TestCase):
         self.assertIn("done: shipped", text)
         self.assertEqual(store.get_orch(self.con, self.orch)["job_id"], "resumed1")
 
+    def test_alive_missing_transport_is_not_retired_or_cloned(self):
+        from orchd.orch_transport import TransportUnavailable
+        self.rt.jobs['orchjob'] = {'pid':4242,'status':'idle'}
+        self.rt.dead_sockets = {store.get_orch(self.con,self.orch)['socket']}
+        health = {'state':'alive','reason':'job_present'}
+        self.assertIsNone(orch_revive.retired(self.rt,store.get_orch(self.con,self.orch),health))
+        self.rt.gone = 1
+        with self.assertRaises(TransportUnavailable):orch_revive.send(self.con,self.rt,self.orch,'hold')
+        self.assertFalse(getattr(self.rt,'resumed_orchs',[]))
+        self.assertEqual(store.get_orch(self.con,self.orch)['job_id'],'orchjob')
+
     def test_stopped_orch_is_never_resumed(self):
         store.stop_orch(self.con, self.orch)
         self.rt.gone = 1
