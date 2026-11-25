@@ -27,6 +27,9 @@ class FakeRuntime:
         self.stops = []
         self.mode = "normal"
 
+    def claude_trusted(self, home):
+        return True
+
     def live_jobs(self):
         return self.jobs
 
@@ -88,6 +91,77 @@ class ReloadTest(unittest.TestCase):
     def reload(self, **kw):
         return orch_reload.reload(self.con, self.rt, "owner", self.op, "original-session", "old-job",
                                   kw.get("model", "example-model"))
+
+    def assert_untrusted_new_reload_untouched(self, value):
+        before = dict(store.get_orch(self.con, "owner"))
+        with mock.patch.object(self.rt, "claude_trusted", return_value=value) as trust, \
+                mock.patch.object(self.rt, "live_jobs", wraps=self.rt.live_jobs) as jobs:
+            with self.assertRaisesRegex(ValueError, "not positively trusted"):
+                self.reload()
+            trust.assert_called_once_with(self.home)
+            jobs.assert_not_called()
+        self.assertEqual(dict(store.get_orch(self.con, "owner")), before)
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM orch_reload_operations").fetchone()[0], 0)
+        self.assertEqual(self.rt.stops, [])
+        self.assertEqual(self.rt.starts, [])
+
+    def test_untrusted_new_reload_does_not_quiesce_or_create_operation(self):
+        self.assert_untrusted_new_reload_untouched(False)
+
+    def test_unknown_trust_does_not_quiesce_or_create_operation(self):
+        self.assert_untrusted_new_reload_untouched(None)
+
+    def test_truthy_nonboolean_trust_does_not_quiesce_or_create_operation(self):
+        self.assert_untrusted_new_reload_untouched(1)
+
+    def test_trust_read_failure_is_generic_and_does_not_quiesce(self):
+        before = dict(store.get_orch(self.con, "owner"))
+        with mock.patch.object(self.rt, "claude_trusted", side_effect=RuntimeError("PRIVATE config content")):
+            with self.assertRaisesRegex(ValueError, "not positively trusted") as result:
+                self.reload()
+        self.assertNotIn("PRIVATE", str(result.exception))
+        self.assertTrue(result.exception.__suppress_context__)
+        self.assertEqual(dict(store.get_orch(self.con, "owner")), before)
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM orch_reload_operations").fetchone()[0], 0)
+        self.assertEqual((self.rt.stops, self.rt.starts), ([], []))
+
+    def test_stop_pending_retry_rechecks_trust_without_changing_evidence_or_lifecycle(self):
+        self.rt.mode = "crash-stop"
+        with self.assertRaises(KeyboardInterrupt): self.reload()
+        before = orch_reload.status(self.con, self.op)
+        owner = dict(store.get_orch(self.con, "owner"))
+        self.assertEqual(before["phase"], "stop_pending")
+        with mock.patch.object(self.rt, "claude_trusted", return_value=False):
+            with self.assertRaisesRegex(ValueError, "not positively trusted"): self.reload()
+        self.assertEqual(orch_reload.status(self.con, self.op), before)
+        self.assertEqual(dict(store.get_orch(self.con, "owner")), owner)
+        self.assertEqual((self.rt.stops, self.rt.starts), (["old-job"], []))
+
+    def test_spawn_pending_and_reconciliation_do_not_recheck_trust_or_respawn(self):
+        self.rt.mode = "unknown"
+        before = self.reload()
+        with mock.patch.object(self.rt, "claude_trusted", side_effect=AssertionError("no new launch")):
+            self.assertEqual(self.reload(), before)
+            self.assertEqual(orch_reload.reconcile(self.con, self.rt, self.op, "new-job")["phase"], "complete")
+        self.assertEqual((self.rt.stops, len(self.rt.starts)), (["old-job"], 1))
+
+    def test_real_trust_reader_distinguishes_unset_from_explicit_default_data_directory(self):
+        (self.home / ".claude.json").write_text(json.dumps({"projects": {
+            str(self.home): {"hasTrustDialogAccepted": True}}}))
+        data_dir = self.home / ".claude"
+        data_dir.mkdir()
+        (data_dir / ".claude.json").write_text(json.dumps({"projects": {}}))
+        self.rt.claude_trusted = Runtime().claude_trusted
+        before = dict(store.get_orch(self.con, "owner"))
+        with mock.patch.object(Path, "home", return_value=self.home):
+            with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(data_dir)}):
+                with self.assertRaisesRegex(ValueError, "not positively trusted"): self.reload()
+            self.assertEqual(dict(store.get_orch(self.con, "owner")), before)
+            self.assertEqual(self.con.execute("SELECT COUNT(*) FROM orch_reload_operations").fetchone()[0], 0)
+            self.assertEqual((self.rt.stops, self.rt.starts), ([], []))
+            self.assertNotIn("CLAUDE_CONFIG_DIR", os.environ)
+            self.assertEqual(self.reload()["phase"], "complete")
+            self.assertNotIn("CLAUDE_CONFIG_DIR", os.environ)
 
     def test_complete_and_repeat_preserve_identity_and_all_author_bytes(self):
         self.assertEqual(self.reload()["phase"], "complete")
@@ -756,6 +830,7 @@ class ReloadTest(unittest.TestCase):
         results = [subprocess.CompletedProcess([], 0, "example-version", ""),
                    subprocess.CompletedProcess([], 7, native_stdout, native_stderr)]
         with mock.patch.object(runtime, "run", side_effect=results) as run, \
+                mock.patch.object(runtime, "claude_trusted", return_value=True), \
                 mock.patch.object(runtime, "live_jobs", side_effect=self.rt.live_jobs), \
                 mock.patch.object(runtime, "stop_worker", side_effect=self.rt.stop_worker), \
                 mock.patch.object(runtime, "socket_listening", side_effect=self.rt.socket_listening), \

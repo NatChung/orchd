@@ -26,6 +26,15 @@ def _operator():
         raise PermissionError("Orch reload is an Operator-only entry point")
 
 
+def _require_trusted(rt, home):
+    try:
+        trusted = rt.claude_trusted(home)
+    except Exception:
+        trusted = None
+    if trusted is not True:
+        raise ValueError("Orch home is not positively trusted by this Claude profile; no stop or launch requested") from None
+
+
 def _schema(con):
     con.execute("""CREATE TABLE IF NOT EXISTS orch_reload_operations (
         operation_id TEXT PRIMARY KEY, orch_id TEXT NOT NULL, session_id TEXT NOT NULL,
@@ -230,12 +239,14 @@ def reload(con, rt, orch_id, operation_id, expected_session, expected_job, expec
             row = status(con, operation_id)
             if row["phase"] != "stop_pending":
                 return row
+            _require_trusted(rt, Path(row["home"]))
         else:
             orch = store.get_orch(con, orch_id)
             if (orch is None or orch["kind"] != "claude" or orch["stopped_at"] is not None or
                     (orch["session_id"], orch["job_id"], orch["model"]) !=
                     (expected_session, expected_job, expected_model)):
                 raise ValueError("original Orch identity does not match, or is stopped")
+            _require_trusted(rt, paths.orch_home().resolve())
             jobs = rt.live_jobs()
             item = jobs.get(expected_job, {}) if isinstance(jobs, dict) else {}
             if (owner_health(orch, jobs)["state"] != "alive" or item.get("status") != "idle" or

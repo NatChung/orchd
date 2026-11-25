@@ -15,6 +15,20 @@ python -m orchd.orch_reload reload --state /srv/example/state.db \
   --expected-model example-model
 ```
 
+Before creating a new operation or retrying `stop_pending`, the actual runtime's
+`claude_trusted(home)` must return exactly `True`. False, unknown, nonboolean or
+failed trust reads refuse before any new operation row, owner quiescing or
+lifecycle call. A refused `stop_pending` retry preserves its existing marker and
+evidence. Later phases never respawn and keep their existing reconciliation and
+receipt-attachment paths. This check only reads trust; it never accepts trust or
+writes credentials/configuration.
+
+Preserve the actual `CLAUDE_CONFIG_DIR` environment semantics. Unset reads trust
+from `~/.claude.json`; explicitly setting the default data directory reads
+`~/.claude/.claude.json`. Those settings are not interchangeable merely because
+they address the same normalized data directory. Do not rewrite the environment
+to normalize it. Existing immutable provider/preflight evidence is unchanged.
+
 The old provider job must positively identify the original session and Orch cwd,
 with live PID, `status=idle` and `state=blocked`. This is a maintenance eligibility
 check, not a claim that a conversation has completed its work. The command takes
