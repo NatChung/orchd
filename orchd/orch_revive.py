@@ -19,21 +19,19 @@ def revivable(orch):
 
 def retired(rt, orch, health):
     """The job a revive should replace, or None. `claude agents` keeps listing a retired job (no pid, no status)
-    so an alive verdict is also checked against the socket."""
+    so missing transport alone must never retire a live process."""
     if not revivable(orch):
         return None
     if health["state"] == "dead":
         return orch["job_id"] if health["reason"] in REVIVABLE else None
-    if health["state"] == "alive" and orch["socket"] and not rt.socket_listening(orch["socket"]):
-        return orch["job_id"]
     return None
 
 
 def revive(con, rt, orch_id, seen_job=None):
     """Resume a retired Orch and return its row.
 
-    Without `seen_job` it revives only when `claude agents` confirms the job ended. With `seen_job` (the job a
-    send just failed to reach) the refused socket is the proof: `claude agents` can still list a retired job.
+    Without `seen_job` it revives only when `claude agents` confirms the job ended. With `seen_job`, a concurrent replacement is left alone; fresh provider death
+    evidence is still required. A missing socket never proves an alive process retired.
     The orch lock serializes revives; whoever gets it second finds a new job_id and returns that row.
     """
     with store.task_delivery(con, [f"orch:{orch_id}"]):
@@ -45,10 +43,9 @@ def revive(con, rt, orch_id, seen_job=None):
         if seen_job is not None:
             if orch["job_id"] != seen_job:
                 return orch
-        else:
-            health = owner_health(orch, rt.live_jobs())
-            if health["state"] != "dead" or health["reason"] not in REVIVABLE:
-                return orch
+        health = owner_health(orch, rt.live_jobs())
+        if health["state"] != "dead" or health["reason"] not in REVIVABLE:
+            return orch
         # Spawn under the flock only, never inside a SQLite write transaction.
         sock, job, session = rt.start_orch(orch_id, orch["model"], paths.orch_home(), resume=orch["session_id"])
         with store.immediate(con):
@@ -63,14 +60,20 @@ def revive(con, rt, orch_id, seen_job=None):
 
 
 def send(con, rt, orch_id, text):
-    """Send `text` to a Claude Orch's socket; when the socket is gone and the Orch was not stopped, revive it
-    and send once more. Returns the row the text went to."""
+    """Send through verified Orch transport; only confirmed provider death may revive.
+
+    Returns the row the text went to. Missing transport on a live owner is held.
+    """
     orch = store.get_orch(con, orch_id)
     try:
-        rt.send_uds(orch["socket"], orch["session_id"], text)
+        rt.send_orch(orch, text)
     except GONE:
         if not revivable(orch):
             raise
+        health = owner_health(orch, rt.live_jobs())
+        if health["state"] != "dead" or health["reason"] not in REVIVABLE:
+            from .orch_transport import TransportUnavailable
+            raise TransportUnavailable("Orch transport is unknown; a live owner is not revived") from None
         orch = revive(con, rt, orch_id, seen_job=orch["job_id"])
-        rt.send_uds(orch["socket"], orch["session_id"], text)
+        rt.send_orch(orch, text)
     return orch

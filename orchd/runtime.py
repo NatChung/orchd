@@ -214,6 +214,20 @@ class Runtime:
                               text=True, encoding='utf-8', errors='replace', timeout=timeout, check=check, env=env,
                               **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}))
 
+    def send_orch(self, orch, text):
+        from .orch_transport import send
+        return send(self, orch, text)
+
+    def orch_transport_info(self, orch):
+        from .orch_transport import info
+        try:
+            return info(self, orch)
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError):
+            return None
+
+    def orch_listening(self, orch):
+        return self.orch_transport_info(orch) is not None
+
     def send_uds(self, path, session_id, text, *, message_uuid=None):
         frame = {"type": "user", "session_id": session_id, "uuid": message_uuid or str(uuid.uuid4()),
                  "from": "orchd", "priority": "next", "message": {"role": "user", "content": text}}

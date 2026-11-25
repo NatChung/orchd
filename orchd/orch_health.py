@@ -53,7 +53,7 @@ def session_health(orch, jobs, rt):
         return {"state": "unknown", "reason": "session_mismatch"}
     if orch["socket"]:
         try:
-            listening = rt.socket_listening(orch["socket"])
+            listening = rt.orch_listening(orch)
         except Exception:
             return {"state": "unknown", "reason": "socket_unavailable"}
         if listening is not True and listening is not False:
@@ -65,7 +65,7 @@ def session_health(orch, jobs, rt):
         if health["state"] == "alive":
             if orch["stopped_at"] is not None or not orch["session_id"]:
                 return {"state": "unknown", "reason": "socket_job_conflict"}
-            health = {"state": "dead", "reason": "job_retired"}
+            return {"state": "unknown", "reason": "transport_unavailable"}
     if (health["state"] == "dead" and orch["stopped_at"] is None
             and orch["session_id"] and orch["job_id"] and orch["socket"]):
         return {"state": "idle", "reason": "session_resumable"}

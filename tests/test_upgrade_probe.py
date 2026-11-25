@@ -33,9 +33,13 @@ class UpgradeProbeTest(unittest.TestCase):
 
     def runtime(self, send=None, *, jobs=True, listening=True):
         job = dict(id="new-job", pid=12345, status="idle", sessionId="new-session", cwd=str(paths.orch_home()))
-        return SimpleNamespace(send_uds=send or (lambda *a: self.sent.append(a)),
+        rt = SimpleNamespace(send_uds=send or (lambda *a: self.sent.append(a)),
                                live_jobs=lambda: {"new-job": job} if jobs else {},
                                socket_listening=lambda *a: listening)
+        rt.send_orch = lambda orch, text: rt.send_uds(orch["socket"], orch["session_id"], text)
+        rt.orch_listening = lambda orch: rt.socket_listening(orch["socket"])
+        rt.orch_transport_info = lambda orch: {"kind": "configured", "socket": orch["socket"]} if rt.orch_listening(orch) else None
+        return rt
 
     def create_pending(self):
         rt = self.runtime()
@@ -217,7 +221,7 @@ class UpgradeProbeTest(unittest.TestCase):
         entry_ops._write(record)
         code = ("import sys; from types import SimpleNamespace; from orchd import cli, paths; "
                 "job=dict(id='new-job',pid=12345,status='idle',sessionId='new-session',cwd=str(paths.orch_home())); "
-                "cli.Runtime=lambda: SimpleNamespace(live_jobs=lambda:{'new-job':job},socket_listening=lambda *a:True); "
+                "cli.Runtime=lambda: SimpleNamespace(live_jobs=lambda:{'new-job':job},socket_listening=lambda *a:True,orch_transport_info=lambda orch:{'kind':'configured','socket':orch['socket']}); "
                 "sys.exit(cli.main(['_entry-verify',sys.argv[1]]))")
         result = subprocess.run([sys.executable, "-B", "-c", code, self.op],
                                 capture_output=True, text=True, timeout=10)

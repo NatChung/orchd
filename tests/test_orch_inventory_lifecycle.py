@@ -66,7 +66,7 @@ class LifecycleTest(unittest.TestCase):
             self.rt.jobs = {'orchjob': entry}
             self.assertEqual(self.probe()['orchs'][0]['health'], 'unknown')
         self.rt.jobs = {'orchjob': LIVE}
-        self.assertEqual(self.probe()['orchs'][0]['health'], 'idle')  # live entry, retired socket
+        self.assertEqual(self.probe()['orchs'][0]['health'], 'unknown')  # alive process, unavailable transport
         store.stop_orch(self.con, 'orch')
         self.assertEqual(self.probe()['orchs'][0]['health'], 'unknown')  # conflicting process/socket
         self.rt.jobs = {}

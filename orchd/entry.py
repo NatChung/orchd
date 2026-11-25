@@ -90,7 +90,7 @@ def bind(con, rt, orch_id, entry_id=DEFAULT_ENTRY, force=False, *, in_transactio
             con.execute("UPDATE entries SET orch_id=?, bound_at=? WHERE id=?", (orch_id, now, entry_id))
             sweep_questions(con, get_entry(con, entry_id), "orchd", f"entry rebound to {orch_id}")
     try:  # best effort: the Orch also learns this from its first [orchd entry] wake
-        rt.send_uds(orch["socket"], orch["session_id"],
+        rt.send_orch(orch,
                     f"[orchd entry] Desktop entry {entry_id} is now bound to you. Operator's messages arrive as "
                     "[orchd entry] wakes: read them with entry_inbox. Reply with send_to_nat; ask Operator with ask_nat "
                     "(one question at a time, the rest queue). Forward Operator's reply to a worker with "

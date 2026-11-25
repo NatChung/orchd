@@ -56,11 +56,14 @@ def _live_controller(rt, orch):
             return None
         job = jobs[orch["job_id"]]
         if (job.get("id") != orch["job_id"] or job.get("sessionId") != orch["session_id"] or not job.get("cwd")
-                or Path(job["cwd"]).resolve() != paths.orch_home().resolve()
-                or rt.socket_listening(orch["socket"]) is not True):
+                or Path(job["cwd"]).resolve() != paths.orch_home().resolve()):
+            return None
+        transport = rt.orch_transport_info(orch)
+        if (transport is None or (transport.get("kind") == "native_exported" and
+                transport.get("pid") != job["pid"])):
             return None
         return dict(job_id=orch["job_id"], session_id=orch["session_id"], pid=job["pid"],
-                    cwd=str(paths.orch_home().resolve()), socket=orch["socket"])
+                    cwd=str(paths.orch_home().resolve()), socket=orch["socket"], transport=transport)
     except (OSError, ValueError, RuntimeError, KeyError, TypeError):
         return None
 
@@ -162,7 +165,7 @@ def verify(con, rt, op_id, *, timeout=60, sleep=time.sleep, clock=time.monotonic
     # Do not hold the probe lock across delivery: the MCP response writes its receipt under that lock.
     if message is not None:
         try:
-            rt.send_uds(orch["socket"], orch["session_id"], message)
+            rt.send_orch(orch, message)
         except OSError:
             return dict(state="pending", reason="probe_delivery_unknown", op_id=op_id)
     deadline = clock() + timeout
