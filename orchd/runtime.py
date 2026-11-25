@@ -570,8 +570,13 @@ class Runtime:
         out = self.run(cmd, cwd=cwd, timeout=60, check=False, env=launch_env())
         match = re.search(r"claude attach ([a-zA-Z0-9-]+)", out.stdout)
         if not match:
-            raise RuntimeError(f"claude --bg returned no job id ({diagnostic}): "
-                               + redact((out.stdout + out.stderr)[-500:]))
+            error = RuntimeError(f"claude --bg returned no job id ({diagnostic}): "
+                                 + redact((out.stdout + out.stderr)[-500:]))
+            # Maintenance records only stage/status/output digests. Keep these
+            # structured so its catch need not persist this message or argv.
+            error.launch_stage = "native_no_job_receipt"
+            error.returncode, error.stdout, error.stderr = out.returncode, out.stdout, out.stderr
+            raise error
         job = match[1]
         deadline = time.monotonic() + 25
         failure = "did not publish its session and socket"

@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -525,6 +526,36 @@ class ReloadTest(unittest.TestCase):
             self.accept_copy(path)
         self.assertIsNotNone(store.get_orch(self.con, "owner")["stopped_at"])
 
+    def test_roster_only_accepted_competitor_refuses_attachment_and_existing_acceptance(self):
+        source, receipt, path, roster = self.recovery_evidence()
+        before = orch_reload.status(self.con, self.op)
+        original = json.loads(json.dumps(roster))
+        def competing_roster(kind):
+            data = json.loads(json.dumps(original))
+            candidate = json.loads(json.dumps(data["workers"]["new-job"]))
+            candidate["sessionId"] = candidate["dispatch"]["sessionId"] = "third-uuid"
+            candidate["dispatch"]["short"] = "pending-copy"
+            if kind == "same-parent-foreign-home":
+                candidate["cwd"] = candidate["dispatch"]["cwd"] = "/srv/another-home"
+            else:
+                candidate["dispatch"]["launch"].update(mode="fresh", sessionId="unrelated")
+            data["workers"]["pending-copy"] = candidate
+            return data
+        # Native acceptance precedes publication in the public jobs listing.
+        self.assertNotIn("pending-copy", self.rt.jobs)
+        for kind in ("same-parent-foreign-home", "same-home-other-parent"):
+            self.save_roster(path, competing_roster(kind))
+            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, "ambiguous"):
+                self.attach_recovery(source, path)
+            self.assertEqual(orch_reload.status(self.con, self.op), before)
+        self.con.execute("UPDATE orch_reload_operations SET phase='held',error='returned_session_mismatch',"
+                         "receipt=? WHERE operation_id=?", (json.dumps(receipt["receipt"]), self.op))
+        for kind in ("same-parent-foreign-home", "same-home-other-parent"):
+            self.save_roster(path, competing_roster(kind))
+            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, "ambiguous"):
+                self.accept_copy(path)
+        self.assertIsNotNone(store.get_orch(self.con, "owner")["stopped_at"])
+
     def test_second_copy_with_different_uuid_but_same_parent_rejects_attachment_and_acceptance(self):
         source, receipt, path, roster = self.recovery_evidence()
         self.rt.jobs["other-copy"] = dict(self.rt.jobs["new-job"], id="other-copy", sessionId="third-uuid")
@@ -580,22 +611,29 @@ class ReloadTest(unittest.TestCase):
         with self.assertRaises(ValueError): self.attach_recovery(source, path)
         self.assertIsNone(orch_reload.status(self.con, self.op)["recovery"])
 
-    def test_missing_cwd_on_active_other_uuid_refuses_recovery_and_existing_copy_acceptance(self):
+    def test_missing_or_relative_cwd_on_active_other_uuid_refuses_attachment_and_acceptance(self):
         source, receipt, path, roster = self.recovery_evidence()
         before = orch_reload.status(self.con, self.op)
         self.rt.jobs["unknown-copy"] = dict(id="unknown-copy", sessionId="third-uuid", pid=999, status="idle")
-        with self.assertRaisesRegex(ValueError, "ambiguous"):
-            self.attach_recovery(source, path)
-        self.assertEqual(orch_reload.status(self.con, self.op), before)
+        for cwd in (None, "", "  ", 42, "relative-provider-cwd", "."):
+            self.rt.jobs["unknown-copy"]["cwd"] = cwd
+            with self.subTest(cwd=cwd), self.assertRaisesRegex(ValueError, "ambiguous"):
+                self.attach_recovery(source, path)
+            self.assertEqual(orch_reload.status(self.con, self.op), before)
         self.con.execute("UPDATE orch_reload_operations SET phase='held',error='returned_session_mismatch',"
                          "receipt=? WHERE operation_id=?", (json.dumps(receipt["receipt"]), self.op))
-        with self.assertRaisesRegex(ValueError, "ambiguous"):
-            self.accept_copy(path)
+        for cwd in (None, "", "  ", 42, "relative-provider-cwd", "."):
+            self.rt.jobs["unknown-copy"]["cwd"] = cwd
+            with self.subTest(cwd=cwd), self.assertRaisesRegex(ValueError, "ambiguous"):
+                self.accept_copy(path)
         self.assertIsNotNone(store.get_orch(self.con, "owner")["stopped_at"])
 
     def test_recovery_keeps_unrelated_author_job_and_requires_operator(self):
         source, receipt, path, roster = self.recovery_evidence()
         self.rt.jobs["author"] = dict(id="author", sessionId="author-original", cwd="/srv/author", pid=999, status="idle")
+        roster["workers"]["author"] = {"cwd": "/srv/author", "dispatch": {
+            "cwd": "/srv/author", "launch": {"mode": "resume", "sessionId": "unrelated-parent"}}}
+        self.save_roster(path, roster)
         with mock.patch.dict(os.environ, {"ORCHD_TASK_ID": "author"}), self.assertRaises(PermissionError):
             self.attach_recovery(source, path)
         self.assertIsNone(orch_reload.status(self.con, self.op)["recovery"])
@@ -612,8 +650,36 @@ class ReloadTest(unittest.TestCase):
         self.assertEqual(orch_reload.status(self.con, self.op)["phase"], "held")
         self.assertEqual(len(self.rt.starts), 1)
 
+    def test_real_native_no_job_failure_preserves_stage_returncode_and_only_output_digests(self):
+        runtime = Runtime()
+        runtime.claude = self.rt.claude
+        native_stdout = "PRIVATE PROMPT stdout, no receipt"
+        native_stderr = "PRIVATE TOKEN stderr, provider rejected"
+        results = [subprocess.CompletedProcess([], 0, "example-version", ""),
+                   subprocess.CompletedProcess([], 7, native_stdout, native_stderr)]
+        with mock.patch.object(runtime, "run", side_effect=results) as run, \
+                mock.patch.object(runtime, "live_jobs", side_effect=self.rt.live_jobs), \
+                mock.patch.object(runtime, "stop_worker", side_effect=self.rt.stop_worker), \
+                mock.patch.object(runtime, "socket_listening", side_effect=self.rt.socket_listening), \
+                mock.patch.object(runtime, "orch_socket_path", return_value=str(self.home / "o.sock")):
+            row = orch_reload.reload(self.con, runtime, "owner", self.op, "original-session",
+                                     "old-job", "example-model")
+        failure = row["spawn_failure"]
+        self.assertEqual(failure["launch_stage"], "native_no_job_receipt")
+        self.assertEqual(failure["returncode"], 7)
+        for key, value in (("stdout", native_stdout), ("stderr", native_stderr)):
+            self.assertEqual(failure[key + "_sha256"], hashlib.sha256(value.encode()).hexdigest())
+            self.assertEqual(failure[key + "_bytes"], len(value.encode()))
+        self.assertNotIn("PRIVATE", json.dumps(row))
+        self.assertIsNone(row["receipt"])
+        self.assertEqual(row["phase"], "spawn_pending")
+        self.assertIsNotNone(store.get_orch(self.con, "owner")["stopped_at"])
+        self.assertEqual(run.call_count, 2)
+
     def test_spawn_failure_keeps_structured_diagnostics_without_prompt_or_secret_text(self):
-        with mock.patch.object(self.rt, "start_orch", side_effect=RuntimeError("SECRET prompt body")):
+        error = RuntimeError("SECRET prompt body")
+        error.launch_stage = "SECRET not-an-allowlisted-stage"
+        with mock.patch.object(self.rt, "start_orch", side_effect=error):
             row = self.reload()
         self.assertEqual(row["error"], "spawn_acceptance_unknown")
         self.assertEqual(row["spawn_failure"]["type"], "RuntimeError")

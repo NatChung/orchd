@@ -199,9 +199,11 @@ bytes; they are not cryptographic authentication of who launched the process.
 The API also independently requires every original resume-copy lineage,
 model/socket/MCP/profile/database, positive live PID/parent, and listening-socket
 check described above. It rejects original-session processes, competing copies
-with different outer UUIDs but the same resume parent, live jobs missing session or cwd evidence,
+with different outer UUIDs but the same resume parent, live jobs missing session or absolute cwd evidence,
 and other new active controllers in the same home. Unrelated author jobs are
-preserved. Missing, conflicting or ambiguous evidence leaves state unchanged.
+preserved. Accepted same-parent copies or new same-home workers in the protected
+native roster also refuse attachment even before they appear in the public jobs
+listing. Missing, conflicting or ambiguous evidence leaves state unchanged.
 
 A successful attachment only saves an immutable recovery receipt and changes the
 operation to `held/returned_session_mismatch`; it exits 2 and does not change the
@@ -213,6 +215,7 @@ for a genuine original-UUID receipt, use normal `reconcile` instead. Exact
 attachment replay rechecks live evidence; changed evidence is rejected.
 
 Launch failures retain structured `spawn_failure` diagnostics: exception class,
+the allowlisted `native_no_job_receipt` stage for missing native attach receipts,
 finite numeric errno/return code/timeout when supplied, and captured output byte
 counts/digests when supplied. Exception text, command arguments and native output
 contents are never persisted. A diagnostic or an exit-zero launch receipt is not

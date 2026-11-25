@@ -286,6 +286,9 @@ def reload(con, rt, orch_id, operation_id, expected_session, expected_job, expec
             # Exception text/argv can contain prompts, credentials and replies.
             # Retain only bounded structural diagnostics, never str(error).
             failure = {"type": type(error).__name__, "recorded_at": time.time()}
+            stage = getattr(error, "launch_stage", None)
+            if isinstance(stage, str) and stage == "native_no_job_receipt":
+                failure["launch_stage"] = stage
             for key in ("errno", "returncode", "timeout"):
                 value = getattr(error, key, None)
                 if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
@@ -367,7 +370,23 @@ def _process_parent(pid):
 
 def _copy_proof(con, rt, row, orch, receipt, roster, sha256):
     """Full lineage/MCP/process proof, shared by attachment and final acceptance."""
-    worker = roster.get("workers", {}).get(receipt["job_id"], {})
+    if not isinstance(roster, dict) or not isinstance(roster.get("workers"), dict):
+        raise ValueError("provider roster workers are malformed")
+    workers = roster["workers"]
+    # Native acceptance can precede publication in live_jobs. Never treat a
+    # missing public job as evidence that an accepted competitor is absent.
+    for job, candidate in workers.items():
+        if not isinstance(job, str) or not isinstance(candidate, dict):
+            raise ValueError("provider roster worker is malformed")
+        candidate_dispatch = candidate.get("dispatch", {})
+        if not isinstance(candidate_dispatch, dict) or not isinstance(candidate_dispatch.get("launch", {}), dict):
+            raise ValueError("provider roster launch is malformed")
+        parent = candidate_dispatch.get("launch", {})
+        same_parent = parent.get("mode") == "resume" and parent.get("sessionId") == row["session_id"]
+        same_home = candidate.get("cwd") == row["home"] or candidate_dispatch.get("cwd") == row["home"]
+        if job != receipt["job_id"] and (same_parent or (job not in row["baseline"] and same_home)):
+            raise ValueError("ambiguous accepted controller or original-session resume copy")
+    worker = workers.get(receipt["job_id"], {})
     dispatch = worker.get("dispatch", {})
     launch = dispatch.get("launch", {})
     if (roster.get("proto") != 1 or dispatch.get("proto") != 1 or
@@ -415,7 +434,7 @@ def _copy_proof(con, rt, row, orch, receipt, roster, sha256):
         session = item.get("sessionId")
         if active and (not isinstance(session, str) or not session.strip() or
                        not isinstance(item.get("cwd"), str) or not item["cwd"].strip() or
-                       session == row["session_id"] or (session == receipt["session_id"] and job != receipt["job_id"])):
+                       not Path(item["cwd"]).is_absolute() or session == row["session_id"] or (session == receipt["session_id"] and job != receipt["job_id"])):
             raise ValueError("original or copied session has ambiguous competing process evidence")
         worker_copy = roster.get("workers", {}).get(job, {})
         parent = worker_copy.get("dispatch", {}).get("launch", {})
@@ -524,7 +543,12 @@ def attach_recovery_receipt(con, rt, operation_id, receipt_file, receipt_sha256,
                 not row["stop_evidence"]):
             raise ValueError("recovery launch time or original stop evidence is invalid")
         roster = _protected_json(roster_file, roster_sha256, private=True, newer_than=finish)
-        dispatch = roster.get("workers", {}).get(receipt["job_id"], {}).get("dispatch", {})
+        if not isinstance(roster, dict) or not isinstance(roster.get("workers"), dict):
+            raise ValueError("provider roster workers are malformed")
+        worker = roster["workers"].get(receipt["job_id"], {})
+        if not isinstance(worker, dict) or not isinstance(worker.get("dispatch"), dict):
+            raise ValueError("provider copy dispatch is malformed")
+        dispatch = worker["dispatch"]
         created = dispatch.get("createdAt")
         if (not isinstance(created, (int, float)) or isinstance(created, bool) or
                 not math.isfinite(created) or not start * 1000 <= created <= finish * 1000):
