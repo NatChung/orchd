@@ -556,6 +556,34 @@ class ReloadTest(unittest.TestCase):
                 self.accept_copy(path)
         self.assertIsNotNone(store.get_orch(self.con, "owner")["stopped_at"])
 
+    def test_roster_worker_unknown_or_conflicting_scope_refuses_without_public_job(self):
+        source, receipt, path, roster = self.recovery_evidence()
+        original = json.loads(json.dumps(roster))
+        cases = ({}, {"cwd": "relative-provider-cwd"}, {"cwd": 42},
+                 {"cwd": "  "}, {"cwd": "/srv/foreign", "dispatch": {"cwd": "/srv/different"}},
+                 {"cwd": "/srv/foreign", "dispatch": {"cwd": "relative"}},
+                 {"cwd": "/srv/foreign", "dispatch": {"cwd": 42}},
+                 {"cwd": "/srv/foreign", "dispatch": {"cwd": None}},
+                 {"cwd": "/srv/foreign", "dispatch": []},
+                 {"cwd": "/srv/foreign", "dispatch": {"launch": []}})
+        for candidate in cases:
+            with self.subTest(candidate=candidate):
+                self.con.execute("UPDATE orch_reload_operations SET phase='spawn_pending',receipt=NULL,"
+                                 "recovery=NULL,error='spawn_acceptance_unknown' WHERE operation_id=?", (self.op,))
+                before = orch_reload.status(self.con, self.op)
+                data = json.loads(json.dumps(original));data["workers"]["pending-unknown"] = candidate
+                self.save_roster(path, data)
+                self.assertNotIn("pending-unknown", self.rt.jobs)
+                with self.assertRaisesRegex(ValueError, "malformed|ambiguous"):
+                    self.attach_recovery(source, path)
+                self.assertEqual(orch_reload.status(self.con, self.op), before)
+        self.con.execute("UPDATE orch_reload_operations SET phase='held',error='returned_session_mismatch',"
+                         "receipt=? WHERE operation_id=?", (json.dumps(receipt["receipt"]), self.op))
+        self.save_roster(path, dict(original, workers=dict(original["workers"], **{"pending-unknown": {}})))
+        with self.assertRaisesRegex(ValueError, "malformed|ambiguous"):
+            self.accept_copy(path)
+        self.assertIsNotNone(store.get_orch(self.con, "owner")["stopped_at"])
+
     def test_second_copy_with_different_uuid_but_same_parent_rejects_attachment_and_acceptance(self):
         source, receipt, path, roster = self.recovery_evidence()
         self.rt.jobs["other-copy"] = dict(self.rt.jobs["new-job"], id="other-copy", sessionId="third-uuid")

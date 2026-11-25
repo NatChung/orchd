@@ -203,7 +203,10 @@ with different outer UUIDs but the same resume parent, live jobs missing session
 and other new active controllers in the same home. Unrelated author jobs are
 preserved. Accepted same-parent copies or new same-home workers in the protected
 native roster also refuse attachment even before they appear in the public jobs
-listing. Missing, conflicting or ambiguous evidence leaves state unchanged.
+listing. Every roster worker must have a nonempty absolute cwd; a supplied
+dispatch cwd must be absolute and resolve to the same directory. Unknown scope
+is refused even if no public job has appeared. Missing, conflicting or ambiguous
+evidence leaves state unchanged.
 
 A successful attachment only saves an immutable recovery receipt and changes the
 operation to `held/returned_session_mismatch`; it exits 2 and does not change the
