@@ -580,6 +580,19 @@ class ReloadTest(unittest.TestCase):
         with self.assertRaises(ValueError): self.attach_recovery(source, path)
         self.assertIsNone(orch_reload.status(self.con, self.op)["recovery"])
 
+    def test_missing_cwd_on_active_other_uuid_refuses_recovery_and_existing_copy_acceptance(self):
+        source, receipt, path, roster = self.recovery_evidence()
+        before = orch_reload.status(self.con, self.op)
+        self.rt.jobs["unknown-copy"] = dict(id="unknown-copy", sessionId="third-uuid", pid=999, status="idle")
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            self.attach_recovery(source, path)
+        self.assertEqual(orch_reload.status(self.con, self.op), before)
+        self.con.execute("UPDATE orch_reload_operations SET phase='held',error='returned_session_mismatch',"
+                         "receipt=? WHERE operation_id=?", (json.dumps(receipt["receipt"]), self.op))
+        with self.assertRaisesRegex(ValueError, "ambiguous"):
+            self.accept_copy(path)
+        self.assertIsNotNone(store.get_orch(self.con, "owner")["stopped_at"])
+
     def test_recovery_keeps_unrelated_author_job_and_requires_operator(self):
         source, receipt, path, roster = self.recovery_evidence()
         self.rt.jobs["author"] = dict(id="author", sessionId="author-original", cwd="/srv/author", pid=999, status="idle")

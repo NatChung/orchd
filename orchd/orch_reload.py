@@ -414,6 +414,7 @@ def _copy_proof(con, rt, row, orch, receipt, roster, sha256):
         active = item.get("pid") is not None or item.get("status") is not None
         session = item.get("sessionId")
         if active and (not isinstance(session, str) or not session.strip() or
+                       not isinstance(item.get("cwd"), str) or not item["cwd"].strip() or
                        session == row["session_id"] or (session == receipt["session_id"] and job != receipt["job_id"])):
             raise ValueError("original or copied session has ambiguous competing process evidence")
         worker_copy = roster.get("workers", {}).get(job, {})

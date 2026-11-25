@@ -199,7 +199,7 @@ bytes; they are not cryptographic authentication of who launched the process.
 The API also independently requires every original resume-copy lineage,
 model/socket/MCP/profile/database, positive live PID/parent, and listening-socket
 check described above. It rejects original-session processes, competing copies
-with different outer UUIDs but the same resume parent, unidentified live jobs,
+with different outer UUIDs but the same resume parent, live jobs missing session or cwd evidence,
 and other new active controllers in the same home. Unrelated author jobs are
 preserved. Missing, conflicting or ambiguous evidence leaves state unchanged.
 
