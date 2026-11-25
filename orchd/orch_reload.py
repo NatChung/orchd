@@ -368,6 +368,10 @@ def _process_parent(pid):
     return psutil.Process(pid).ppid()
 
 
+def _valid_token(value):
+    return isinstance(value, str) and bool(value) and not any(char.isspace() for char in value)
+
+
 def _copy_proof(con, rt, row, orch, receipt, roster, sha256):
     """Full lineage/MCP/process proof, shared by attachment and final acceptance."""
     if not isinstance(roster, dict) or not isinstance(roster.get("workers"), dict):
@@ -376,18 +380,20 @@ def _copy_proof(con, rt, row, orch, receipt, roster, sha256):
     # Native acceptance can precede publication in live_jobs. Never treat a
     # missing public job as evidence that an accepted competitor is absent.
     for job, candidate in workers.items():
-        if not isinstance(job, str) or not isinstance(candidate, dict):
+        if not _valid_token(job) or not isinstance(candidate, dict):
             raise ValueError("provider roster worker is malformed")
         candidate_dispatch = candidate.get("dispatch", {})
         if not isinstance(candidate_dispatch, dict) or not isinstance(candidate_dispatch.get("launch", {}), dict):
             raise ValueError("provider roster launch is malformed")
+        if "short" in candidate_dispatch and (
+                not _valid_token(candidate_dispatch["short"]) or candidate_dispatch["short"] != job):
+            raise ValueError("provider roster dispatch job identity is malformed or ambiguous")
         session = candidate.get("sessionId")
-        if not isinstance(session, str) or not session.strip():
+        if not _valid_token(session):
             raise ValueError("provider roster worker session is malformed")
         if "sessionId" in candidate_dispatch:
             dispatch_session = candidate_dispatch["sessionId"]
-            if (not isinstance(dispatch_session, str) or not dispatch_session.strip() or
-                    dispatch_session != session):
+            if not _valid_token(dispatch_session) or dispatch_session != session:
                 raise ValueError("provider roster dispatch session is malformed or ambiguous")
         cwd = candidate.get("cwd")
         if not isinstance(cwd, str) or not cwd.strip() or not Path(cwd).is_absolute():
@@ -399,6 +405,8 @@ def _copy_proof(con, rt, row, orch, receipt, roster, sha256):
                     not Path(dispatch_cwd).is_absolute() or str(Path(dispatch_cwd).resolve()) != canonical_cwd):
                 raise ValueError("provider roster dispatch scope is malformed or ambiguous")
         parent = candidate_dispatch.get("launch", {})
+        if parent.get("mode") == "resume" and not _valid_token(parent.get("sessionId")):
+            raise ValueError("provider roster resume parent is malformed")
         same_parent = parent.get("mode") == "resume" and parent.get("sessionId") == row["session_id"]
         same_home = canonical_cwd == row["home"]
         if job != receipt["job_id"] and (session in (row["session_id"], receipt["session_id"]) or
@@ -446,11 +454,11 @@ def _copy_proof(con, rt, row, orch, receipt, roster, sha256):
     if not _verified(copy_row, jobs, receipt["job_id"]) or rt.socket_listening(orch["socket"]) is not True:
         raise ValueError("copy is not positively alive on the original socket")
     for job, item in jobs.items():
-        if not isinstance(item, dict):
+        if not _valid_token(job) or not isinstance(item, dict):
             raise ValueError("provider job evidence is malformed")
         active = item.get("pid") is not None or item.get("status") is not None
         session = item.get("sessionId")
-        if active and (not isinstance(session, str) or not session.strip() or
+        if active and (not _valid_token(session) or
                        not isinstance(item.get("cwd"), str) or not item["cwd"].strip() or
                        not Path(item["cwd"]).is_absolute() or session == row["session_id"] or (session == receipt["session_id"] and job != receipt["job_id"])):
             raise ValueError("original or copied session has ambiguous competing process evidence")

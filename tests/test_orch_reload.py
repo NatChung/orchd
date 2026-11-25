@@ -616,6 +616,38 @@ class ReloadTest(unittest.TestCase):
             self.accept_copy(path)
         self.assertIsNotNone(store.get_orch(self.con, "owner")["stopped_at"])
 
+    def test_raw_roster_identity_token_contract_refuses_invalid_metadata_without_mutation(self):
+        source, receipt, path, roster = self.recovery_evidence()
+        original = json.loads(json.dumps(roster))
+        valid = {"sessionId": "foreign-session", "cwd": "/srv/foreign-home"}
+        cases = [(key, valid) for key in ("", " ", " leading", "trailing ", "inner whitespace")]
+        cases += [("foreign-worker", dict(valid, sessionId=value))
+                  for value in (" leading", "trailing ", "inner whitespace")]
+        cases += [("foreign-worker", dict(valid, dispatch={"short": value}))
+                  for value in ("old-job", "", None, 42, " ", " foreign-worker")]
+        cases += [("foreign-worker", dict(valid, dispatch={"sessionId": value}))
+                  for value in (" foreign-session", "foreign-session ", "foreign session")]
+        cases += [("foreign-worker", dict(valid, dispatch={"launch": {"mode": "resume", "sessionId": value}}))
+                  for value in (None, "", 42, " ", " original-session", "foreign parent")]
+        for key, candidate in cases:
+            with self.subTest(key=key, candidate=candidate):
+                self.con.execute("UPDATE orch_reload_operations SET phase='spawn_pending',receipt=NULL,"
+                                 "recovery=NULL,error='spawn_acceptance_unknown' WHERE operation_id=?", (self.op,))
+                before = orch_reload.status(self.con, self.op)
+                data = json.loads(json.dumps(original));data["workers"][key] = candidate
+                self.save_roster(path, data)
+                with self.assertRaisesRegex(ValueError, "malformed|ambiguous"):
+                    self.attach_recovery(source, path)
+                self.assertEqual(orch_reload.status(self.con, self.op), before)
+        self.con.execute("UPDATE orch_reload_operations SET phase='held',error='returned_session_mismatch',"
+                         "receipt=? WHERE operation_id=?", (json.dumps(receipt["receipt"]), self.op))
+        data = json.loads(json.dumps(original))
+        data["workers"]["foreign-worker"] = dict(valid, dispatch={"short": "old-job"})
+        self.save_roster(path, data)
+        with self.assertRaisesRegex(ValueError, "malformed|ambiguous"):
+            self.accept_copy(path)
+        self.assertIsNotNone(store.get_orch(self.con, "owner")["stopped_at"])
+
     def test_second_copy_with_different_uuid_but_same_parent_rejects_attachment_and_acceptance(self):
         source, receipt, path, roster = self.recovery_evidence()
         self.rt.jobs["other-copy"] = dict(self.rt.jobs["new-job"], id="other-copy", sessionId="third-uuid")
@@ -695,6 +727,10 @@ class ReloadTest(unittest.TestCase):
         self.rt.jobs["author"] = dict(id="author", sessionId="author-original", cwd="/srv/author", pid=999, status="idle")
         roster["workers"]["author"] = {"sessionId": "author-original", "cwd": "/srv/author", "dispatch": {
             "sessionId": "author-original", "cwd": "/srv/author", "launch": {"mode": "resume", "sessionId": "unrelated-parent"}}}
+        roster["workers"]["provider:foreign_worker"] = {
+            "sessionId": "provider:foreign_session", "cwd": "/srv/foreign-fresh", "dispatch": {
+                "short": "provider:foreign_worker", "sessionId": "provider:foreign_session",
+                "cwd": "/srv/foreign-fresh", "launch": {"mode": "provider-fresh-mode"}}}
         self.save_roster(path, roster)
         with mock.patch.dict(os.environ, {"ORCHD_TASK_ID": "author"}), self.assertRaises(PermissionError):
             self.attach_recovery(source, path)

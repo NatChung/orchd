@@ -203,7 +203,10 @@ with different outer UUIDs but the same resume parent, live jobs missing session
 and other new active controllers in the same home. Unrelated author jobs are
 preserved. Accepted same-parent copies or new same-home workers in the protected
 native roster also refuse attachment even before they appear in the public jobs
-listing. Every roster worker must have a nonempty session ID and absolute cwd. A supplied
+listing. Every roster worker key and session ID must be nonempty strings without
+whitespace. A supplied dispatch short ID must match the worker key. Resume
+launches require a nonempty parent session ID without whitespace. Every worker
+must have an absolute cwd. A supplied
 dispatch session ID must be nonempty and match its worker; a supplied dispatch
 cwd must be absolute and resolve to the same directory. A second accepted worker
 with the original or returned session ID is refused regardless of its cwd,
