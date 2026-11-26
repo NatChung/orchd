@@ -341,9 +341,10 @@ def build_parser():
             if action == "ask":
                 command.add_argument("--task-id")
                 command.add_argument("--quote-worker-question", action="store_true")
+                command.add_argument("--project", help="Dashboard project slug")
     questions = sub.add_parser("entry-question", help="explicit question lifecycle and history")
     question_actions = questions.add_subparsers(dest="question_action", required=True)
-    for action in ("show", "snooze", "un-snooze", "cancel", "supersede", "answer"):
+    for action in ("show", "snooze", "un-snooze", "cancel", "supersede", "answer", "set-project"):
         command = question_actions.add_parser(action, description="Submit an answer; always prints a JSON receipt." if action == "answer" else None)
         command.add_argument("question_id", type=int)
         command.add_argument("--entry", default="desktop")
@@ -352,7 +353,9 @@ def build_parser():
         command.add_argument("--expected-version", type=int, required=True)
         command.add_argument("--expected-state", required=True,
                              choices=["current", "queued", "answered", "snoozed", "cancelled", "superseded"])
-        if action == "answer":
+        if action == "set-project":
+            command.add_argument("--project", required=True, help="Dashboard project slug")
+        elif action == "answer":
             command.add_argument("--text", required=True)
             command.add_argument("--orch-id", required=True, help="expected responsible Orch binding")
             command.add_argument("--idempotency-key", required=True)
@@ -743,7 +746,7 @@ HOME_POLICY = {
     ("intake", "reconcile"): "write",  # no --apply -> warn
     ("entry", "tag"): "write", ("entry", "send"): "write", ("entry", "resend"): "write", ("entry", "ask"): "write",
     ("entry-question", "show"): "warn", ("entry-question", "snooze"): "write", ("entry-question", "un-snooze"): "write",
-    ("entry-question", "cancel"): "write", ("entry-question", "supersede"): "write", ("entry-question", "answer"): "write",
+    ("entry-question", "set-project"): "write", ("entry-question", "cancel"): "write", ("entry-question", "supersede"): "write", ("entry-question", "answer"): "write",
     ("task-question", "answer"): "write", ("task-question", "dismiss"): "write",
     **{("intake", a): "write" for a in ("submit", "draft", "approve", "receipt", "classify", "suggest", "deliver",
                                         "notify-reconcile", "decide", "resolve", "exclude", "bind", "ack", "claim", "cancel")},
@@ -989,7 +992,7 @@ def main(argv=None):
                     result = entry.send_to_nat(con, Runtime(), orch_id, args.text, issue_ref=args.issue_ref)
                 else:
                     result = entry.ask_nat(con, Runtime(), orch_id, args.text, args.task_id,
-                                           args.quote_worker_question, issue_ref=args.issue_ref)
+                                           args.quote_worker_question, issue_ref=args.issue_ref, project=args.project)
             print(json.dumps(result, ensure_ascii=False, indent=1))
             return 0
         except (ValueError, OSError, sqlite3.Error, stats.SnapshotError) as error:
@@ -1329,6 +1332,9 @@ def main(argv=None):
         try:
             if args.question_action == "show":
                 result = entry.question_show(con, args.entry, args.question_id)
+            elif args.question_action == "set-project":
+                result = entry.set_question_project(con, args.entry, args.question_id, args.expected_version,
+                                                    args.expected_state, args.project)
             elif args.question_action == "answer":
                 result = entry.submit_answer(con, rt, args.entry, args.question_id, args.expected_version,
                                              args.expected_state, args.text, args.idempotency_key, orch_id=args.orch_id)

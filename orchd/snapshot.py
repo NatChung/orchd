@@ -56,11 +56,16 @@ def read(path, *, answered_limit=100, schema_version=1):
         questions += [dict(r) for r in con.execute(
             "SELECT * FROM entry_messages WHERE kind='question' AND question_state='answered' ORDER BY id DESC LIMIT ?",
             (answered_limit,))]
+        projects = {}
+        if schema_version == 2 and "entry_question_projects" in tables:
+            projects = dict(con.execute("SELECT question_id,project FROM entry_question_projects"))
         entry_messages = []
         for question in questions:
             task = task_rows.get(question["task_id"])
             item = _metadata(question)
             if schema_version == 2:
+                if question["id"] in projects:
+                    item["project"] = projects[question["id"]]
                 item.update({key: question.get(key, 1 if key == "version" else None) for key in
                              ("version", "supersedes", "superseded_by", "revisit_at", "note", "reason")})
                 item["revisit_due"] = (question["question_state"] == "snoozed" and item["revisit_at"] is not None

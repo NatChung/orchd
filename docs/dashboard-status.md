@@ -65,3 +65,36 @@ revision before publishing and coordinate receipt updates. Set `node` and `codex
 paths if the MCP host cannot find them on its PATH. The actions use the
 account signed in to that Codex CLI. For a write, the Pages API must confirm
 owner-only access.
+
+
+## Assign a question to a project
+
+When a decision belongs to a different project from its worker's repository,
+call `ask_nat` with `project` set to the project slug. The CLI equivalent is
+`orchd entry ask --project PROJECT --text "…"`. To correct an existing open
+question in place, first inspect its version and state with
+`orchd entry-question show ID`, then use:
+
+```sh
+orchd entry-question set-project ID --project PROJECT --expected-version VERSION --expected-state queued
+```
+
+Use the question's actual state. This changes only the grouping metadata.
+The Dashboard groups version 2 snapshot questions by their explicit project
+first, then by the worker's repository, then under unassigned. The snapshot
+and publisher still read question IDs, queue states, and task links from the
+orchd DB.
+
+For an existing Pages publisher that loads `orch-dash-project.py`, keep any
+profile-specific display names in that file and delegate its projection to
+the installed orchd module. The periodic and on-demand publishers can keep
+using the same watcher and Page:
+
+```python
+from orchd.dashboard_projection import project as project_snapshot
+
+PROJECT_NAMES = {}  # Keep the existing profile's display-name mapping here.
+
+def project(snapshot):
+    return project_snapshot(snapshot, project_names=PROJECT_NAMES)
+```
