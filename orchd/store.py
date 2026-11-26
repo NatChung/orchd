@@ -371,7 +371,7 @@ TASK_COLUMNS = ("goal_id TEXT REFERENCES goals(id)", "goal_critical INTEGER CHEC
                 "remote_branch TEXT", "remote_repo TEXT")
 MESSAGE_COLUMNS = ("recipient_orch TEXT", "notice_error TEXT", "notice_recipient TEXT",
                    "entry_reply_id INTEGER REFERENCES entry_messages(id)")
-ORCH_COLUMNS = ("first_seen_dead REAL", "last_verified_dead REAL", "archived_at REAL", "codex_probe TEXT")
+ORCH_COLUMNS = ("first_seen_dead REAL", "last_verified_dead REAL", "archived_at REAL", "codex_probe TEXT", "prune_requested_at REAL")
 SUBMISSION_COLUMNS = ("body_sha256 TEXT",)
 # entry_messages columns a DB created from an early #37 draft lacks (nullable: ALTER cannot add NOT NULL).
 ENTRY_MESSAGE_COLUMNS = ("body_bytes INTEGER", "body_sha256 TEXT", "wire_text TEXT", "source_thread TEXT",

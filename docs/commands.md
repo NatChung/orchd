@@ -14,6 +14,19 @@ Based on argparse in `orchd/cli.py` and dynamic fields in `orchd/goals.py`. All 
 | `orchd upgrade` | Update the uv-installed program and managed home rules. |
 | `orchd orch verify-tools --op-id ID --orch-id ORCH --expected-session SESSION --expected-job JOB` | Operator-only verification after an exact controller refresh; no install, restart, adoption or dispatch. |
 
+## Clean up an unbound Orch
+
+Run `orchd orch prune` to preview retention reasons and eligible Claude Orchs.
+Use `--orch ID` to focus on one. After checking any separately configured
+legacy channel routes, use `orchd orch prune --orch ID --apply` in a local
+Operator terminal. The command checks stored Desktop, listener, channel and
+work obligations again, stops the exact idle job if present, verifies its
+exit and archives the registry row.
+If the result is `unconfirmed`, inspect the existing job and repeat the same
+named command to reconcile it. Preview can run periodically. When routing is
+still maintained in an external listener, use its configuration to determine
+which owners can be selected for a stop.
+
 ## BREAKING CHANGE: upgrade commands
 
 Orch commands now require an explicit `orch start|stop|restart|list|attach` action. The old entry points were removed; there are no aliases. Update scripts, shell aliases, runbooks and handoff notes using this table. Existing flags and action behavior stay the same.

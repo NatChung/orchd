@@ -13,6 +13,16 @@
 | `orchd doctor` | 檢查機器就緒狀態。 |
 | `orchd upgrade` | 更新 uv 安裝的程式與 managed 家目錄規則。 |
 
+## 清理未綁定的 Orch
+
+用 `orchd orch prune` 預覽可清理的 Claude Orch 和保留原因。加
+`--orch ID` 可以只查一個。查過外部 listener 的路由後，在 Operator
+終端執行 `orchd orch prune --orch ID --apply` 才會實際停止和封存。
+指令會再核對 DB 裡的 Desktop、listener、Channel 綁定和待處理工作，
+確認指定的閒置程序已退出後才封存，Orch 歷史可繼續查詢。
+結果若為 `unconfirmed`，先查指定 job，再用同一條指定 ID 的指令核對。
+預覽可定期跑。外部 listener 的負責 Orch 仍要從各自的設定查證。
+
 ## BREAKING CHANGE：升級指令
 
 Orch 指令現在必須明確使用 `orch start|stop|restart|list|attach`。舊入口已移除，不保留 alias；請依下表更新腳本、shell alias、操作手冊與交接文件。既有旗標和動作語意維持不變。

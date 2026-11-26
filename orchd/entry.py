@@ -81,6 +81,9 @@ def bind(con, rt, orch_id, entry_id=DEFAULT_ENTRY, force=False, *, in_transactio
         raise ValueError(f"orch {orch_id} is offline ({health['reason']}); start one with `orchd orch start` first")
     now = time.time()
     with store.immediate(con):
+        current_orch = store.get_orch(con, orch_id)
+        if current_orch is None or current_orch["stopped_at"] is not None:
+            raise ValueError(f"orch {orch_id} is stopped or missing")
         if in_transaction is not None:
             in_transaction(con)
         row = con.execute("SELECT * FROM entries WHERE id=?", (entry_id,)).fetchone()
