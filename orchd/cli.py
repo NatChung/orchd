@@ -19,7 +19,7 @@
   orchd flush ID [--after-pid PID]            run by a Codex turn's shell when codex exits: send answers queued meanwhile
   orchd ask ID "question with full preview"   worker: ask Orch/Operator and wait for an answer
   orchd verify ID [--timeout S]               verifier worker: rerun the verified task's locked command at its locked SHA
-  orchd orch prune [--orch ID] [--apply]        preview or stop one unbound idle Orch
+  orchd orch prune [--orch ID] [--routing-config PATH] [--apply]   preview or stop unbound idle Orchs
   orchd orch list [--all] [--json] [--restore ID]          live/resumable Orchs; --all includes archived/unknown
   orchd orch attach ID [--viewer]                  attach an existing Claude Orch (resume its conversation if idle)
   orchd intake submit|suggest|pending|bind|ack|exclude|classify|deliver|show|decide|resolve|decisions|backlog|reconcile|draft|draft-show|approve|claim|receipt|cancel   local intake queue and reply approvals (docs/intake.md)
@@ -181,9 +181,10 @@ def build_parser():
     stop.add_argument("orch_id")
     restart = actions.add_parser("restart", help="replace an Orch and adopt its open tasks")
     restart_options(restart)
-    prune = actions.add_parser("prune", help="preview unbound Orch cleanup; --apply requires an explicit Orch")
-    prune.add_argument("--orch", metavar="ID")
-    prune.add_argument("--apply", action="store_true", help="stop and archive the specified eligible Orch")
+    prune = actions.add_parser("prune", help="preview or apply cleanup of unbound idle Orchs")
+    prune.add_argument("--orch", metavar="ID", help="limit cleanup to one Orch")
+    prune.add_argument("--routing-config", metavar="PATH", type=Path, help="legacy listener config manifest for batch apply")
+    prune.add_argument("--apply", action="store_true", help="stop and archive eligible Orchs")
     listing = actions.add_parser("list", help="list live/resumable Orchs")
     list_options(listing)
     probe = actions.add_parser("register-codex-probe", help="register a managed Codex app-server health probe")
@@ -1223,16 +1224,20 @@ def main(argv=None):
             if args.apply:
                 if os.environ.get("ORCHD_ORCH_ID") or os.environ.get("ORCHD_WORKTREE"):
                     raise ValueError("prune --apply requires a local Operator terminal")
-                if not args.orch or not path.is_file():
-                    raise ValueError("--apply requires --orch ID and an existing DB")
+                if not path.is_file():
+                    raise ValueError("--apply requires an existing DB")
+                if not args.orch and not args.routing_config:
+                    raise ValueError("batch cleanup requires --routing-config")
+                if args.routing_config:
+                    orch_prune.listener_owners(args.routing_config)
                 con = store.connect(path)
                 try:
-                    report = orch_prune.run(con, Runtime(), args.orch, apply=True)
+                    report = orch_prune.run(con, Runtime(), args.orch, apply=True, routing_config=args.routing_config)
                 finally:
                     con.close()
             else:
                 with stats.open_snapshot(path) as snapshot:
-                    report = orch_prune.run(snapshot.con, Runtime(), args.orch)
+                    report = orch_prune.run(snapshot.con, Runtime(), args.orch, routing_config=args.routing_config)
             print(json.dumps(report, ensure_ascii=False, indent=2))
             return int(any(row["status"] == "unconfirmed" for row in report))
         except (ValueError, RuntimeError, OSError, sqlite3.Error, stats.SnapshotError, subprocess.SubprocessError) as error:

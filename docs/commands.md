@@ -16,16 +16,33 @@ Based on argparse in `orchd/cli.py` and dynamic fields in `orchd/goals.py`. All 
 
 ## Clean up an unbound Orch
 
-Run `orchd orch prune` to preview retention reasons and eligible Claude Orchs.
-Use `--orch ID` to focus on one. After checking any separately configured
-legacy channel routes, use `orchd orch prune --orch ID --apply` in a local
-Operator terminal. The command checks stored Desktop, listener, channel and
-work obligations again, stops the exact idle job if present, verifies its
-exit and archives the registry row.
-If the result is `unconfirmed`, inspect the existing job and repeat the same
-named command to reconcile it. Preview can run periodically. When routing is
-still maintained in an external listener, use its configuration to determine
-which owners can be selected for a stop.
+Use `orchd orch prune` for a read-only preview, or
+`orchd orch prune --orch ID --apply` to stop and archive a single eligible
+Claude Orch from an Operator terminal. Cron can invoke one batch command with
+no target IDs:
+
+```crontab
+*/15 * * * * /absolute/path/to/orchd orch prune --apply --routing-config /absolute/path/to/orch-prune.toml
+```
+
+Use the profile environment and executables visible to that scheduled job.
+The local TOML manifest lists the effective configuration files of all legacy
+Slack and LINE listeners using that profile. Use an empty list for a provider
+with no legacy listeners. For LINE configurations containing `@bound`,
+include the Orch IDs resolved by the running listeners in `line_bound_owners`.
+LINE resolves that alias at startup, so keep this list synchronized with
+running listener ownership during cutovers.
+
+```toml
+slack_configs = ["/absolute/path/to/slack-accounts.toml"]
+line_configs = ["/absolute/path/to/line-listener.toml"]
+line_bound_owners = ["example-orch"]
+```
+
+Batch cleanup waits until each new Orch is at least ten minutes old, and
+overlapping batches skip. Each stop rechecks Desktop, legacy listener and
+native channel bindings, plus open tasks and pending work. Archival requires
+a verified job exit. An `unconfirmed` result can be reconciled by a later run.
 
 ## BREAKING CHANGE: upgrade commands
 

@@ -15,13 +15,27 @@
 
 ## 清理未綁定的 Orch
 
-用 `orchd orch prune` 預覽可清理的 Claude Orch 和保留原因。加
-`--orch ID` 可以只查一個。查過外部 listener 的路由後，在 Operator
-終端執行 `orchd orch prune --orch ID --apply` 才會實際停止和封存。
-指令會再核對 DB 裡的 Desktop、listener、Channel 綁定和待處理工作，
-確認指定的閒置程序已退出後才封存，Orch 歷史可繼續查詢。
-結果若為 `unconfirmed`，先查指定 job，再用同一條指定 ID 的指令核對。
-預覽可定期跑。外部 listener 的負責 Orch 仍要從各自的設定查證。
+`orchd orch prune` 可唯讀預覽候選與保留原因。Cron 可以直接執行整批，
+每次自動找候選：
+
+```crontab
+*/15 * * * * /absolute/path/to/orchd orch prune --apply --routing-config /absolute/path/to/orch-prune.toml
+```
+
+Cron 要沿用該 profile 的環境及執行檔。排程設定列出此 profile 所有舊版
+Slack／LINE listener 正在使用的設定檔。沒有舊 listener 的平台用空陣列。
+LINE 若使用 `@bound`，需在 `line_bound_owners` 記錄正在跑的 listener
+啟動時實際綁到的 Orch。切換 listener 時同步更新，避免新舊路由交接期間誤清。
+
+```toml
+slack_configs = ["/absolute/path/to/slack-accounts.toml"]
+line_configs = ["/absolute/path/to/line-listener.toml"]
+line_bound_owners = ["example-orch"]
+```
+
+批次會保留建立未滿十分鐘的 Orch，排程重疊時會跳過。每次停止前重新核對
+Desktop、listener、Channel 綁定、未結任務與待辦。確認程序退出才封存，
+Orch 歷史仍可繼續查詢。需要只操作一個時，可用 `--orch ID --apply`。
 
 ## BREAKING CHANGE：升級指令
 
