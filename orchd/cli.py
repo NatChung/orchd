@@ -8,6 +8,7 @@
   orchd init [--from OLD_ORCH_HOME] [--no-trust]   create Orch, interface and computer-use homes; trust Orch/interface in Codex
   orchd upgrade                               reinstall the uv-installed orchd at its source's newest commit
   orchd entry reconcile [--apply]             move open entry questions stranded on an old owner to the entry's owner (#60)
+  orchd bindings [--orch ID] [--json]         show Desktop, listener and channel bindings
   orchd binding [--new | --to ORCH_ID | --status] [--entry NAME]
                                               bind ~/orch/interface to a live Claude Orch (starts one if none);
                                               --new starts a new one, --to binds a given one, --status only reads
@@ -302,6 +303,9 @@ def build_parser():
     upgrade_parser = sub.add_parser("upgrade")
     upgrade_parser.add_argument("--migrations-only", action="store_true", help="retry home migrations without reinstalling")
     upgrade_parser.add_argument("--dry-run", action="store_true", help="preview home migrations without writing or reinstalling")
+    bindings = sub.add_parser("bindings", help="read Desktop, listener and channel bindings by Orch")
+    bindings.add_argument("--orch", metavar="ID", help="show one Orch")
+    bindings.add_argument("--json", action="store_true", help="print the binding inventory as JSON")
     binding = sub.add_parser("binding")
     binding.add_argument("--entry", default="desktop")
     how = binding.add_mutually_exclusive_group()
@@ -734,7 +738,7 @@ HOME_POLICY = {
     ("_entry-verify",): "skip",
     ("orch", "verify-tools"): "skip",
     ("config", "show"): "skip", ("config", "get"): "skip", ("config", "set"): "skip", ("config", "unset"): "skip",
-    ("dashboard",): "skip",
+    ("dashboard",): "skip", ("bindings",): "skip",
     **{("workflow", action): "skip" for action in ("install", "list", "show", "render", "bind", "bindings", "run-template")},
     **{('workflow', 'run', action): 'skip' for action in ('start', 'show', 'cancel', 'reconcile', 'serve', 'export')},
     **{('instance', action): 'skip' for action in ('apply', 'check')},
@@ -998,6 +1002,17 @@ def main(argv=None):
         finally:
             if con is not None:
                 con.close()
+
+    if args.cmd == "bindings":
+        import sqlite3
+        from orchd import bindings, stats
+        try:
+            report = bindings.read(store.home() / "orchd.db", args.orch)
+        except (ValueError, OSError, sqlite3.Error, stats.SnapshotError) as error:
+            print(f"orchd bindings: {error}", file=sys.stderr)
+            return 1
+        print(json.dumps(report, ensure_ascii=False, indent=2) if args.json else bindings.render(report))
+        return 0
 
     if args.cmd == "dashboard":
         from orchd import dashboard
