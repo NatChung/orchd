@@ -246,7 +246,10 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
         attachment_text, attachment_images = prepare_dispatch(con, attachment_refs, orch_thread, kind, backend)
     task_id = run_task_id or store.new_task_id()
     remote_branch = remote_repo = None
-    with store.immediate(con) if goal_id is not None else contextlib.nullcontext():
+    with store.immediate(con):
+        owner = store.get_orch(con, orch_thread)
+        if owner is not None and store.orch_prune_reserved(owner):
+            raise ValueError("dispatch owner Orch is being pruned or has been stopped and archived")
         task = store.create_task(con, id=task_id, repo=repo, repo_path=str(repo_path), title=title,
                                  instructions=instructions, done_when=done_when,
                                  orch_thread=orch_thread, codex_bin=rt.codex, model=WORKER_MODELS[model],

@@ -13,6 +13,30 @@
 | `orchd doctor` | 檢查機器就緒狀態。 |
 | `orchd upgrade` | 更新 uv 安裝的程式與 managed 家目錄規則。 |
 
+## 清理未綁定的 Orch
+
+`orchd orch prune` 可唯讀預覽候選與保留原因。Cron 可以直接執行整批，
+每次自動找候選：
+
+```crontab
+*/15 * * * * /absolute/path/to/orchd orch prune --apply --routing-config /absolute/path/to/orch-prune.toml
+```
+
+Cron 要沿用該 profile 的環境及執行檔。排程設定列出此 profile 所有舊版
+Slack／LINE listener 正在使用的設定檔。沒有舊 listener 的平台用空陣列。
+LINE 若使用 `@bound`，需在 `line_bound_owners` 記錄正在跑的 listener
+啟動時實際綁到的 Orch。切換 listener 時同步更新，避免新舊路由交接期間誤清。
+
+```toml
+slack_configs = ["/absolute/path/to/slack-accounts.toml"]
+line_configs = ["/absolute/path/to/line-listener.toml"]
+line_bound_owners = ["example-orch"]
+```
+
+批次會保留建立未滿十分鐘的 Orch，排程重疊時會跳過。每次停止前重新核對
+Desktop、listener、Channel 綁定、未結任務與待辦。確認程序退出才封存，
+Orch 歷史仍可繼續查詢。需要只操作一個時，可加 `--orch ID`。
+
 ## BREAKING CHANGE：升級指令
 
 Orch 指令現在必須明確使用 `orch start|stop|restart|list|attach`。舊入口已移除，不保留 alias；請依下表更新腳本、shell alias、操作手冊與交接文件。既有旗標和動作語意維持不變。

@@ -14,6 +14,36 @@ Based on argparse in `orchd/cli.py` and dynamic fields in `orchd/goals.py`. All 
 | `orchd upgrade` | Update the uv-installed program and managed home rules. |
 | `orchd orch verify-tools --op-id ID --orch-id ORCH --expected-session SESSION --expected-job JOB` | Operator-only verification after an exact controller refresh; no install, restart, adoption or dispatch. |
 
+## Clean up an unbound Orch
+
+Use `orchd orch prune` for a read-only preview, or
+`orchd orch prune --orch ID --apply --routing-config PATH` to stop and archive a single eligible
+Claude Orch from an Operator terminal. Cron can invoke one batch command with
+no target IDs:
+
+```crontab
+*/15 * * * * /absolute/path/to/orchd orch prune --apply --routing-config /absolute/path/to/orch-prune.toml
+```
+
+Use the profile environment and executables visible to that scheduled job.
+The local TOML manifest lists the effective configuration files of all legacy
+Slack and LINE listeners using that profile. Use an empty list for a provider
+with no legacy listeners. For LINE configurations containing `@bound`,
+include the Orch IDs resolved by the running listeners in `line_bound_owners`.
+LINE resolves that alias at startup, so keep this list synchronized with
+running listener ownership during cutovers.
+
+```toml
+slack_configs = ["/absolute/path/to/slack-accounts.toml"]
+line_configs = ["/absolute/path/to/line-listener.toml"]
+line_bound_owners = ["example-orch"]
+```
+
+Batch cleanup waits until each new Orch is at least ten minutes old, and
+overlapping batches skip. Each stop rechecks Desktop, legacy listener and
+native channel bindings, plus open tasks and pending work. Archival requires
+a verified job exit. An `unconfirmed` result can be reconciled by a later run.
+
 ## BREAKING CHANGE: upgrade commands
 
 Orch commands now require an explicit `orch start|stop|restart|list|attach` action. The old entry points were removed; there are no aliases. Update scripts, shell aliases, runbooks and handoff notes using this table. Existing flags and action behavior stay the same.

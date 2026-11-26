@@ -125,6 +125,8 @@ def _check_owner(con, owner):
     row = store.get_orch(con, owner)
     if row is None:
         raise IntakeError("unknown_owner", f"owner_orch {owner!r} is not a registered Orch")
+    if store.orch_prune_reserved(row):
+        raise IntakeError("invalid_state", f"owner_orch {owner!r} is being pruned or is stopped and archived")
     return row
 
 
@@ -314,6 +316,7 @@ def adopt_receipts(con, old_owners, new_orch):
     old_owners = list(dict.fromkeys(old_owners))
     if not old_owners:
         return []
+    _check_owner(con, new_orch)
     rows = con.execute(f"SELECT * FROM intake_events WHERE state='received' AND owner_orch IN ({','.join('?' * len(old_owners))}) "
                        "ORDER BY id", old_owners).fetchall()
     for row in rows:

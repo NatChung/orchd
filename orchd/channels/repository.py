@@ -719,6 +719,10 @@ def apply_routes(con, entries):
     from .models import canonical, digest
     now=datetime.now(timezone.utc).isoformat()
     with store.immediate(con):
+        for route in entries:
+            orch = store.get_orch(con, route['owner_orch'])
+            if orch is None or orch['stopped_at'] is not None:
+                raise ValueError('cannot route to a stopped or missing Orch')
         con.execute('UPDATE channel_routes SET active=0 WHERE active=1')
         for route in entries:
             previous=con.execute('SELECT COALESCE(MAX(version),0) FROM channel_routes WHERE id=?',(route['id'],)).fetchone()[0]

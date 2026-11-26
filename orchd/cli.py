@@ -19,6 +19,7 @@
   orchd flush ID [--after-pid PID]            run by a Codex turn's shell when codex exits: send answers queued meanwhile
   orchd ask ID "question with full preview"   worker: ask Orch/Operator and wait for an answer
   orchd verify ID [--timeout S]               verifier worker: rerun the verified task's locked command at its locked SHA
+  orchd orch prune [--orch ID] [--routing-config PATH] [--apply]   preview or stop unbound idle Orchs
   orchd orch list [--all] [--json] [--restore ID]          live/resumable Orchs; --all includes archived/unknown
   orchd orch attach ID [--viewer]                  attach an existing Claude Orch (resume its conversation if idle)
   orchd intake submit|suggest|pending|bind|ack|exclude|classify|deliver|show|decide|resolve|decisions|backlog|reconcile|draft|draft-show|approve|claim|receipt|cancel   local intake queue and reply approvals (docs/intake.md)
@@ -180,6 +181,10 @@ def build_parser():
     stop.add_argument("orch_id")
     restart = actions.add_parser("restart", help="replace an Orch and adopt its open tasks")
     restart_options(restart)
+    prune = actions.add_parser("prune", help="preview or apply cleanup of unbound idle Orchs")
+    prune.add_argument("--orch", metavar="ID", help="limit cleanup to one Orch")
+    prune.add_argument("--routing-config", metavar="PATH", type=Path, help="legacy listener config manifest required for apply")
+    prune.add_argument("--apply", action="store_true", help="stop and archive eligible Orchs")
     listing = actions.add_parser("list", help="list live/resumable Orchs")
     list_options(listing)
     probe = actions.add_parser("register-codex-probe", help="register a managed Codex app-server health probe")
@@ -732,7 +737,7 @@ HOME_POLICY = {
     **{("channels", action): "skip" for action in ("messages", "search", "message", "conversation", "sync", "sync-status", "attachment", "draft", "retention", "approve", "approval-preview", "delivery", "recover-outbound", "reconcile")},
     ("_entry-op",): "skip",  # its `orchd upgrade` / `orchd orch restart` children apply the policy themselves
     ("_entry-verify",): "skip",
-    ("orch", "verify-tools"): "skip",
+    ("orch", "verify-tools"): "skip", ("orch", "prune"): "skip",
     ("config", "show"): "skip", ("config", "get"): "skip", ("config", "set"): "skip", ("config", "unset"): "skip",
     ("dashboard",): "skip",
     **{("workflow", action): "skip" for action in ("install", "list", "show", "render", "bind", "bindings", "run-template")},
@@ -1211,6 +1216,32 @@ def main(argv=None):
         finally:
             con.close()
         return 0
+    if args.cmd == "orch prune":
+        import sqlite3
+        from orchd import orch_prune, stats
+        path = store.home() / "orchd.db"
+        try:
+            if args.apply:
+                if os.environ.get("ORCHD_ORCH_ID") or os.environ.get("ORCHD_WORKTREE"):
+                    raise ValueError("prune --apply requires a local Operator terminal")
+                if not path.is_file():
+                    raise ValueError("--apply requires an existing DB")
+                if not args.routing_config:
+                    raise ValueError("cleanup apply requires --routing-config")
+                orch_prune.listener_owners(args.routing_config)
+                con = store.connect(path)
+                try:
+                    report = orch_prune.run(con, Runtime(), args.orch, apply=True, routing_config=args.routing_config)
+                finally:
+                    con.close()
+            else:
+                with stats.open_snapshot(path) as snapshot:
+                    report = orch_prune.run(snapshot.con, Runtime(), args.orch, routing_config=args.routing_config)
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            return int(any(row["status"] == "unconfirmed" for row in report))
+        except (ValueError, RuntimeError, OSError, sqlite3.Error, stats.SnapshotError, subprocess.SubprocessError) as error:
+            print(f"orchd orch prune: {error}", file=sys.stderr)
+            return 1
     if args.cmd == "orch restart":
         from orchd import orch_restart, stats
         con = snap = None

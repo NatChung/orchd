@@ -6,10 +6,10 @@ from . import codex_orch, orch_revive, store
 from .orch_health import owner_health, session_health
 
 
-def obligations(con, orch_id):
-    """Count links that must survive even after a task is closed or adopted."""
+def pending_notifications(con, orch_id):
+    """Count worker events that still require this Orch, including closed tasks."""
     marks = ",".join("?" * len(store.ORCH_KINDS))
-    messages = con.execute(
+    return con.execute(
         "SELECT COUNT(*) FROM messages m JOIN tasks t ON t.id=m.task_id WHERE "
         "((COALESCE(m.recipient_orch,t.orch_thread)=? AND "
         f"((m.read_at IS NULL AND m.kind IN ({marks})) OR m.wake_error IS NOT NULL "
@@ -19,6 +19,11 @@ def obligations(con, orch_id):
         "THEN json_extract(m.evidence,'$.old_orch') END)=? AND "
         "(m.notice_error IS NOT NULL OR (m.kind='adopt_notice' AND m.wake_error IS NOT NULL))))",
         (orch_id, *store.ORCH_KINDS, orch_id)).fetchone()[0]
+
+
+def obligations(con, orch_id):
+    """Count links that must survive even after a task is closed or adopted."""
+    messages = pending_notifications(con, orch_id)
     entries = con.execute("SELECT COUNT(*) FROM entries WHERE orch_id=?", (orch_id,)).fetchone()[0]
     pending = con.execute(
         "SELECT COUNT(*) FROM entry_messages WHERE orch_id=? AND "
