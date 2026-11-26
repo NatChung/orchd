@@ -9,9 +9,27 @@
 | 指令 | 用途 |
 | --- | --- |
 | `orchd orch restart` | 重開目前 Desktop 綁定的 Orch，接手未結任務並重新 bind。 |
+| `orchd bindings [--orch ID] [--json]` | 按 Orch 列出 Desktop、listener 和 Channel 的綁定。 |
 | `orchd list` | 查看未結任務與健康狀態。 |
 | `orchd doctor` | 檢查機器就緒狀態。 |
 | `orchd upgrade` | 更新 uv 安裝的程式與 managed 家目錄規則。 |
+
+## 查 Orch、Interface 和 Channel 綁定
+
+`orchd bindings` 從目前 profile 的 DB 私人副本讀取資料，按 Orch 列出
+Desktop 入口、既有 listener 登記和啟用的原生 Channel 路由。沒有綁定紀錄
+的 Orch 也會列出。只看一個 Orch 用 `orchd bindings --orch ID`，程式要讀
+結果時可加 `--json`。
+
+Listener 狀態來自 DB 內的登記與租期。原生 Channel 顯示平台、來源、頻道
+或群組、專案、模式和來源啟用狀態。查 Orch 是否在線用
+`orchd orch list --all`，查單一 Desktop 入口用
+`orchd binding --entry NAME --status`。
+
+既有 Slack listener 的 Orch 登記會顯示在清單上，各頻道規則在
+kc-assistant。既有 LINE／D1 listener 的群組和負責 Orch 對照在
+nat-assistant 的 listener 設定。原生 Channels 路由可在這份清單和
+`orchd channels route list` 查到。
 
 ## BREAKING CHANGE：升級指令
 

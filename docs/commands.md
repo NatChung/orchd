@@ -9,10 +9,29 @@ Based on argparse in `orchd/cli.py` and dynamic fields in `orchd/goals.py`. All 
 | Command | Purpose |
 | --- | --- |
 | `orchd orch restart` | Replace the Desktop-bound Orch, adopt open tasks and rebind. |
+| `orchd bindings [--orch ID] [--json]` | Show Desktop entry, legacy listener and native channel bindings grouped by Orch. |
 | `orchd list` | Check open tasks and health. |
 | `orchd doctor` | Check machine readiness. |
 | `orchd upgrade` | Update the uv-installed program and managed home rules. |
 | `orchd orch verify-tools --op-id ID --orch-id ORCH --expected-session SESSION --expected-job JOB` | Operator-only verification after an exact controller refresh; no install, restart, adoption or dispatch. |
+
+## Look up bindings
+
+`orchd bindings` reads a private copy of the current profile DB and groups its
+Desktop entries, legacy listener registrations, and active native channel
+routes by Orch. It also lists Orchs without recorded bindings. Use
+`orchd bindings --orch ID` to focus on one Orch or add `--json` for scripts.
+
+A registered listener state reflects its stored lease. A native route lists its
+provider, source, conversation, project (when set), mode, and source enabled
+state. For runtime health use `orchd orch list --all`. For a single Desktop
+entry use `orchd binding --entry NAME --status`.
+
+For the legacy Slack listener, this view shows its Orch registration. Per-channel
+rules live with the listener in kc-assistant. For the legacy LINE/D1 listener,
+look up per-group routing and owner mappings in nat-assistant's listener
+configuration. Native Channels routes appear in this view and in
+`orchd channels route list`.
 
 ## BREAKING CHANGE: upgrade commands
 
