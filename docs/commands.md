@@ -62,7 +62,7 @@ Removed entry points exit with code 2 and point to the new command. Without a su
 
 | Command and complete arguments | Description | Common example |
 | --- | --- | --- |
-| `orchd init [--from OLD_HOME] [--no-trust]` | Create home/interface templates and configure trust without overwriting edited templates. | `orchd init` |
+| `orchd init [--from OLD_HOME] [--no-trust] [--entry-per-thread]` | Create home/interface templates and configure trust without overwriting edited templates. | `orchd init` |
 | `orchd doctor [--profile example] [--json] [--no-input]` | Check machine readiness; on the first terminal run, offer to save the projects directory. `--json` / `--no-input` never prompt. | `orchd doctor` |
 | `orchd upgrade` | Update from the recorded source, then migrate home rules; `--dry-run` previews only, `--migrations-only` retries without reinstalling. | `orchd upgrade` |
 
@@ -89,6 +89,8 @@ Removed entry points exit with code 2 and point to the new command. Without a su
 | `orchd entry thread (--issue-refs REFS \| --issue-ref REF \| --question-id ID \| --task-id TASK) [--entry NAME] [--limit N] [--per-question-limit N] [--cursor C] [--json]` | Read-only entry threads from a private DB copy: issue-ref summaries, or full question/task threads with pagination. | `orchd entry thread --question-id 101 --limit 3 --json` |
 
 Run `orchd init` first to create the interface configuration. `binding` defaults to entry desktop. It starts an Orch when there is no binding yet; otherwise it reuses the binding. A stopped or confirmed-dead bound Orch causes an error: use `--new` explicitly to start and rebind, leaving the old Orch's open questions with it. A session retired by Claude for idling can resume in place; a failed resume also requires `--new`. Mutually exclusive modes: `--new` starts a new Orch, `--to` selects a live Orch, `--status` reads binding/health/questions/delivery only.
+
+Use `orchd init --entry-per-thread` in a new Interface folder to start one Orch per verified Desktop chat. See [Desktop per-chat setup](entry.md#每個-desktop-聊天各自綁定-orch).
 
 ## Tasks and goals
 
@@ -244,7 +246,7 @@ Quote text containing spaces. Report evidence defaults to an empty string; suppl
 
 | Command and complete arguments | Description | Common example |
 | --- | --- | --- |
-| `orchd mcp [--role orch\|entry] [--entry NAME]` | Run the stdio MCP server for Orch or Entry tools. | `orchd mcp --role entry --entry desktop` |
+| `orchd mcp [--role orch\|entry] [--entry NAME \| --entry-per-thread]` | Run the stdio MCP server for Orch or Entry tools. | `orchd mcp --role entry --entry desktop` |
 | `orchd flush TASK_ID [--after-pid PID]` | Turn-shell integration: deliver queued answers after Codex exits. | `orchd flush TASK_ID --after-pid PID` |
 | `orchd stats [--since TIME] [--json]` | Read source-backed task/token counts and cost estimates by Orch/task type. | `orchd stats --json` |
 | `orchd close TASK_ID` | Stop a task worker and clean its worktree only when safe. | `orchd close TASK_ID` |

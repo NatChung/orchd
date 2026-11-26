@@ -103,7 +103,9 @@ def sync_interface_entry_tools(interface, backup_dir, *, dry_run=False):
     server = (old.get("mcp_servers") or {}).get("orchd_entry")
     if not isinstance(server, dict):
         return [f"skipped: {file} has no [mcp_servers.orchd_entry] (user-managed config)"]
-    names = [t["name"] for t in mcp_server.ENTRY_TOOLS]
+    tools = (mcp_server.THREAD_ENTRY_TOOLS if "--entry-per-thread" in (server.get("args") or ())
+             else mcp_server.ENTRY_TOOLS)
+    names = [t["name"] for t in tools]
     missing = [name for name in names if name not in (server.get("tools") or {})]
     new, lines = text, []
     marker = "# orchd:interface-instructions"
@@ -135,7 +137,7 @@ def sync_interface_entry_tools(interface, backup_dir, *, dry_run=False):
             "Restart the Codex app (or open a new interface conversation) to load the new entry tools."]
 
 
-def planned_files(home, env, orchd_bin=None):
+def planned_files(home, env, orchd_bin=None, *, entry_per_thread=False):
     """{target path: text} for every file init manages."""
     from . import mcp_server  # imported lazily: it pulls in the runtime
     orch, interface = paths.orch_home(home, env), paths.interface_home(home, env)
@@ -164,7 +166,9 @@ def planned_files(home, env, orchd_bin=None):
                   ORCHD_COMMAND=_toml_string(command),
                   ORCHD_LEAD="".join(_toml_string(a) + ", " for a in lead),
                   INTERFACE_MODEL=_toml_string(interface_model), INTERFACE_EFFORT=_toml_string(interface_effort),
-                  ENTRY_APPROVALS=_approvals("orchd_entry", [t["name"] for t in mcp_server.ENTRY_TOOLS]),
+                  ENTRY_MODE=', "--entry-per-thread"' if entry_per_thread else '',
+                  ENTRY_APPROVALS=_approvals("orchd_entry", [t["name"] for t in (
+                      mcp_server.THREAD_ENTRY_TOOLS if entry_per_thread else mcp_server.ENTRY_TOOLS)]),
                   EXTRA_READ="".join(f"{_toml_string(p)} = \"read\"\n" for p in reads),
                   DISABLED_APPS="".join(f"\n[apps.{_toml_string(a)}]\nenabled = false\n" for a in apps))
     try:  # PROJECTS.md records the effective projects directory at init; a bad setting must not block init
@@ -278,7 +282,7 @@ def migrate(source, target, stubs=None):
     return dict(source=str(source), copied=copied, replaced_init_stub=replaced, kept_existing=kept)
 
 
-def init(rt, home=None, env=None, trust=True, source=None, orchd_bin=None):
+def init(rt, home=None, env=None, trust=True, source=None, orchd_bin=None, *, entry_per_thread=False):
     home = Path(home or Path.home())
     env = os.environ if env is None else env
     from . import channel_layout
@@ -287,7 +291,13 @@ def init(rt, home=None, env=None, trust=True, source=None, orchd_bin=None):
         layout_env["ORCHD_ROOT"] = str(paths.root(home, env))
     channel_layout.plan(home=home, env=layout_env)
     orch, interface = paths.orch_home(home, env), paths.interface_home(home, env)
-    planned = planned_files(home, env, orchd_bin)
+    entry_config = interface / ".codex" / "config.toml"
+    if entry_per_thread and entry_config.exists():
+        settings = tomllib.loads(entry_config.read_text(encoding="utf-8"))
+        args = settings.get("mcp_servers", {}).get("orchd_entry", {}).get("args", ())
+        if "--entry-per-thread" not in args:
+            raise ValueError(f"{entry_config} already configures a fixed Interface; use a new Interface folder")
+    planned = planned_files(home, env, orchd_bin, entry_per_thread=entry_per_thread)
     from . import home_migrations
     worker = paths.computer_use_home(home, env)
     worker_rules = worker / "AGENTS.md"
@@ -316,7 +326,10 @@ def init(rt, home=None, env=None, trust=True, source=None, orchd_bin=None):
     from . import channel_layout
     result["channel_layout"] = channel_layout.provision(home=home, env=layout_env)
     result["layout_version"] = result["channel_layout"]["layout_version"]
-    result["next"] = ("Run `orchd binding` to bind the interface to a Claude Orch, then open "
+    result["next"] = (f"Open {interface} in the Codex Desktop app (permissions: interface). "
+                      "Each chat starts its own Orch on first use."
+                      if entry_per_thread else
+                      "Run `orchd binding` to bind the interface to a Claude Orch, then open "
                       f"{interface} in the Codex Desktop app (permissions: interface).")
     return result
 

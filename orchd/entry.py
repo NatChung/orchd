@@ -65,7 +65,7 @@ def reachability(con, rt, orch_id):
     return owner_health(orch, jobs)
 
 
-def bind(con, rt, orch_id, entry_id=DEFAULT_ENTRY, force=False, *, in_transaction=None):
+def bind(con, rt, orch_id, entry_id=DEFAULT_ENTRY, force=False, *, in_transaction=None, thread_id=None):
     """Operator-run. Binds the entry to one Claude Orch; rebinding needs force.
 
     Restart may supply a short database-only hook to move interfaces in the same
@@ -90,7 +90,8 @@ def bind(con, rt, orch_id, entry_id=DEFAULT_ENTRY, force=False, *, in_transactio
         if row is not None and row["orch_id"] != orch_id and not force:
             raise ValueError(f"entry {entry_id} is bound to {row['orch_id']}; rebinding it needs force (`orchd binding --to`)")
         if row is None:
-            con.execute("INSERT INTO entries(id,orch_id,bound_at) VALUES(?,?,?)", (entry_id, orch_id, now))
+            con.execute("INSERT INTO entries(id,orch_id,bound_at,thread_id) VALUES(?,?,?,?)",
+                        (entry_id, orch_id, now, thread_id))
         elif row["orch_id"] != orch_id:
             con.execute("UPDATE entries SET orch_id=?, bound_at=? WHERE id=?", (orch_id, now, entry_id))
             sweep_questions(con, get_entry(con, entry_id), "orchd", f"entry rebound to {orch_id}")
@@ -1126,7 +1127,7 @@ def codex_trusted(home):
     return isinstance(entry, dict) and entry.get("trust_level") == "trusted"
 
 
-def binding(con, rt, start_orch, new=False, entry_id=DEFAULT_ENTRY):
+def binding(con, rt, start_orch, new=False, entry_id=DEFAULT_ENTRY, *, thread_id=None):
     """Operator: make sure the interface is bound to a live Claude Orch.
 
     Reuses the bound Orch unless it is confirmed dead (Q3). One Claude's daemon retired for idling is resumed in
@@ -1159,7 +1160,7 @@ def binding(con, rt, start_orch, new=False, entry_id=DEFAULT_ENTRY):
                              "open question(s) stay with it. Run `orchd binding --new` to start a new Orch and "
                              "bind the interface to it")
         orch_id, started = start_orch()["id"], True
-        bind(con, rt, orch_id, entry_id, force=True)
+        bind(con, rt, orch_id, entry_id, force=new, thread_id=thread_id)
     trusted = codex_trusted(home)
     return dict(interface=str(home), orch_id=orch_id, orch_model=store.get_orch(con, orch_id)["model"],
                 started_new_orch=started, revived_orch=revived, orch_health=reachability(con, rt, orch_id),

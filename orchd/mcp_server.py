@@ -6,7 +6,8 @@ codex exec and the Desktop app send on every tools/call (verified 2026-09-29); s
 registered as a codex Orch on its first call other than the read-only `list_orchs` or `quota_status`.
 
 `orchd mcp --role entry` serves the Desktop entry (issue #37) instead: only ENTRY_TOOLS are listed or callable,
-their arguments are ids (never a body), and the caller is never registered as an Orch. This guards orchd's
+their arguments are ids (never a body), and the caller is never registered as an Orch.
+With `--entry-per-thread`, each verified Desktop rollout gets its own Claude Orch. This guards orchd's
 own tools only; the Codex host's other tools are limited by the entry project's config, not here.
 """
 import contextlib
@@ -20,7 +21,7 @@ import sys
 import traceback
 from pathlib import Path
 
-from . import core, entry, goals, inventory, issue_links, limits, question_summary, quota, store, verify as verification
+from . import core, entry, goals, inventory, issue_links, limits, paths, question_summary, quota, store, verify as verification
 from .runtime import WORKER_MODELS, Runtime
 
 TOOLS = [
@@ -605,6 +606,25 @@ ENTRY_INSTRUCTIONS = (
     "interface reload without claiming that the current conversation has reloaded.")
 
 
+THREAD_ENTRY_TOOLS = [copy.deepcopy(tool) for tool in ENTRY_TOOLS if tool["name"] in ("status", "relay", "foreground")]
+for tool in THREAD_ENTRY_TOOLS:
+    if tool["name"] == "status":
+        tool["description"] = "For this verified Desktop chat, start its Orch on first use or inspect its existing binding."
+        tool["annotations"] = {"readOnlyHint": False}
+
+THREAD_ENTRY_INSTRUCTIONS = (
+    "You are the Desktop entry for this chat's own Orch. On the first turn or when the chat reopens, call status "
+    "and report which Orch is bound, its availability, and any current question in full. On a new chat the tool "
+    "creates its binding. Report an unavailable or unverified binding to Operator. Relay a substantive first message too. "
+    "For Operator messages use relay without retyping their text; pass reply_to only for the current [orchd question N]. "
+    "For foreground requests call foreground with target=orch or the full task_id. "
+    "Do not relay the end-of-voice transcript_tail_flush. Read [orchd message N] and [orchd question N] bodies "
+    "verbatim once, in text and voice. Do not classify, decide, schedule or dispatch work. After relay, "
+    "briefly acknowledge success; on transport failure report whether the message was saved. "
+    "Profile-wide Dashboard and lifecycle commands belong to the fixed Interface."
+)
+
+
 def list_open_cursor(cursor):
     """Decode a stable last position and the first page's inclusive high-water position."""
     try:
@@ -901,7 +921,7 @@ def entry_foreground(args, con, rt, entry_id):
             "launch_status": "launch_requested", "window_opened": None}
 
 
-def _entry_thread(meta):
+def _entry_thread(meta, *, interface_home=None):
     """Resolve the caller from rollout evidence, never from a UUID prefix."""
     turn = meta.get("x-codex-turn-metadata") or {}
     if not isinstance(turn, dict):
@@ -919,7 +939,13 @@ def _entry_thread(meta):
             try:
                 with path.open(encoding="utf-8") as stream:
                     header = json.loads(next(stream))
-                    thread = identifier((header.get("payload") or {}).get("id")) if header.get("type") == "session_meta" else None
+                    payload = header.get("payload") or {}
+                    thread = identifier(payload.get("id")) if header.get("type") == "session_meta" else None
+                    if interface_home is not None:
+                        cwd = payload.get("cwd")
+                        if (payload.get("originator") != "Codex Desktop" or not isinstance(cwd, str)
+                                or not Path(cwd).is_absolute() or Path(cwd).resolve() != interface_home):
+                            continue
                     if not thread or not (path.name.endswith(f"-{thread}.jsonl") or
                                           f"-{thread}_" in path.name):
                         continue
@@ -942,15 +968,33 @@ def _entry_thread(meta):
             except (ValueError, StopIteration, AttributeError):
                 continue
     if turn_id:
-        if len(matches) == 1:
+        if len(matches) == 1 and (interface_home is None or not present - matches):
             return matches.pop(), turn_id
     elif len(present) == 1:
         return present.pop(), None
     raise ValueError("Desktop thread could not be verified against a unique rollout; existing binding retained")
 
 
-def entry_call(name, args, meta, con, rt, entry_id):
-    tool = next((t for t in ENTRY_TOOLS if t["name"] == name), None)
+def _thread_entry(con, rt, thread, *, resume=False):
+    entry_id = "chat-" + thread
+    with store.task_delivery(con, ["desktop-entry:" + entry_id]):
+        row = con.execute("SELECT orch_id,thread_id FROM entries WHERE id=?", (entry_id,)).fetchone()
+        if row is not None and row["thread_id"] != thread:
+            raise ValueError("Desktop thread does not match its saved entry")
+        created = False
+        if row is None:
+            result = entry.binding(con, rt, lambda: core.start_orch(con, rt), entry_id=entry_id, thread_id=thread)
+            created = result["started_new_orch"]
+        elif resume:
+            owner = store.get_orch(con, row["orch_id"])
+            if owner is not None and owner["stopped_at"] is None:
+                entry.binding(con, rt, lambda: core.start_orch(con, rt), entry_id=entry_id)
+        return entry_id, created
+
+
+def entry_call(name, args, meta, con, rt, entry_id, *, per_thread=False):
+    tools = THREAD_ENTRY_TOOLS if per_thread else ENTRY_TOOLS
+    tool = next((t for t in tools if t["name"] == name), None)
     if tool is None:
         raise PermissionError(f"{name} is not available to the Desktop entry")
     if not isinstance(args, dict):
@@ -971,7 +1015,11 @@ def entry_call(name, args, meta, con, rt, entry_id):
         turn = {}
     thread = meta.get("threadId") or turn.get("thread_id")
     binding_warning = None
-    if name in ("relay", "status"):
+    created = False
+    if per_thread:
+        thread, turn_id = _entry_thread(meta, interface_home=paths.interface_home().resolve())
+        entry_id, created = _thread_entry(con, rt, thread, resume=name == "status")
+    elif name in ("relay", "status"):
         try:
             thread, turn_id = _entry_thread(meta)
         except ValueError as error:
@@ -1003,6 +1051,8 @@ def entry_call(name, args, meta, con, rt, entry_id):
         return entry_ops.start("restart" if name == "orch_restart" else "upgrade", entry_id=entry_id,
                                thread=thread, restart=restart)
     result = entry.status(con, rt, entry_id, thread, bind_thread=binding_warning is None)
+    if per_thread:
+        result["started_new_orch"] = created
     if binding_warning:
         result["binding_warning"] = binding_warning
     return result
@@ -1052,7 +1102,7 @@ def normalize_tool_name(name):
     return name
 
 
-def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY, sent=None):
+def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY, sent=None, *, per_thread=False):
     method, mid = msg.get("method"), msg.get("id")
     if mid is None:
         return None
@@ -1061,21 +1111,23 @@ def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY, sent=None):
         result = {"protocolVersion": params.get("protocolVersion", "2025-06-18"),
                   "capabilities": {"tools": {}}, "serverInfo": {"name": "orchd", "version": "0.1"}}
         if role == "entry":
-            result["instructions"] = ENTRY_INSTRUCTIONS
+            result["instructions"] = THREAD_ENTRY_INSTRUCTIONS if per_thread else ENTRY_INSTRUCTIONS
         else:
             contract = dispatch_contract()
             result["instructions"] = ("Hydrate and use the current schema-qualified dispatch tools: "
                                       + contract["dispatch_tool"] + ", " + contract["dispatch_batch_tool"]
                                       + ". Resumed legacy tool schemas may be stale.")
     elif method == "tools/list":
-        result = {"tools": ENTRY_TOOLS if role == "entry" else TOOLS + dispatch_descriptors()}
+        tools = THREAD_ENTRY_TOOLS if per_thread else ENTRY_TOOLS
+        result = {"tools": tools if role == "entry" else TOOLS + dispatch_descriptors()}
     elif method == "tools/call":
         meta = params.get("_meta") or {}
         marks = sent if sent is not None else []
         try:
             if role == "entry":  # never an Orch: no ORCHD_ORCH_ID, no registration
                 print(f"orchd entry meta keys: {sorted(meta)}", file=sys.stderr)
-                data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id)
+                data = entry_call(params.get("name"), params.get("arguments", {}), meta, con, rt, entry_id,
+                                  per_thread=per_thread)
             else:
                 name = normalize_tool_name(params.get("name"))
                 thread = os.environ.get("ORCHD_ORCH_ID")
@@ -1106,7 +1158,8 @@ def handle(msg, con, rt, role="orch", entry_id=entry.DEFAULT_ENTRY, sent=None):
     return {"jsonrpc": "2.0", "id": mid, "result": result}
 
 
-def serve(stdin=sys.stdin, stdout=sys.stdout, con=None, rt=None, role="orch", entry_id=entry.DEFAULT_ENTRY):
+def serve(stdin=sys.stdin, stdout=sys.stdout, con=None, rt=None, role="orch", entry_id=entry.DEFAULT_ENTRY,
+          *, per_thread=False):
     con = con or store.connect()
     rt = rt or Runtime()
     if role != "entry":
@@ -1119,7 +1172,7 @@ def serve(stdin=sys.stdin, stdout=sys.stdout, con=None, rt=None, role="orch", en
             if not line.strip():
                 continue
             sent = []  # inbox read marks: committed only after the reply was written and flushed
-            reply = handle(json.loads(line), con, rt, role, entry_id, sent)
+            reply = handle(json.loads(line), con, rt, role, entry_id, sent, per_thread=per_thread)
             if reply is not None:
                 stdout.write(core.inbox_wire(reply))
                 stdout.flush()
