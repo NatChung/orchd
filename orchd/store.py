@@ -543,6 +543,11 @@ def get_orch(con, orch_id):
     return con.execute("SELECT * FROM orchs WHERE id=?", (orch_id,)).fetchone()
 
 
+def orch_prune_reserved(orch):
+    return (orch["prune_requested_at"] is not None
+            or (orch["stopped_at"] is not None and orch["archived_at"] is not None))
+
+
 def list_orchs(con):
     """Registry inventory including owners with zero open tasks; no writes."""
     marks = ",".join("?" * len(OPEN))

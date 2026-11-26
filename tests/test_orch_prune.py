@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock
 
-from orchd import orch_prune, store
+from orchd import intake, orch_prune, store
 from orchd.channels import repository
 
 
@@ -13,6 +13,8 @@ class PruneTest(unittest.TestCase):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         self.path = Path(folder.name).resolve() / "orchd.db"
+        self.manifest = self.path.with_name("manifest.toml")
+        self.manifest.write_text("slack_configs=[]\nline_configs=[]\n", encoding="utf-8")
         self.con = repository.connect(self.path)
         self.addCleanup(self.con.close)
         self.rt = Mock()
@@ -59,12 +61,14 @@ class PruneTest(unittest.TestCase):
         rows = {row["orch_id"]: row for row in orch_prune.run(self.con, self.rt)}
         self.assertEqual(rows["unbound"]["status"], "eligible")
         self.rt.stop_worker.assert_not_called()
-        with self.assertRaisesRegex(ValueError, "batch cleanup requires --routing-config"):
+        with self.assertRaisesRegex(ValueError, "cleanup apply requires --routing-config"):
             orch_prune.run(self.con, self.rt, apply=True)
+        with self.assertRaisesRegex(ValueError, "cleanup apply requires --routing-config"):
+            orch_prune.run(self.con, self.rt, "unbound", apply=True)
         for name in ("desktop-owner", "channel-owner", "listener-owner", "busy", "pending"):
-            result, = orch_prune.run(self.con, self.rt, name, apply=True)
+            result, = orch_prune.run(self.con, self.rt, name, apply=True, routing_config=self.manifest)
             self.assertEqual(result["status"], "retained", result)
-        result, = orch_prune.run(self.con, self.rt, "unbound", apply=True)
+        result, = orch_prune.run(self.con, self.rt, "unbound", apply=True, routing_config=self.manifest)
         self.assertEqual(result["status"], "stopped_and_archived")
         self.rt.stop_worker.assert_called_once_with("unbound")
         record = store.get_orch(self.con, "unbound")
@@ -74,13 +78,13 @@ class PruneTest(unittest.TestCase):
     def test_unverified_stop_can_be_reconciled_without_second_stop(self):
         self.owner("unbound")
         self.rt.stop_worker.side_effect = None
-        result, = orch_prune.run(self.con, self.rt, "unbound", apply=True)
+        result, = orch_prune.run(self.con, self.rt, "unbound", apply=True, routing_config=self.manifest)
         self.assertEqual(result["status"], "unconfirmed")
         row = store.get_orch(self.con, "unbound")
         self.assertIsNone(row["archived_at"])
         self.assertIsNotNone(row["prune_requested_at"])
         del self.jobs["unbound"]
-        result, = orch_prune.run(self.con, self.rt, "unbound", apply=True)
+        result, = orch_prune.run(self.con, self.rt, "unbound", apply=True, routing_config=self.manifest)
         self.assertEqual(result["status"], "stopped_and_archived")
         self.rt.stop_worker.assert_called_once()
 
@@ -108,6 +112,9 @@ class PruneTest(unittest.TestCase):
         self.rt.stop_worker.assert_not_called()
         with manifest.open("a", encoding="utf-8") as stream:
             stream.write('line_bound_owners=["cached-line"]\n')
+        single, = orch_prune.run(self.con, self.rt, "slack", apply=True, routing_config=manifest)
+        self.assertEqual(single["reasons"], ["external_listener_binding"])
+        self.rt.stop_worker.assert_not_called()
 
         # A binding added between the batch preview and a stop must win.
         original = self.rt.live_jobs.side_effect
@@ -135,3 +142,56 @@ class PruneTest(unittest.TestCase):
             rows = orch_prune.run(self.con, self.rt, apply=True, routing_config=manifest)
         self.assertEqual(rows[0]["reasons"], ["batch_already_running"])
         self.rt.live_jobs.assert_not_called()
+
+
+    def test_provider_becoming_busy_after_reservation_releases_new_stop_intent(self):
+        self.owner("orphan")
+        original = self.rt.socket_listening.side_effect
+        calls = 0
+
+        def socket_probe(path):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                self.jobs["orphan"] = {**self.jobs["orphan"], "status": "busy"}
+            return original(path)
+
+        self.rt.socket_listening.side_effect = socket_probe
+        result, = orch_prune.run(self.con, self.rt, "orphan", apply=True, routing_config=self.manifest)
+        self.assertEqual(result["reasons"], ["orch_not_idle"])
+        self.assertIsNone(store.get_orch(self.con, "orphan")["stopped_at"])
+        self.rt.stop_worker.assert_not_called()
+
+
+    def test_pending_worker_notification_survives_task_close(self):
+        self.owner("orphan")
+        self.con.execute(
+            "INSERT INTO tasks(id,repo,repo_path,title,instructions,done_when,orch_thread,codex_bin,status,"
+            "created_at,updated_at) VALUES('task','demo','/example','title','instructions','done','orphan','codex',"
+            "'closed',1,1)"
+        )
+        store.add_message(self.con, "task", "report", "Pending worker report")
+        result, = orch_prune.run(self.con, self.rt, "orphan", apply=True, routing_config=self.manifest)
+        self.assertIn("pending_worker_notifications", result["reasons"])
+        self.rt.stop_worker.assert_not_called()
+
+    def test_intake_bind_cannot_cross_a_reserved_stop(self):
+        self.owner("orphan")
+        self.con.execute(
+            "INSERT INTO intake_events(receipt_id,version,provider,account,company,event_id,source_ref,"
+            "source_time,received_at,producer,summary,content_sha256) "
+            "VALUES('receipt',1,'line','a','org','event','group',1,1,'fixture','test','hash')"
+        )
+        other = store.connect(self.path)
+        self.addCleanup(other.close)
+        original_stop = self.rt.stop_worker.side_effect
+
+        def stop(job):
+            with self.assertRaisesRegex(intake.IntakeError, "being pruned"):
+                intake.bind_owner(other, "receipt", "orphan", only_if_unassigned=True)
+            original_stop(job)
+
+        self.rt.stop_worker.side_effect = stop
+        result, = orch_prune.run(self.con, self.rt, "orphan", apply=True, routing_config=self.manifest)
+        self.assertEqual(result["status"], "stopped_and_archived")
+        self.assertIsNone(self.con.execute("SELECT owner_orch FROM intake_events").fetchone()[0])

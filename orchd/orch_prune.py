@@ -4,7 +4,7 @@ from pathlib import Path
 import time
 import tomllib
 
-from . import store
+from . import inventory, store
 from .orch_health import owner_health
 
 BATCH_MIN_AGE_SECONDS = 600
@@ -22,6 +22,8 @@ def _obligation_reasons(con, row, external_owners=frozenset(), created_before=No
         reasons.append("recently_created")
     if orch_id in external_owners:
         reasons.append("external_listener_binding")
+    if inventory.pending_notifications(con, orch_id):
+        reasons.append("pending_worker_notifications")
     if _bound(con, "entries", "orch_id=?", orch_id):
         reasons.append("desktop_binding")
     if _bound(con, "entry_messages", "orch_id=? AND ("
@@ -35,6 +37,10 @@ def _obligation_reasons(con, row, external_owners=frozenset(), created_before=No
         reasons.append("listener_binding")
     if _bound(con, "channel_routes", "owner_orch=? AND active=1", orch_id):
         reasons.append("channel_binding")
+    if _bound(con, "channel_deliveries", "state IN ('queued','claimed','provider_accepted','failed','uncertain') "
+              "AND EXISTS (SELECT 1 FROM channel_routes WHERE channel_routes.id=channel_deliveries.route_id "
+              "AND channel_routes.version=channel_deliveries.route_version AND channel_routes.owner_orch=?)", orch_id):
+        reasons.append("pending_channel_delivery")
     if _bound(con, "interface_requests", "orch_id=? AND reply IS NULL AND dismissed_at IS NULL", orch_id):
         reasons.append("pending_interface_request")
     if con.execute(f"SELECT 1 FROM tasks WHERE orch_thread=? AND status IN ({','.join('?' * len(store.OPEN))})",
@@ -113,7 +119,7 @@ def _apply(con, rt, orch_id, routing_config, created_before=None):
         if row is None:
             raise ValueError(f"unknown Orch {orch_id}")
         runtime_reasons = _runtime_reasons(rt, row, jobs) if row["kind"] == "claude" else ["unsupported_kind"]
-        external_owners = listener_owners(routing_config) if routing_config else frozenset()
+        external_owners = listener_owners(routing_config)
         with store.immediate(con):
             current = store.get_orch(con, orch_id)
             if dict(current) != dict(row):
@@ -125,9 +131,28 @@ def _apply(con, rt, orch_id, routing_config, created_before=None):
             con.execute("UPDATE orchs SET stopped_at=COALESCE(stopped_at,?),"
                         "prune_requested_at=COALESCE(prune_requested_at,?) WHERE id=?", (now, now, orch_id))
 
-        # The short transaction above reserves the owner against new work. Keep the
-        # per-Orch lock across the provider operation, never the SQLite writer lock.
+        # Refresh the provider status after the reservation. Work can start in
+        # the provider while the earlier DB and socket checks are running.
         try:
+            updated_owners = listener_owners(routing_config)
+            fresh_jobs = rt.live_jobs(timeout=10)
+            reasons = _runtime_reasons(rt, row, fresh_jobs)
+            if orch_id in updated_owners:
+                reasons = ["external_listener_binding"]
+            if not reasons and owner_health(row, fresh_jobs)["state"] == "alive":
+                if jobs.get(row["job_id"], {}).get("pid") != fresh_jobs[row["job_id"]]["pid"]:
+                    reasons = ["runtime_changed"]
+        except (OSError, ValueError, RuntimeError):
+            reasons = ["pre_stop_verification_failed"]
+        if reasons:
+            if row["prune_requested_at"] is None:
+                con.execute("UPDATE orchs SET stopped_at=?,prune_requested_at=NULL WHERE id=? AND prune_requested_at=?",
+                            (row["stopped_at"], orch_id, now))
+            return dict(orch_id=orch_id, status="retained", reasons=reasons)
+
+        # Keep the per-Orch lock across the provider operation, not SQLite's writer lock.
+        try:
+            jobs = fresh_jobs
             if owner_health(row, jobs)["state"] == "alive":
                 rt.stop_worker(row["job_id"])
                 jobs = rt.live_jobs(timeout=10)
@@ -158,10 +183,10 @@ def run(con, rt, orch_id=None, *, apply=False, routing_config=None):
     if not apply:
         owners = listener_owners(routing_config) if routing_config else frozenset()
         return _preview(con, rt, orch_id, owners, created_before)
+    if routing_config is None:
+        raise ValueError("cleanup apply requires --routing-config")
     if orch_id is not None:
         return [_apply(con, rt, orch_id, routing_config)]
-    if routing_config is None:
-        raise ValueError("batch cleanup requires --routing-config")
 
     with ExitStack() as locks:
         try:

@@ -183,7 +183,7 @@ def build_parser():
     restart_options(restart)
     prune = actions.add_parser("prune", help="preview or apply cleanup of unbound idle Orchs")
     prune.add_argument("--orch", metavar="ID", help="limit cleanup to one Orch")
-    prune.add_argument("--routing-config", metavar="PATH", type=Path, help="legacy listener config manifest for batch apply")
+    prune.add_argument("--routing-config", metavar="PATH", type=Path, help="legacy listener config manifest required for apply")
     prune.add_argument("--apply", action="store_true", help="stop and archive eligible Orchs")
     listing = actions.add_parser("list", help="list live/resumable Orchs")
     list_options(listing)
@@ -1226,10 +1226,9 @@ def main(argv=None):
                     raise ValueError("prune --apply requires a local Operator terminal")
                 if not path.is_file():
                     raise ValueError("--apply requires an existing DB")
-                if not args.orch and not args.routing_config:
-                    raise ValueError("batch cleanup requires --routing-config")
-                if args.routing_config:
-                    orch_prune.listener_owners(args.routing_config)
+                if not args.routing_config:
+                    raise ValueError("cleanup apply requires --routing-config")
+                orch_prune.listener_owners(args.routing_config)
                 con = store.connect(path)
                 try:
                     report = orch_prune.run(con, Runtime(), args.orch, apply=True, routing_config=args.routing_config)

@@ -35,7 +35,7 @@ line_bound_owners = ["example-orch"]
 
 批次會保留建立未滿十分鐘的 Orch，排程重疊時會跳過。每次停止前重新核對
 Desktop、listener、Channel 綁定、未結任務與待辦。確認程序退出才封存，
-Orch 歷史仍可繼續查詢。需要只操作一個時，可用 `--orch ID --apply`。
+Orch 歷史仍可繼續查詢。需要只操作一個時，可加 `--orch ID`。
 
 ## BREAKING CHANGE：升級指令
 

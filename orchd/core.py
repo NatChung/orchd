@@ -248,8 +248,7 @@ def dispatch(con, rt, *, orch_thread, repo, title, instructions, done_when, mode
     remote_branch = remote_repo = None
     with store.immediate(con):
         owner = store.get_orch(con, orch_thread)
-        if owner is not None and (owner["prune_requested_at"] is not None
-                                  or (owner["stopped_at"] is not None and owner["archived_at"] is not None)):
+        if owner is not None and store.orch_prune_reserved(owner):
             raise ValueError("dispatch owner Orch is being pruned or has been stopped and archived")
         task = store.create_task(con, id=task_id, repo=repo, repo_path=str(repo_path), title=title,
                                  instructions=instructions, done_when=done_when,

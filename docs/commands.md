@@ -17,7 +17,7 @@ Based on argparse in `orchd/cli.py` and dynamic fields in `orchd/goals.py`. All 
 ## Clean up an unbound Orch
 
 Use `orchd orch prune` for a read-only preview, or
-`orchd orch prune --orch ID --apply` to stop and archive a single eligible
+`orchd orch prune --orch ID --apply --routing-config PATH` to stop and archive a single eligible
 Claude Orch from an Operator terminal. Cron can invoke one batch command with
 no target IDs:
 
