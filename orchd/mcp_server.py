@@ -983,7 +983,21 @@ def _thread_entry(con, rt, thread, *, resume=False):
             raise ValueError("Desktop thread does not match its saved entry")
         created = False
         if row is None:
-            result = entry.binding(con, rt, lambda: core.start_orch(con, rt), entry_id=entry_id, thread_id=thread)
+            from .orch_restart import wait_alive
+
+            def start():
+                orch = core.start_orch(con, rt)
+                try:
+                    wait_alive(con, rt, orch["id"])
+                except Exception as error:
+                    try:
+                        core.stop_orch(con, rt, orch["id"])
+                    except Exception as cleanup_error:
+                        error.add_note(f"new Orch cleanup failed: {type(cleanup_error).__name__}")
+                    raise
+                return orch
+
+            result = entry.binding(con, rt, start, entry_id=entry_id, thread_id=thread)
             created = result["started_new_orch"]
         elif resume:
             owner = store.get_orch(con, row["orch_id"])

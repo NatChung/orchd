@@ -162,6 +162,26 @@ class DesktopPerThreadTest(unittest.TestCase):
             sorted([(f"chat-{chat_a}", a, chat_a), (f"chat-{chat_b}", b, chat_b)]))
         self.assertEqual(self.con.execute("SELECT COUNT(*) FROM orchs").fetchone()[0], 2)
 
+    def test_first_binding_waits_for_new_job_to_publish_pid_and_status(self):
+        chat = self.chat()
+        turn = self.user_turn(chat, "first turn")
+        read_jobs = self.rt.live_jobs
+        starting = True
+
+        def live_jobs(timeout=None):
+            nonlocal starting
+            jobs = read_jobs(timeout)
+            if starting and any(job.startswith("job-o") for job in jobs):
+                starting = False
+                return {job: {} for job in jobs}
+            return jobs
+
+        with patch.object(self.rt, "live_jobs", side_effect=live_jobs):
+            result = self.data(self.desktop(chat, turn, "status"))
+        self.assertTrue(result["started_new_orch"])
+        self.assertEqual(result["orch_health"]["state"], "alive")
+        self.assertFalse(starting)
+
     def test_simultaneous_first_calls_start_only_one_orch_for_the_same_chat(self):
         chat = self.chat()
         turn = self.user_turn(chat, "first turn")
