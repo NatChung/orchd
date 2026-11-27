@@ -1,4 +1,5 @@
 """Operator-only restart sequence. Never infers death from registry bookkeeping."""
+import re
 import time
 
 from . import core, entry, intake, interface, inventory, store
@@ -43,6 +44,39 @@ def wait_alive(con, rt, orch_id, timeout=None, poll=None):
         time.sleep(min(poll, max(deadline - time.monotonic(), 0)))
 
 
+def continue_work(con, rt, old_id, new_id):
+    """Wake the replacement after ownership and routing have moved."""
+    relative = f"groups/{old_id}.md"
+    notes = None
+    text = (
+        f"[orchd restart] You replaced Orch {old_id}. Continue its previously authorized work. "
+        "Read groups/env-facts.md and the handoff notes, then check inbox and list_open for the tasks now owned by you. "
+        "If Desktop is bound to you, use entry_inbox for pending Operator messages. "
+        "Use the live task and question state to reconcile the notes. Continue existing workers where applicable "
+        "and leave decisions that still require Operator input pending."
+    )
+    if re.fullmatch(r"[A-Za-z0-9_-]+", old_id):
+        try:
+            path = core.orch_home() / relative
+            if path.is_file() and not path.is_symlink():
+                with path.open(encoding="utf-8") as stream:
+                    offset = max((i for i, line in enumerate(stream, 1) if line.startswith("## Restart handoff ")),
+                                 default=None)
+                notes = relative
+                text += f" Read {notes}, starting with its latest restart handoff if present."
+                if offset is not None:
+                    text += f" The latest restart handoff starts at line {offset}."
+        except (OSError, UnicodeError):
+            pass  # An unreadable note does not prevent using the live inbox.
+    try:
+        replacement = store.get_orch(con, new_id)
+        rt.send_uds(replacement["socket"], replacement["session_id"], text)
+    except Exception as error:
+        return {"status": "unconfirmed", "notes": notes, "error": f"{type(error).__name__}: {error}"[:500],
+                "recovery": f"orchd orch attach {new_id}; prompt: 盤點上次"}
+    return {"status": "sent", "notes": notes}
+
+
 def restart(con, rt, old_id=None, model=None, dry_run=False):
     result = dict(status="failed", step="select", old_orch=old_id, new_orch=None, steps=[])
     remedy = "orchd orch list --all; orchd orch restart OLD_ID --dry-run"
@@ -73,6 +107,7 @@ def restart(con, rt, old_id=None, model=None, dry_run=False):
                 if tasks or receipts else "skip adopt if there are still no open tasks or received intake receipts",
                 "migrate all interfaces and unanswered requests to NEW_ID (preserve tokens and reply routes)",
                 "orchd binding --to NEW_ID; orchd binding --status" if rebind else "leave Desktop binding alone",
+                "prompt the replacement to read the handoff notes and resume its adopted work",
             ])
             return result
 
@@ -158,6 +193,7 @@ def restart(con, rt, old_id=None, model=None, dry_run=False):
                 if result["binding_status"]["orch_id"] != new_id:
                     raise ValueError("Desktop binding read-back does not match the new Orch")
                 if result["binding"].get("notice") != "sent":
+                    result["continuation"] = continue_work(con, rt, old_id, new_id)
                     raise ValueError("binding committed but the new Orch's binding notice failed")
                 result["steps"].append(dict(step="binding", **result["binding_status"]))
             else:
@@ -169,6 +205,7 @@ def restart(con, rt, old_id=None, model=None, dry_run=False):
         result["interface_wakes"] = interface.sweep(con, rt)
         from . import workflow_runs
         result["workflow_runner"] = workflow_runs.ensure_runner(con, rt)
+        result["continuation"] = continue_work(con, rt, old_id, new_id)
         result.update(status="done", step="done", first_prompt="盤點上次")
     except Exception as error:
         result.update(error=f"{type(error).__name__}: {error}", manual_recovery=remedy)

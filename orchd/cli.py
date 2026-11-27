@@ -1267,7 +1267,10 @@ def main(argv=None):
             result = orch_restart.restart(con, Runtime(), args.old_id, args.model, args.dry_run)
             print(json.dumps(result, ensure_ascii=False, indent=1))
             if result["status"] == "done":
-                print(f"New Orch: {result['new_orch']}; first prompt: {result['first_prompt']}")
+                continuation = result.get("continuation") or {}
+                status = ("continuation prompt sent" if continuation.get("status") == "sent"
+                          else continuation.get("recovery") or f"first prompt: {result['first_prompt']}")
+                print(f"New Orch: {result['new_orch']}; {status}")
             return 0 if result["status"] in ("done", "dry-run") else 1
         except (ValueError, OSError, stats.SnapshotError) as error:
             print(f"orch restart select: {error}; inspect with `orchd orch list --all`", file=sys.stderr)

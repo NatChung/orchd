@@ -188,7 +188,10 @@ def _restart_outcome(result):
     adopted = (result.get("adopt") or {}).get("adopted") or []
     moved = f", moved {len(adopted)} open task(s)" if adopted else ""
     if result.get("status") == "done":
-        return "done", f"Orch restarted: {result.get('old_orch')} -> {new}{moved}; the interface is bound to {new}."
+        summary = f"Orch restarted: {result.get('old_orch')} -> {new}{moved}; the interface is bound to {new}."
+        if (result.get("continuation") or {}).get("status") == "unconfirmed":
+            return "done_with_warnings", summary + " Continuation prompt unconfirmed; tell the replacement 盤點上次."
+        return "done", summary
     notice_only = (result.get("step") == "binding-status" and new
                    and (result.get("binding_status") or {}).get("orch_id") == new
                    and (result.get("new_health") or {}).get("state") == "alive"
