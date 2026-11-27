@@ -182,6 +182,10 @@ CREATE TABLE IF NOT EXISTS entry_messages(
     delivered_at REAL,
     read_at REAL
 );
+CREATE TABLE IF NOT EXISTS entry_question_projects(
+    question_id INTEGER PRIMARY KEY REFERENCES entry_messages(id),
+    project TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS entry_message_tags(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     message_id INTEGER NOT NULL REFERENCES entry_messages(id),

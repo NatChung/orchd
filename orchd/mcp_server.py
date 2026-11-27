@@ -354,6 +354,7 @@ TOOLS += [
      "inputSchema": {"type": "object", "properties": {
          "text": {"type": "string", "description": "Your question; optional with quote_worker_question"},
          "task_id": {"type": "string"},
+         "project": {"type": "string", "description": "Optional project slug for Dashboard grouping when the question belongs to a different project than its worker repository."},
          "quote_worker_question": {"type": "boolean"},
          "supersedes": {"type": "integer", "description": "Old question id; requires expected_version, expected_state and reason. Creates a new version without reusing answers."},
          "expected_version": {"type": "integer", "minimum": 1},
@@ -859,7 +860,8 @@ def call(name, args, thread, con, rt, sent=None, *, reply_id=None):
         return entry.ask_nat(con, rt, thread, args.get("text"), args.get("task_id"),
                              bool(args.get("quote_worker_question")), supersedes=args.get("supersedes"),
                              expected_version=args.get("expected_version"), expected_state=args.get("expected_state"),
-                             reason=args.get("reason"), issue_ref=args.get("issue_ref"))
+                             reason=args.get("reason"), issue_ref=args.get("issue_ref"),
+                             project=args.get("project"))
     if name == "entry_tag":
         return entry.entry_tag(con, thread, args["message_id"], args["issue_ref"])
     if name in ("entry_question_show", "entry_question_snooze", "entry_question_cancel"):

@@ -349,6 +349,53 @@ class EntryTest(unittest.TestCase):
         self.assertTrue(refused["isError"])
         self.assertIn("not a reply", refused["content"][0]["text"])
 
+    def test_question_project_changes_group_but_keeps_the_existing_reply_route(self):
+        from orchd import dashboard_projection, snapshot
+
+        self.relay_thread_seen()
+        task_id = self.task()
+        core.ask(self.con, self.rt, task_id, "Send?")
+        blocking = entry.ask_nat(self.con, self.rt, self.orch, "Answer first")
+        q = entry.ask_nat(self.con, self.rt, self.orch, "Send?\nA. Me\nB. You", task_id)
+
+        def group():
+            data = snapshot.read(Path(self.tmp.name) / "t.db", schema_version=2)
+            return next((p["id"], card) for p in dashboard_projection.project(data)["projects"]
+                        for card in p["cards"] if card["id"] == q["question_id"])
+
+        original_group, original_card = group()
+        self.assertEqual(original_group, "demo")
+        before = dict(self.con.execute("SELECT * FROM entry_messages WHERE id=?", (q["question_id"],)).fetchone())
+        with self.assertRaisesRegex(ValueError, "version/state mismatch"):
+            entry.set_question_project(self.con, "desktop", q["question_id"], 1, "current", "other")
+        for _ in range(2):
+            result = entry.set_question_project(self.con, "desktop", q["question_id"], 1, "queued", "Other")
+            self.assertEqual(result, {"question_id": q["question_id"], "project": "other", "task_id": task_id,
+                                      "state": "queued", "version": 1})
+        after = dict(self.con.execute("SELECT * FROM entry_messages WHERE id=?", (q["question_id"],)).fetchone())
+        self.assertEqual(after, before)
+        self.assertEqual(store.get_task(self.con, task_id)["repo"], "demo")
+        self.assertEqual(group(), ("other", original_card))
+        self.rt.nat_says("desk-1", "first reply")
+        self.relay(reply_to=blocking["question_id"])
+        self.rt.nat_says("desk-1", "A")
+        reply = self.relay(reply_to=q["question_id"])
+        with patch.dict(os.environ, {"ORCHD_ORCH_ID": self.orch}):
+            delivered = self.call_orch("answer", {"task_id": task_id, "entry_reply_id": reply["message_id"]})
+        self.assertFalse(delivered.get("isError"), delivered)
+        self.assertEqual(entry.question_show(self.con, "desktop", q["question_id"])["state"], "answered")
+
+    def test_ask_nat_persists_explicit_project_from_mcp(self):
+        with patch.dict(os.environ, {"ORCHD_ORCH_ID": self.orch}):
+            invalid = self.call_orch("ask_nat", {"text": "Choose", "project": "../other"})
+            result = self.call_orch("ask_nat", {"text": "Choose", "project": "Other"})
+        self.assertTrue(invalid["isError"])
+        self.assertFalse(result.get("isError"), result)
+        questions = self.con.execute("SELECT * FROM entry_question_projects").fetchall()
+        self.assertEqual(len(questions), 1)
+        question_id = questions[0]["question_id"]
+        self.assertEqual(entry.question_show(self.con, "desktop", question_id)["project"], "other")
+
     def call_orch(self, name, args):
         return mcp_server.handle({"id": 1, "method": "tools/call", "params": {"name": name, "arguments": args}},
                                  self.con, self.rt)["result"]

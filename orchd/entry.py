@@ -350,6 +350,27 @@ def _checked_question(con, entry, question_id, expected_version, expected_state,
     return row
 
 
+def _project_slug(project):
+    if not isinstance(project, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", project):
+        raise ValueError("project must be a 1–64 character project slug")
+    return project.lower()
+
+
+def set_question_project(con, entry_id, question_id, expected_version, expected_state, project):
+    """Correct the grouping of an open question without changing its lifecycle."""
+    project = _project_slug(project)
+    with _lock(con, entry_id), store.immediate(con):
+        bound = get_entry(con, entry_id)
+        row = _checked_question(con, bound, question_id, expected_version, expected_state)
+        if row["question_state"] not in OPEN_QUESTION_STATES:
+            raise ValueError("only open questions can be assigned a project")
+        con.execute("INSERT INTO entry_question_projects(question_id,project) VALUES(?,?) "
+                    "ON CONFLICT(question_id) DO UPDATE SET project=excluded.project WHERE project<>excluded.project",
+                    (question_id, project))
+    return dict(question_id=question_id, project=project, task_id=row["task_id"],
+                state=row["question_state"], version=row["version"])
+
+
 def question_show(con, entry_id, question_id):
     """Lifecycle metadata and history; a due snooze is a read-time flag, never a transition."""
     bound = get_entry(con, entry_id)
@@ -357,6 +378,10 @@ def question_show(con, entry_id, question_id):
     if row is None or row["entry_id"] != bound["id"] or row["kind"] != "question":
         raise ValueError("not a question of this entry")
     result = _public(row, body=True)
+    attribution = con.execute("SELECT project FROM entry_question_projects WHERE question_id=?",
+                              (question_id,)).fetchone()
+    if attribution is not None:
+        result["project"] = attribution["project"]
     result.update(question_id=row["id"], state=row["question_state"],
                   revisit_due=row["question_state"] == "snoozed" and row["revisit_at"] is not None
                   and row["revisit_at"] <= time.time(),
@@ -997,9 +1022,11 @@ def resend_to_nat(con, rt, orch_id, message_id):
 
 
 def ask_nat(con, rt, orch_id, text=None, task_id=None, quote_worker_question=False, *,
-            supersedes=None, expected_version=None, expected_state=None, reason=None, actor=None, issue_ref=None):
+            supersedes=None, expected_version=None, expected_state=None, reason=None, actor=None, issue_ref=None,
+            project=None):
     """Orch tool: one question to Operator. Only one is open at a time; the rest wait in order (Q2)."""
     from . import workflow_runs
+    project = _project_slug(project) if project is not None else None
     workflow_runs.guard_desktop_route(con, orch_id, task_id)
     entry = _entry_of(con, orch_id)
     if issue_ref is not None:
@@ -1049,6 +1076,8 @@ def ask_nat(con, rt, orch_id, text=None, task_id=None, quote_worker_question=Fal
                               source_message_id=source_message_id,
                               version=old["version"] + 1 if old else 1, supersedes=supersedes,
                               question_state="queued" if busy else "current", delivery="held" if busy else "pending")
+        if project is not None:
+            con.execute("INSERT INTO entry_question_projects(question_id,project) VALUES(?,?)", (question_id, project))
         row = dict(_row(con, question_id))
         row["question_state"] = None
         _history(con, row, "queued" if busy else "current", actor, reason or "ask_nat")
@@ -1064,6 +1093,8 @@ def ask_nat(con, rt, orch_id, text=None, task_id=None, quote_worker_question=Fal
                                        len(queued_questions(con, entry))), current["id"]))
     result = dict(_deliver_result(con, rt, entry, question_id), question_id=question_id,
                   state=_row(con, question_id)["question_state"], **_questions(con, entry))
+    if project is not None:
+        result["project"] = project
     if busy:
         result["note"] = "another question is open; this one waits and is sent after Operator answers the earlier ones"
     # Validate/save first; MCP and CLI entry ask expose warnings in the result only.
