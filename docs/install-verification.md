@@ -60,6 +60,8 @@ Orch root. After `uv tool update-shell`, open a new terminal and confirm the PAT
 `command -v orchd` (PowerShell: `Get-Command orchd`); it should point into the uv tool bin dir
 (`uv tool dir --bin`), not a checkout's `bin/`.
 
+For the authenticated Desktop round trip, see [Desktop smoke test and CI setup](desktop-roundtrip.md).
+
 ## Manual new-machine acceptance (not CI)
 
 Run this on a clean machine or a fresh user account with your own accounts. Record the date, OS,
