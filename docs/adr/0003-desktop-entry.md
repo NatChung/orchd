@@ -26,3 +26,10 @@ ADR-0002 讓每個 Desktop session 自成一組，也曾以「多一層身分或
 代價：多一層搬運、身分與恢復狀態；`role=user` 不能證明是 Operator 本人（`codex queue` 也會寫同樣的紀錄），
 orchd 只排除自己送進去的文字。MCP role 只擋 orchd 自己的工具；Codex host 的其他內建工具要靠入口專案的
 read-only 設定限制，這一層在 CLI 驗到有 10 個非入口工具，Native 尚未驗證。
+
+## 每個聊天各自綁定 Orch
+
+固定入口仍由 Operator 管理。新的入口資料夾可用 `orchd init --entry-per-thread` 啟用另一種綁定。
+首次來自已驗證 Desktop 聊天的工具呼叫會啟動並綁定一個 Claude Orch。後續同一聊天依完整 UUID 接回原組，
+另開聊天則建立獨立的一組。問答與原文傳送沿用上述規則。CLI 的 `orchd binding --entry chat-<UUID> --status`
+可讀取此類綁定，綁定由 Desktop 模式管理。

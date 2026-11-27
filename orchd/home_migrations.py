@@ -140,8 +140,12 @@ def update_entry_tools(folders, dry_run, lines, backup_root):
                                                       dry_run=dry_run))
 
 
-def update_dashboard_entry(folders, dry_run, lines, backup_root):
+def update_interface_rules(folders, dry_run, lines, backup_root):
     update_rules({"interface": folders["interface"]}, dry_run, lines, backup_root)
+
+
+def update_dashboard_entry(folders, dry_run, lines, backup_root):
+    update_interface_rules(folders, dry_run, lines, backup_root)
     update_entry_tools(folders, dry_run, lines, backup_root)
 
 
@@ -171,7 +175,7 @@ STEPS = (("orch-rules-v1", update_rules), ("orch-rules-v2", update_rules),
          ("orch-rules-v7", update_rules), ("channel-layout-v1", channel_layout_step),
          ("orch-rules-v8", update_rules), ("channel-schema-v2", channel_schema_step),
          ("orch-rules-v9", update_rules), ("dashboard-entry-v1", update_dashboard_entry),
-         ("dashboard-actions-v1", update_dashboard_entry))
+         ("dashboard-actions-v1", update_dashboard_entry), ("interface-rules-v4", update_interface_rules))
 
 
 def run(*, home=None, env=None, dry_run=False):

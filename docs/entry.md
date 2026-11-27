@@ -54,6 +54,29 @@ Windows 的安全圖片複製尚未提供，附件會明確回報 `unsupported_p
 全域 `~/.codex/config.toml` 的 MCP 與工具在 interface 是否仍出現、語音模式實際用哪個模型、
 orchd 的 MCP server 在 Native 是否也不受這份權限限制（它要寫 `ORCHD_HOME` 的資料庫、讀 `~/.codex/sessions`；CLI 實測不受限）。
 
+## 每個 Desktop 聊天各自綁定 Orch
+
+建立一個新的介面資料夾。下面的設定使用獨立的 Orch 家目錄、DB 與設定目錄：
+
+```sh
+export ORCHD_ROOT="$HOME/orch-per-chat"
+export ORCHD_HOME="$ORCHD_ROOT/state"
+export ORCHD_CONFIG_DIR="$ORCHD_ROOT/config"
+orchd init --entry-per-thread
+```
+
+照 init 輸出完成 Claude 的資料夾信任設定。在 Codex Desktop 用 **Local** 開啟
+`$ORCHD_ROOT/interface`，選擇 `interface` 權限。新聊天送出第一則訊息後，入口首次呼叫
+`status` 或 `relay` 會建立自己的 Orch。重開同一則聊天沿用原 Orch，並讀回該聊天尚未回答的題目。
+Claude 因閒置回收程序時，沿用既有的原地接回流程。已手動停止的 Orch 會顯示離線。
+
+每則聊天的綁定以完整 UUID 儲存。交辦及回答留在原聊天與 worker；聊天身分無法驗證時，工具會停止。
+使用初始化時相同的環境變數，執行 `orchd binding --entry chat-<UUID> --status` 可查看單一聊天的綁定。
+舊的固定介面繼續用 `orchd binding`，Dashboard 與入口升級工具也留在固定介面。
+Slack／LINE 綁定維持各自設定。
+
+[macOS 手動 E2E](desktop-manual-e2e.md) 提供兩個真實聊天的重開及問答驗收。
+
 ## 工具
 
 | 角色 | 工具 | 說明 |

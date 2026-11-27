@@ -1,6 +1,6 @@
 """orchd: Orch MCP server and the worker/operator command line.
 
-  orchd mcp [--role orch|entry] [--entry NAME]   run the MCP server for an Orch session, or for the Desktop entry (stdio)
+  orchd mcp [--role orch|entry] [--entry NAME | --entry-per-thread]   run the MCP server for an Orch session, or for the Desktop entry (stdio)
   orchd orch start [--model opus|sonnet] [--no-attach]   start a Claude Orch, then attach to it
   orchd orch stop ID                          stop a Claude Orch
   orchd orch restart [OLD_ID] [--model opus|sonnet] [--dry-run]
@@ -90,7 +90,10 @@ def build_parser():
     feedback.add_argument("--hide-bots", action="store_true")
     mcp = sub.add_parser("mcp")
     mcp.add_argument("--role", choices=["orch", "entry"], default="orch")
-    mcp.add_argument("--entry", default="desktop", help="entry name (with --role entry)")
+    entry_mode = mcp.add_mutually_exclusive_group()
+    entry_mode.add_argument("--entry", default="desktop", help="fixed entry name (with --role entry)")
+    entry_mode.add_argument("--entry-per-thread", action="store_true",
+                            help="give each verified Desktop chat its own entry and Orch")
     dispatch = sub.add_parser("dispatch", help="start a worker in a fresh task worktree")
     for field in ("repo", "title", "instructions", "done-when", "model-reason"):
         dispatch.add_argument("--" + field, required=True)
@@ -196,6 +199,8 @@ def build_parser():
 
     init = sub.add_parser("init")
     init.add_argument("--from", dest="source", help="copy what an old Orch home kept (e.g. ~/projects/orch); never overwrites")
+    init.add_argument("--entry-per-thread", action="store_true",
+                      help="configure a new Desktop interface to use one Orch per chat")
     init.add_argument("--no-trust", action="store_true", help="do not write Codex trust or check Claude trust")
     install = sub.add_parser("install", help="provision Orch homes and disabled channels")
     install.add_argument("--no-trust", action="store_true")
@@ -1145,18 +1150,22 @@ def main(argv=None):
     if args.cmd == "init":  # files, trust and home-location record; no task DB changes
         from orchd import bootstrap
         try:
-            result = bootstrap.init(Runtime(), trust=not args.no_trust, source=args.source)
+            result = bootstrap.init(Runtime(), trust=not args.no_trust, source=args.source,
+                                    entry_per_thread=args.entry_per_thread)
         except ValueError as error:
             print(f"init: {error}", file=sys.stderr)
             return 1
         print(json.dumps(result, ensure_ascii=False, indent=1))
         return 0
     if args.cmd == "mcp":
+        if args.entry_per_thread and args.role != "entry":
+            print("orchd mcp: --entry-per-thread requires --role entry", file=sys.stderr)
+            return 1
         from orchd import mcp_server
         for stream in (sys.stdin, sys.stdout):
             if hasattr(stream, "reconfigure"):
                 stream.reconfigure(encoding="utf-8")
-        mcp_server.serve(role=args.role, entry_id=args.entry)
+        mcp_server.serve(role=args.role, entry_id=args.entry, per_thread=args.entry_per_thread)
         return 0
     if args.cmd in ("dispatch", "inbox"):
         import sqlite3
@@ -1347,6 +1356,8 @@ def main(argv=None):
         try:
             if args.status:
                 result = entry.snapshot(con, rt, args.entry)
+            elif entry.is_per_chat_id(args.entry):
+                raise ValueError("per-chat entries are managed by Desktop; use --status to inspect")
             elif args.to:
                 result = entry.bind(con, rt, args.to, args.entry, force=True)
             else:

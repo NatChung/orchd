@@ -3,6 +3,8 @@
 This page separates what CI proves about a packaged install from what only a person on a real
 machine can prove. A green CI run is **not** end-to-end acceptance.
 
+For the native Desktop routing check on macOS, use the [manual Desktop E2E](desktop-manual-e2e.md).
+
 ## Installed package vs. source checkout
 
 | | Installed package (`uv tool install …`) | Source checkout (`git clone …`) |

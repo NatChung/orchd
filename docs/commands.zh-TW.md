@@ -55,7 +55,7 @@ Orch 指令現在必須明確使用 `orch start|stop|restart|list|attach`。舊�
 
 | 指令與完整參數 | 說明 | 常用範例 |
 | --- | --- | --- |
-| `orchd init [--from OLD_HOME] [--no-trust]` | 建立 home／interface 範本與 trust，保留已修改範本。 | `orchd init` |
+| `orchd init [--from OLD_HOME] [--no-trust] [--entry-per-thread]` | 建立 home／interface 範本與 trust，保留已修改範本。 | `orchd init` |
 | `orchd doctor [--profile example] [--json] [--no-input]` | 檢查機器是否就緒；終端機首次執行時可保存專案目錄。`--json`／`--no-input` 不詢問。 | `orchd doctor` |
 | `orchd upgrade` | 從 uv 記錄來源更新程式並執行家目錄 migration；`--dry-run` 只預覽，`--migrations-only` 只重試 migration。 | `orchd upgrade` |
 
@@ -82,6 +82,8 @@ Orch 指令現在必須明確使用 `orch start|stop|restart|list|attach`。舊�
 | `orchd entry thread (--issue-refs REFS \| --issue-ref REF \| --question-id ID \| --task-id TASK) [--entry NAME] [--limit N] [--per-question-limit N] [--cursor C] [--json]` | 從私有 DB 副本唯讀查 entry thread：issue-ref 摘要，或依題目／task 查完整問答（可分頁）。 | `orchd entry thread --question-id 101 --limit 3 --json` |
 
 先跑 `orchd init` 建立 interface 設定。`binding` 預設 entry 為 desktop；尚無綁定時才會自動啟動 Orch，已有綁定則沿用。已綁定的 Orch 停止或確認死亡時會報錯，需用 `--new` 明確啟動並重新綁定，舊 Orch 的未結問題仍留在原處。Claude 因閒置退出的 session 可原地 resume；失敗時也需 `--new`。`--new` 開新 Orch、`--to` 指定存活 Orch、`--status` 唯讀查綁定／健康／問題／delivery，三者互斥。
+
+新入口資料夾用 `orchd init --entry-per-thread` 啟用[每個聊天各自綁定 Orch](entry.md#每個-desktop-聊天各自綁定-orch)。
 
 ## 查看任務與目標
 
@@ -176,7 +178,7 @@ link／unlink／superseded 的稽核事件；v1 不含這些新欄位。snapshot
 
 | 指令與完整參數 | 說明 | 常用範例 |
 | --- | --- | --- |
-| `orchd mcp [--role orch\|entry] [--entry NAME]` | 啟動 Orch 或 Entry 工具的 stdio MCP server。 | `orchd mcp --role entry --entry desktop` |
+| `orchd mcp [--role orch\|entry] [--entry NAME \| --entry-per-thread]` | 啟動 Orch 或 Entry 工具的 stdio MCP server。 | `orchd mcp --role entry --entry desktop` |
 | `orchd flush TASK_ID [--after-pid PID]` | Turn shell 整合：Codex 結束後送出排隊回答。 | `orchd flush TASK_ID --after-pid PID` |
 | `orchd stats [--since TIME] [--json]` | 按 Orch／任務類型讀取有來源依據的任務、token 與成本估計。 | `orchd stats --json` |
 | `orchd close TASK_ID` | 停止任務 worker，在安全條件下清理 worktree。 | `orchd close TASK_ID` |
