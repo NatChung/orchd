@@ -1356,6 +1356,8 @@ def main(argv=None):
         try:
             if args.status:
                 result = entry.snapshot(con, rt, args.entry)
+            elif entry.is_per_chat_id(args.entry):
+                raise ValueError("per-chat entries are managed by Desktop; use --status to inspect")
             elif args.to:
                 result = entry.bind(con, rt, args.to, args.entry, force=True)
             else:

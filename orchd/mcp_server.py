@@ -933,7 +933,7 @@ def _entry_thread(meta, *, interface_home=None):
     print("orchd entry binding metadata: " + json.dumps(
         {"threadId": direct, "thread_id": nested, "turn_id": turn_id}), file=sys.stderr)
     root = Path(os.environ.get("ORCHD_CODEX_SESSIONS", Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "sessions"))
-    matches, present = set(), set()
+    matches, claimed_rollout_threads, eligible_claimed_threads = set(), set(), set()
     for directory in (root, root.parent / "archived_sessions"):
         for path in directory.glob("**/rollout-*.jsonl"):
             try:
@@ -941,16 +941,19 @@ def _entry_thread(meta, *, interface_home=None):
                     header = json.loads(next(stream))
                     payload = header.get("payload") or {}
                     thread = identifier(payload.get("id")) if header.get("type") == "session_meta" else None
+                    if not thread or not (path.name.endswith(f"-{thread}.jsonl") or
+                                          f"-{thread}_" in path.name):
+                        continue
+                    claimed = thread in (direct, nested)
+                    if claimed:
+                        claimed_rollout_threads.add(thread)
                     if interface_home is not None:
                         cwd = payload.get("cwd")
                         if (payload.get("originator") != "Codex Desktop" or not isinstance(cwd, str)
                                 or not Path(cwd).is_absolute() or Path(cwd).resolve() != interface_home):
                             continue
-                    if not thread or not (path.name.endswith(f"-{thread}.jsonl") or
-                                          f"-{thread}_" in path.name):
-                        continue
-                    if thread in (direct, nested):
-                        present.add(thread)
+                    if claimed:
+                        eligible_claimed_threads.add(thread)
                     if turn_id:
                         for line in stream:
                             if turn_id not in line:
@@ -968,10 +971,10 @@ def _entry_thread(meta, *, interface_home=None):
             except (ValueError, StopIteration, AttributeError):
                 continue
     if turn_id:
-        if len(matches) == 1 and (interface_home is None or not present - matches):
+        if len(matches) == 1 and (interface_home is None or not claimed_rollout_threads - matches):
             return matches.pop(), turn_id
-    elif len(present) == 1:
-        return present.pop(), None
+    elif len(eligible_claimed_threads) == 1 and claimed_rollout_threads == eligible_claimed_threads:
+        return eligible_claimed_threads.pop(), None
     raise ValueError("Desktop thread could not be verified against a unique rollout; existing binding retained")
 
 
@@ -981,32 +984,42 @@ def _thread_entry(con, rt, thread, *, resume=False):
         row = con.execute("SELECT orch_id,thread_id FROM entries WHERE id=?", (entry_id,)).fetchone()
         if row is not None and row["thread_id"] != thread:
             raise ValueError("Desktop thread does not match its saved entry")
-        created = False
+        created, warning = False, None
         if row is None:
             from .orch_restart import wait_alive
 
+            started_id = None
+
             def start():
+                nonlocal started_id
                 orch = core.start_orch(con, rt)
-                try:
-                    wait_alive(con, rt, orch["id"])
-                except Exception as error:
-                    try:
-                        core.stop_orch(con, rt, orch["id"])
-                    except Exception as cleanup_error:
-                        error.add_note(f"new Orch cleanup failed: {type(cleanup_error).__name__}")
-                    raise
+                started_id = orch["id"]
+                wait_alive(con, rt, started_id)
                 return orch
 
-            result = entry.binding(con, rt, start, entry_id=entry_id, thread_id=thread)
+            try:
+                result = entry.binding(con, rt, start, entry_id=entry_id, thread_id=thread)
+            except Exception as error:
+                if started_id and not con.execute("SELECT 1 FROM entries WHERE orch_id=?", (started_id,)).fetchone():
+                    try:
+                        core.stop_orch(con, rt, started_id)
+                    except Exception as cleanup_error:
+                        error.add_note(f"new Orch cleanup failed: {type(cleanup_error).__name__}")
+                raise
             created = result["started_new_orch"]
         elif resume:
             owner = store.get_orch(con, row["orch_id"])
             if owner is not None and owner["stopped_at"] is None:
-                entry.binding(con, rt, lambda: core.start_orch(con, rt), entry_id=entry_id)
-        return entry_id, created
+                try:
+                    entry.binding(con, rt, lambda: core.start_orch(con, rt), entry_id=entry_id)
+                except ValueError as error:
+                    warning = str(error)
+        return entry_id, created, warning
 
 
 def entry_call(name, args, meta, con, rt, entry_id, *, per_thread=False):
+    if not per_thread and entry.is_per_chat_id(entry_id):
+        raise PermissionError("use --entry-per-thread for a managed Desktop chat entry")
     tools = THREAD_ENTRY_TOOLS if per_thread else ENTRY_TOOLS
     tool = next((t for t in tools if t["name"] == name), None)
     if tool is None:
@@ -1032,7 +1045,7 @@ def entry_call(name, args, meta, con, rt, entry_id, *, per_thread=False):
     created = False
     if per_thread:
         thread, turn_id = _entry_thread(meta, interface_home=paths.interface_home().resolve())
-        entry_id, created = _thread_entry(con, rt, thread, resume=name == "status")
+        entry_id, created, resume_warning = _thread_entry(con, rt, thread, resume=name == "status")
     elif name in ("relay", "status"):
         try:
             thread, turn_id = _entry_thread(meta)
@@ -1067,6 +1080,8 @@ def entry_call(name, args, meta, con, rt, entry_id, *, per_thread=False):
     result = entry.status(con, rt, entry_id, thread, bind_thread=binding_warning is None)
     if per_thread:
         result["started_new_orch"] = created
+        if resume_warning:
+            result["resume_warning"] = resume_warning
     if binding_warning:
         result["binding_warning"] = binding_warning
     return result

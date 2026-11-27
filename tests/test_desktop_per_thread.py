@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
 
-from orchd import bootstrap, core, mcp_server, store
+from orchd import bootstrap, core, entry, mcp_server, store
 from orchd.runtime import Runtime
 from tests.test_orchd import FakeRuntime
 
@@ -182,6 +182,19 @@ class DesktopPerThreadTest(unittest.TestCase):
         self.assertEqual(result["orch_health"]["state"], "alive")
         self.assertFalse(starting)
 
+    def test_reopening_an_offline_orch_still_shows_its_unanswered_question(self):
+        chat = self.chat()
+        turn = self.user_turn(chat, "first turn")
+        owner = self.data(self.desktop(chat, turn, "status"))["orch_id"]
+        question = self.data(self.orch(owner, "ask_nat", text="Still pending?"))["question_id"]
+        self.rt.jobs.clear()
+        self.rt.resume_fails = True
+        status = self.data(self.desktop(chat, turn, "status"))
+        self.assertEqual(status["orch_id"], owner)
+        self.assertEqual(status["current_question"]["message_id"], question)
+        self.assertIn("resume_warning", status)
+        self.assertFalse(status["started_new_orch"])
+
     def test_simultaneous_first_calls_start_only_one_orch_for_the_same_chat(self):
         chat = self.chat()
         turn = self.user_turn(chat, "first turn")
@@ -199,13 +212,30 @@ class DesktopPerThreadTest(unittest.TestCase):
         foreign = self.chat(cwd=self.root / "another-interface")
         cli = self.chat(originator="codex_cli_rs")
         self.data(self.desktop(chat, turn, "status"))
-        for claimed, seen in ((chat, str(uuid4())), (other, turn),
+        for claimed, seen in ((chat, str(uuid4())), (other, turn), (foreign, turn), (cli, turn),
                               (foreign, self.user_turn(foreign, "wrong project")),
                               (cli, self.user_turn(cli, "wrong app"))):
             with self.subTest(claimed=claimed, seen=seen):
                 self.assertTrue(self.desktop(claimed, seen, "relay").get("isError"))
         self.assertEqual(self.con.execute("SELECT COUNT(*) FROM orchs").fetchone()[0], 1)
         self.assertEqual(self.con.execute("SELECT COUNT(*) FROM entry_messages").fetchone()[0], 0)
+
+    def test_fixed_entry_tools_cannot_use_a_managed_chat_binding(self):
+        chat = self.chat()
+        turn = self.user_turn(chat, "known")
+        status = self.data(self.desktop(chat, turn, "status"))
+        fixed_call = mcp_server.handle(self.request(chat, turn, "relay"), self.con, self.rt,
+                                       role="entry", entry_id=status["entry_id"])
+        self.assertTrue(fixed_call["result"]["isError"])
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM entry_messages").fetchone()[0], 0)
+
+    def test_per_chat_orch_cannot_be_shared_with_a_fixed_entry(self):
+        chat = self.chat()
+        turn = self.user_turn(chat, "known")
+        owner = self.data(self.desktop(chat, turn, "status"))["orch_id"]
+        with self.assertRaisesRegex(ValueError, "per-chat Orchs require exclusive entries"):
+            entry.bind(self.con, self.rt, owner)
+        self.assertEqual(self.con.execute("SELECT COUNT(*) FROM entries").fetchone()[0], 1)
 
     def test_init_only_enables_per_chat_on_a_new_or_already_configured_interface(self):
         with self.assertRaisesRegex(ValueError, "use a new Interface folder"):

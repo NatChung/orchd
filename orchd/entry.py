@@ -1,4 +1,4 @@
-"""Desktop entry (issue #37): a Codex Desktop thread that relays Operator's text to one fixed Claude Orch and back.
+"""Desktop entry (issue #37): a Codex Desktop thread that relays Operator's text to its bound Claude Orch and back.
 
 No body ever travels as a tool argument typed by the entry model (a probe showed it rewrites long text):
 Operator's text is read from the entry thread's Codex rollout, and the Orch's text reaches the Desktop thread
@@ -38,6 +38,10 @@ class SourceNotReady(Exception):
     pass
 
 
+def is_per_chat_id(entry_id):
+    return re.fullmatch(r"chat-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", entry_id) is not None
+
+
 def digest(text):
     raw = text.encode()
     return len(raw), hashlib.sha256(raw).hexdigest()
@@ -71,6 +75,9 @@ def bind(con, rt, orch_id, entry_id=DEFAULT_ENTRY, force=False, *, in_transactio
     Restart may supply a short database-only hook to move interfaces in the same
     transaction. A hook or binding failure rolls back both ownership changes.
     """
+    per_chat = is_per_chat_id(entry_id)
+    if per_chat and thread_id != entry_id.removeprefix("chat-"):
+        raise ValueError("a per-chat entry requires its verified Desktop thread")
     orch = store.get_orch(con, orch_id)
     if orch is None:
         raise ValueError(f"unknown orch {orch_id}")
@@ -86,6 +93,10 @@ def bind(con, rt, orch_id, entry_id=DEFAULT_ENTRY, force=False, *, in_transactio
             raise ValueError(f"orch {orch_id} is stopped or missing")
         if in_transaction is not None:
             in_transaction(con)
+        other_ids = con.execute("SELECT id FROM entries WHERE orch_id=? AND id<>?",
+                                (orch_id, entry_id)).fetchall()
+        if any(per_chat or is_per_chat_id(other["id"]) for other in other_ids):
+            raise ValueError(f"orch {orch_id} already has a binding; per-chat Orchs require exclusive entries")
         row = con.execute("SELECT * FROM entries WHERE id=?", (entry_id,)).fetchone()
         if row is not None and row["orch_id"] != orch_id and not force:
             raise ValueError(f"entry {entry_id} is bound to {row['orch_id']}; rebinding it needs force (`orchd binding --to`)")
@@ -113,6 +124,8 @@ def touch(con, entry_id, thread):
         raise ValueError("the entry needs the caller's thread id")
     with store.immediate(con):
         entry = get_entry(con, entry_id)
+        if is_per_chat_id(entry_id) and thread != entry["thread_id"]:
+            raise ValueError("Desktop thread does not match its saved entry")
         con.execute("UPDATE entries SET thread_id=?, thread_seen_at=? WHERE id=?", (thread, time.time(), entry_id))
     return get_entry(con, entry_id), entry["thread_id"] is not None and entry["thread_id"] != thread
 
@@ -1141,14 +1154,15 @@ def binding(con, rt, start_orch, new=False, entry_id=DEFAULT_ENTRY, *, thread_id
     row = con.execute("SELECT * FROM entries WHERE id=?", (entry_id,)).fetchone()
     health = reachability(con, rt, row["orch_id"]) if row is not None else None
     revived = False
+    replace_hint = ("" if is_per_chat_id(entry_id) else
+                    " Run `orchd binding --new` to start a new Orch and bind the interface to it")
     seen = orch_revive.retired(rt, store.get_orch(con, row["orch_id"]), health) if row is not None and not new else None
     if seen:
         try:
             orch_revive.revive(con, rt, row["orch_id"], seen_job=seen)
         except Exception as error:
             raise ValueError(f"the interface's Orch {row['orch_id']} was retired by Claude and resuming it failed "
-                             f"({type(error).__name__}: {error}). Run `orchd binding --new` to start a new Orch and "
-                             "bind the interface to it") from error
+                             f"({type(error).__name__}: {error}).{replace_hint}") from error
         health, revived = reachability(con, rt, row["orch_id"]), True
     if row is not None and health["state"] != "dead" and not new:
         orch_id, started = row["orch_id"], False
@@ -1157,8 +1171,7 @@ def binding(con, rt, start_orch, new=False, entry_id=DEFAULT_ENTRY, *, thread_id
             entry = get_entry(con, entry_id)
             open_questions = len(queued_questions(con, entry)) + (1 if current_question(con, entry) else 0)
             raise ValueError(f"the interface's Orch {row['orch_id']} is offline ({health['reason']}); {open_questions} "
-                             "open question(s) stay with it. Run `orchd binding --new` to start a new Orch and "
-                             "bind the interface to it")
+                             f"open question(s) stay with it.{replace_hint}")
         orch_id, started = start_orch()["id"], True
         bind(con, rt, orch_id, entry_id, force=new, thread_id=thread_id)
     trusted = codex_trusted(home)

@@ -75,6 +75,8 @@ Claude 因閒置回收程序時，沿用既有的原地接回流程。已手動�
 舊的固定介面繼續用 `orchd binding`，Dashboard 與入口升級工具也留在固定介面。
 Slack／LINE 綁定維持各自設定。
 
+[macOS 手動 E2E](desktop-manual-e2e.md) 提供兩個真實聊天的重開及問答驗收。
+
 ## 工具
 
 | 角色 | 工具 | 說明 |
